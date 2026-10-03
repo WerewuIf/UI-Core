@@ -46,10 +46,8 @@ Addons marked `"early": true` run at document-start; the rest wait for `DOMConte
 
 ## 2. Repo layout
 
-Create **one public repository** with exactly this layout:
-
 ```
-your-repo/
+repo/
 ├── core.user.js            backup copy of what you install in Tampermonkey (nothing fetches it)
 ├── addons.json             REQUIRED – the manifest Core reads
 ├── README.md               this file (optional)
@@ -71,27 +69,20 @@ your-repo/
 | `addons/*.js` | **YES** | **no — do not install these** (plain code, no userscript header) |
 | `examples/addon-template.js` | optional | no |
 
-> The repo must be **public**: `raw.githubusercontent.com` can't serve private files to a browser without a token and Core doesn't send one.
 
 ---
 
 ## 3. Setup
 
-### Step 1 — Create the repo (web UI, no git needed)
-
-1. **github.com → New repository**, any name, **Public**. Click **Create repository**.
-2. **Add file → Upload files**. Drag in `addons.json`, `README.md`, `REFERENCE.md`, `core.user.js` and the `addons` and `examples` **folders** (drag the folders so paths stay `addons/…`). **Commit changes** to `main`.
-3. Open `addons/` and confirm all 5 `.js` files are there.
-
-### Step 2 — Get your manifest URL
+### Step 1 — Get your manifest URL
 
 Open `addons.json` in the repo → **Raw**, copy the address bar URL. It looks like
 `https://raw.githubusercontent.com/<you>/<repo>/main/addons.json`. Open it in a tab: you should see JSON text.
 (404 = private repo, wrong branch, or the file isn't at the repo root.)
 
-### Step 3 — Put that URL in the script (the only edit you make)
+### Step 2 — Put that URL in the script
 
-Near the top of `core.user.js`:
+top of `core.user.js`:
 
 ```js
 const CONFIG = { manifest: 'https://raw.githubusercontent.com/YOU/REPO/main/addons.json' };
@@ -100,7 +91,7 @@ const CONFIG = { manifest: 'https://raw.githubusercontent.com/YOU/REPO/main/addo
 
 `addons.json` uses relative URLs, so every addon is found next to it. Nothing else needs editing.
 
-### Step 4 — Turn off the old scripts
+### Step 3 — Turn off the old scripts
 
 In Tampermonkey **disable** (don't delete yet, see §9):
 
@@ -109,7 +100,6 @@ In Tampermonkey **disable** (don't delete yet, see §9):
 - UI Cleanup
 - Pet Team Presets + Sigil No-Reload Helper
 - Battle Page Restructure (All-in-One)
-- **"DS Central" / "DS Central (hub + addon loader)"** if you installed the earlier version of this suite
 
 Leaving any on makes features run twice. The addons read and write the **same localStorage keys** as the originals
 (`pcPresets_<pid>`, `gearPresets_<pid>`, `petPresets_<pid>`, `verya_reminders`, the battle panel keys…), so
@@ -144,7 +134,6 @@ It should be **enabled** with match `https://demonicscans.org/*`.
 
 ## 4. What each addon changed
 
-Every edit was an exact-match patch of your original code; the logic you tuned is untouched. Only plumbing changed.
 
 | Addon | From | Changed | Untouched |
 |---|---|---|---|
