@@ -69,8 +69,6 @@ Add `"match": "^/pets\\.php"` if it only belongs on certain pages (§7).
 
 **3. Commit, then reload the site twice** (the first reload fetches the new manifest, the second runs the addon).
 
-To test before committing: ⚙️ → **Add by URL** with a `http://localhost:8000/addons/my-addon.js` URL (`python3 -m http.server 8000`), and tick **Dev mode** so it always fetches fresh.
-
 ---
 
 ## 3. How an addon runs
