@@ -11,7 +11,7 @@
 /* =============================================================================
  * Core — the ONLY userscript you install.
  *
- *  1. Set CONFIG.manifest below to the raw URL of your addons.json.
+ *  1. CONFIG.manifest is addons.json
  *  2. Open the site: every addon that has a panel gets its OWN floating button
  *     (💎 Crystals, ⚔️ Gear, 🐾 Pets, …) and a ⚙️ button manages the addon list.
  *  3. Addons are plain .js files at URLs, listed in addons.json (or added with the
@@ -31,8 +31,8 @@
 (function (root) {
   'use strict';
 
-  // >>> EDIT THIS ONE LINE: raw URL of your addons.json
-  const CONFIG = { manifest: 'https://raw.githubusercontent.com/YOU/REPO/main/addons.json' };
+  // raw URL of addons.json
+  const CONFIG = { manifest: 'https://raw.githubusercontent.com/WerewuIf/UI-Core/main/addons.json' };
 
   const API = 2;
   if (root.Core && root.Core.__isCore) {
