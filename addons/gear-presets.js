@@ -559,40 +559,40 @@
   function injectStyles() {
     const style = document.createElement('style');
     style.textContent = `
-      .gp-modal{ position:fixed; inset:0; background:rgba(0,0,0,.6); display:none;
-        align-items:center; justify-content:center; padding:16px; z-index:300000;  }
+      .gp-modal{ position:fixed; inset:0; background:rgba(6,10,18,.74); display:none;
+        align-items:center; justify-content:center; padding:20px; z-index:300000; backdrop-filter:blur(7px); }
       .gp-modal.show{ display:flex; }
       .gp-modal-card{ width:min(760px, 100%); max-height:90vh; overflow:auto;
-        background:#171923;
-        border:1px solid #2B2D44; border-radius:12px; box-shadow:0 10px 30px rgba(0,0,0,.4);
-        padding:14px; color:#E0E0E0; font-family:Arial,sans-serif; }
-      .gp-modal-head{ display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:8px; }
-      .gp-modal-title{ margin:0; font-size:18px; color:#F1F2FA; }
-      .gp-close-btn{ background:#2a2d44; border:0; color:#fff; padding:6px 10px; border-radius:8px; font:13px Arial,sans-serif; cursor:pointer; }
+        background:linear-gradient(180deg, rgba(24,34,56,.98), rgba(14,20,34,.98));
+        border:1px solid rgba(255,255,255,.08); border-radius:22px; box-shadow:0 26px 60px rgba(0,0,0,.38);
+        padding:22px; color:#eef3ff; font-family:Arial,sans-serif; }
+      .gp-modal-head{ display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:16px; }
+      .gp-modal-title{ margin:0; font-size:22px; }
+      .gp-close-btn{ width:38px; height:38px; border-radius:12px; border:none; background:#18223a; color:#fff; font-size:20px; cursor:pointer; }
 
       .gp-btn{ border:none; cursor:pointer; text-decoration:none; color:#fff;
-        background:#4b5ef5; padding:8px 10px; border-radius:8px;
-        font-weight:700; font-family:Arial,sans-serif; font-size:13px; box-shadow:0 4px 10px rgba(0,0,0,.4); }
+        background:linear-gradient(135deg, #3657a7, #4b6dd0); padding:9px 14px; border-radius:12px;
+        font-weight:700; font-family:Arial,sans-serif; font-size:13px; box-shadow:0 8px 18px rgba(41,72,155,.28); }
       .gp-btn:hover{ filter:brightness(1.06); }
-      .gp-btn-soft{ background:#2a2b3a; color:#e0e4ff; box-shadow:inset 0 0 0 1px #3b3d55; }
-      .gp-btn-success{ background:#4caf50; }
-      .gp-btn-danger{ background:#e74c3c; }
+      .gp-btn-soft{ background:linear-gradient(135deg, #222d49, #2b3859); box-shadow:none; }
+      .gp-btn-success{ background:linear-gradient(135deg, #217f5b, #33b57f); }
+      .gp-btn-danger{ background:linear-gradient(135deg, #7b3040, #b4465c); }
       .gp-btn:disabled{ opacity:.5; cursor:not-allowed; }
 
       .gp-row{ display:flex; justify-content:space-between; align-items:center; gap:12px; padding:12px;
-        background:#12131a; border:1px solid #232437; border-radius:10px; margin-bottom:10px; flex-wrap:wrap; }
+        background:#11192d; border:1px solid rgba(255,255,255,.06); border-radius:14px; margin-bottom:10px; flex-wrap:wrap; }
       .gp-row-name{ font-weight:800; }
-      .gp-row-meta{ color:#9aa0b8; font-size:12px; margin-top:2px; }
+      .gp-row-meta{ color:#9caad0; font-size:12px; margin-top:2px; }
       .gp-equipped-badge{ display:inline-block; font-size:10px; font-weight:800; letter-spacing:.03em; text-transform:uppercase;
         color:#8ee6a8; background:rgba(46,204,113,.12); border:1px solid rgba(46,204,113,.35); border-radius:999px;
         padding:2px 7px; vertical-align:middle; margin-left:6px; }
       .gp-row-icons{ display:flex; gap:4px; margin-top:6px; flex-wrap:wrap; }
-      .gp-row-icons img{ width:24px; height:24px; border-radius:6px; object-fit:cover; border:1px solid #232437; background:#12131a; }
+      .gp-row-icons img{ width:24px; height:24px; border-radius:6px; object-fit:cover; border:1px solid rgba(255,255,255,.08); background:#0d1322; }
       .gp-row-actions{ display:flex; gap:6px; flex-wrap:wrap; }
       .gp-row-actions .gp-btn{ padding:6px 10px; font-size:12px; }
 
       .gp-menu-btn{ width:32px; height:32px; padding:0; display:inline-flex; align-items:center; justify-content:center; font-size:17px; }
-      .gp-menu-dropdown{ position:fixed; z-index:300050; background:#1a1b25; border:1px solid rgba(255,255,255,.1);
+      .gp-menu-dropdown{ position:fixed; z-index:300050; background:#171e33; border:1px solid rgba(255,255,255,.1);
         border-radius:12px; box-shadow:0 12px 28px rgba(0,0,0,.45); min-width:150px; padding:6px; display:none; }
       .gp-menu-dropdown.open{ display:block; }
       .gp-menu-item{ display:block; width:100%; text-align:left; background:none; border:none; color:#e7ecff;
@@ -600,30 +600,30 @@
       .gp-menu-item:hover{ background:rgba(255,255,255,.06); }
       .gp-menu-item.danger{ color:#ff8a97; }
 
-      .gp-empty-state{ padding:30px 18px; text-align:center; color:#9aa0b8; background:rgba(255,255,255,.02);
-        border:1px dashed rgba(255,255,255,.08); border-radius:10px; }
+      .gp-empty-state{ padding:30px 18px; text-align:center; color:#9caad0; background:rgba(255,255,255,.02);
+        border:1px dashed rgba(255,255,255,.08); border-radius:16px; }
 
       .gp-editor-grid{ display:grid; grid-template-columns:repeat(auto-fit, minmax(150px, 1fr)); gap:12px; }
-      .gp-slot-card{ background:#12131a; border:1px solid #232437; border-radius:10px; padding:10px; text-align:center; }
-      .gp-slot-label{ font-size:11px; color:#9aa0b8; margin-bottom:6px; text-transform:uppercase; letter-spacing:.03em; }
-      .gp-slot-icon{ width:64px; height:64px; margin:0 auto; border-radius:12px; background:#12131a; overflow:hidden;
-        position:relative; cursor:pointer; border:1px solid #232437; display:flex; align-items:center; justify-content:center; }
+      .gp-slot-card{ background:#11192d; border:1px solid rgba(255,255,255,.06); border-radius:14px; padding:10px; text-align:center; }
+      .gp-slot-label{ font-size:11px; color:#9caad0; margin-bottom:6px; text-transform:uppercase; letter-spacing:.03em; }
+      .gp-slot-icon{ width:64px; height:64px; margin:0 auto; border-radius:12px; background:#0d1322; overflow:hidden;
+        position:relative; cursor:pointer; border:1px solid rgba(255,255,255,.08); display:flex; align-items:center; justify-content:center; }
       .gp-slot-icon img{ width:100%; height:100%; object-fit:cover; display:block; }
       .gp-slot-icon.empty{ color:#5f6890; font-size:26px; font-weight:800; }
       .gp-slot-remove{ position:absolute; top:2px; right:2px; width:16px; height:16px; border-radius:50%; border:none;
         background:rgba(10,15,28,.85); color:#fff; font-size:11px; line-height:16px; padding:0; cursor:pointer; }
       .gp-slot-remove:hover{ background:rgba(255,107,122,.9); }
-      .gp-slot-name{ margin-top:6px; font-size:12px; color:#c0c4e4; overflow-wrap:anywhere; }
+      .gp-slot-name{ margin-top:6px; font-size:12px; color:#cfd8f7; overflow-wrap:anywhere; }
 
       .gp-picker-grid{ display:grid; grid-template-columns:repeat(auto-fit, minmax(150px, 1fr)); gap:12px; max-height:55vh; overflow:auto; }
-      .gp-picker-card{ background:#12131a; border:1px solid #232437; border-radius:10px; padding:12px; text-align:center; }
-      .gp-picker-icon{ width:96px; height:96px; margin:0 auto; border-radius:14px; overflow:hidden; background:#12131a; }
+      .gp-picker-card{ background:#10182a; border:1px solid rgba(255,255,255,.06); border-radius:16px; padding:12px; text-align:center; }
+      .gp-picker-icon{ width:96px; height:96px; margin:0 auto; border-radius:14px; overflow:hidden; background:#0d1322; }
       .gp-picker-icon img{ width:100%; height:100%; object-fit:cover; }
-      .gp-picker-name{ font-size:12px; color:#e0e4ff; margin:8px 0; overflow-wrap:anywhere; }
+      .gp-picker-name{ font-size:12px; color:#eef3ff; margin:8px 0; overflow-wrap:anywhere; }
 
       .gp-set-choice{ display:grid; gap:10px; }
-      .gp-set-choice .gp-btn{ width:100%; padding:12px; font-size:13px; }
-      .gp-modal-sub{ color:#9aa0b8; font-size:13px; margin-bottom:14px; }
+      .gp-set-choice .gp-btn{ width:100%; padding:12px; font-size:14px; }
+      .gp-modal-sub{ color:#9caad0; font-size:13px; margin-bottom:14px; }
       .gp-footer{ display:flex; gap:8px; flex-wrap:wrap; margin-top:16px; align-items:center; }
     `;
     document.head.appendChild(style);
@@ -917,7 +917,7 @@
         <div class="gp-modal-card">
           <div class="gp-modal-head">
             <h3 class="gp-modal-title">Gear Presets</h3>
-            <button type="button" class="gp-close-btn" data-gp-close="gpModal">Close ✕</button>
+            <button type="button" class="gp-close-btn" data-gp-close="gpModal">&times;</button>
           </div>
           <div id="gpList"></div>
           <div class="gp-footer">
@@ -933,7 +933,7 @@
         <div class="gp-modal-card" style="max-width:420px;">
           <div class="gp-modal-head">
             <h3 class="gp-modal-title">Capture Current Gear</h3>
-            <button type="button" class="gp-close-btn" data-gp-close="gpCaptureModal">Close ✕</button>
+            <button type="button" class="gp-close-btn" data-gp-close="gpCaptureModal">&times;</button>
           </div>
           <div class="gp-modal-sub">Which set's current loadout do you want to save?</div>
           <div class="gp-set-choice">
@@ -948,7 +948,7 @@
         <div class="gp-modal-card" style="max-width:420px;">
           <div class="gp-modal-head">
             <h3 class="gp-modal-title" id="gpApplyTitle">Apply preset to:</h3>
-            <button type="button" class="gp-close-btn" data-gp-close="gpApplyModal">Close ✕</button>
+            <button type="button" class="gp-close-btn" data-gp-close="gpApplyModal">&times;</button>
           </div>
           <div class="gp-modal-sub">This will overwrite whatever's currently equipped in that set.</div>
           <div class="gp-set-choice">
@@ -963,7 +963,7 @@
         <div class="gp-modal-card" style="max-width:820px;">
           <div class="gp-modal-head">
             <h3 class="gp-modal-title">Edit Preset — <span id="gpEditorName"></span></h3>
-            <button type="button" class="gp-close-btn" data-gp-close="gpEditorModal">Close ✕</button>
+            <button type="button" class="gp-close-btn" data-gp-close="gpEditorModal">&times;</button>
           </div>
           <div id="gpEditorGrid" class="gp-editor-grid"></div>
           <div class="gp-footer">
@@ -978,7 +978,7 @@
         <div class="gp-modal-card">
           <div class="gp-modal-head">
             <h3 class="gp-modal-title" id="gpPickerTitle">Choose an item</h3>
-            <button type="button" class="gp-close-btn" data-gp-close="gpPickerModal">Close ✕</button>
+            <button type="button" class="gp-close-btn" data-gp-close="gpPickerModal">&times;</button>
           </div>
           <div id="gpPickerBody"></div>
         </div>

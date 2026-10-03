@@ -1658,42 +1658,42 @@
   function injectPresetStyles() {
     const style = document.createElement('style');
     style.textContent = `
-      .pp-modal{ position:fixed; inset:0; background:rgba(0,0,0,.6); display:none;
-        align-items:center; justify-content:center; padding:16px; z-index:300000;  }
+      .pp-modal{ position:fixed; inset:0; background:rgba(6,10,18,.74); display:none;
+        align-items:center; justify-content:center; padding:20px; z-index:300000; backdrop-filter:blur(7px); }
       .pp-modal.show{ display:flex; }
       #ppPickerModal{ z-index:300010; background:rgba(4,7,14,.8); }
       .pp-modal-card{ width:min(760px,100%); max-height:90vh; overflow:auto;
-        background:#171923;
-        border:1px solid #2B2D44; border-radius:12px; box-shadow:0 10px 30px rgba(0,0,0,.4);
-        padding:14px; color:#E0E0E0; font-family:Arial,sans-serif; }
-      .pp-modal-head{ display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:8px; }
-      .pp-modal-title{ margin:0; font-size:18px; color:#F1F2FA; }
-      .pp-close-btn{ background:#2a2d44; border:0; color:#fff; padding:6px 10px; border-radius:8px; font:13px Arial,sans-serif; cursor:pointer; }
-      .pp-modal-sub{ color:#9aa0b8; font-size:13px; margin-bottom:14px; line-height:1.5; }
+        background:linear-gradient(180deg, rgba(24,34,56,.98), rgba(14,20,34,.98));
+        border:1px solid rgba(255,255,255,.08); border-radius:22px; box-shadow:0 26px 60px rgba(0,0,0,.38);
+        padding:22px; color:#eef3ff; font-family:Arial,sans-serif; }
+      .pp-modal-head{ display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:16px; }
+      .pp-modal-title{ margin:0; font-size:22px; }
+      .pp-close-btn{ width:38px; height:38px; border-radius:12px; border:none; background:#18223a; color:#fff; font-size:20px; cursor:pointer; }
+      .pp-modal-sub{ color:#9caad0; font-size:13px; margin-bottom:14px; line-height:1.5; }
 
       .pp-btn{ border:none; cursor:pointer; color:#fff;
-        background:#4b5ef5; padding:8px 10px; border-radius:8px;
-        font:700 13px Arial,sans-serif; box-shadow:0 4px 10px rgba(0,0,0,.4); }
+        background:linear-gradient(135deg,#3657a7,#4b6dd0); padding:9px 14px; border-radius:12px;
+        font:700 13px Arial,sans-serif; box-shadow:0 8px 18px rgba(41,72,155,.28); }
       .pp-btn:hover{ filter:brightness(1.06); }
-      .pp-btn-soft{ background:#2a2b3a; color:#e0e4ff; box-shadow:inset 0 0 0 1px #3b3d55; }
-      .pp-btn-success{ background:#4caf50; }
+      .pp-btn-soft{ background:linear-gradient(135deg,#222d49,#2b3859); box-shadow:none; }
+      .pp-btn-success{ background:linear-gradient(135deg,#217f5b,#33b57f); }
       .pp-btn:disabled{ opacity:.5; cursor:not-allowed; }
 
       .pp-row{ display:flex; justify-content:space-between; align-items:center; gap:12px; padding:12px;
-        background:#12131a; border:1px solid #232437; border-radius:10px; margin-bottom:10px; flex-wrap:wrap; }
+        background:#11192d; border:1px solid rgba(255,255,255,.06); border-radius:14px; margin-bottom:10px; flex-wrap:wrap; }
       .pp-row-name{ font-weight:800; }
-      .pp-row-meta{ color:#9aa0b8; font-size:12px; margin-top:2px; }
+      .pp-row-meta{ color:#9caad0; font-size:12px; margin-top:2px; }
       .pp-equipped-badge{ display:inline-block; font:800 10px Arial,sans-serif; letter-spacing:.03em; text-transform:uppercase;
         color:#8ee6a8; background:rgba(46,204,113,.12); border:1px solid rgba(46,204,113,.35); border-radius:999px;
         padding:2px 7px; vertical-align:middle; margin-left:6px; }
       .pp-row-icons{ display:flex; gap:4px; margin-top:6px; flex-wrap:wrap; }
       .pp-row-icons img{ width:24px; height:24px; border-radius:6px; object-fit:cover;
-        border:1px solid #232437; background:#12131a; }
+        border:1px solid rgba(255,255,255,.08); background:#0d1322; }
       .pp-row-actions{ display:flex; gap:6px; flex-wrap:wrap; }
       .pp-row-actions .pp-btn{ padding:6px 10px; font-size:12px; }
 
       .pp-menu-btn{ width:32px; height:32px; padding:0; display:inline-flex; align-items:center; justify-content:center; font-size:17px; }
-      .pp-menu-dropdown{ position:fixed; z-index:300050; background:#1a1b25; border:1px solid rgba(255,255,255,.1);
+      .pp-menu-dropdown{ position:fixed; z-index:300050; background:#171e33; border:1px solid rgba(255,255,255,.1);
         border-radius:12px; box-shadow:0 12px 28px rgba(0,0,0,.45); min-width:150px; padding:6px; display:none; }
       .pp-menu-dropdown.open{ display:block; }
       .pp-menu-item{ display:block; width:100%; text-align:left; background:none; border:none; color:#e7ecff;
@@ -1701,17 +1701,17 @@
       .pp-menu-item:hover{ background:rgba(255,255,255,.06); }
       .pp-menu-item.danger{ color:#ff8a97; }
 
-      .pp-empty-state{ padding:30px 18px; text-align:center; color:#9aa0b8; background:rgba(255,255,255,.02);
-        border:1px dashed rgba(255,255,255,.08); border-radius:10px; }
+      .pp-empty-state{ padding:30px 18px; text-align:center; color:#9caad0; background:rgba(255,255,255,.02);
+        border:1px dashed rgba(255,255,255,.08); border-radius:16px; }
 
       .pp-editor-grid{ display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:12px; }
       .pp-slot-column{ display:flex; flex-direction:column; gap:8px; }
-      .pp-slot-card{ background:#12131a; border:1px solid #232437; border-radius:10px; padding:10px; text-align:center; }
-      .pp-slot-label{ font-size:11px; color:#9aa0b8; margin-bottom:6px; }
-      .pp-slot-name{ margin-top:6px; font-size:12px; color:#c0c4e4; overflow-wrap:anywhere; }
+      .pp-slot-card{ background:#11192d; border:1px solid rgba(255,255,255,.06); border-radius:14px; padding:10px; text-align:center; }
+      .pp-slot-label{ font-size:11px; color:#9caad0; margin-bottom:6px; }
+      .pp-slot-name{ margin-top:6px; font-size:12px; color:#cfd8f7; overflow-wrap:anywhere; }
 
-      .pp-slot-icon{ width:110px; height:110px; margin:0 auto; border-radius:14px; background:#12131a; overflow:hidden;
-        position:relative; cursor:pointer; border:1px solid #232437;
+      .pp-slot-icon{ width:110px; height:110px; margin:0 auto; border-radius:14px; background:#0d1322; overflow:hidden;
+        position:relative; cursor:pointer; border:1px solid rgba(255,255,255,.08);
         display:flex; align-items:center; justify-content:center; }
       .pp-slot-icon > img{ width:100%; height:100%; object-fit:cover; display:block; }
       .pp-slot-icon.empty{ color:#5f6890; font-size:26px; font-weight:800; }
@@ -1736,9 +1736,9 @@
       .pp-x:hover{ background:rgba(255,107,122,.95); }
 
       /* Links: tiles under the card. */
-      .pp-links-panel{ background:#12131a; border:1px solid #232437; border-radius:12px; padding:8px; }
+      .pp-links-panel{ background:#0d1322; border:1px solid rgba(255,255,255,.06); border-radius:12px; padding:8px; }
       .pp-links-title{ font:800 10px Arial,sans-serif; letter-spacing:.04em; text-transform:uppercase;
-        color:#9aa0b8; margin-bottom:6px; text-align:center; }
+        color:#9caad0; margin-bottom:6px; text-align:center; }
       .pp-links-row{ display:flex; gap:8px; justify-content:center; }
       .pp-link-box{ flex:1; text-align:center; min-width:0; }
       .pp-link-label{ font-size:10px; color:#7f8ab8; margin-bottom:4px; }
@@ -1748,7 +1748,7 @@
   height:80px;
   margin:0 auto;
   border-radius:11px;
-  background:#12131a;
+  background:#11192d;
   cursor:pointer;
   border:1px solid rgba(255,255,255,.12);
   display:flex;
@@ -1767,16 +1767,16 @@
       .pp-link-tile img{ width:100%; height:100%; object-fit:cover; display:block; border-radius:10px; }
       .pp-link-tile.locked{ cursor:not-allowed; color:#8a6a4a; background:#171313; }
       .pp-link-tile.empty{ border-style:dashed; opacity:.7; }
-      .pp-link-name{ margin-top:5px; font-size:11px; color:#c0c4e4; overflow-wrap:anywhere; }
-      .pp-links-loading{ font-size:11px; color:#9aa0b8; text-align:center; padding:6px 0; }
+      .pp-link-name{ margin-top:5px; font-size:11px; color:#cfd8f7; overflow-wrap:anywhere; }
+      .pp-links-loading{ font-size:11px; color:#9caad0; text-align:center; padding:6px 0; }
       .pp-links-error{ font-size:11px; color:#ff8a97; text-align:center; padding:6px 0; }
 
       .pp-picker-grid{ display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; max-height:55vh; overflow:auto; }
-      .pp-picker-card{ background:#12131a; border:1px solid #232437; border-radius:10px; padding:12px; text-align:center; }
-      .pp-picker-icon{ width:92px; height:92px; margin:0 auto; border-radius:14px; overflow:visible; background:#12131a;
+      .pp-picker-card{ background:#10182a; border:1px solid rgba(255,255,255,.06); border-radius:16px; padding:12px; text-align:center; }
+      .pp-picker-icon{ width:92px; height:92px; margin:0 auto; border-radius:14px; overflow:visible; background:#0d1322;
         display:flex; align-items:center; justify-content:center; font-size:28px; color:#59627f; position:relative; }
       .pp-picker-icon img{ width:100%; height:100%; object-fit:cover; border-radius:14px; display:block; }
-      .pp-picker-name{ font-size:12px; color:#e0e4ff; margin:8px 0 4px; overflow-wrap:anywhere; }
+      .pp-picker-name{ font-size:12px; color:#eef3ff; margin:8px 0 4px; overflow-wrap:anywhere; }
       .pp-picker-tag{ font-size:11px; color:#b3a4ff; margin-bottom:8px; }
       .pp-picker-tag.warn{ color:#ffc27a; }
       .pp-picker-badge{
@@ -1805,7 +1805,7 @@
       .pp-picker-chip-empty{ opacity:.4; border-style:dashed; }
 
       .pp-set-choice{ display:grid; gap:10px; }
-      .pp-set-choice .pp-btn{ width:100%; padding:12px; font-size:13px; }
+      .pp-set-choice .pp-btn{ width:100%; padding:12px; font-size:14px; }
       .pp-footer{ display:flex; gap:8px; flex-wrap:wrap; margin-top:16px; align-items:center; }
 
             .pp-buy-action-btn{
@@ -2919,7 +2919,7 @@ function openLinkChooser(mainInvId, level, info) {
 
             if (p.melanippeAvailable) {
               money.innerHTML =
-                'Gold: <span style="color:#e0e4ff;font-weight:800;">' +
+                'Gold: <span style="color:#eef3ff;font-weight:800;">' +
                 Number(p.melanippeGold || 0).toLocaleString() +
                 '</span>' +
                 ' · Cost: <span style="color:#f4d483;font-weight:800;">' +
@@ -3126,7 +3126,7 @@ function openLinkChooser(mainInvId, level, info) {
         <div class="pp-modal-card">
           <div class="pp-modal-head">
             <h3 class="pp-modal-title">Pet Team Presets</h3>
-            <button type="button" class="pp-close-btn" data-pp-close="ppModal">Close ✕</button>
+            <button type="button" class="pp-close-btn" data-pp-close="ppModal">&times;</button>
           </div>
           <div id="ppList"></div>
           <div class="pp-footer">
@@ -3140,7 +3140,7 @@ function openLinkChooser(mainInvId, level, info) {
         <div class="pp-modal-card" style="max-width:420px;">
           <div class="pp-modal-head">
             <h3 class="pp-modal-title">Capture a team</h3>
-            <button type="button" class="pp-close-btn" data-pp-close="ppCaptureModal">Close ✕</button>
+            <button type="button" class="pp-close-btn" data-pp-close="ppCaptureModal">&times;</button>
           </div>
           <div class="pp-set-choice">
             <button type="button" class="pp-btn" data-capture-team="attack">PvE Attack</button>
@@ -3158,7 +3158,7 @@ function openLinkChooser(mainInvId, level, info) {
         <div class="pp-modal-card" style="max-width:420px;">
           <div class="pp-modal-head">
             <h3 class="pp-modal-title" id="ppApplyTitle">Apply preset to:</h3>
-            <button type="button" class="pp-close-btn" data-pp-close="ppApplyModal">Close ✕</button>
+            <button type="button" class="pp-close-btn" data-pp-close="ppApplyModal">&times;</button>
           </div>
           <div class="pp-set-choice">
             <button type="button" class="pp-btn" data-apply-team="attack">PvE Attack</button>
@@ -3176,7 +3176,7 @@ function openLinkChooser(mainInvId, level, info) {
         <div class="pp-modal-card" style="max-width:840px;">
           <div class="pp-modal-head">
             <h3 class="pp-modal-title">Edit preset — <span id="ppEditorName"></span></h3>
-            <button type="button" class="pp-close-btn" data-pp-close="ppEditorModal">Close ✕</button>
+            <button type="button" class="pp-close-btn" data-pp-close="ppEditorModal">&times;</button>
           </div>
           <div id="ppEditorGrid" class="pp-editor-grid"></div>
           <div class="pp-footer">
@@ -3191,7 +3191,7 @@ function openLinkChooser(mainInvId, level, info) {
         <div class="pp-modal-card">
           <div class="pp-modal-head">
             <h3 class="pp-modal-title" id="ppPickerTitle">Choose</h3>
-            <button type="button" class="pp-close-btn" data-pp-close="ppPickerModal">Close ✕</button>
+            <button type="button" class="pp-close-btn" data-pp-close="ppPickerModal">&times;</button>
           </div>
           <div id="ppPickerBody"></div>
           <div class="pp-footer">
