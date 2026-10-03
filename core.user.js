@@ -11,7 +11,7 @@
 /* =============================================================================
  * Core — the ONLY userscript you install.
  *
- *  1. CONFIG.manifest is addons.json
+ *  1. Set CONFIG.manifest below to the raw URL of your addons.json.
  *  2. Open the site: every addon that has a panel gets its OWN floating button
  *     (💎 Crystals, ⚔️ Gear, 🐾 Pets, …) and a ⚙️ button manages the addon list.
  *  3. Addons are plain .js files at URLs, listed in addons.json (or added with the
@@ -31,8 +31,8 @@
 (function (root) {
   'use strict';
 
-  // raw URL of addons.json
-  const CONFIG = { manifest: 'https://raw.githubusercontent.com/WerewuIf/UI-Core/main/addons.json' };
+  // >>> EDIT THIS ONE LINE: raw URL of your addons.json
+  const CONFIG = { manifest: 'https://raw.githubusercontent.com/YOU/REPO/main/addons.json' };
 
   const API = 2;
   if (root.Core && root.Core.__isCore) {
@@ -97,12 +97,24 @@
 
   /* ------------------------------------------------------------ player --- */
   let pidCache = null;
+  // Player id, from the most to least reliable place. Pages differ: most have the sidebar link,
+  // but e.g. the event map has no sidebar and only exposes the id in its #ecConfig JSON.
   const player = {
     id() {
       if (pidCache) return pidCache;
-      const link = document.querySelector && document.querySelector('.side-drawer a[href*="player.php?pid="]');
-      const m = link && /pid=(\d+)/.exec(link.getAttribute('href') || '');
-      if (m) { pidCache = m[1]; try { localStorage.setItem('core:lastPid', pidCache); } catch (_) { /* */ } return pidCache; }
+      let pid = null;
+      try {
+        const link = document.querySelector('.side-drawer a[href*="player.php?pid="]');
+        const m = link && /pid=(\d+)/.exec(link.getAttribute('href') || '');
+        if (m) pid = m[1];
+        if (!pid && root.expPotionSettings && root.expPotionSettings.userId) pid = String(root.expPotionSettings.userId);
+        if (!pid) {
+          const ec = document.getElementById('ecConfig');
+          const u = ec && JSON.parse(ec.textContent || '{}').userId;
+          if (u) pid = String(u);
+        }
+      } catch (_) { /* fall through to the remembered id */ }
+      if (pid) { pidCache = pid; try { localStorage.setItem('core:lastPid', pid); } catch (_) { /* */ } return pid; }
       try { return localStorage.getItem('core:lastPid') || 'default'; } catch (_) { return 'default'; }
     },
   };
@@ -329,44 +341,46 @@
 
   /* ---------------------------------------------------------------- ui --- */
   const ui = (() => {
+    // Every value below is copied from the site's own stylesheet (buffs modal, quick-set modal,
+    // chat / menu floating buttons) so Core's UI is indistinguishable from the site's.
     const CSS = `
-      .core-modal{position:fixed;inset:0;background:rgba(6,10,18,.74);display:none;align-items:center;justify-content:center;padding:20px;backdrop-filter:blur(7px)}
+      .core-modal{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;align-items:center;justify-content:center;padding:16px}
       .core-modal.show{display:flex}
-      .core-modal-card{width:100%;max-height:90vh;overflow:auto;box-sizing:border-box;background:linear-gradient(180deg,rgba(24,34,56,.98),rgba(14,20,34,.98));border:1px solid rgba(255,255,255,.08);border-radius:22px;box-shadow:0 26px 60px rgba(0,0,0,.38);padding:22px;color:#eef3ff;font-family:Arial,sans-serif}
-      .core-modal-head{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:16px}
-      .core-modal-title{margin:0;font-size:22px}
-      .core-close{width:38px;height:38px;border-radius:12px;border:none;background:#18223a;color:#fff;font-size:20px;cursor:pointer}
-      .core-footer{display:flex;gap:8px;flex-wrap:wrap;margin-top:16px;align-items:center}
+      .core-modal-card{width:100%;max-height:90vh;max-height:90dvh;overflow:auto;box-sizing:border-box;background:#171923;border:1px solid #2B2D44;border-radius:12px;box-shadow:0 10px 30px rgba(0,0,0,.4);padding:14px;color:#E0E0E0;font-family:Arial,sans-serif;font-size:14px}
+      .core-modal-head{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:8px}
+      .core-modal-title{margin:0;font-size:18px;font-weight:700;color:#F1F2FA}
+      .core-close{background:#2a2d44;border:0;color:#fff;padding:6px 10px;border-radius:8px;font:13px Arial,sans-serif;cursor:pointer}
+      .core-footer{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px;align-items:center}
       .core-footer:empty{display:none}
       .core-spacer{flex:1 1 auto}
-      .core-btn{border:none;cursor:pointer;color:#fff;background:linear-gradient(135deg,#3657a7,#4b6dd0);padding:9px 14px;border-radius:12px;font:700 13px Arial,sans-serif;box-shadow:0 8px 18px rgba(41,72,155,.28)}
-      .core-btn:hover{filter:brightness(1.06)}
+      .core-btn{border:1px solid #4b5ef5;cursor:pointer;color:#fff;background:#4b5ef5;padding:8px 10px;border-radius:8px;font:700 13px Arial,sans-serif;box-shadow:0 4px 10px rgba(0,0,0,.4)}
+      .core-btn:hover{filter:brightness(1.1)}
       .core-btn:disabled{opacity:.5;cursor:not-allowed}
-      .core-btn-soft{background:linear-gradient(135deg,#222d49,#2b3859);box-shadow:none}
-      .core-btn-success{background:linear-gradient(135deg,#217f5b,#33b57f)}
-      .core-btn-danger{background:linear-gradient(135deg,#7b3040,#b4465c)}
-      .core-empty{padding:30px 18px;text-align:center;color:#9caad0;background:rgba(255,255,255,.02);border:1px dashed rgba(255,255,255,.08);border-radius:16px}
-      .core-menu{position:fixed;z-index:2147483000;background:#171e33;border:1px solid rgba(255,255,255,.1);border-radius:12px;box-shadow:0 12px 28px rgba(0,0,0,.45);min-width:150px;padding:6px;display:none}
+      .core-btn-soft{background:#2a2b3a;border-color:#3b3d55;color:#e0e4ff}
+      .core-btn-success{background:#4caf50;border-color:#4caf50}
+      .core-btn-danger{background:#e74c3c;border-color:#e74c3c}
+      .core-empty{padding:30px 18px;text-align:center;color:#9aa0b8;background:#12131a;border:1px dashed #232437;border-radius:10px}
+      .core-menu{position:fixed;z-index:2147483000;background:#1a1b25;border:1px solid #2f324d;border-radius:10px;box-shadow:0 10px 24px rgba(0,0,0,.6);min-width:150px;padding:6px;display:none}
       .core-menu.open{display:block}
-      .core-menu-item{display:block;width:100%;text-align:left;background:none;border:none;color:#e7ecff;padding:8px 10px;border-radius:8px;font:13px Arial,sans-serif;cursor:pointer}
-      .core-menu-item:hover{background:rgba(255,255,255,.06)}
-      .core-menu-item.danger{color:#ff8a97}
-      #core-toast{position:fixed;top:20px;right:20px;z-index:2147483001;max-width:420px;padding:12px 20px;border-radius:10px;color:#fff;font:600 14px Arial,sans-serif;box-shadow:0 4px 12px rgba(0,0,0,.4);white-space:pre-line;display:none;cursor:pointer}
+      .core-menu-item{display:block;width:100%;text-align:left;background:none;border:none;color:#e0e4ff;padding:8px 10px;border-radius:8px;font:13px Arial,sans-serif;cursor:pointer}
+      .core-menu-item:hover{background:#22233a}
+      .core-menu-item.danger{color:#e74c3c}
+      #core-toast{position:fixed;top:20px;right:20px;z-index:2147483001;max-width:420px;padding:12px 20px;border-radius:10px;color:#fff;font:15px Arial,sans-serif;box-shadow:0 4px 12px rgba(0,0,0,.4);white-space:pre-line;display:none;cursor:pointer}
       #core-dock{position:fixed;z-index:99990;display:flex;gap:10px;flex-direction:row-reverse}
-      .core-dock-btn{width:46px;height:46px;border-radius:50%;border:1px solid rgba(255,255,255,.12);background:#171923;color:#fff;font-size:20px;cursor:pointer;box-shadow:0 6px 16px rgba(0,0,0,.45)}
-      .core-dock-btn:hover{filter:brightness(1.2)}
+      .core-dock-btn{display:inline-flex;align-items:center;justify-content:center;width:46px;height:46px;padding:0;border-radius:50%;border:1px solid #2b2d44;background:#2a2b3a;color:#fff;font-size:20px;line-height:1;cursor:pointer;box-shadow:0 8px 24px rgba(0,0,0,.35)}
+      .core-dock-btn:hover{background:#343648}
       .core-row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
-      .core-input{box-sizing:border-box;padding:8px 10px;border-radius:10px;border:1px solid #2b3859;background:#0d1322;color:#eef3ff;font:13px Arial,sans-serif}
-      .core-dim{color:#9caad0;font-size:12px;overflow-wrap:anywhere}
-      .core-err{color:#ff8a97;font-size:12px;margin-top:3px}
-      .core-pill{font:800 10px Arial,sans-serif;letter-spacing:.03em;text-transform:uppercase;border-radius:999px;padding:2px 8px;border:1px solid rgba(255,255,255,.15);color:#9caad0}
-      .core-pill-ok{color:#8ee6a8;border-color:rgba(46,204,113,.4);background:rgba(46,204,113,.1)}
-      .core-pill-error{color:#ff8a97;border-color:rgba(255,107,122,.4);background:rgba(255,107,122,.1)}
-      .core-pill-loading{color:#ffd978;border-color:rgba(255,217,120,.4)}
-      .core-float-pane{overflow:auto;max-height:76vh;min-width:0;padding-right:4px}
-      .core-addon{display:flex;gap:12px;align-items:center;padding:12px;background:#11192d;border:1px solid rgba(255,255,255,.06);border-radius:14px;margin-bottom:10px}
+      .core-input{box-sizing:border-box;padding:10px;border-radius:8px;border:1px solid #2B2D44;background:#12131A;color:#EDEFF6;font:13px Arial,sans-serif}
+      .core-dim{color:#9aa0b8;font-size:12px;overflow-wrap:anywhere}
+      .core-err{color:#e74c3c;font-size:12px;margin-top:3px}
+      .core-pill{font:800 10px Arial,sans-serif;letter-spacing:.03em;text-transform:uppercase;border-radius:999px;padding:2px 8px;border:1px solid #2b2e49;background:#202235;color:#cfd4ff}
+      .core-pill-ok{color:#2ecc71;border-color:rgba(46,204,113,.4);background:rgba(46,204,113,.1)}
+      .core-pill-error{color:#e74c3c;border-color:rgba(231,76,60,.4);background:rgba(231,76,60,.1)}
+      .core-pill-loading{color:#FFD369;border-color:rgba(255,211,105,.4);background:rgba(255,211,105,.08)}
+      .core-float-pane{min-width:0}
+      .core-addon{display:flex;gap:12px;align-items:center;padding:10px;background:#12131a;border:1px solid #232437;border-radius:10px;margin-bottom:8px}
       .core-addon-main{flex:1 1 auto;min-width:0}
-      .core-addon-name{font-weight:800}
+      .core-addon-name{font-weight:600;color:#F1F2FA}
       .core-addon-meta{display:flex;flex-direction:column;align-items:flex-end;gap:3px}
       .core-addon .core-btn{padding:6px 10px}
     `;
@@ -376,8 +390,10 @@
 
     function css(id, text) {
       const sid = 'core-css-' + id;
+      const host = document.head || document.documentElement;
+      if (!host) { ready.then(() => css(id, text)); return; }   // earlier than <html> exists: wait
       if (document.getElementById(sid)) return;
-      (document.head || document.documentElement).appendChild(h('style', { id: sid }, text));
+      host.appendChild(h('style', { id: sid }, text));
     }
     function base() {
       if (baseDone) return; baseDone = true;
@@ -411,7 +427,7 @@
       const foot = h('div', { class: 'core-footer' });
       const el = h('div', { class: 'core-modal' },
         h('div', { class: 'core-modal-card', style: { maxWidth: (o.width || 760) + 'px' } },
-          h('div', { class: 'core-modal-head' }, titleEl, h('button', { class: 'core-close', type: 'button', onclick: () => m.close() }, '\u00d7')),
+          h('div', { class: 'core-modal-head' }, titleEl, h('button', { class: 'core-close', type: 'button', onclick: () => m.close() }, 'Close \u2715')),
           body, foot));
       el.addEventListener('click', (e) => { if (e.target === el) m.close(); });
       const m = {
@@ -778,11 +794,11 @@
     }
   }
 
-  function addCustom(url, match) {
+  function addCustom(url) {
     url = String(url || '').trim();
     if (!/^https?:\/\//i.test(url)) { ui.toast('Enter a full http(s) URL', false); return; }
     const id = url.split(/[?#]/)[0].split('/').pop().replace(/\.js$/i, '') || 'addon';
-    const e = { id, name: id, url, match: (match || '').trim() || undefined };
+    const e = { id, name: id, url };
     cfg.update((c) => { c.custom = c.custom.filter((x) => x.id !== id); c.custom.push(e); c.off = c.off.filter((x) => x !== id); });
     startOne(Object.assign({ source: 'custom' }, e)).then(() => float.refresh('addons'));
     ui.toast('Added "' + id + '"');
@@ -829,13 +845,12 @@
         e.source === 'custom' ? ui.btn('\ud83d\uddd1', 'danger', () => removeCustom(e.id)) : null);
     });
     const url = h('input', { class: 'core-input', placeholder: 'https://raw.githubusercontent.com/you/repo/main/addons/x.js', style: { flex: '1 1 320px' } });
-    const match = h('input', { class: 'core-input', placeholder: 'pages regex (optional), e.g. ^/pets\\.php', style: { flex: '1 1 200px' } });
     const dev = h('input', { type: 'checkbox', onchange: (ev) => cfg.update((x) => { x.dev = ev.target.checked; }) });
     dev.checked = !!c.dev;
     el.replaceChildren(
       h('div', { class: 'core-dim', style: { marginBottom: '12px' } }, 'Manifest: ' + (CONFIG.manifest || '(none)')),
       ...rows.length ? rows : [h('div', { class: 'core-empty' }, 'No addons yet. Add a URL below or set CONFIG.manifest.')],
-      h('div', { class: 'core-row', style: { marginTop: '16px' } }, url, match, ui.btn('Add by URL', 'success', () => { addCustom(url.value, match.value); url.value = ''; })),
+      h('div', { class: 'core-row', style: { marginTop: '16px' } }, url, ui.btn('Add by URL', 'success', () => { addCustom(url.value); url.value = ''; })),
       h('div', { class: 'core-row' },
         h('label', { class: 'core-dim' }, dev, ' Dev mode: always fetch fresh (for localhost / unpushed edits)'),
         h('div', { class: 'core-spacer' }),
