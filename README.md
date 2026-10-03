@@ -46,8 +46,10 @@ Addons marked `"early": true` run at document-start; the rest wait for `DOMConte
 
 ## 2. Repo layout
 
+Create **one public repository** with exactly this layout:
+
 ```
-repo/
+your-repo/
 ├── core.user.js            backup copy of what you install in Tampermonkey (nothing fetches it)
 ├── addons.json             REQUIRED – the manifest Core reads
 ├── README.md               this file (optional)
@@ -69,20 +71,27 @@ repo/
 | `addons/*.js` | **YES** | **no — do not install these** (plain code, no userscript header) |
 | `examples/addon-template.js` | optional | no |
 
+> The repo must be **public**: `raw.githubusercontent.com` can't serve private files to a browser without a token and Core doesn't send one.
 
 ---
 
 ## 3. Setup
 
-### Step 1 — Get your manifest URL
+### Step 1 — Create the repo (web UI, no git needed)
+
+1. **github.com → New repository**, any name, **Public**. Click **Create repository**.
+2. **Add file → Upload files**. Drag in `addons.json`, `README.md`, `REFERENCE.md`, `core.user.js` and the `addons` and `examples` **folders** (drag the folders so paths stay `addons/…`). **Commit changes** to `main`.
+3. Open `addons/` and confirm all 5 `.js` files are there.
+
+### Step 2 — Get your manifest URL
 
 Open `addons.json` in the repo → **Raw**, copy the address bar URL. It looks like
 `https://raw.githubusercontent.com/<you>/<repo>/main/addons.json`. Open it in a tab: you should see JSON text.
 (404 = private repo, wrong branch, or the file isn't at the repo root.)
 
-### Step 2 — Put that URL in the script
+### Step 3 — Put that URL in the script (the only edit you make)
 
-top of `core.user.js`:
+Near the top of `core.user.js`:
 
 ```js
 const CONFIG = { manifest: 'https://raw.githubusercontent.com/YOU/REPO/main/addons.json' };
@@ -91,7 +100,7 @@ const CONFIG = { manifest: 'https://raw.githubusercontent.com/YOU/REPO/main/addo
 
 `addons.json` uses relative URLs, so every addon is found next to it. Nothing else needs editing.
 
-### Step 3 — Turn off the old scripts
+### Step 4 — Turn off the old scripts
 
 In Tampermonkey **disable** (don't delete yet, see §9):
 
@@ -100,6 +109,7 @@ In Tampermonkey **disable** (don't delete yet, see §9):
 - UI Cleanup
 - Pet Team Presets + Sigil No-Reload Helper
 - Battle Page Restructure (All-in-One)
+- **"DS Central" / "DS Central (hub + addon loader)"** if you installed the earlier version of this suite
 
 Leaving any on makes features run twice. The addons read and write the **same localStorage keys** as the originals
 (`pcPresets_<pid>`, `gearPresets_<pid>`, `petPresets_<pid>`, `verya_reminders`, the battle panel keys…), so
@@ -134,6 +144,7 @@ It should be **enabled** with match `https://demonicscans.org/*`.
 
 ## 4. What each addon changed
 
+Every edit was an exact-match patch of your original code; the logic you tuned is untouched. Only plumbing changed.
 
 | Addon | From | Changed | Untouched |
 |---|---|---|---|
@@ -155,7 +166,7 @@ dropped automatically after your own POSTs, in **all open tabs**.
 
 **Add or remove an addon everywhere.** Edit `addons.json`, commit. Each browser toasts *"Addon list changed — reload to apply"*.
 
-**Add an addon for this browser only.** **⚙️ → paste a URL → Add by URL** (optionally a page regex). It runs immediately and survives reloads. 🗑 removes it.
+**Add an addon for this browser only.** **⚙️ → paste a URL → Add by URL**. It runs on every page, immediately, and survives reloads. 🗑 removes it. (To limit an addon to certain pages, use `match` in `addons.json`.)
 
 **Disable an addon.** Untick it in ⚙️. Full effect after a reload (a running script can't be unloaded); re-enabling runs it at once.
 
@@ -175,7 +186,18 @@ Fields, `match`, `early`, `sha256`: see [`REFERENCE.md` §7](REFERENCE.md#7-mani
 
 ---
 
-## 7. Troubleshooting
+## 7. Security
+
+A URL decides what code runs **inside your logged-in game session**. Treat the repo like a password:
+
+- Turn on **2-factor authentication** on the GitHub account that owns it. Don't add collaborators you don't fully trust, and read any addon from someone else's repo before using it.
+- To harden, pin hashes: `sha256sum addons/*.js` (macOS: `shasum -a 256`), paste each digest into that entry's `"sha256"`. A tampered or half-updated file then refuses to run and shows an error in ⚙️. Update the hash whenever you edit the addon.
+- Optionally pin the manifest to a commit SHA (§5).
+- `CONFIG.manifest` lives in the Tampermonkey copy, not on GitHub: someone who pushes to the repo can change addons but can't point your install at a different manifest.
+
+---
+
+## 8. Troubleshooting
 
 | Symptom | Cause / fix |
 |---|---|
@@ -198,7 +220,27 @@ Fields, `match`, `early`, `sha256`: see [`REFERENCE.md` §7](REFERENCE.md#7-mani
 Console helpers: `Core.status()`, `Core.addons.status`, `Core.debug = true`, `localStorage.getItem('core:addons')`
 (your disabled list, custom addons, dev flag).
 
-## 8. Testing status
+---
+
+## 9. Rollback
+
+Nothing Core does is destructive and your presets are never rewritten.
+
+1. Tampermonkey: **disable** Core.
+2. **Re-enable** the five original userscripts (that's why Step 4 said disable, not delete).
+3. Reload. You're back to the old setup with all presets intact.
+
+To wipe Core's own data (cached code, disabled list, preferences — **not** your presets):
+
+```js
+Object.keys(localStorage).filter(k => k.startsWith('core:') || k.startsWith('ds:')).forEach(k => localStorage.removeItem(k))
+```
+
+(`ds:` is the old name used by the earlier "DS Central" build; it's harmless leftover data.)
+
+---
+
+## 10. Testing status
 
 **Verified** in a simulated browser (jsdom with a mock server) running the real `core.user.js`, the real `addons/*.js` and `examples/addon-template.js`:
 
@@ -206,7 +248,11 @@ Console helpers: `Core.status()`, `Core.addons.status`, `Core.debug = true`, `lo
 - exactly four dock buttons in order (💎 ⚔️ 🐾 ⚙️), no hub, no `DS` global;
 - each button opens its own panel with that addon's real content; ✕ / Esc / `Core.float.close` close it and the content is parked back;
 - `Core.float.add` with `onClick` only, `Core.module({ float })`, `float.remove` and duplicate-id warnings behave as documented;
-- the ⚙️ manager lists all addons with correct state pills;
+- the ⚙️ manager lists all addons with correct state pills and has no regex field;
+- pages with no sidebar (the event map) still find your player id, so your saved presets show there (before the fix they showed "No saved presets yet");
+- each panel has exactly one scrollbar, the modal card itself, like the original modals;
 - the template addon runs as a real addon (panel, page tweak, cached fetch).
 
+**Also checked in real Chromium** (desktop and phone width), against the real CSS of your stats page: the floating buttons and panels use the site's own colours, radii, shadows and "Close ✕" button, and sit next to the site's ☰ / 💬 buttons without overlapping.
 
+**Not verified** (no access to the live site or your account): real equip/restore round-trips against the live server, the site's actual CSP, and the event page's real `event-core.css` (only its layout was approximated). Step 7 is the checklist for that.

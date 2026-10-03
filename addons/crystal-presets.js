@@ -231,14 +231,7 @@
 
   // ---------- reading the page ----------
 
-  function getPlayerId() {
-    const link = document.querySelector('.side-drawer a[href*="player.php?pid="]');
-    if (link) {
-      const m = /pid=(\d+)/.exec(link.getAttribute('href') || '');
-      if (m) return m[1];
-    }
-    return 'default';
-  }
+  function getPlayerId() { return Core.player.id(); }
 
   function findPanelByHeading(root, text) {
     return Array.from(root.querySelectorAll('.panel')).find((p) => {
@@ -630,10 +623,10 @@
     const style = document.createElement('style');
     style.textContent = `
       .pcp-row { display:flex; justify-content:space-between; align-items:center; gap:12px;
-        padding:12px; background:#11192d; border:1px solid rgba(255,255,255,.06);
-        border-radius:14px; margin-bottom:10px; flex-wrap:wrap; }
+        padding:12px; background:#12131a; border:1px solid #232437;
+        border-radius:10px; margin-bottom:10px; flex-wrap:wrap; }
       .pcp-row-name { font-weight:800; }
-      .pcp-row-meta { color:#9caad0; font-size:12px; margin-top:2px; }
+      .pcp-row-meta { color:#9aa0b8; font-size:12px; margin-top:2px; }
       .pcp-equipped-badge{
         display:inline-block; font-size:10px; font-weight:800; letter-spacing:.03em;
         text-transform:uppercase; color:#8ee6a8; background:rgba(46,204,113,.12);
@@ -642,26 +635,26 @@
       }
       .pcp-row-icons { display:flex; gap:4px; margin-top:6px; align-items:center; }
       .pcp-row-icons img { width:24px; height:24px; border-radius:6px; object-fit:cover;
-        border:1px solid rgba(255,255,255,.08); background:#0d1322; }
-      .pcp-row-icons span { font-size:11px; color:#9caad0; }
+        border:1px solid #232437; background:#12131a; }
+      .pcp-row-icons span { font-size:11px; color:#9aa0b8; }
       .pcp-row-actions { display:flex; gap:6px; flex-wrap:wrap; }
       .pcp-row-actions .pcp-btn { padding:6px 10px; font-size:12px; }
       .pcp-editor-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(220px, 1fr));
         gap:14px; max-height:50vh; overflow:auto; padding-right:4px; }
-      .pcp-eq-card { background:#11192d; border:1px solid rgba(255,255,255,.06); border-radius:16px;
+      .pcp-eq-card { background:#12131a; border:1px solid #232437; border-radius:10px;
         padding:14px; display:flex; gap:12px; align-items:center; }
-      .pcp-eq-icon { width:56px; height:56px; border-radius:12px; overflow:hidden; background:#0d1322;
-        border:1px solid rgba(255,255,255,.08); flex-shrink:0; }
+      .pcp-eq-icon { width:56px; height:56px; border-radius:12px; overflow:hidden; background:#12131a;
+        border:1px solid #232437; flex-shrink:0; }
       .pcp-eq-icon img { width:100%; height:100%; object-fit:cover; display:block; }
-      .pcp-orphan-row { display:flex; align-items:center; gap:10px; background:#11192d;
-        border:1px solid rgba(255,255,255,.06); border-radius:12px; padding:8px 10px; margin-top:8px; }
+      .pcp-orphan-row { display:flex; align-items:center; gap:10px; background:#12131a;
+        border:1px solid #232437; border-radius:12px; padding:8px 10px; margin-top:8px; }
       .pcp-orphan-row img { width:32px; height:32px; border-radius:8px; object-fit:cover; }
-      .pcp-orphan-row span { flex:1; color:#9caad0; font-size:13px; }
+      .pcp-orphan-row span { flex:1; color:#9aa0b8; font-size:13px; }
 
       .pcp-menu-btn{ width:34px; height:34px; padding:0; display:inline-flex; align-items:center;
         justify-content:center; font-size:18px; line-height:1; border-radius:10px; }
       .pcp-menu-dropdown{ position:fixed; z-index:300050;
-        background:#171e33; border:1px solid rgba(255,255,255,.1); border-radius:12px;
+        background:#1a1b25; border:1px solid rgba(255,255,255,.1); border-radius:12px;
         box-shadow:0 12px 28px rgba(0,0,0,.45); min-width:150px; padding:6px; display:none; }
       .pcp-menu-dropdown.open{ display:block; }
       .pcp-menu-item{ display:block; width:100%; text-align:left; background:none; border:none;
@@ -719,7 +712,7 @@
       }
 
       .pcp-free-counter{
-        color:#9caad0; font-size:13px; font-weight:600; margin-bottom:10px;
+        color:#9aa0b8; font-size:13px; font-weight:600; margin-bottom:10px;
       }
 
       /* =====================================================================
@@ -735,13 +728,13 @@
       .pcp-modal{
         position:fixed;
         inset:0;
-        background:rgba(6,10,18,.74);
+        background:rgba(0,0,0,.6);
         display:none;
         align-items:center;
         justify-content:center;
-        padding:20px;
+        padding:16px;
         z-index:300000;
-        backdrop-filter:blur(7px);
+        
       }
       .pcp-modal.show{ display:flex; }
 
@@ -749,12 +742,12 @@
         width:min(780px, 100%);
         max-height:90vh;
         overflow:auto;
-        background:linear-gradient(180deg, rgba(24,34,56,.98), rgba(14,20,34,.98));
-        border:1px solid rgba(255,255,255,.08);
-        border-radius:24px;
-        box-shadow:0 26px 60px rgba(0,0,0,.38);
-        padding:22px;
-        color:#eef3ff;
+        background:#171923;
+        border:1px solid #2B2D44;
+        border-radius:12px;
+        box-shadow:0 10px 30px rgba(0,0,0,.4);
+        padding:14px;
+        color:#E0E0E0;
         font-family:Arial,sans-serif;
       }
 
@@ -763,25 +756,22 @@
         justify-content:space-between;
         align-items:center;
         gap:12px;
-        margin-bottom:16px;
+        margin-bottom:8px;
       }
-      .pcp-modal-title{ margin:0; font-size:24px; }
-      .pcp-close-btn{
-        width:40px; height:40px; border-radius:12px; border:none;
-        background:#18223a; color:#fff; font-size:22px; cursor:pointer;
-      }
+      .pcp-modal-title{ margin:0; font-size:18px; color:#F1F2FA; }
+      .pcp-close-btn{ background:#2a2d44; border:0; color:#fff; padding:6px 10px; border-radius:8px; font:13px Arial,sans-serif; cursor:pointer; }
 
       .pcp-btn{
         border:none; cursor:pointer; text-decoration:none; color:#fff;
-        background:linear-gradient(135deg, #3657a7, #4b6dd0);
-        padding:10px 14px; border-radius:12px; font-weight:700;
-        font-family:Arial,sans-serif; font-size:14px;
-        box-shadow:0 8px 18px rgba(41,72,155,.28); transition:.18s ease;
+        background:#4b5ef5;
+        padding:8px 10px; border-radius:8px; font-weight:700;
+        font-family:Arial,sans-serif; font-size:13px;
+        box-shadow:0 4px 10px rgba(0,0,0,.4); transition:.18s ease;
       }
       .pcp-btn:hover{ transform:translateY(-1px); filter:brightness(1.05); }
-      .pcp-btn-soft{ background:linear-gradient(135deg, #222d49, #2b3859); box-shadow:none; }
-      .pcp-btn-danger{ background:linear-gradient(135deg, #7b3040, #b4465c); }
-      .pcp-btn-success{ background:linear-gradient(135deg, #217f5b, #33b57f); }
+      .pcp-btn-soft{ background:#2a2b3a; color:#e0e4ff; box-shadow:inset 0 0 0 1px #3b3d55; }
+      .pcp-btn-danger{ background:#e74c3c; }
+      .pcp-btn-success{ background:#4caf50; }
       .pcp-btn:disabled{
         opacity:.45; cursor:not-allowed; transform:none !important;
         filter:none !important; box-shadow:none;
@@ -791,16 +781,16 @@
         display:grid; grid-template-columns:repeat(auto-fit, minmax(180px, 1fr)); gap:14px;
       }
       .pcp-picker-card{
-        background:#10182a; border:1px solid rgba(255,255,255,.06);
-        border-radius:18px; padding:14px; text-align:center;
+        background:#12131a; border:1px solid #232437;
+        border-radius:10px; padding:14px; text-align:center;
       }
       .pcp-picker-card .pcp-crystal-image{ width:138px; height:138px; border-radius:18px; }
-      .pcp-picker-meta{ color:#9caad0; font-size:12px; margin-top:10px; text-align:center; }
+      .pcp-picker-meta{ color:#9aa0b8; font-size:12px; margin-top:10px; text-align:center; }
       .pcp-picker-card .pcp-btn{ width:100%; margin-top:12px; }
 
       .pcp-crystal-image{
         position:relative; width:138px; height:138px; border:none; padding:0;
-        border-radius:22px; overflow:hidden; background:#0d1322; cursor:pointer;
+        border-radius:22px; overflow:hidden; background:#12131a; cursor:pointer;
         box-shadow:0 14px 28px rgba(0,0,0,.22); display:block; margin:0 auto;
       }
       .pcp-crystal-image img{
@@ -818,12 +808,12 @@
       .pcp-slot-row{ display:flex; gap:10px; flex-wrap:wrap; }
       .pcp-slot-btn{
         width:48px; height:48px; border-radius:14px; border:1px dashed rgba(255,255,255,.16);
-        background:#10182a; cursor:pointer; position:relative; overflow:hidden;
+        background:#12131a; cursor:pointer; position:relative; overflow:hidden;
         transition: transform .12s ease, box-shadow .12s ease, background .12s ease, border-color .12s ease;
       }
       .pcp-slot-btn:hover{ transform:scale(1.07); box-shadow:0 4px 10px rgba(0,0,0,.35); z-index:1; }
       .pcp-slot-btn.empty::before{ content:"+"; color:#8ea1d9; font-size:22px; font-weight:700; }
-      .pcp-slot-btn.filled{ border-style:solid; border-color:rgba(110,168,255,.35); background:#0f1628; }
+      .pcp-slot-btn.filled{ border-style:solid; border-color:rgba(110,168,255,.35); background:#12131a; }
       .pcp-slot-btn.filled img{ width:100%; height:100%; object-fit:cover; display:block; }
       /* No ::after "×" here (unlike the page's native .slot-btn.filled) —
          .pcp-slot-remove already supplies a real, clickable remove button in
@@ -832,8 +822,8 @@
       .pcp-confirm-actions{ display:flex; justify-content:flex-end; gap:10px; flex-wrap:wrap; }
 
       .pcp-empty-state{
-        padding:34px 18px; text-align:center; color:#9caad0;
-        background:rgba(255,255,255,.02); border:1px dashed rgba(255,255,255,.08); border-radius:18px;
+        padding:34px 18px; text-align:center; color:#9aa0b8;
+        background:rgba(255,255,255,.02); border:1px dashed rgba(255,255,255,.08); border-radius:10px;
       }
 
       /* info-stack / info-box / info-line / info-empty stay UNPREFIXED: this
@@ -842,14 +832,14 @@
          classes we didn't generate. This just duplicates the CSS, since the
          page's own copy only loads on power_crystals.php. */
       .info-stack{ display:grid; gap:12px; }
-      .info-box{ background:#11192d; border:1px solid rgba(255,255,255,.06); border-radius:16px; padding:14px; }
-      .info-box h4{ margin:0 0 10px; font-size:14px; color:#cfd8f7; }
+      .info-box{ background:#12131a; border:1px solid #232437; border-radius:10px; padding:14px; }
+      .info-box h4{ margin:0 0 10px; font-size:14px; color:#c0c4e4; }
       .info-line{
         display:flex; justify-content:space-between; gap:16px; padding:7px 0;
-        border-bottom:1px solid rgba(255,255,255,.05); font-size:14px; color:#eef3ff;
+        border-bottom:1px solid rgba(255,255,255,.05); font-size:14px; color:#e0e4ff;
       }
       .info-line:last-child{ border-bottom:none; }
-      .info-empty{ color:#9caad0; font-size:14px; }
+      .info-empty{ color:#9aa0b8; font-size:14px; }
     `;
     document.head.appendChild(style);
   }
@@ -1278,7 +1268,7 @@
         <div class="pcp-modal-card" style="max-width:640px;">
           <div class="pcp-modal-head">
             <h3 class="pcp-modal-title">Crystal Presets</h3>
-            <button type="button" class="pcp-close-btn" data-pcp-close="pcpModal">&times;</button>
+            <button type="button" class="pcp-close-btn" data-pcp-close="pcpModal">Close ✕</button>
           </div>
           <div id="pcpList"></div>
           <div class="pcp-confirm-actions" style="margin-top:16px;">
@@ -1294,7 +1284,7 @@
         <div class="pcp-modal-card" style="max-width:820px;">
           <div class="pcp-modal-head">
             <h3 class="pcp-modal-title">Edit Preset — <span id="pcpEditorName"></span></h3>
-            <button type="button" class="pcp-close-btn" data-pcp-close="pcpEditorModal">&times;</button>
+            <button type="button" class="pcp-close-btn" data-pcp-close="pcpEditorModal">Close ✕</button>
           </div>
           <div id="pcpFreeCounter" class="pcp-free-counter"></div>
           <div id="pcpEditorGrid" class="pcp-editor-grid"></div>
@@ -1312,7 +1302,7 @@
         <div class="pcp-modal-card">
           <div class="pcp-modal-head">
             <h3 class="pcp-modal-title">Choose a Crystal</h3>
-            <button type="button" class="pcp-close-btn" data-pcp-close="pcpPickerModal">&times;</button>
+            <button type="button" class="pcp-close-btn" data-pcp-close="pcpPickerModal">Close ✕</button>
           </div>
           <div id="pcpPickerBody"></div>
         </div>
@@ -1322,7 +1312,7 @@
         <div class="pcp-modal-card" style="max-width:520px;">
           <div class="pcp-modal-head">
             <h3 class="pcp-modal-title" id="pcpDetailTitle">Crystal</h3>
-            <button type="button" class="pcp-close-btn" data-pcp-close="pcpDetailModal">&times;</button>
+            <button type="button" class="pcp-close-btn" data-pcp-close="pcpDetailModal">Close ✕</button>
           </div>
           <div id="pcpDetailBody"></div>
           <div class="pcp-confirm-actions" style="margin-top:16px;">

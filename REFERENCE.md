@@ -278,7 +278,7 @@ All `pages.*` accept `{ fetch: true }` (force a fetched copy even when you're on
 | `store(ns, {def, key})` → `{get, set, update, watch}` | persistent JSON, per player, synced across tabs |
 | `state.get/set/update/watch` | in-memory, this page only |
 | `on / once / off / emit(evt, data, {shared})` | event bus |
-| `player.id()` | player id (from the sidebar profile link) |
+| `player.id()` | player id. Tries the sidebar link, then `expPotionSettings.userId`, then the event page's `#ecConfig`, then the last id seen. **Use this, not your own lookup**, or your addon will see a different id on pages without a sidebar |
 | `cookies.withMode(mode, fn)` | see recipe |
 | `dom.watch(fn, {for, immediate})` · `dom.when(sel, timeout)` · `dom.ready` | shared observer · wait for element · DOM-ready promise |
 | `esc sleep debounce fmt int compact parseJson` | small utilities |
@@ -324,6 +324,9 @@ JSON needs doubled backslashes (`\\.`). Entries run in the order listed. "Add by
 ## 8. Rules and gotchas
 
 - [ ] **Buttons come from `Core.float`**, never your own `position:fixed` element.
+- [ ] **Never add your own scrollbar to a panel.** The modal card is the one scroller. Don't put `overflow:auto` + `max-height` on your top-level content, or you get a second scrollbar. (A bounded inner list, e.g. a picker grid, is fine.)
+- [ ] **Get the player id from `Core.player.id()`.** Some pages (e.g. the event map) have no sidebar, so a hand-rolled lookup returns the wrong id there and your saved data looks empty.
+- [ ] **Match the site's look** (table below). Use the `core-*` classes, or these exact values in your own CSS.
 - [ ] **Idempotent DOM work.** `Core.dom.watch` re-runs your function after DOM changes; mark what you've done (`dataset`, a class) and bail out early.
 - [ ] **Read through `Core.net` / `Core.pages`**, not raw `fetch` + `DOMParser`, so pages are shared and caches invalidate. (`fetch` is fine for POSTs the site itself would make; `Core.net.post` is nicer.)
 - [ ] **Saved data goes in `Core.store`.** Pass `key` if you must keep an old key.
@@ -335,6 +338,23 @@ JSON needs doubled backslashes (`\\.`). Entries run in the order listed. "Add by
 - [ ] **Everything must work after a reload twice**: first load downloads, later loads run from cache.
 - [ ] **Never put secrets in an addon.** It's a public file.
 - [ ] **Go easy on the server.** Use the cache (`ttl`) and don't poll faster than you need.
+
+### Matching the site's look
+
+Core's own UI uses the site's exact values, copied from its stylesheet. If you write your own CSS, use the same ones:
+
+| Thing | Value |
+|---|---|
+| Dialog card | `background:#171923; border:1px solid #2B2D44; border-radius:12px; box-shadow:0 10px 30px rgba(0,0,0,.4); padding:14px; color:#E0E0E0` |
+| Backdrop | `rgba(0,0,0,.6)`, flat (no blur) |
+| Close button | `background:#2a2d44; border:0; color:#fff; padding:6px 10px; border-radius:8px`, label `Close ✕` |
+| Inner row / card | `background:#12131a; border:1px solid #232437; border-radius:10px` |
+| Primary button | `background:#4b5ef5; color:#fff; border-radius:8px; padding:8px 10px; font:700 13px Arial; box-shadow:0 4px 10px rgba(0,0,0,.4)` |
+| Soft button | `background:#2a2b3a; border:1px solid #3b3d55; color:#e0e4ff` |
+| Success / danger | `#4caf50` / `#e74c3c` |
+| Text | main `#E0E0E0`, headings `#F1F2FA`, dim `#9aa0b8` |
+| Input | `background:#12131A; border:1px solid #2B2D44; border-radius:8px; color:#EDEFF6; padding:10px` |
+| Floating button | built by `Core.float` (46px circle, `#2a2b3a`, `1px solid #2b2d44`, hover `#343648`) |
 
 ---
 
@@ -353,6 +373,8 @@ UI RULES
 - Dialogs/menus/toasts: Core.ui.modal({id,title,body,actions}).open(), Core.ui.menu(anchor, items), Core.ui.toast(msg, ok).
 - Build DOM with Core.ui.h(tag, props, ...kids) and Core.ui.btn(label, kind, onClick).
   Classes in panels: core-btn[-soft|-success|-danger], core-input, core-row, core-dim, core-empty, core-err, core-pill.
+- Match the site's look: dark card #171923, border #2B2D44, radius 12px, rows #12131a, primary #4b5ef5, dim text #9aa0b8.
+- Never give the top-level panel its own overflow/scrollbar (the modal card scrolls). Get the player id from Core.player.id().
 - Prefix your own CSS classes; inject once with Core.ui.css(id, text).
 
 DATA RULES
