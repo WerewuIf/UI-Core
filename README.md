@@ -175,18 +175,7 @@ Fields, `match`, `early`, `sha256`: see [`REFERENCE.md` §7](REFERENCE.md#7-mani
 
 ---
 
-## 7. Security
-
-A URL decides what code runs **inside your logged-in game session**. Treat the repo like a password:
-
-- Turn on **2-factor authentication** on the GitHub account that owns it. Don't add collaborators you don't fully trust, and read any addon from someone else's repo before using it.
-- To harden, pin hashes: `sha256sum addons/*.js` (macOS: `shasum -a 256`), paste each digest into that entry's `"sha256"`. A tampered or half-updated file then refuses to run and shows an error in ⚙️. Update the hash whenever you edit the addon.
-- Optionally pin the manifest to a commit SHA (§5).
-- `CONFIG.manifest` lives in the Tampermonkey copy, not on GitHub: someone who pushes to the repo can change addons but can't point your install at a different manifest.
-
----
-
-## 8. Troubleshooting
+## 7. Troubleshooting
 
 | Symptom | Cause / fix |
 |---|---|
@@ -209,27 +198,7 @@ A URL decides what code runs **inside your logged-in game session**. Treat the r
 Console helpers: `Core.status()`, `Core.addons.status`, `Core.debug = true`, `localStorage.getItem('core:addons')`
 (your disabled list, custom addons, dev flag).
 
----
-
-## 9. Rollback
-
-Nothing Core does is destructive and your presets are never rewritten.
-
-1. Tampermonkey: **disable** Core.
-2. **Re-enable** the five original userscripts (that's why Step 4 said disable, not delete).
-3. Reload. You're back to the old setup with all presets intact.
-
-To wipe Core's own data (cached code, disabled list, preferences — **not** your presets):
-
-```js
-Object.keys(localStorage).filter(k => k.startsWith('core:') || k.startsWith('ds:')).forEach(k => localStorage.removeItem(k))
-```
-
-(`ds:` is the old name used by the earlier "DS Central" build; it's harmless leftover data.)
-
----
-
-## 10. Testing status
+## 8. Testing status
 
 **Verified** in a simulated browser (jsdom with a mock server) running the real `core.user.js`, the real `addons/*.js` and `examples/addon-template.js`:
 
@@ -240,4 +209,4 @@ Object.keys(localStorage).filter(k => k.startsWith('core:') || k.startsWith('ds:
 - the ⚙️ manager lists all addons with correct state pills;
 - the template addon runs as a real addon (panel, page tweak, cached fetch).
 
-**Not verified** (no access to the live site or your account): how the panels *look* (they reuse your original CSS classes and haven't been screenshot-tested), real equip/restore round-trips against the live server, the site's actual CSP, and behaviour with your real page HTML. Step 7 is the checklist for that.
+
