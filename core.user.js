@@ -34,7 +34,7 @@
   'use strict';
 
   // >>> EDIT THIS ONE LINE: raw URL of your addons.json
-  const CONFIG = { manifest: 'https://raw.githubusercontent.com/WerewuIf/UI-Core/main/core/addons.json' };
+  const CONFIG = { manifest: 'https://github.com/WerewuIf/UI-Core/raw/refs/heads/main/addons.json' };
 
   const API = 2;
   if (root.Core && root.Core.__isCore) {
