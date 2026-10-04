@@ -1,11 +1,13 @@
 // ==UserScript==
 // @name         Core (addon loader)
 // @namespace    https://example.local/
-// @version      3.0.0
+// @version      3.1.0
 // @description  One script: shared core + floating-button system. Addons are plain .js files loaded by URL.
 // @match        https://demonicscans.org/*
 // @run-at       document-start
 // @grant        none
+// @updateURL    https://raw.githubusercontent.com/WerewuIf/UI-Core/main/core/core.user.js
+// @downloadURL  https://raw.githubusercontent.com/WerewuIf/UI-Core/main/core/core.user.js
 // ==/UserScript==
 
 /* =============================================================================
@@ -32,7 +34,7 @@
   'use strict';
 
   // >>> EDIT THIS ONE LINE: raw URL of your addons.json
-  const CONFIG = { manifest: 'https://github.com/WerewuIf/UI-Core/raw/refs/heads/main/addons.json' };
+  const CONFIG = { manifest: 'https://raw.githubusercontent.com/WerewuIf/UI-Core/main/core/addons.json' };
 
   const API = 2;
   if (root.Core && root.Core.__isCore) {
@@ -365,10 +367,10 @@
       .core-menu-item.danger{color:#ff8a97}
       #core-toast{position:fixed;top:20px;right:20px;z-index:2147483001;max-width:420px;padding:12px 20px;border-radius:10px;color:#fff;font:600 14px Arial,sans-serif;box-shadow:0 4px 12px rgba(0,0,0,.4);white-space:pre-line;display:none;cursor:pointer}
       #core-dock{position:fixed;z-index:99990;display:flex;gap:10px;flex-direction:row-reverse}
-      /* The floating buttons that open each panel: copied from the game's own round buttons
-         (chat 💬 and menu ☰), so they look like part of the page. */
-      .core-dock-btn{display:inline-flex;align-items:center;justify-content:center;width:46px;height:46px;padding:0;border-radius:50%;border:1px solid #2b2d44;background:#2a2b3a;color:#fff;font-size:20px;line-height:1;cursor:pointer;box-shadow:0 8px 24px rgba(0,0,0,.35)}
-      .core-dock-btn:hover{background:#343648}
+      /* The floating buttons that open each panel: an exact copy of the game's own
+         .quickset-drawer-trigger / .battle-drawer-trigger buttons (the rounded ⚔️ and 🧪 ones). */
+      .core-dock-btn{display:flex;align-items:center;justify-content:center;gap:6px;background:#24263a;border:1px solid #2f324d;box-shadow:0 10px 24px rgba(0,0,0,.6);border-radius:12px;color:#fff;cursor:pointer;font-weight:700;font-size:14px;line-height:1.2;padding:10px 12px}
+      .core-dock-btn:active{transform:scale(.97)}
       .core-row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
       .core-input{box-sizing:border-box;padding:8px 10px;border-radius:10px;border:1px solid #2b3859;background:#0d1322;color:#eef3ff;font:13px Arial,sans-serif}
       .core-dim{color:#9caad0;font-size:12px;overflow-wrap:anywhere}
@@ -485,31 +487,43 @@
     let dockEl = null;
     function fixedRects(skip) {
       const out = [];
+      const near = (r) => { const fb = root.innerHeight - r.bottom; return fb >= -20 && fb <= 420; };   // covers the stacked-row fallback
       document.querySelectorAll('body *').forEach((el) => {
         if (skip.contains(el) || el.closest('.core-modal,.core-menu,#core-toast')) return;
         const s = getComputedStyle(el);
         if (s.position !== 'fixed' || s.display === 'none' || s.visibility === 'hidden' || parseFloat(s.opacity) === 0) return;
         const r = el.getBoundingClientRect();
-        if (!r.width || !r.height || r.width > 220 || r.height > 140) return;
-        const fromBottom = root.innerHeight - r.bottom;
-        if (fromBottom < -20 || fromBottom > 140) return;
-        out.push(r);
+        if (!r.width || !r.height) return;
+        if (r.width <= 220 && r.height <= 140) { if (near(r)) out.push(r); return; }
+        // Bigger than a button. A full-screen overlay / drawer is ignored, but a small fixed GROUP of
+        // buttons (e.g. a column of zoom controls) is avoided by looking at the buttons inside it.
+        if (r.width >= root.innerWidth * 0.6 || r.height >= root.innerHeight * 0.6) return;
+        el.querySelectorAll('button,a,input,select,[role="button"]').forEach((c) => {
+          const cr = c.getBoundingClientRect();
+          if (cr.width && cr.height && cr.width <= 220 && cr.height <= 140 && near(cr)) out.push(cr);
+        });
       });
       return out;
     }
     const placeDock = debounce(() => {
       if (!dockEl) return;
-      const BOTTOM = 17, GAP = 10;
-      dockEl.style.bottom = BOTTOM + 'px';
-      const w = dockEl.offsetWidth || 46, hh = dockEl.offsetHeight || 46;
+      const BOTTOM = 17, GAP = 8, EDGE = 8;           // BOTTOM matches the site's own round/rounded buttons
+      const w = dockEl.offsetWidth || 45, hh = dockEl.offsetHeight || 40;
       const others = fixedRects(dockEl);
-      let right = 14;
-      for (let i = 0; i < 25; i++) {
-        const left = root.innerWidth - right - w, top = root.innerHeight - BOTTOM - hh, bottom = root.innerHeight - BOTTOM;
-        if (!others.some((r) => !(left > r.right + GAP || left + w < r.left - GAP || top > r.bottom + GAP || bottom < r.top - GAP))) break;
-        right += 56;
+      const clear = (right, bottom) => {
+        const left = root.innerWidth - right - w, top = root.innerHeight - bottom - hh, bot = root.innerHeight - bottom;
+        return left >= EDGE && !others.some((r) => !(left > r.right + GAP || left + w < r.left - GAP || top > r.bottom + GAP || bot < r.top - GAP));
+      };
+      // Lowest row first (level with the site's own buttons), sliding left within each row until it
+      // clears them and is fully on screen; if a row has no room (phones), try the next row up.
+      let right = 14, bottom = BOTTOM;
+      search: for (let b = BOTTOM; b < BOTTOM + 300; b += 4) {
+        for (let r = 14; root.innerWidth - r - w >= EDGE; r += 4) {
+          if (clear(r, b)) { right = r; bottom = b; break search; }
+        }
       }
       dockEl.style.right = right + 'px';
+      dockEl.style.bottom = bottom + 'px';
     }, 120);
     const dock = {
       // ui.dock.add({ id, icon, title, onClick, order }) -> button element
@@ -849,7 +863,7 @@
     const dev = h('input', { type: 'checkbox', onchange: (ev) => cfg.update((x) => { x.dev = ev.target.checked; }) });
     dev.checked = !!c.dev;
     el.replaceChildren(
-      h('div', { class: 'core-dim', style: { marginBottom: '12px' } }, 'Manifest: ' + (CONFIG.manifest || '(none)')),
+      h('div', { class: 'core-dim', style: { marginBottom: '12px' } }, 'Core v' + Core.version + '  \u00b7  Manifest: ' + (CONFIG.manifest || '(none)')),
       ...rows.length ? rows : [h('div', { class: 'core-empty' }, 'No addons yet. Add a URL below or set CONFIG.manifest.')],
       h('div', { class: 'core-row', style: { marginTop: '16px' } }, url, ui.btn('Add by URL', 'success', () => { addCustom(url.value); url.value = ''; })),
       h('div', { class: 'core-row' },
@@ -862,7 +876,7 @@
 
   /* ------------------------------------------------------------ export --- */
   const Core = {
-    __isCore: true, apiLevel: API, version: '3.0.0', debug: false, tabId: TAB,
+    __isCore: true, apiLevel: API, version: '3.1.0', debug: false, tabId: TAB,
     esc, sleep, debounce, fmt, int, compact, parseJson,
     on, off, once, emit,
     state, store, player,

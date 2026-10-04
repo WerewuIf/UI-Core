@@ -136,6 +136,7 @@ Use 40–800 for new addons. The ⚙️ manager always stays furthest left.
 
 **Notes**
 
+- The button is an exact copy of the site's own rounded ⚔️ / 🧪 buttons and sits level with them. Core keeps the row clear of the page's other fixed buttons and on screen; on narrow screens it stacks above the site's row. You never position anything.
 - Add the button **once per page load**. A duplicate `id` is ignored with a console warning.
 - `render` runs on every open, so build fresh each time. If your panel is expensive or has long-lived DOM that other code looks up by `getElementById`, build it once, keep it in a hidden holder, and in `render` do `el.replaceChildren(panel)`, then put it back in `onHide`. The Crystal, Gear and Pet addons do exactly this.
 - A `Core.module({ ..., float: { render, onShow, onHide, order } })` registers its button for you (§6).

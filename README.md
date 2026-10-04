@@ -1,6 +1,6 @@
 # Core
 
-Core adds a row of small round buttons to the game. Each one opens a tool without leaving the page:
+Core adds a row of small buttons to the game, styled like the game's own. Each one opens a tool without leaving the page:
 
 | Button | What it does |
 |---|---|
@@ -44,7 +44,9 @@ You should now see the buttons in the bottom-right corner: **💎 ⚔️ 🐾 �
 - Click **⚙️** to see every tool. A green **OK** means it's running. **SKIPPED** just means that tool isn't needed on the page you're on.
 - Untick a tool in **⚙️** to turn it off, then reload the page.
 
-**Updates are automatic.** If a tool is updated you'll see a message saying *"updated — reload to apply"*. Just reload the page.
+**Updates are automatic.** If a tool is updated you'll see a message saying *"updated — reload to apply"*. Just reload the page. Core itself is updated by Tampermonkey (it checks about once a day; you can also click **Check for userscript updates** in its dashboard).
+
+**Which version do I have?** Open **⚙️**. The top line says **Core v…**.
 
 ---
 
@@ -56,6 +58,7 @@ You should now see the buttons in the bottom-right corner: **💎 ⚔️ 🐾 �
 | Buttons appear twice, or things act strangely | An old script is still on. Turn off the old ones from step 2. |
 | Only ⚙️ shows | Reload once or twice. If it's still just ⚙️, check your internet connection and reload again. |
 | A tool shows a red row in ⚙️ | Click the **↻** button on that row and reload. If it stays red, tell whoever gave you the link and tell them what the row says. |
+| Things look old, or a fix doesn't show up | Reloading the page doesn't update the script itself. Open **⚙️** and check the version, then re-open the install link in step 3 and click **Reinstall** / **Update**. |
 | Still stuck | Open **⚙️ → Clear cache**, then reload. |
 
 ---
