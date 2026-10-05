@@ -6,7 +6,7 @@ Core adds a row of small buttons to the game, styled like the game's own. Each o
 |---|---|
 | 💎 | **Crystal Presets**: save and restore your power-crystal setups |
 | ⚔️ | **Gear Presets**: save and apply equipment sets |
-| 🐾 | **Pet Presets**: save and apply pet teams |
+| 🐾 | **Pet Presets**: save and apply pet teams, including their sigils and elemental orbs |
 | ⚙️ | **Addons**: see what's loaded, turn things on or off |
 
 It also tidies a few game pages (guild, home, battle) in the background.
@@ -28,7 +28,7 @@ It also tidies a few game pages (guild, home, battle) in the background.
 
 **3. Install Core.** Open this link and click **Install**:
 
-**https://raw.githubusercontent.com/WerewuIf/UI-Core/main/core/core.user.js**
+**https://raw.githubusercontent.com/WerewuIf/UI-Core/main/core.user.js**
 
 **4. Open the game and reload the page** (hold **Shift** and press **Reload**, or press **Ctrl+Shift+R**).
 

@@ -1,13 +1,13 @@
 // ==UserScript==
 // @name         Core (addon loader)
 // @namespace    https://example.local/
-// @version      3.1.0
+// @version      3.2.0
 // @description  One script: shared core + floating-button system. Addons are plain .js files loaded by URL.
 // @match        https://demonicscans.org/*
 // @run-at       document-start
 // @grant        none
-// @updateURL    https://raw.githubusercontent.com/WerewuIf/UI-Core/main/core/core.user.js
-// @downloadURL  https://raw.githubusercontent.com/WerewuIf/UI-Core/main/core/core.user.js
+// @updateURL    https://raw.githubusercontent.com/WerewuIf/UI-Core/main/core.user.js
+// @downloadURL  https://raw.githubusercontent.com/WerewuIf/UI-Core/main/core.user.js
 // ==/UserScript==
 
 /* =============================================================================
@@ -34,7 +34,7 @@
   'use strict';
 
   // >>> EDIT THIS ONE LINE: raw URL of your addons.json
-  const CONFIG = { manifest: 'https://github.com/WerewuIf/UI-Core/raw/refs/heads/main/addons.json' };
+  const CONFIG = { manifest: 'https://raw.githubusercontent.com/WerewuIf/UI-Core/main/addons.json' };
 
   const API = 2;
   if (root.Core && root.Core.__isCore) {
@@ -346,7 +346,8 @@
     const CSS = `
       .core-modal{position:fixed;inset:0;background:rgba(6,10,18,.74);display:none;align-items:center;justify-content:center;padding:20px;backdrop-filter:blur(7px)}
       .core-modal.show{display:flex}
-      .core-modal-card{width:100%;max-height:90vh;overflow:auto;box-sizing:border-box;background:linear-gradient(180deg,rgba(24,34,56,.98),rgba(14,20,34,.98));border:1px solid rgba(255,255,255,.08);border-radius:22px;box-shadow:0 26px 60px rgba(0,0,0,.38);padding:22px;color:#eef3ff;font-family:Arial,sans-serif}
+      .core-modal-card{width:100%;max-height:90vh;overflow:auto;scrollbar-width:none;-ms-overflow-style:none;box-sizing:border-box;background:linear-gradient(180deg,rgba(24,34,56,.98),rgba(14,20,34,.98));border:1px solid rgba(255,255,255,.08);border-radius:22px;box-shadow:0 26px 60px rgba(0,0,0,.38);padding:22px;color:#eef3ff;font-family:Arial,sans-serif}
+      .core-modal-card::-webkit-scrollbar{display:none;width:0;height:0}
       .core-modal-head{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:16px}
       .core-modal-title{margin:0;font-size:22px}
       .core-close{width:38px;height:38px;border-radius:12px;border:none;background:#18223a;color:#fff;font-size:20px;cursor:pointer}
@@ -703,6 +704,18 @@
   const rt = new Map();                         // id -> { state, from, bytes, err, update }
   const rstat = (id) => { let s = rt.get(id); if (!s) rt.set(id, s = { state: 'idle' }); return s; };
   const ck = (id) => 'core:code:' + id;
+
+  // GitHub's "Copy raw file" button and the browser address bar for a file often give
+  //   https://github.com/<user>/<repo>/raw/refs/heads/<branch>/<path>   (or /blob/<branch>/<path>)
+  // Those are REDIRECTS, and the browser blocks them from another site (CORS). The real file host is
+  //   https://raw.githubusercontent.com/<user>/<repo>/<branch>/<path>
+  // so any github.com file link is rewritten to that form, wherever it is used.
+  function normalizeUrl(u) {
+    u = String(u || '').trim();
+    const m = /^https?:\/\/(?:www\.)?github\.com\/([^/]+)\/([^/]+)\/(?:raw|blob)\/([^?#]+)(?:[?#].*)?$/i.exec(u);
+    return m ? 'https://raw.githubusercontent.com/' + m[1] + '/' + m[2] + '/' + m[3].replace(/^refs\/heads\//, '') : u;
+  }
+  const MANIFEST = normalizeUrl(CONFIG.manifest);
   let manifestEntries = [];
 
   const sha256hex = async (t) => [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(t)))].map((b) => b.toString(16).padStart(2, '0')).join('');
@@ -717,13 +730,14 @@
       return text;
     } finally { clearTimeout(timer); }
   }
+  function readAnyCode(e) { try { return JSON.parse(localStorage.getItem(ck(e.id)) || 'null'); } catch (_) { return null; } }
   function readCode(e) { try { const r = JSON.parse(localStorage.getItem(ck(e.id)) || 'null'); return r && r.url === e.url ? r : null; } catch (_) { return null; } }
   function writeCode(e, code) { try { localStorage.setItem(ck(e.id), JSON.stringify({ url: e.url, code, ts: Date.now(), checked: Date.now() })); } catch (_) { warn('could not cache "' + e.id + '" (storage full?)'); } }
 
   function entries() {
     const byId = new Map();
     manifestEntries.forEach((e) => byId.set(e.id, Object.assign({ source: 'manifest' }, e)));
-    cfg.get().custom.forEach((e) => byId.set(e.id, Object.assign({ source: 'custom' }, e)));   // custom id wins = local override
+    cfg.get().custom.forEach((e) => byId.set(e.id, Object.assign({ source: 'custom' }, e, { url: normalizeUrl(e.url) })));   // custom id wins = local override
     return [...byId.values()];
   }
   function entryMatches(e) {
@@ -745,9 +759,16 @@
       return rec.code;
     }
     s.from = 'net';
-    const t = await fetchCode(e);
-    s.bytes = t.length; writeCode(e, t);
-    return t;
+    try {
+      const t = await fetchCode(e);
+      s.bytes = t.length; writeCode(e, t);
+      return t;
+    } catch (err) {
+      // Network failed (offline, blocked, wrong URL). A saved copy, even from a different URL, beats nothing.
+      const old = readAnyCode(e);
+      if (old && old.code) { s.from = 'saved copy (network failed)'; s.bytes = old.code.length; warn('"' + e.id + '": ' + err.message + ' - using saved copy'); return old.code; }
+      throw err;
+    }
   }
 
   // The addon runs in page-global scope with `Core` in scope, so bare references to the
@@ -769,14 +790,14 @@
   }
 
   async function loadManifest() {
-    if (!CONFIG.manifest || /YOU\/REPO/.test(CONFIG.manifest)) return;
+    if (!MANIFEST || /YOU\/REPO/.test(MANIFEST)) return;
     let cached = null;
     try { cached = JSON.parse(localStorage.getItem('core:manifest') || 'null'); } catch (_) { /* */ }
-    const refresh = root.fetch(CONFIG.manifest, { cache: 'no-cache' }).then((r) => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+    const refresh = root.fetch(MANIFEST, { cache: 'no-cache' }).then((r) => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
       .then((j) => { try { localStorage.setItem('core:manifest', JSON.stringify(j)); } catch (_) { /* */ } return j; });
     // Entry urls may be relative ("addons/x.js"): they resolve against the manifest's own URL,
     // so moving the repo means editing CONFIG.manifest only.
-    const resolve = (j) => ((j && j.addons) || []).map((e) => Object.assign({}, e, { url: new URL(e.url, CONFIG.manifest).href }));
+    const resolve = (j) => ((j && j.addons) || []).map((e) => Object.assign({}, e, { url: normalizeUrl(new URL(e.url, MANIFEST).href) }));
     if (cached) {
       manifestEntries = resolve(cached);
       refresh.then((j) => { if (JSON.stringify(j.addons) !== JSON.stringify(cached.addons)) ready.then(() => ui.toast('Addon list changed \u2014 reload to apply')); }).catch(() => {});
@@ -810,7 +831,7 @@
   }
 
   function addCustom(url) {
-    url = String(url || '').trim();
+    url = normalizeUrl(url);
     if (!/^https?:\/\//i.test(url)) { ui.toast('Enter a full http(s) URL', false); return; }
     const id = url.split(/[?#]/)[0].split('/').pop().replace(/\.js$/i, '') || 'addon';
     const e = { id, name: id, url };
@@ -863,7 +884,7 @@
     const dev = h('input', { type: 'checkbox', onchange: (ev) => cfg.update((x) => { x.dev = ev.target.checked; }) });
     dev.checked = !!c.dev;
     el.replaceChildren(
-      h('div', { class: 'core-dim', style: { marginBottom: '12px' } }, 'Core v' + Core.version + '  \u00b7  Manifest: ' + (CONFIG.manifest || '(none)')),
+      h('div', { class: 'core-dim', style: { marginBottom: '12px' } }, 'Core v' + Core.version + '  \u00b7  Manifest: ' + (MANIFEST || '(none)')),
       ...rows.length ? rows : [h('div', { class: 'core-empty' }, 'No addons yet. Add a URL below or set CONFIG.manifest.')],
       h('div', { class: 'core-row', style: { marginTop: '16px' } }, url, ui.btn('Add by URL', 'success', () => { addCustom(url.value); url.value = ''; })),
       h('div', { class: 'core-row' },
@@ -876,7 +897,7 @@
 
   /* ------------------------------------------------------------ export --- */
   const Core = {
-    __isCore: true, apiLevel: API, version: '3.1.0', debug: false, tabId: TAB,
+    __isCore: true, apiLevel: API, version: '3.2.0', debug: false, tabId: TAB,
     esc, sleep, debounce, fmt, int, compact, parseJson,
     on, off, once, emit,
     state, store, player,
