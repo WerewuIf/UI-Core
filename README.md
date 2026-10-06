@@ -42,11 +42,12 @@ You should now see the buttons in the bottom-right corner: **💎 ⚔️ 🐾 �
 
 - Click a button to open its panel. Click **×**, press **Esc**, or click outside to close it.
 - Click **⚙️** to see every tool. A green **OK** means it's running. **SKIPPED** just means that tool isn't needed on the page you're on.
+- Hover over a preset's **⋯** to get Edit / Rename / Duplicate / Delete.
 - Untick a tool in **⚙️** to turn it off, then reload the page.
 
-**Updates are automatic.** If a tool is updated you'll see a message saying *"updated — reload to apply"*. Just reload the page. Core itself is updated by Tampermonkey (it checks about once a day; you can also click **Check for userscript updates** in its dashboard).
+**Updates are automatic.** When a tool is updated you'll see a message saying *"updated — click here to reload"*. Click it (or just reload the page) and you're on the new version. Core itself is updated by Tampermonkey (it checks about once a day; you can also click **Check for userscript updates** in its dashboard).
 
-**Which version do I have?** Open **⚙️**. The top line says **Core v…**.
+**Which version do I have?** Open **⚙️**. The top line says **Core v…**, and each tool shows the version that is running.
 
 ---
 

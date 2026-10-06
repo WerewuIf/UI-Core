@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Core (addon loader)
 // @namespace    https://example.local/
-// @version      3.2.0
+// @version      3.3.0
 // @description  One script: shared core + floating-button system. Addons are plain .js files loaded by URL.
 // @match        https://demonicscans.org/*
 // @run-at       document-start
@@ -409,11 +409,12 @@
     const btn = (label, kind, onClick) => h('button', { class: 'core-btn' + (kind ? ' core-btn-' + kind : ''), type: 'button', onclick: onClick }, label);
 
     // ui.toast(msg, ok = true, ms = 3000). Safe to call before <body> exists.
-    function toast(msg, ok = true, ms = 3000) {
-      if (!document.body) { ready.then(() => toast(msg, ok, ms)); return; }
+    function toast(msg, ok = true, ms = 3000, onClick = null) {
+      if (!document.body) { ready.then(() => toast(msg, ok, ms, onClick)); return; }
       base();
       let el = document.getElementById('core-toast');
-      if (!el) { el = h('div', { id: 'core-toast', onclick: () => { el.style.display = 'none'; } }); document.body.appendChild(el); }
+      if (!el) { el = h('div', { id: 'core-toast' }); document.body.appendChild(el); }
+      el.onclick = () => { el.style.display = 'none'; if (onClick) onClick(); };
       el.textContent = msg;
       el.style.background = ok ? '#2ecc71' : '#e74c3c';
       el.style.display = 'block';
@@ -732,7 +733,7 @@
   }
   function readAnyCode(e) { try { return JSON.parse(localStorage.getItem(ck(e.id)) || 'null'); } catch (_) { return null; } }
   function readCode(e) { try { const r = JSON.parse(localStorage.getItem(ck(e.id)) || 'null'); return r && r.url === e.url ? r : null; } catch (_) { return null; } }
-  function writeCode(e, code) { try { localStorage.setItem(ck(e.id), JSON.stringify({ url: e.url, code, ts: Date.now(), checked: Date.now() })); } catch (_) { warn('could not cache "' + e.id + '" (storage full?)'); } }
+  function writeCode(e, code) { try { localStorage.setItem(ck(e.id), JSON.stringify({ url: e.url, ver: e.version || '', code, ts: Date.now(), checked: Date.now() })); } catch (_) { warn('could not cache "' + e.id + '" (storage full?)'); } }
 
   function entries() {
     const byId = new Map();
@@ -746,29 +747,32 @@
     try { return [].concat(e.match).some((x) => new RegExp(x).test(p)); } catch (_) { return true; }
   }
 
+  const updatedToast = (e) => ready.then(() => ui.toast('"' + (e.name || e.id) + '" updated \u2014 click here to reload', true, 12000, () => root.location.reload()));
+  // Fetch the newest code in the background. It is saved for the NEXT load; the page keeps running what it has.
+  const inflight = new Set();
+  function refreshInBackground(e, rec) {
+    if (inflight.has(e.id)) return Promise.resolve();
+    inflight.add(e.id);
+    const s = rstat(e.id);
+    return fetchCode(e).then((t) => {
+      if (!rec || t !== rec.code) { s.update = true; updatedToast(e); }
+      writeCode(e, t);
+    }).catch(() => {}).finally(() => inflight.delete(e.id));
+  }
   async function prepare(e) {
-    const s = rstat(e.id), rec = readCode(e);
-    if (rec && !cfg.get().dev) {
-      s.from = 'cache'; s.bytes = rec.code.length;
-      if (Date.now() - (rec.checked || 0) > 10 * 60 * 1000) {
-        fetchCode(e).then((t) => {
-          if (t !== rec.code) { s.update = true; ready.then(() => ui.toast('Addon "' + (e.name || e.id) + '" updated \u2014 reload to apply')); }
-          writeCode(e, t);
-        }).catch(() => {});
-      }
+    const s = rstat(e.id);
+    // ANY saved copy (even one saved under a different URL) starts instantly: the page never waits on GitHub.
+    const rec = !cfg.get().dev ? (readCode(e) || readAnyCode(e)) : null;
+    if (rec && rec.code) {
+      s.from = 'cache'; s.bytes = rec.code.length; s.ver = rec.ver || '';
+      const stale = rec.url !== e.url || (e.version && rec.ver !== e.version) || Date.now() - (rec.checked || 0) > 10 * 60 * 1000;
+      if (stale) refreshInBackground(e, rec);
       return rec.code;
     }
-    s.from = 'net';
-    try {
-      const t = await fetchCode(e);
-      s.bytes = t.length; writeCode(e, t);
-      return t;
-    } catch (err) {
-      // Network failed (offline, blocked, wrong URL). A saved copy, even from a different URL, beats nothing.
-      const old = readAnyCode(e);
-      if (old && old.code) { s.from = 'saved copy (network failed)'; s.bytes = old.code.length; warn('"' + e.id + '": ' + err.message + ' - using saved copy'); return old.code; }
-      throw err;
-    }
+    s.from = 'net'; s.ver = e.version || '';
+    const t = await fetchCode(e);          // nothing saved yet: the only case that has to wait
+    s.bytes = t.length; writeCode(e, t);
+    return t;
   }
 
   // The addon runs in page-global scope with `Core` in scope, so bare references to the
@@ -793,14 +797,24 @@
     if (!MANIFEST || /YOU\/REPO/.test(MANIFEST)) return;
     let cached = null;
     try { cached = JSON.parse(localStorage.getItem('core:manifest') || 'null'); } catch (_) { /* */ }
-    const refresh = root.fetch(MANIFEST, { cache: 'no-cache' }).then((r) => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+    const mctl = new AbortController(); setTimeout(() => mctl.abort(), 8000);
+    const refresh = root.fetch(MANIFEST, { cache: 'no-cache', signal: mctl.signal }).then((r) => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
       .then((j) => { try { localStorage.setItem('core:manifest', JSON.stringify(j)); } catch (_) { /* */ } return j; });
     // Entry urls may be relative ("addons/x.js"): they resolve against the manifest's own URL,
     // so moving the repo means editing CONFIG.manifest only.
     const resolve = (j) => ((j && j.addons) || []).map((e) => Object.assign({}, e, { url: normalizeUrl(new URL(e.url, MANIFEST).href) }));
     if (cached) {
       manifestEntries = resolve(cached);
-      refresh.then((j) => { if (JSON.stringify(j.addons) !== JSON.stringify(cached.addons)) ready.then(() => ui.toast('Addon list changed \u2014 reload to apply')); }).catch(() => {});
+      refresh.then((j) => {
+        if (JSON.stringify(j.addons) !== JSON.stringify(cached.addons)) ready.then(() => ui.toast('Addon list changed \u2014 reload to apply'));
+        // A newer addon version in the manifest is fetched right now (no waiting for the 10-minute check).
+        const off = new Set(cfg.get().off);
+        resolve(j).forEach((e) => {
+          const rec = readAnyCode(e);
+          if (off.has(e.id) || !entryMatches(e) || cfg.get().dev) return;
+          if (rec && rec.code && (rec.url !== e.url || !e.version || rec.ver !== e.version)) refreshInBackground(e, rec);
+        });
+      }).catch(() => {});
     } else {
       manifestEntries = resolve(await refresh);
     }
@@ -871,7 +885,7 @@
       cb.checked = !c.off.includes(e.id);
       return h('div', { class: 'core-addon' }, cb,
         h('div', { class: 'core-addon-main' },
-          h('div', { class: 'core-addon-name' }, e.name || e.id, h('span', { class: 'core-dim' }, '  ' + e.id + (e.version ? ' v' + e.version : '') + ' \u00b7 ' + e.source)),
+          h('div', { class: 'core-addon-name' }, e.name || e.id, h('span', { class: 'core-dim' }, '  ' + e.id + ((s.ver || e.version) ? ' v' + (s.ver || e.version) + (s.ver && e.version && s.ver !== e.version ? ' (v' + e.version + ' ready)' : '') : '') + ' \u00b7 ' + e.source)),
           h('div', { class: 'core-dim' }, e.url),
           s.err ? h('div', { class: 'core-err' }, s.err) : null),
         h('div', { class: 'core-addon-meta' },
@@ -897,7 +911,7 @@
 
   /* ------------------------------------------------------------ export --- */
   const Core = {
-    __isCore: true, apiLevel: API, version: '3.2.0', debug: false, tabId: TAB,
+    __isCore: true, apiLevel: API, version: '3.3.0', debug: false, tabId: TAB,
     esc, sleep, debounce, fmt, int, compact, parseJson,
     on, off, once, emit,
     state, store, player,
