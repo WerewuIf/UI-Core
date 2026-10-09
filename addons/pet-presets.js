@@ -4,6 +4,17 @@
  */
 
 /* ===========================================================================
+ * 2.7.0
+ *
+ * "EQUIPPED" BADGE IS EXACT AND WORKS ON EVERY PAGE. A preset row shows
+ * "Equipped · PvE Attack" / "PvP Attack" / "PvP Defense" only when that live team
+ * matches the preset completely: same pets in the same slots, the same Link 1 / Link 2
+ * pets, and the same Attack sigil, Defense sigil and Elemental Orb on every pet in the
+ * preset, linked pets included. Anything that differs (or can't be read) = no badge.
+ * It is checked against all three teams, not just the one open on pets.php, and a
+ * preset that is live on two teams shows both badges. A slot the preset never recorded
+ * (e.g. the orb in a preset saved before 2.5.0) is not compared, same as on restore.
+ *
  * 2.5.0
  *
  * ELEMENTAL ORB. Pets have a third slot next to the Attack and Defense sigils: the
@@ -826,6 +837,124 @@
         return (wantName || null) === (liveSig[slotType] || null);
       });
     });
+  }
+
+  /* =======================================================================
+   * "Equipped" badge: which team, if any, holds a preset exactly
+   * ===================================================================== */
+
+  let lastEquipped = {};   // presetId -> [teamKey, ...]
+  let equippedRun = 0;
+
+  // One pet's saved Attack/Defense/Orb entry vs what it wears. A slot the preset
+  // never recorded is ignored. A wanted item whose name we can't look up can't be
+  // confirmed, so it counts as a mismatch.
+  function sigilEntryMatches(preset, petId, liveSig) {
+    const wantSig = preset.sigils && preset.sigils[petId];
+    if (!wantSig) return true;
+    if (!liveSig) return false;
+    return SIGIL_SLOTS.every((slotType) => {
+      if (!has(wantSig, slotType)) return true;
+      const wantId = wantSig[slotType];
+      if (!wantId) return !liveSig[slotType];
+      const wantName = preset.meta && preset.meta.sigils && preset.meta.sigils[wantId] && preset.meta.sigils[wantId].name;
+      return !!wantName && wantName === (liveSig[slotType] || null);
+    });
+  }
+
+  async function readLiveTeam(teamKey, force) {
+    const doc = await getContextDoc(teamKey, force);
+    const slots = scanEquippedPetSlots(doc, teamKey);
+    const sigils = {};
+    // Team cards and inventory cards both render their sigil panel.
+    doc.querySelectorAll('.pet-card[data-pet-inv-id]').forEach((card) => {
+      if (card.querySelector('.pet-sigil-slot')) sigils[card.getAttribute('data-pet-inv-id')] = readCardSigilNames(card);
+    });
+    return { teamKey, slots, sigils, links: {} };
+  }
+  async function liveLinksOf(live, invId, force) {
+    if (!has(live.links, invId)) {
+      try { live.links[invId] = (await fetchLinkInfo(invId, force)).links; }
+      catch (_) { live.links[invId] = null; }
+    }
+    return live.links[invId];
+  }
+  async function liveSigilsOf(live, invId, force) {
+    if (live.sigils[invId]) return live.sigils[invId];
+    const sig = SIGIL_NONE();
+    try {
+      for (const t of SIGIL_SLOTS) {
+        const info = await fetchSigilInfo(invId, t, force);
+        sig[t] = info.current ? info.current.name : null;
+      }
+    } catch (_) { return null; }
+    live.sigils[invId] = sig;
+    return sig;
+  }
+
+  async function presetMatchesLive(preset, live, force) {
+    if (!SLOT_IDS.some((s) => preset.slots[s])) return false;
+    if (!slotsEqual(preset.slots, live.slots)) return false;
+
+    const petIds = [];   // every pet the preset describes: mains + their wanted links
+    for (const s of SLOT_IDS) {
+      const pet = preset.slots[s];
+      if (!pet) continue;
+      const id = String(pet.invId);
+      petIds.push(id);
+      const wantLinks = preset.links && preset.links[id];
+      if (!wantLinks) continue;
+      const liveLinks = await liveLinksOf(live, id, force);
+      if (!liveLinks) return false;
+      for (const lvl of LINK_LEVELS) {
+        if (!has(wantLinks, lvl)) continue;
+        const want = wantLinks[lvl] ? String(wantLinks[lvl]) : null;
+        const cur = liveLinks[lvl] ? String(liveLinks[lvl].invId) : null;
+        if (want !== cur) return false;
+      }
+      Object.values(wantLinks).forEach((v) => { if (v) petIds.push(String(v)); });
+    }
+
+    for (const id of petIds) {
+      if (!(preset.sigils && preset.sigils[id])) continue;
+      const liveSig = await liveSigilsOf(live, id, force);
+      if (!sigilEntryMatches(preset, id, liveSig)) return false;
+    }
+    return true;
+  }
+
+  async function computeEquippedMap(presets, force) {
+    const lives = await mapLimit(TEAM_KEYS, 3, (t) => readLiveTeam(t, force));
+    const out = {};
+    for (const preset of presets) {
+      const teams = [];
+      for (let i = 0; i < TEAM_KEYS.length; i++) {
+        if (!lives[i]) continue;
+        try { if (await presetMatchesLive(preset, lives[i], force)) teams.push(TEAM_KEYS[i]); }
+        catch (_) { /* can't confirm = no badge */ }
+      }
+      if (teams.length) out[preset.id] = teams;
+    }
+    return out;
+  }
+
+  function paintEquipped() {
+    document.querySelectorAll('#ppList .pp-row[data-preset-id]').forEach((row) => {
+      const holder = row.querySelector('.pp-eq-slot');
+      if (!holder) return;
+      const teams = lastEquipped[row.getAttribute('data-preset-id')] || [];
+      holder.innerHTML = teams.map((t) => `<span class="pp-equipped-badge">Equipped · ${TEAM_LABELS[t]}</span>`).join('');
+    });
+  }
+
+  async function refreshEquippedBadges(force) {
+    const run = ++equippedRun;
+    let map;
+    try { map = await computeEquippedMap(loadPresets(), !!force); }
+    catch (_) { return; }
+    if (run !== equippedRun) return;   // a newer check is in charge
+    lastEquipped = map;
+    paintEquipped();
   }
 
   /* =======================================================================
@@ -1950,7 +2079,7 @@
     return n;
   }
 
-  function renderPresetList() {
+  function renderPresetList(force) {
     const wrap = document.getElementById('ppList');
     if (!wrap) return;
     const presets = loadPresets();
@@ -1959,25 +2088,21 @@
       return;
     }
 
-    const onPets = isPetsPage();
-    const liveTeam = onPets ? getUrlTeam() : null;
-    const liveSlots = onPets ? scanEquippedPetSlots(document, liveTeam) : null;
-
     wrap.innerHTML = '';
     presets.forEach((preset) => {
       const row = document.createElement('div');
       row.className = 'pp-row';
+      row.setAttribute('data-preset-id', preset.id);
       const filled = SLOT_IDS.filter((s) => preset.slots[s]).length;
       const nLinks = countSet(preset.links);
       const nSigils = countSet(preset.sigils);
-      const matches = liveSlots && slotsEqual(preset.slots, liveSlots) && presetSigilsMatch(preset, liveSlots);
 
       const meta = [`${filled}/3 pets`];
       if (nLinks) meta.push(`${nLinks} link${nLinks === 1 ? '' : 's'}`);
       if (nSigils) meta.push(`${nSigils} sigil${nSigils === 1 ? '' : 's'}`);
 
       const info = document.createElement('div');
-      info.innerHTML = `<div class="pp-row-name">${esc(preset.name)}${matches ? ` <span class="pp-equipped-badge">Equipped · ${TEAM_LABELS[liveTeam]}</span>` : ''}</div>
+      info.innerHTML = `<div class="pp-row-name">${esc(preset.name)}<span class="pp-eq-slot"></span></div>
         <div class="pp-row-meta">${meta.join(' · ')}</div>`;
       const icons = document.createElement('div');
       icons.className = 'pp-row-icons';
@@ -2002,6 +2127,8 @@
 
       wrap.appendChild(row);
     });
+    paintEquipped();              // last known result right away, no flicker
+    refreshEquippedBadges(force); // then re-check all three teams
   }
 
   /* ------------------------------- editor ----------------------------- */
@@ -3213,7 +3340,7 @@ function openLinkChooser(mainInvId, level, info) {
     btn.disabled = false;
     btn.textContent = original;
     activeApplyPreset = null;
-    renderPresetList();
+    renderPresetList(true);
   }
 
   /* ------------------------------ build UI ---------------------------- */
@@ -3383,7 +3510,7 @@ function openLinkChooser(mainInvId, level, info) {
   Core.float.add({
     id: 'pet-presets', title: 'Pet Presets', icon: '🐾', order: 30,
     render(el) { el.replaceChildren(ppPanel); },
-    onShow() { renderPresetList(); },
+    onShow() { renderPresetList(true); },
     onHide() { if (ppHome && ppPanel) ppHome.appendChild(ppPanel); },
   });
 
