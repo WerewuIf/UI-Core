@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Core (addon loader)
 // @namespace    https://example.local/
-// @version      3.3.0
+// @version      3.4.0
 // @description  One script: shared core + floating-button system. Addons are plain .js files loaded by URL.
 // @match        https://demonicscans.org/*
 // @run-at       document-start
@@ -793,6 +793,9 @@
     catch (err) { s.state = 'error'; s.err = String((err && err.message) || err); warn('addon "' + e.id + '" threw', err); }
   }
 
+  // Entry urls may be relative ("addons/x.js"): they resolve against the manifest's own URL.
+  const resolveEntries = (j) => ((j && j.addons) || []).map((e) => Object.assign({}, e, { url: normalizeUrl(new URL(e.url, MANIFEST).href) }));
+
   async function loadManifest() {
     if (!MANIFEST || /YOU\/REPO/.test(MANIFEST)) return;
     let cached = null;
@@ -802,7 +805,7 @@
       .then((j) => { try { localStorage.setItem('core:manifest', JSON.stringify(j)); } catch (_) { /* */ } return j; });
     // Entry urls may be relative ("addons/x.js"): they resolve against the manifest's own URL,
     // so moving the repo means editing CONFIG.manifest only.
-    const resolve = (j) => ((j && j.addons) || []).map((e) => Object.assign({}, e, { url: normalizeUrl(new URL(e.url, MANIFEST).href) }));
+    const resolve = resolveEntries;
     if (cached) {
       manifestEntries = resolve(cached);
       refresh.then((j) => {
@@ -867,14 +870,44 @@
     if (!on) ui.toast('"' + id + '" disabled \u2014 reload to fully unload it');
     float.refresh('addons');
   }
-  async function refetch(e) {
-    try { const t = await fetchCode(e); writeCode(e, t); rstat(e.id).update = true; ui.toast('Fetched "' + e.id + '" \u2014 reload to apply'); }
-    catch (err) { ui.toast('Fetch failed: ' + err.message, false); }
-    float.refresh('addons');
-  }
-  function clearCache() {
-    Object.keys(localStorage).filter((k) => k.startsWith('core:code:') || k === 'core:manifest').forEach((k) => localStorage.removeItem(k));
-    ui.toast('Addon cache cleared \u2014 next load fetches everything fresh');
+  // The automatic check that runs on every page load, on demand. Re-reads the manifest, fetches each
+  // enabled addon and compares it with the saved copy: only a real difference counts as an update.
+  // Updates are saved for the next load, exactly like the automatic ones. There is no separate
+  // "clear cache": this does the same job and never says "update" when nothing changed.
+  let checking = false;
+  async function checkForUpdates() {
+    if (checking) return;
+    checking = true;
+    ui.toast('Checking for updates\u2026', true, 1500);
+    try {
+      if (MANIFEST && !/YOU\/REPO/.test(MANIFEST)) {
+        try {
+          const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), 8000);
+          let j;
+          try {
+            const r = await root.fetch(MANIFEST, { cache: 'no-cache', signal: ctl.signal });
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            j = await r.json();
+          } finally { clearTimeout(timer); }
+          try { localStorage.setItem('core:manifest', JSON.stringify(j)); } catch (_) { /* */ }
+          manifestEntries = resolveEntries(j);
+        } catch (err) { ui.toast('Could not reach the update list: ' + ((err && err.message) || err), false); return; }
+      }
+      const off = new Set(cfg.get().off);
+      const list = entries().filter((e) => !off.has(e.id));
+      let failed = 0;
+      await Promise.all(list.map(async (e) => {
+        try {
+          const rec = readAnyCode(e), t = await fetchCode(e);
+          if (!rec || !rec.code || rec.code !== t) rstat(e.id).update = true;
+          writeCode(e, t);
+        } catch (_) { failed++; }
+      }));
+      const pending = list.filter((e) => rstat(e.id).update).length;
+      const note = failed ? ' (' + failed + ' could not be checked)' : '';
+      if (pending) ui.toast(pending + (pending === 1 ? ' update is' : ' updates are') + ' ready \u2014 click here to reload' + note, true, 12000, () => root.location.reload());
+      else ui.toast('Everything is up to date' + note, !failed);
+    } finally { checking = false; float.refresh('addons'); }
   }
 
   function renderAddonsTab(el) {
@@ -891,7 +924,6 @@
         h('div', { class: 'core-addon-meta' },
           h('span', { class: 'core-pill core-pill-' + s.state }, s.state + (s.update ? ' \u00b7 update ready' : '')),
           s.from ? h('span', { class: 'core-dim' }, s.from + (s.bytes ? ' \u00b7 ' + Math.round(s.bytes / 1024) + ' KB' : '')) : null),
-        ui.btn('\u21bb', 'soft', () => refetch(e)),
         e.source === 'custom' ? ui.btn('\ud83d\uddd1', 'danger', () => removeCustom(e.id)) : null);
     });
     const url = h('input', { class: 'core-input', placeholder: 'https://raw.githubusercontent.com/you/repo/main/addons/x.js', style: { flex: '1 1 320px' } });
@@ -904,14 +936,14 @@
       h('div', { class: 'core-row' },
         h('label', { class: 'core-dim' }, dev, ' Dev mode: always fetch fresh (for localhost / unpushed edits)'),
         h('div', { class: 'core-spacer' }),
-        ui.btn('Clear cache', 'soft', clearCache)));
+        ui.btn('Check for updates', 'soft', checkForUpdates)));
   }
   // The addon manager is just another floating item - same system every addon uses.
   float.add({ id: 'addons', title: 'Addons', icon: '\u2699\ufe0f', order: 900, width: 900, render: renderAddonsTab });
 
   /* ------------------------------------------------------------ export --- */
   const Core = {
-    __isCore: true, apiLevel: API, version: '3.3.0', debug: false, tabId: TAB,
+    __isCore: true, apiLevel: API, version: '3.4.0', debug: false, tabId: TAB,
     esc, sleep, debounce, fmt, int, compact, parseJson,
     on, off, once, emit,
     state, store, player,
