@@ -6,6 +6,15 @@
 /* ===========================================================================
  * 2.7.0
  *
+ * APPLY NO LONGER LOOKS STUCK. Applying a preset to a team that already matches used to
+ * sit on "✔ Reading your pet teams" while it silently re-read every link and sigil one
+ * request at a time (and a single request that never answered froze it for good). Now:
+ *   - right after reading the teams it checks whether the team already matches the preset
+ *     exactly (same check as the Equipped badge) and, if so, says so immediately;
+ *   - otherwise the link and sigil passes are their own visible steps;
+ *   - every request in the apply path times out (CFG.REQUEST_TIMEOUT_MS) and reports it
+ *     instead of waiting forever.
+ *
  * "EQUIPPED" BADGE IS EXACT AND WORKS ON EVERY PAGE. A preset row shows
  * "Equipped · PvE Attack" / "PvP Attack" / "PvP Defense" only when that live team
  * matches the preset completely: same pets in the same slots, the same Link 1 / Link 2
@@ -109,6 +118,7 @@
     LINK_ALLOW_IDS: [],
     TAKE_FROM_OTHER_TEAMS: true,   // a preset may pull a pet off another team to use it
     FETCH_CONCURRENCY: 4,
+    REQUEST_TIMEOUT_MS: 30000,   // a request that hasn't answered by then fails with a message instead of hanging
   };
 
   const TEAM_KEYS = ['attack', 'pvp_attack', 'defense'];
@@ -207,6 +217,20 @@
     return out;
   }
   function has(obj, key) { return !!obj && Object.prototype.hasOwnProperty.call(obj, key); }
+
+  // fetch that gives up after CFG.REQUEST_TIMEOUT_MS instead of waiting forever.
+  function fetchTO(url, opts) {
+    const ctl = (typeof AbortController === 'function') ? new AbortController() : null;
+    let timer;
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => {
+        if (ctl) { try { ctl.abort(); } catch (_) { /* ignore */ } }
+        reject(new Error('The game did not answer (timed out).'));
+      }, CFG.REQUEST_TIMEOUT_MS);
+    });
+    return Promise.race([fetch(url, ctl ? Object.assign({}, opts, { signal: ctl.signal }) : opts), timeout])
+      .finally(() => clearTimeout(timer));
+  }
 
   function notify(msg, ok = true) {
     if (typeof window.showNotification === 'function') {
@@ -334,7 +358,7 @@
    * ===================================================================== */
 
   async function postPetAjax(body) {
-    const res = await fetch('/inventory_ajax.php', {
+    const res = await fetchTO('/inventory_ajax.php', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: body.toString(),
@@ -368,7 +392,7 @@
     invId = String(invId);
     if (!force && linkCache[invId]) return linkCache[invId];
     const p = (async () => {
-      const res = await fetch('/pet_links_ajax.php?pet_inv_id=' + encodeURIComponent(invId),
+      const res = await fetchTO('/pet_links_ajax.php?pet_inv_id=' + encodeURIComponent(invId),
                               { cache: 'no-store', credentials: 'include' });
       const data = await res.json().catch(() => null);
       if (!data || data.status !== 'success') {
@@ -419,7 +443,7 @@
     body.set('pet_inv_id', String(mainInvId));
     body.set('link_level', String(opts.level));
     if (action === 'set') body.set('link_pet_id', String(opts.linkPetId));
-    return fetch('/pet_link_action.php', {
+    return fetchTO('/pet_link_action.php', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: body.toString(),
@@ -444,7 +468,7 @@
     const p = (async () => {
       const url = '/pet_sigils_ajax.php?pet_inv_id=' + encodeURIComponent(invId) +
             '&slot_type=' + encodeURIComponent(slotType);
-      const res = await fetch(url, { cache: 'no-store', credentials: 'include' });
+      const res = await fetchTO(url, { cache: 'no-store', credentials: 'include' });
       const data = await res.json().catch(() => null);
       if (!data || data.status !== 'success') {
         throw new Error((data && data.message) || 'Failed to load sigils.');
@@ -485,7 +509,7 @@
     if (itemId) params.set('item_id', String(itemId));
     params.set('csrf_token', sigilCsrfToken || '');
 
-    const res = await fetch('/pet_sigil_action.php', {
+    const res = await fetchTO('/pet_sigil_action.php', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Accept': 'application/json' },
       body: params.toString(),
@@ -863,7 +887,9 @@
   }
 
   async function readLiveTeam(teamKey, force) {
-    const doc = await getContextDoc(teamKey, force);
+    return liveFromDoc(await getContextDoc(teamKey, force), teamKey);
+  }
+  function liveFromDoc(doc, teamKey) {
     const slots = scanEquippedPetSlots(doc, teamKey);
     const sigils = {};
     // Team cards and inventory cards both render their sigil panel.
@@ -1611,11 +1637,19 @@
       // another team (and so be missing from this team's inventory list).
       const docs = {};
       await step('Reading your pet teams', async () => {
-        for (const t of TEAM_KEYS) {
+        await Promise.all(TEAM_KEYS.map(async (t) => {
           try { docs[t] = await getContextDoc(t, true); } catch (_) { /* checked below */ }
-        }
+        }));
         if (!docs[targetTeam]) throw new Error('Could not reach the Pets page to read that team.');
       });
+
+      // Already exactly this? Say so now instead of re-reading every link and sigil.
+      const alreadySame = await step('Checking whether it already matches', async () =>
+        presetMatchesLive(preset, liveFromDoc(docs[targetTeam], targetTeam), true).catch(() => false));
+      if (alreadySame) {
+        finishRun(`${TEAM_LABELS[targetTeam]} already matches "${preset.name}".`, true, []);
+        return;
+      }
 
       const current = scanEquippedPetSlots(docs[targetTeam], targetTeam);
       const owned = {};       // every pet, wherever it is right now
@@ -1750,18 +1784,22 @@
 
       // Unlink everything first, then link, so a pet freed by a later slot is
       // available to an earlier one.
-      for (const phase of ['unlink', 'link']) {
-        for (const pet of pets) {
-          const wantLinks = preset.links && preset.links[pet.invId];
-          if (wantLinks && Object.keys(wantLinks).length) {
-            await applyLinksForPet(pet.invId, pet.name, wantLinks, linkNotes, stats, phase);
+      await step('Checking links', async () => {
+        for (const phase of ['unlink', 'link']) {
+          for (const pet of pets) {
+            const wantLinks = preset.links && preset.links[pet.invId];
+            if (wantLinks && Object.keys(wantLinks).length) {
+              await applyLinksForPet(pet.invId, pet.name, wantLinks, linkNotes, stats, phase);
+            }
           }
         }
-      }
+      });
 
       const sigilNotes = [];
-      await sigilRemovalPass(preset, sigilPets, sigilNotes, stats);
-      await sigilEquipPass(preset, sigilPets, targetTeam, sigilNotes, stats);
+      await step('Checking sigils and orbs', async () => {
+        await sigilRemovalPass(preset, sigilPets, sigilNotes, stats);
+        await sigilEquipPass(preset, sigilPets, targetTeam, sigilNotes, stats);
+      });
 
       dropDocCache();
       dropLinkIndex();
