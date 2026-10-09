@@ -28,7 +28,7 @@
   'use strict';
   if (root.__coreBoot) return;
 
-  const CORE_URL = 'https://raw.githubusercontent.com/WerewuIf/UI-Core/main/core.js';
+  const CORE_URL = 'https://raw.githubusercontent.com/WerewuIf/UI-Core/refs/heads/main/addons/core.js';
   const K = 'coreboot:code', K_GOOD = 'coreboot:good', K_BAD = 'coreboot:bad';
   const warn = (...a) => console.warn('[Core boot]', ...a);
 
