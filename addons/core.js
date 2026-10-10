@@ -25,7 +25,7 @@
   'use strict';
 
   // >>> EDIT THIS ONE LINE: raw URL of your addons.json
-  const CONFIG = { manifest: 'https://raw.githubusercontent.com/WerewuIf/UI-Core/refs/heads/main/addons.json' };
+  const CONFIG = { manifest: 'https://raw.githubusercontent.com/WerewuIf/UI-Core/main/addons.json' };
 
   const API = 2;
   if (root.Core && root.Core.__isCore) {
@@ -941,13 +941,164 @@
   // The addon manager is just another floating item - same system every addon uses.
   float.add({ id: 'addons', title: 'Addons', icon: '\u2699\ufe0f', order: 900, width: 900, render: renderAddonsTab });
 
+
+  /* ---------------------------------------------------------------- me --- */
+  // The player's own numbers, read once here so no addon re-implements it: stamina (+ regen and next tick),
+  // level, exp, gold, the server clock, and the player id. Source: the site's top bar (.gtb-inner). On pages
+  // without that bar (event map, fetched documents) get() returns the last values seen, marked stale.
+  // Gems are deliberately not read.
+  const me = (() => {
+    const saved = store('me', { def: {} });
+    const nint = (x) => parseInt(String(x == null ? '' : x).replace(/[^\d-]/g, ''), 10) || 0;
+    const MULT = { K: 1e3, M: 1e6, B: 1e9, T: 1e12 };
+    const abbr = (x) => {            // "3746394.603K" -> 3746394603, "2,345" -> 2345
+      const m = /([\d.,]+)\s*([KMBT]?)/i.exec(String(x || ''));
+      return m ? (Math.round(parseFloat(m[1].replace(/,/g, '')) * (MULT[m[2].toUpperCase()] || 1)) || 0) : 0;
+    };
+    const stat = (bar, label) => {
+      const el = Array.from(bar.querySelectorAll('.gtb-stat')).find((e) => {
+        const l = e.querySelector('.gtb-label'); return l && l.textContent.trim().toLowerCase() === label;
+      });
+      return el ? el.querySelector('.gtb-value') : null;
+    };
+    let skew = null;                 // server clock minus this browser's clock, ms
+    const renderedAt = () => {       // when the server rendered this page, on the browser's clock (about)
+      try {
+        const n = performance.getEntriesByType('navigation')[0];
+        if (n && n.responseStart > 0 && performance.now() < 20000) return performance.timeOrigin + n.responseStart;
+      } catch (_) { /* fall through */ }
+      return Date.now();
+    };
+
+    function readBar() {
+      const bar = document.querySelector('.gtb-inner');
+      if (!bar) return null;
+      const out = { pid: player.id() };
+      const sp = bar.querySelector('#stamina_span');
+      if (sp) {
+        const box = sp.closest('.gtb-value'), mm = box && /([\d,]+)\s*\/\s*([\d,]+)/.exec(box.textContent);
+        const tm = bar.querySelector('#stamina_timer');
+        const regen = tm && /\+\s*([\d,]+)/.exec(tm.getAttribute('title') || '');
+        const t = tm && /(\d+):(\d+)(?::(\d+))?/.exec(tm.textContent || '');
+        const secs = t ? (t[3] != null ? (+t[1]) * 3600 + (+t[2]) * 60 + (+t[3]) : (+t[1]) * 60 + (+t[2])) : null;
+        out.stamina = { cur: nint(sp.textContent), max: mm ? nint(mm[2]) : 0, regen: regen ? nint(regen[1]) : 0, nextTickAt: secs == null ? 0 : Date.now() + secs * 1000 };
+      }
+      const g = stat(bar, 'gold'); if (g) out.gold = abbr(g.textContent);
+      const lv = bar.querySelector('.gtb-level'); if (lv) out.level = nint(lv.textContent);
+      const ex = bar.querySelector('.gtb-exp-top');
+      if (ex) {
+        const spans = ex.querySelectorAll('span'), mm = /([\d,]+)\s*\/\s*([\d,]+)/.exec(spans.length ? spans[spans.length - 1].textContent : ex.textContent);
+        const fill = bar.querySelector('.gtb-exp-fill'), w = fill && /([\d.]+)\s*%/.exec(fill.getAttribute('style') || '');
+        if (mm) out.exp = { cur: nint(mm[1]), max: nint(mm[2]), pct: w ? parseFloat(w[1]) : (nint(mm[2]) ? Math.round(nint(mm[1]) / nint(mm[2]) * 1000) / 10 : 0) };
+      }
+      const st = bar.querySelector('#server_time');
+      if (st && st.getAttribute('data-epoch')) {
+        if (skew === null) skew = (+st.getAttribute('data-epoch')) * 1000 - renderedAt();
+        out.server = { tzoff: +(st.getAttribute('data-tzoff') || 0), skew };
+      }
+      return out;
+    }
+
+    // Change detector: ignores the ticking timer/clock so 'me:update' only fires when a real value moved.
+    const sigOf = (v) => JSON.stringify([v.stamina && [v.stamina.cur, v.stamina.max, v.stamina.regen], v.gold, v.level, v.exp && [v.exp.cur, v.exp.max]]);
+    let lastSig = '', lastSave = 0;
+    function refresh() {
+      const live = readBar();
+      if (!live) return null;
+      const sig = sigOf(live), changed = sig !== lastSig;
+      if (live.pid !== 'default' && (changed || Date.now() - lastSave > 30000)) { lastSave = Date.now(); saved.set(Object.assign({}, live, { ts: Date.now() })); }
+      if (changed) { lastSig = sig; emit('me:update', Object.assign({ stale: false, ageMs: 0 }, live)); }
+      return live;
+    }
+    function get() {
+      const live = readBar();
+      if (live) return Object.assign({ stale: false, ageMs: 0, ts: Date.now() }, live);
+      const c = saved.get() || {};
+      return Object.assign({ pid: player.id() }, c, { stale: true, ageMs: c.ts ? Date.now() - c.ts : null });
+    }
+    // Stamina now. When the numbers are old (stale snapshot) this adds the hourly regen that must have happened since.
+    function staminaEstimate(now = Date.now()) {
+      const s = get().stamina;
+      if (!s) return null;
+      if (!s.regen || !s.nextTickAt || now < s.nextTickAt) return s.cur;
+      return Math.min(s.max || Infinity, s.cur + (Math.floor((now - s.nextTickAt) / 3600000) + 1) * s.regen);
+    }
+    // The server's clock (ms since epoch). Uses the offset measured on the last page that had the top bar.
+    function serverNow() { const sv = get().server; return Date.now() + (sv ? sv.skew : 0); }
+    // Seconds until the next top of the hour on the SERVER's local clock (when stamina ticks).
+    function secondsToTick(now = serverNow()) { const tz = (get().server || {}).tzoff || 0; return 3600 - (Math.floor(now / 1000) + tz) % 3600; }
+    const watch = (cb) => on('me:update', cb);
+    dom.watch(refresh);
+    return { get, refresh, staminaEstimate, serverNow, secondsToTick, watch };
+  })();
+
+  /* -------------------------------------------------------------- csrf --- */
+  // One registry for the site's CSRF tokens, so a later site change that adds a token to more endpoints is one
+  // register() call, not a hunt through every addon.
+  //   Core.csrf.register(name, { get, page, re, field, expired })
+  //     get      () => token | null     read it from the current page (a page global)
+  //     page     '/pets.php'            a page that carries the token ...
+  //     re       /const X = "(...)"/    ... and the regex whose group 1 is the token (used by refresh)
+  //     field    'csrf_token'           form field name POSTs send it under (null = read-only)
+  //     expired  /regex/                tells an "expired" reply apart (also matches json.code === 'csrf_expired')
+  //   Core.csrf.get(name) · set(name, token) · refresh(name) -> Promise<token|null> · post(name, url, params)
+  // post() adds the token, and if the reply says it expired, refreshes it and retries ONCE.
+  const csrf = (() => {
+    const src = new Map(), tok = new Map(), busy = new Map();
+    function register(name, o) { src.set(name, Object.assign({ field: 'csrf_token', expired: /token expired|csrf_expired/i }, o)); return api; }
+    function get(name) {
+      if (tok.has(name) && tok.get(name)) return tok.get(name);
+      const s = src.get(name);
+      let v = null; try { v = s && s.get ? s.get() : null; } catch (_) { /* not on this page */ }
+      if (v) tok.set(name, String(v));
+      return v ? String(v) : '';
+    }
+    function set(name, token) { if (token) tok.set(name, String(token)); return token; }
+    function refresh(name) {
+      const s = src.get(name);
+      if (!s || !s.page || !s.re) return Promise.resolve(null);
+      if (busy.has(name)) return busy.get(name);
+      const p = (async () => {
+        try {
+          const html = await (await root.fetch(abs0(s.page), { credentials: 'include', cache: 'no-store' })).text();
+          const m = s.re.exec(html);
+          if (m && m[1]) { tok.set(name, m[1]); return m[1]; }
+        } catch (_) { /* leave the old token */ }
+        return null;
+      })();
+      busy.set(name, p);
+      p.finally(() => busy.delete(name));
+      return p;
+    }
+    const abs0 = (u) => new URL(u, root.location.origin).href;
+    const isExpired = (s, r) => !!((r.json && (r.json.code === 'csrf_expired' || s.expired.test(String(r.json.message || '')))) || (!r.json && s.expired.test(String(r.text || '').slice(0, 300))));
+    async function post(name, url, params, o = {}) {
+      const s = src.get(name);
+      if (!s) throw new Error('unknown csrf source: ' + name);
+      if (!s.field) throw new Error('csrf source "' + name + '" is read-only (no field)');
+      const send = () => {
+        const p = new URLSearchParams(params instanceof URLSearchParams ? params.toString() : (params || {}));
+        p.set(s.field, get(name));
+        return net.post(url, p, Object.assign({ json: true }, o));
+      };
+      let r = await send();
+      if (isExpired(s, r)) { tok.delete(name); await refresh(name); r = await send(); }
+      return r;
+    }
+    const api = { register, get, set, refresh, post };
+    // Known from the real pages (see the guide, "Site knowledge"):
+    register('petSigil', { page: '/pets.php', re: /const\s+PET_SIGIL_CSRF\s*=\s*"([^"]*)"/, get: () => (typeof PET_SIGIL_CSRF === 'undefined' ? null : PET_SIGIL_CSRF), field: 'csrf_token', expired: /security token expired|csrf_expired/i });
+    register('expPotion', { get: () => (root.expPotionSettings && root.expPotionSettings.csrf) || null, field: null });
+    return api;
+  })();
+
   /* ------------------------------------------------------------ export --- */
   const Core = {
-    __isCore: true, apiLevel: API, version: '3.5.1', debug: false, tabId: TAB,
+    __isCore: true, apiLevel: API, version: '3.6.0', debug: false, tabId: TAB,
     esc, sleep, debounce, fmt, int, compact, parseJson,
     on, off, once, emit,
     state, store, player,
-    net, pages, dom, cookies, ui,
+    net, pages, dom, cookies, ui, me, csrf,
     module: module_, use, get, status,
     float, addons: { list: entries, add: addCustom, remove: removeCustom, enable: setEnabled, status: rt, reload: startOne },
   };
