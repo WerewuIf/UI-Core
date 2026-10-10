@@ -1092,13 +1092,236 @@
     return api;
   })();
 
+
+  /* -------------------------------------------------------------- lock --- */
+  // Web Locks, as the Ascension Assistant / Cube Suite use them. A lock is held by a promise that never
+  // resolves, and the browser frees it the instant this tab's JS context goes away (closed, crashed, discarded):
+  // nothing to poll, no stale timestamp, no read-then-write race between two tabs.
+  //   Core.lock.hold(name, opts, onLost) -> Promise<boolean>
+  //       opts is navigator.locks.request's: {} waits in line until granted, { ifAvailable:true } resolves false
+  //       at once if someone else has it, { steal:true } takes it from the holder (who gets onLost).
+  //       Resolves true once THIS tab holds it, and keeps holding until release(name) or the tab ends.
+  //   Core.lock.release(name) · held(name) · available() · query(name) -> Promise<{ held, pending }>
+  //   Core.lock.elect(name, { onLead, onFollow, onLost }) -> Promise<'leader'|'follower'>
+  //       one tab leads, the others follow and are promoted automatically when the leader's tab dies.
+  const lock = (() => {
+    const releasers = {};
+    const available = () => !!(navigator.locks && typeof navigator.locks.request === 'function');
+    function hold(name, opts, onLost) {
+      return new Promise((resolve) => {
+        if (!available()) { resolve(false); return; }
+        if (releasers[name]) { resolve(true); return; }            // this tab already holds it
+        let granted = false;
+        try {
+          navigator.locks.request(name, opts || {}, (l) => {
+            if (!l) { resolve(false); return; }                      // ifAvailable and it was taken
+            granted = true; resolve(true);
+            return new Promise((release) => { releasers[name] = release; });
+          }).then(() => {}, (e) => {
+            if (!granted) resolve(false);
+            else if (e && e.name === 'AbortError') { delete releasers[name]; if (onLost) { try { onLost(); } catch (err) { warn('lock onLost threw', err); } } }
+          });
+        } catch (_) { resolve(false); }
+      });
+    }
+    function release(name) { const r = releasers[name]; if (r) { delete releasers[name]; r(); } }
+    async function query(name) {
+      try {
+        const q = await navigator.locks.query();
+        return { held: q.held.filter((x) => x.name === name).length, pending: q.pending.filter((x) => x.name === name).length };
+      } catch (_) { return { held: 0, pending: 0 }; }
+    }
+    async function elect(name, o = {}) {
+      if (!available()) { if (o.onLead) o.onLead(); return 'leader'; }   // no Web Locks: behave like a single tab
+      if (await hold(name, { ifAvailable: true }, o.onLost)) { if (o.onLead) o.onLead(); return 'leader'; }
+      if (o.onFollow) o.onFollow();
+      hold(name, {}, o.onLost).then((ok) => { if (ok && o.onLead) o.onLead(); });   // queued: granted when the leader's tab dies
+      return 'follower';
+    }
+    return { hold, release, held: (n) => !!releasers[n], available, query, elect };
+  })();
+
+  /* --------------------------------------------------------- keepAlive --- */
+  // Keeps a background tab from being throttled, frozen or discarded. Three independent signals (browsers treat
+  // them as "this tab is doing something"; none is a guarantee, so use all of them for an automation tab):
+  //   lock   a Web Lock held by this tab (exempts it from freezing/discarding; no gesture needed)
+  //   rtc    a loopback WebRTC data channel inside the page (no signaling, no camera/mic prompt)
+  //   audio  a near-silent 20 Hz oscillator (spares "recently audible" tabs). Needs the browser's autoplay
+  //          permission: it retries resume() every 15 s and on any click/keypress in the tab.
+  //   Core.keepAlive.start({ lock, rtc, audio })   all default true  -> Promise<status>
+  //   Core.keepAlive.stop() · status() -> { lock:bool, rtc:'open'|'connecting'|'closed'|'off', audio:'running'|'suspended'|'off' }
+  //   startLock/stopLock · startRtc/stopRtc · startAudio/stopAudio   each signal on its own
+  // Only start it in the tab that really works in the background; every call is idempotent.
+  const keepAlive = (() => {
+    const LOCK = 'core_keepalive:' + TAB;       // per-tab name so a 2nd tab is never queued behind the 1st
+    let wantLock = false, lockOn = false, wantRtc = false, rtc = null, rtcTimer = null, audio = null, resumeTimer = null, gesture = null;
+
+    let lockP = null;
+    function startLock() {
+      wantLock = true;
+      if (lockOn) return Promise.resolve(true);
+      if (lockP) return lockP;                                   // a request is already in flight
+      lockP = lock.hold(LOCK, {}).then((ok) => { lockP = null; if (ok && !wantLock) { lock.release(LOCK); return false; } lockOn = ok; return ok; });
+      return lockP;
+    }
+    function stopLock() { wantLock = false; lockOn = false; lock.release(LOCK); }
+
+    function startRtc() {
+      wantRtc = true;
+      if (rtc || typeof RTCPeerConnection === 'undefined') return;
+      try {
+        const pc1 = new RTCPeerConnection(), pc2 = new RTCPeerConnection();
+        pc1.onicecandidate = (e) => { if (e.candidate) pc2.addIceCandidate(e.candidate).catch(() => {}); };
+        pc2.onicecandidate = (e) => { if (e.candidate) pc1.addIceCandidate(e.candidate).catch(() => {}); };
+        const channel = pc1.createDataChannel('core-keepalive');
+        // If it ever drops (e.g. after a long freeze/resume), reopen it rather than silently losing the exemption.
+        channel.onclose = () => { if (rtc && rtc.channel === channel) { rtc = null; if (wantRtc) { clearTimeout(rtcTimer); rtcTimer = setTimeout(startRtc, 1000); } } };
+        rtc = { pc1, pc2, channel };
+        pc1.createOffer().then((o) => pc1.setLocalDescription(o))
+          .then(() => pc2.setRemoteDescription(pc1.localDescription))
+          .then(() => pc2.createAnswer()).then((a) => pc2.setLocalDescription(a))
+          .then(() => pc1.setRemoteDescription(pc2.localDescription))
+          .catch((e) => warn('keep-alive RTC negotiation failed', e && e.message));
+      } catch (e) { warn('keep-alive RTC failed to start', e && e.message); }
+    }
+    function stopRtc() {
+      wantRtc = false; clearTimeout(rtcTimer);
+      if (rtc) { try { rtc.channel.onclose = null; rtc.pc1.close(); rtc.pc2.close(); } catch (_) { /* */ } rtc = null; }
+    }
+
+    const tryResume = () => { if (audio && audio.ctx.state === 'suspended') audio.ctx.resume().catch(() => {}); };
+    function startAudio() {
+      if (audio) return;
+      try {
+        const Ctx = root.AudioContext || root.webkitAudioContext;
+        if (!Ctx) return;
+        const ctx = new Ctx(), gain = ctx.createGain(), osc = ctx.createOscillator();
+        gain.gain.value = 0.001; osc.frequency.value = 20;
+        osc.connect(gain).connect(ctx.destination); osc.start();
+        audio = { ctx, osc };
+        tryResume();
+        gesture = tryResume;
+        document.addEventListener('click', gesture, true); document.addEventListener('keydown', gesture, true);
+        resumeTimer = setInterval(tryResume, 15000);
+      } catch (e) { warn('keep-alive audio failed to start', e && e.message); }
+    }
+    function stopAudio() {
+      clearInterval(resumeTimer); resumeTimer = null;
+      if (gesture) { document.removeEventListener('click', gesture, true); document.removeEventListener('keydown', gesture, true); gesture = null; }
+      if (audio) { try { audio.osc.stop(); audio.ctx.close(); } catch (_) { /* */ } audio = null; }
+    }
+
+    const status = () => ({ lock: lockOn, rtc: rtc ? rtc.channel.readyState : 'off', audio: audio ? audio.ctx.state : 'off' });
+    async function start(o = {}) {
+      if (o.audio !== false) startAudio();
+      if (o.rtc !== false) startRtc();
+      if (o.lock !== false) await startLock();
+      return status();
+    }
+    function stop() { stopLock(); stopRtc(); stopAudio(); }
+    return { start, stop, status, startLock, stopLock, startRtc, stopRtc, startAudio, stopAudio };
+  })();
+
+  /* --------------------------------------------------------------- tab --- */
+  // "Which tab does the work?" Several tabs of the game are open; one is the MAIN tab (runs the automation,
+  // owns the keep-alive), the rest are IDLE. Decided by an exclusive Web Lock (Core.lock), exactly like the
+  // Ascension Assistant's main tab and the Cube Suite's primary tab, so there is no timestamp to go stale and
+  // no two-tabs-both-win race: the browser frees the lock the instant the main tab closes, crashes or is discarded.
+  //   Core.tab.join(name, { onMain, onIdle, queue, steal, keepAlive, retries }) -> Promise<'main'|'idle'>
+  //       onMain()/onIdle()  called on every change of role (also fired for the first decision)
+  //       queue      true: an idle tab waits in line and is promoted automatically when the main tab dies
+  //                  (Cube Suite style). false (default): it stays idle until the user takes over (Assistant style).
+  //       steal      true: take main from whoever has it right now (use for a tab that must win, e.g. a reload).
+  //       keepAlive  true / {lock,rtc,audio}: run Core.keepAlive while this tab is main, stop it when it is not.
+  //       retries    waits in ms between attempts to get a free lock at join. Default [0, 500, 1500]: a reloading
+  //                  main can briefly lose to its own dying page, so it tries a few times before settling for idle.
+  //   Core.tab.takeOver(name) -> Promise<boolean>   steal main (the old main gets onIdle) - a "Use this tab" button
+  //   Core.tab.role(name) -> 'main'|'idle'|null · isMain(name) · leave(name) -> give up main / stop waiting
+  //   Core.tab.onRole(name, cb) -> unsubscribe     cb(role) on every change, from any caller (also Core.on('tab:role'))
+  // Tell the other tabs something with Core.emit(evt, data, { shared: true }); they get it through Core.on(evt, fn).
+  // Without Web Locks support every tab is main (fail open: nothing blocks, nothing is exclusive).
+  const tab = (() => {
+    const joined = {};                                   // name -> { role, o, abort, listeners:Set }
+    const lname = (n) => 'core_tab:' + n;
+    function setRole(name, role) {
+      const j = joined[name];
+      if (!j || j.role === role) return;
+      j.role = role;
+      if (j.o.keepAlive) { if (role === 'main') keepAlive.start(j.o.keepAlive === true ? {} : j.o.keepAlive); else keepAlive.stop(); }
+      const cbs = [role === 'main' ? j.o.onMain : j.o.onIdle, ...j.listeners];
+      cbs.forEach((fn) => { if (fn) { try { fn(role); } catch (e) { warn('tab role handler threw', e); } } });
+      dispatch('tab:role', { name, role });
+    }
+    function lostMain(name) {
+      const j = joined[name];
+      if (!j) return;
+      setRole(name, 'idle');
+      if (j.o.queue) enqueue(name);                      // wait for the next turn
+    }
+    function enqueue(name) {
+      const j = joined[name];
+      if (!j || j.abort) return;
+      j.abort = typeof AbortController !== 'undefined' ? new AbortController() : null;
+      const opts = j.abort ? { signal: j.abort.signal } : {};
+      lock.hold(lname(name), opts, () => lostMain(name)).then((ok) => {
+        j.abort = null;
+        if (ok && joined[name] === j) setRole(name, 'main');
+        else if (ok) lock.release(lname(name));          // left while waiting
+      });
+    }
+    async function join(name, o = {}) {
+      if (joined[name]) return joined[name].role;
+      const j = joined[name] = { role: null, o, abort: null, listeners: new Set() };
+      if (!lock.available()) { setRole(name, 'main'); return 'main'; }
+      let ok = false;
+      if (o.steal) ok = await lock.hold(lname(name), { steal: true }, () => lostMain(name));
+      else for (const wait of (o.retries || [0, 500, 1500])) {
+        if (wait) await sleep(wait);
+        if (joined[name] !== j) return j.role;           // left while retrying
+        ok = await lock.hold(lname(name), { ifAvailable: true }, () => lostMain(name));
+        if (ok) break;
+      }
+      if (joined[name] !== j) { if (ok) lock.release(lname(name)); return j.role; }
+      if (ok) setRole(name, 'main');
+      else { setRole(name, 'idle'); if (o.queue) enqueue(name); }
+      return j.role;
+    }
+    async function takeOver(name) {
+      const j = joined[name];
+      if (!j) return false;
+      if (j.role === 'main') return true;
+      if (!lock.available()) return false;
+      if (j.abort) { j.abort.abort(); j.abort = null; }  // stop waiting in line; we are jumping the queue
+      const ok = await lock.hold(lname(name), { steal: true }, () => lostMain(name));
+      if (ok && joined[name] === j) setRole(name, 'main');
+      else if (!ok && j.o.queue) enqueue(name);
+      return ok;
+    }
+    function leave(name) {
+      const j = joined[name];
+      if (!j) return;
+      delete joined[name];
+      if (j.abort) { j.abort.abort(); j.abort = null; }
+      lock.release(lname(name));
+      if (j.role === 'main' && j.o.keepAlive) keepAlive.stop();
+      j.role = null;
+    }
+    function onRole(name, cb) {
+      const j = joined[name];
+      if (!j) return () => {};
+      j.listeners.add(cb);
+      return () => j.listeners.delete(cb);
+    }
+    return { join, takeOver, leave, onRole, role: (n) => (joined[n] ? joined[n].role : null), isMain: (n) => !!joined[n] && joined[n].role === 'main' };
+  })();
+
   /* ------------------------------------------------------------ export --- */
   const Core = {
-    __isCore: true, apiLevel: API, version: '3.6.0', debug: false, tabId: TAB,
+    __isCore: true, apiLevel: API, version: '3.8.0', debug: false, tabId: TAB,
     esc, sleep, debounce, fmt, int, compact, parseJson,
     on, off, once, emit,
     state, store, player,
-    net, pages, dom, cookies, ui, me, csrf,
+    net, pages, dom, cookies, ui, me, csrf, lock, keepAlive, tab,
     module: module_, use, get, status,
     float, addons: { list: entries, add: addCustom, remove: removeCustom, enable: setEnabled, status: rt, reload: startOne },
   };
