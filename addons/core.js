@@ -553,8 +553,10 @@
   //   early  run at load time instead of waiting for DOMContentLoaded
   //   init   may be async; whatever it returns becomes the module's public api (Core.use / Core.get)
   const mods = new Map();   // id -> { def, state, api, waiters }
-  // Shared by the module system and the addon loader: user addons, disabled ids, dev flag.
-  const cfg = store('addons', { def: { custom: [], off: [], dev: false }, key: 'core:addons' });
+  // Shared by the module system and the addon loader: user addons and disabled ids.
+  const cfg = store('addons', { def: { custom: [], off: [] }, key: 'core:addons' });
+  // An addon served from this machine (localhost / 127.0.0.1 / LAN) is being developed: always fetch it fresh, never from the saved copy.
+  const isLocal = (e) => /^https?:\/\/(localhost|127\.\d+\.\d+\.\d+|\[::1\]|192\.168\.\d+\.\d+|10\.\d+\.\d+\.\d+)(:|\/|$)/i.test(String((e && e.url) || ''));
 
   function matches(def) {
     const t = def.match, p = root.location.pathname + root.location.search;
@@ -757,7 +759,7 @@
   async function prepare(e) {
     const s = rstat(e.id);
     // ANY saved copy (even one saved under a different URL) starts instantly: the page never waits on GitHub.
-    const rec = !cfg.get().dev ? (readCode(e) || readAnyCode(e)) : null;
+    const rec = !isLocal(e) ? (readCode(e) || readAnyCode(e)) : null;
     if (rec && rec.code) {
       s.from = 'cache'; s.bytes = rec.code.length; s.ver = rec.ver || '';
       const stale = rec.url !== e.url || (e.version && rec.ver !== e.version) || Date.now() - (rec.checked || 0) > 60 * 1000;   // re-check on (almost) every load: a changed file is picked up without bumping the manifest version
@@ -809,7 +811,7 @@
         const off = new Set(cfg.get().off);
         resolve(j).forEach((e) => {
           const rec = readAnyCode(e);
-          if (off.has(e.id) || !entryMatches(e) || cfg.get().dev) return;
+          if (off.has(e.id) || !entryMatches(e) || isLocal(e)) return;
           if (rec && rec.code && (rec.url !== e.url || !e.version || rec.ver !== e.version)) refreshInBackground(e, rec);
         });
       }).catch(() => {});
@@ -926,15 +928,11 @@
           s.from ? h('span', { class: 'core-dim' }, s.from + (s.bytes ? ' \u00b7 ' + Math.round(s.bytes / 1024) + ' KB' : '')) : null),
         e.source === 'custom' ? ui.btn('\ud83d\uddd1', 'danger', () => removeCustom(e.id)) : null);
     });
-    const url = h('input', { class: 'core-input', placeholder: 'https://raw.githubusercontent.com/you/repo/main/addons/x.js', style: { flex: '1 1 320px' } });
-    const dev = h('input', { type: 'checkbox', onchange: (ev) => cfg.update((x) => { x.dev = ev.target.checked; }) });
-    dev.checked = !!c.dev;
+    const url = h('input', { class: 'core-input', placeholder: 'Addon URL (.js)', title: 'e.g. https://raw.githubusercontent.com/you/repo/main/addons/x.js, or http://localhost:8000/x.js (localhost is always fetched fresh)', style: { flex: '0 1 240px', minWidth: '120px' } });
     el.replaceChildren(
       h('div', { class: 'core-dim', style: { marginBottom: '12px' } }, 'Core v' + Core.version + (root.__coreBoot && root.__coreBoot.pending() && root.__coreBoot.readyVersion() ? ' (v' + root.__coreBoot.readyVersion() + ' ready)' : '') + '  \u00b7  Manifest: ' + (MANIFEST || '(none)')),
       ...rows.length ? rows : [h('div', { class: 'core-empty' }, 'No addons yet. Add a URL below or set CONFIG.manifest.')],
-      h('div', { class: 'core-row', style: { marginTop: '16px' } }, url, ui.btn('Add by URL', 'success', () => { addCustom(url.value); url.value = ''; })),
-      h('div', { class: 'core-row' },
-        h('label', { class: 'core-dim' }, dev, ' Dev mode: always fetch fresh (for localhost / unpushed edits)'),
+      h('div', { class: 'core-row', style: { marginTop: '16px' } }, url, ui.btn('Add by URL', 'success', () => { addCustom(url.value); url.value = ''; }),
         h('div', { class: 'core-spacer' }),
         ui.btn('Check for updates', 'soft', checkForUpdates)));
   }
@@ -1317,7 +1315,7 @@
 
   /* ------------------------------------------------------------ export --- */
   const Core = {
-    __isCore: true, apiLevel: API, version: '3.8.0', debug: false, tabId: TAB,
+    __isCore: true, apiLevel: API, version: '3.8.1', debug: false, tabId: TAB,
     esc, sleep, debounce, fmt, int, compact, parseJson,
     on, off, once, emit,
     state, store, player,
