@@ -1,29 +1,70 @@
-# Core — addon reference
+# Core — developer & AI guide
 
-How to build a new addon. Read §1–§3 and you can write one; the rest is lookup.
-(Setup and day-to-day use are in `README.md`.)
+One file for people and AIs who maintain or extend Core. (End-user setup is in `README.md`.)
 
-1. [What Core is](#1-what-core-is)
-2. [Make an addon in 3 steps](#2-make-an-addon-in-3-steps)
-3. [How an addon runs](#3-how-an-addon-runs)
-4. [Floating buttons — `Core.float`](#4-floating-buttons--corefloat)
-5. [Recipes](#5-recipes)
-6. [API lookup](#6-api-lookup)
-7. [Manifest (`addons.json`)](#7-manifest-addonsjson)
-8. [Rules and gotchas](#8-rules-and-gotchas)
-9. [Brief for an AI that is writing an addon](#9-brief-for-an-ai-that-is-writing-an-addon)
+**Handing the project to an AI:** paste this whole file into the new chat and upload the repo zip. Say what you want changed. It has everything needed; don't re-explain the project. The AI should read this guide and `README.md`, syntax-check what it changes, and test before reporting.
+
+1. [What this is](#1-what-this-is)
+2. [Repo layout and current versions](#2-repo-layout-and-current-versions)
+3. [How Core works](#3-how-core-works)
+4. [Updates and deployment (read twice)](#4-updates-and-deployment-read-twice)
+5. [Working with the owner](#5-working-with-the-owner)
+6. [Make an addon in 3 steps](#6-make-an-addon-in-3-steps)
+7. [How an addon runs](#7-how-an-addon-runs)
+8. [Floating buttons — `Core.float`](#8-floating-buttons--corefloat)
+9. [Recipes](#9-recipes)
+10. [API lookup](#10-api-lookup)
+11. [Manifest (`addons.json`)](#11-manifest-addonsjson)
+12. [Rules and gotchas](#12-rules-and-gotchas)
+13. [Site knowledge (from real pages)](#13-site-knowledge-from-real-pages)
+14. [Pets: sigils, orb, Equipped badge, apply](#14-pets-sigils-orb-equipped-badge-apply)
+15. [How to work on a change, what is verified, ideas](#15-how-to-work-on-a-change-what-is-verified-ideas)
+16. [Brief for an AI that is writing an addon](#16-brief-for-an-ai-that-is-writing-an-addon)
 
 ---
 
-## 1. What Core is
+## 1. What this is
 
-**Core** is the one userscript you install (`core.user.js`). It does two jobs:
+**Core** is a Tampermonkey userscript system for the browser game at `https://demonicscans.org` (the game calls itself "Veyra"). The owner (GitHub: **WerewuIf**) previously ran five separate userscripts. They are now one tiny bootstrap (`core.user.js`) that loads `core.js` (the real Core), which in turn loads "addons": plain `.js` files hosted in the owner's public GitHub repo and fetched by URL at runtime. Everything is client-side convenience tooling (presets, layout tweaks). There is no server code.
+
+The owner is a game player maintaining this for themselves and a few friends. They are not a professional developer. They write tersely with typos; read for intent. They paste real page HTML and screenshots from the live game, which are your ground truth.
+
+---
+
+## 2. Repo layout and current versions
+
+Repo: `https://github.com/WerewuIf/UI-Core` (public, branch `main`).
+
+```
+core.user.js          TINY BOOTSTRAP (v4.0.1). The only thing installed in Tampermonkey. Loads core.js, caches it, swaps in new versions on the next load
+core.js               the real Core: loader + toolbox (plain script, not a userscript, ~55 KB). Found at the repo root OR in addons/ (the bootstrap tries both)
+addons.json           manifest: the list of addons (id, name, version, url, optional match/early)
+addons/
+  crystal-presets.js  💎 Crystal Presets (power-crystal setups per equipment piece)
+  gear-presets.js     ⚔️ Gear Presets (equipment sets) + site quick-set integration
+  pet-presets.js      🐾 Pet team presets: slots, links, sigils, elemental orb, Equipped badge
+  ui-cleanup.js       layout tidy + reminders on guild/home/battle pages (page-matched)
+  battle.js           battle page restructure + AutoSlash (page-matched, early)
+examples/addon-template.js   annotated starter for new addons
+README.md             BASIC end-user guide (install, use, troubleshoot). Keep it basic
+REFERENCE.md          this guide
+```
+
+Versions: Core **3.5.1** (`version:` in `core.js`; ⚙️ shows "Core v3.5.1"), bootstrap **4.0.1**, crystal 1.5.0, gear 3.2.0, pet **2.7.0**, ui-cleanup 2.2.0, battle 15.10.
+
+Recent changes (all tested): Elemental Orb slot; hover ⋯ menus; loader rewrite (instant start from saved copy); Equipped badge that matches pets, links, sigils and orbs exactly on all three teams; apply on an already-matching team finishes at once, with request timeouts; one **Check for updates** button; Core updates itself like an addon; page scroll lock while a modal is open.
+
+---
+
+## 3. How Core works
+
+`core.js` does two jobs:
 
 1. **Loads addons.** An addon is a plain `.js` file on GitHub. Core downloads it, caches it, and runs it on the right pages.
 2. **Gives every addon the same toolbox**, so addons don't each re-implement toasts, modals, page fetching, caching, storage or floating buttons.
 
 ```
-Tampermonkey ── core.user.js ──► Core (window.Core)
+Tampermonkey ── core.user.js ──► core.js ──► Core (window.Core)
                                    │   reads addons.json, loads each addon with `Core` in scope
         ┌──────────────────────────┼───────────────────────────┐
    Core.float  buttons + panels    Core.net / Core.pages       Core.store / state / on·emit
@@ -35,15 +76,54 @@ Tampermonkey ── core.user.js ──► Core (window.Core)
 
 What this buys you:
 
-- **One floating row.** Every addon with UI adds its own button (💎 ⚔️ 🐾 …) through `Core.float.add()`. Core lays them out and keeps them clear of the site's own fixed buttons. A new addon needs no placement code.
-- **One page cache.** Two addons asking for `inventory.php` cause one request. The cache is dropped automatically after your own POSTs (in all open tabs).
+- **One floating row.** Every addon with UI adds its own button through `Core.float.add()`. Core draws the button in a shared dock, owns the modal, and keeps the dock clear of the site's own fixed buttons. There is **no hub** (the owner rejected one).
+- **One page cache.** Two addons asking for `inventory.php` cause one request; the cache is dropped after your own POSTs (in all open tabs).
 - **One of everything else:** one toast, one modal stack, one cookie lock, one DOM observer, one storage layer.
-
-Naming: the global is `Core`; CSS classes and storage keys are prefixed `core-` / `core:`. The word "Core" appears only as that identifier, so renaming it later is a find-and-replace.
+- The three presets addons keep their original storage keys so players' data carries over: `pcPresets_<pid>`, `gearPresets_<pid>`, `petPresets_<pid>`. **Never change those keys or the preset data shape in a breaking way.**
+- Globals, CSS and storage are prefixed `Core` / `core-` / `core:` (originally "DS"; the owner disliked that name, `ds:` keys are obsolete).
+- The loader runs addons with `Core` in scope (`new Function`, falling back to an inline script if the site's CSP blocks eval).
 
 ---
 
-## 2. Make an addon in 3 steps
+## 4. Updates and deployment (read twice)
+
+| Code lives in | Reaches users how |
+|---|---|
+| `addons/*.js` | automatically. Each saved addon is re-checked on (almost) every load (throttled to once a minute, content-compared; GitHub's raw CDN can lag ~5 min). **No `addons.json` change is needed.** |
+| `core.js` | automatically, same way, via the bootstrap |
+| `core.user.js` (bootstrap) | rarely changes. If it does: bump `@version`, push; Tampermonkey updates it about daily, or reinstall / paste |
+| `addons.json` | read on every load. Change it only to add/remove an addon, or change `match`/`early`/`url` |
+
+How an update lands: a saved copy always starts instantly (the page never waits on GitHub, even if GitHub hangs). In the background the loader fetches the newest file; if it differs, it is saved, and a toast says *"… updated — click here to reload"* (or *"Core updated — click here to reload"*). The next load runs it. A manifest `version` that differs from the saved copy still triggers an immediate fetch, but is optional. ⚙️ shows the version that is RUNNING, and `(vX ready)` when a newer one is saved.
+
+**Check for updates (⚙️)** is the single manual control (there is no per-addon refresh and no Clear cache). It re-reads the manifest, fetches Core and every enabled addon that applies to the current page, compares with the saved copies, and says *"Everything is up to date"* or *"Update ready: Core, Pet Presets — click here to reload"*. Addons that don't match the current page (state "skipped") were never downloaded and are left out, so they can't show a false "update ready".
+
+**Core's bootstrap** (`core.user.js`): looks for `core.js` at the repo root, then in `addons/`. Never saves a `core.js` that doesn't parse. If a saved copy throws on start it is set aside (`coreboot:bad`) and the last copy that survived 4 s (`coreboot:good`) runs instead. Keys: `coreboot:code|good|bad`. The first-ever load is the only time the page waits on GitHub.
+
+Deployment facts:
+- Manifest default is in `core.js` (`CONFIG.manifest`): `https://raw.githubusercontent.com/WerewuIf/UI-Core/main/addons.json`. Addon URLs in it are relative to it. Install link for users: `https://raw.githubusercontent.com/WerewuIf/UI-Core/main/core.user.js`.
+- **CORS trap:** `github.com/<u>/<r>/raw/...` (GitHub's "Copy raw file") is a redirect the game's site blocks. Core rewrites `github.com/.../raw|blob/...` to `raw.githubusercontent.com/...` (`normalizeUrl`) and falls back to a saved copy if the network fails or the URL changed. Keep both.
+- Users must turn off the old standalone scripts or everything runs twice.
+- Optional hardening: `sha256` per addon in the manifest. **Security:** whoever can push to the repo runs code inside players' logged-in sessions (addons AND Core). Use 2FA.
+- Don't assume a code change is live; say which file it lives in and what to push.
+
+---
+
+## 5. Working with the owner
+
+- **Do not restyle panels/dialogs.** An earlier AI restyled all modal/panel CSS to the game's colours; the user said "revert the css styles, the UIs themselves are fine". The panels keep their original blue-gradient look (`.core-*`, `.pcp-*`, `.gp-*`, `.pp-*`). Only the **floating buttons** copy the game's own rounded ⚔️/🧪 buttons (exact computed style; see §13).
+- **One scroller per modal** (the modal card), no nested scroll areas on the top-level panel, and **no visible scrollbars** in modals.
+- README = **very basic end-user guide** (no repo/owner/manifest/hardening talk).
+- No regex field in the addon manager's "Add by URL" (removed; the manifest `match` field still exists and is used by ui-cleanup/battle).
+- "Exact fixes please": minimal, targeted changes; do not rewrite working logic. Addon logic was ported by exact-match patches; only plumbing changed.
+- They hate vague claims: **verify in a browser and say what was and was not verified.** They get frustrated by "it should work".
+- Finish the whole job in one turn; they have had to say "continue/finish" when a turn ended early. Do the code, tests, docs and packaging together.
+- Deliver the changed files (and a zip of the repo when many changed).
+- Brevity in the final message: what changed, what was verified, what to do (which files to push), and what is unverified.
+
+---
+
+## 6. Make an addon in 3 steps
 
 **1. Copy `examples/addon-template.js`** to `addons/my-addon.js`. The smallest useful addon is this:
 
@@ -65,15 +145,15 @@ That's a 🔧 button in the floating row that opens a panel.
 { "id": "my-addon", "name": "My Addon", "version": "1.0.0", "url": "addons/my-addon.js" }
 ```
 
-Add `"match": "^/pets\\.php"` if it only belongs on certain pages (§7).
+Add `"match": "^/pets\\.php"` if it only belongs on certain pages (§11).
 
-**3. Commit, then reload the site twice** (the first reload fetches the new manifest, the second runs the addon).
+**3. Commit, then reload the site twice** (the first reload fetches the new manifest, the second runs the addon). After that, edits to the file are picked up on their own; no `addons.json` change is needed (see §4).
 
 To test before committing: ⚙️ → **Add by URL** with a `http://localhost:8000/addons/my-addon.js` URL (`python3 -m http.server 8000`), and tick **Dev mode** so it always fetches fresh.
 
 ---
 
-## 3. How an addon runs
+## 7. How an addon runs
 
 - An addon is a **plain script**: no `==UserScript==` header, no `@require`, no `import`.
 - `Core` is in scope as a variable (and is `window.Core`).
@@ -84,11 +164,11 @@ To test before committing: ⚙️ → **Add by URL** with a `http://localhost:80
 - If it throws, only that addon fails. The ⚙️ manager shows a red row with the error.
 - Updates apply on the **next** page load, never mid-page. Core shows *"Addon … updated — reload to apply"*.
 
-Optional structure: `Core.module({...})` (§6) adds dependencies on other addons and a public API between addons. A plain script doesn't need it.
+Optional structure: `Core.module({...})` (§10) adds dependencies on other addons and a public API between addons. A plain script doesn't need it.
 
 ---
 
-## 4. Floating buttons — `Core.float`
+## 8. Floating buttons — `Core.float`
 
 This is the single, central way to put a button on screen. **Do not** create your own `position:fixed` button.
 
@@ -139,12 +219,12 @@ Use 40–800 for new addons. The ⚙️ manager always stays furthest left.
 - The button is an exact copy of the site's own rounded ⚔️ / 🧪 buttons and sits level with them. Core keeps the row clear of the page's other fixed buttons and on screen; on narrow screens it stacks above the site's row. You never position anything.
 - Add the button **once per page load**. A duplicate `id` is ignored with a console warning.
 - `render` runs on every open, so build fresh each time. If your panel is expensive or has long-lived DOM that other code looks up by `getElementById`, build it once, keep it in a hidden holder, and in `render` do `el.replaceChildren(panel)`, then put it back in `onHide`. The Crystal, Gear and Pet addons do exactly this.
-- A `Core.module({ ..., float: { render, onShow, onHide, order } })` registers its button for you (§6).
+- A `Core.module({ ..., float: { render, onShow, onHide, order } })` registers its button for you (§10).
 - Sub-dialogs inside your panel (editors, pickers): use `Core.ui.modal()`, which stacks above the panel automatically. If you build your own modal DOM instead, give it `z-index` above ~100100 (the existing addons use 300000), or it opens behind the panel.
 
 ---
 
-## 5. Recipes
+## 9. Recipes
 
 ### Read another page of the site
 ```js
@@ -161,7 +241,7 @@ const r = await Core.net.post('/inventory_ajax.php', { action: 'equip', id: 123 
 if (!r.ok) return Core.ui.toast('Failed: HTTP ' + r.status, false);
 console.log(r.json);        // parsed response or null
 ```
-Matching cached pages are invalidated for you (built-in rules in §6).
+Matching cached pages are invalidated for you (built-in rules in §10).
 
 ### React to what the site does (free, no extra requests)
 ```js
@@ -236,11 +316,11 @@ Core.module({
 
 ---
 
-## 6. API lookup
+## 10. API lookup
 
 Everything is on `Core`.
 
-### `Core.float` — see §4
+### `Core.float` — see §8
 
 ### `Core.pages` / `Core.net`
 
@@ -295,7 +375,7 @@ All `pages.*` accept `{ fetch: true }` (force a fetched copy even when you're on
 
 ---
 
-## 7. Manifest (`addons.json`)
+## 11. Manifest (`addons.json`)
 
 ```json
 {
@@ -313,7 +393,7 @@ All `pages.*` accept `{ fetch: true }` (force a fetched copy even when you're on
 |---|---|---|
 | `id` | yes | unique; also the cache key (`core:code:<id>`) and the enable/disable key |
 | `url` | yes | absolute, or relative to `addons.json` |
-| `name`, `version` | no | display only (bump `version` when you change the file so the manager shows it) |
+| `name`, `version` | no | display only. **Not needed for updates**: changed files are picked up on their own (§4). Bumping `version` just makes the update apply on the very next load and updates the label in ⚙️ |
 | `match` | no | regex string (or array) tested against `pathname + search`. **No match = the file isn't even downloaded.** Omit = every page |
 | `early` | no | `true` = run at document-start |
 | `sha256` | no | refuse to run if the file's hash differs |
@@ -322,10 +402,11 @@ JSON needs doubled backslashes (`\\.`). Entries run in the order listed. "Add by
 
 ---
 
-## 8. Rules and gotchas
+## 12. Rules and gotchas
 
 - [ ] **Buttons come from `Core.float`**, never your own `position:fixed` element.
-- [ ] **Never add your own scrollbar to a panel.** The modal card is the one scroller. Don't put `overflow:auto` + `max-height` on your top-level content, or you get a second scrollbar. (A bounded inner list, e.g. a picker grid, is fine.)
+- [ ] **Never add your own scrollbar to a panel.** The modal card is the one scroller, and its scrollbar is hidden. Don't put `overflow:auto` + `max-height` on your top-level content. A bounded inner list (picker grid) is fine but hide its scrollbar too (`scrollbar-width:none` + `::-webkit-scrollbar{display:none}`).
+- [ ] **A new modal class must be added to the page scroll lock** in `core.js` (`html:has(.core-modal.show, .pcp-modal.show, …){overflow:hidden}`), or the site's own scrollbar shows behind it and the page scrolls underneath.
 - [ ] **Get the player id from `Core.player.id()`.** Some pages (e.g. the event map) have no sidebar, so a hand-rolled lookup returns the wrong id there and your saved data looks empty.
 - [ ] **Idempotent DOM work.** `Core.dom.watch` re-runs your function after DOM changes; mark what you've done (`dataset`, a class) and bail out early.
 - [ ] **Read through `Core.net` / `Core.pages`**, not raw `fetch` + `DOMParser`, so pages are shared and caches invalidate. (`fetch` is fine for POSTs the site itself would make; `Core.net.post` is nicer.)
@@ -339,9 +420,65 @@ JSON needs doubled backslashes (`\\.`). Entries run in the order listed. "Add by
 - [ ] **Never put secrets in an addon.** It's a public file.
 - [ ] **Go easy on the server.** Use the cache (`ttl`) and don't poll faster than you need.
 
+Learned the hard way:
+
+1. **Player id.** Most pages have `.side-drawer a[href*="player.php?pid="]`; the event map has no sidebar. `Core.player.id()` tries sidebar → `window.expPotionSettings.userId` → `#ecConfig` JSON `userId` → last seen id (`core:lastPid`) → `'default'`. A hand-rolled lookup made presets look empty (saved to `_default`).
+2. **Dock placement.** The dock sits level with the site's buttons (`bottom:17px`), slides left in 4 px steps to clear fixed elements, and **stacks above** them on narrow screens (~390 px). It inspects small fixed *groups* (e.g. a column of zoom buttons) and ignores overlays/drawers (≥60% of the viewport). It must never run off-screen.
+3. **Slow start / stale updates.** An old loader ignored a saved copy whose URL differed and waited out an 8 s fetch per addon (the "20 seconds"), and only re-checked every 10 minutes. Never reintroduce a network wait on the warm path.
+4. **Silent long work looks stuck.** Apply on an already-matching team once re-read every link and sigil one request at a time with no step shown, and no request had a timeout. Show a step for anything slow and time out requests (`fetchTO`, `CFG.REQUEST_TIMEOUT_MS`).
+5. **Page scroll.** Hidden modal scrollbars are not enough: the site's own scrollbar stayed visible beside the modal and the page scrolled underneath. Fixed with the `html:has(.core-modal.show, …){overflow:hidden}` lock plus `overscroll-behavior:contain` (needs Chrome 105+/Safari 15.4+/Firefox 121+; iOS not verified).
+6. **"Not applicable" is not "updated".** An addon that doesn't match the page is never downloaded; don't flag it as an update.
+7. `ui.css` before `<head>` exists defers until the DOM is available.
+
 ---
 
-## 9. Brief for an AI that is writing an addon
+## 13. Site knowledge (from real pages)
+
+**Floating-button style to copy** (site's `.quickset-drawer-trigger` / `.battle-drawer-trigger`): `display:flex; align-items:center; justify-content:center; gap:6px; background:#24263a; border:1px solid #2f324d; box-shadow:0 10px 24px rgba(0,0,0,.6); border-radius:12px; color:#fff; cursor:pointer; font-weight:700; font-size:14px; line-height:1.2; padding:10px 12px`; `:active{transform:scale(.97)}`; they sit at `bottom:17px` (⚔️ `right:120px`, 🧪 `right:65px`). The round ones: chat 💬 `right:14px;bottom:14px` 46px circle `#2a2b3a`; ☰ `left:14px;bottom:14px`.
+
+**Site CSS palette** (for reference only; see §5): dark card `#171923`, border `#2B2D44`, row `#12131a`/`#232437`, primary `#4b5ef5`, soft `#2a2b3a`/`#3b3d55`, success `#4caf50`/`#2ecc71`, danger `#e74c3c`, dim text `#9aa0b8`, text `#e0e4ff`.
+
+**pets.php** (`/pets.php?team=attack|pvp_attack|defense`): sections titled "PvE Attack Team" / "PvP Attack Team" / "PvP Defense Team" and "🐾 Pet Inventory". Cards: `.slot-box.pet-card[data-pet-inv-id]` (+ `pet-card-legendary|epic|mythical`), `.pet-img-wrap img`, `.pet-stars-overlay`, `.pet-level`, `[data-attack]`, `[data-defense]`, `.pet-race b`, equipped cards have `unequipPet(slot)`, inventory cards `showEquipModal(id,'pet')`. **Sigil panel per card:** `.pet-sigil-slot.attack|defense|elemental` with `.filled` or `.empty-slot`; filled ones contain `.pet-sigil-copy b` (name) and `img` in `.pet-sigil-orb`; click calls `openPetSigilModal(petInvId, slotType)`. Endpoints: `GET pet_sigils_ajax.php?pet_inv_id=&slot_type=attack|defense|elemental` → `{status:'success', slot_label, pet:{name}, current, options:[{item_id,name,image_url,attack,defense,element,owned,equipped,available}], csrf_token, user_id}`; `POST pet_sigil_action.php` (`action=equip|remove`, `pet_inv_id`, `slot_type`, `item_id`, `csrf_token`; `data.code === 'csrf_expired'` means refetch). Links: `GET /pet_links_ajax.php?pet_inv_id=` and `POST /pet_link_action.php`. Equip/unequip pets: `POST inventory_ajax.php` (`action=equip_pet|unequip_pet`, `team`, `slot_id`, `pet_inv_id`) returns `OK`. Elemental orb copy on the page: "Overrides this pet's element to X while keeping its Element Rate". The page reads `const CURRENT_TEAM`, `PET_SIGIL_CSRF`, `PET_SIGIL_USER_ID`.
+
+**Other pages:** `stats.php` has the full site chrome (topbar, side drawer, chat, quick-set + battle drawers). `event_page.php?event=11` (the Black Crown map) has no site chrome; it carries `<script id="ecConfig" type="application/json">{"userId":…}`. Many pages set `window.expPotionSettings = {userId, csrf, items}`. `power_crystals.php`, `inventory.php?set=attack|pvp_attack|defense`, `pets.php`, `stats.php`, `pvp.php`, `battle_pass.php`, `guild_dash.php`, `game_dash.php` are read via `Core.pages.*`.
+
+---
+
+## 14. Pets: sigils, orb, Equipped badge, apply
+
+In `pet-presets.js`: `SIGIL_SLOTS = ['attack','defense','elemental']`, `SIGIL_LABELS`, `SIGIL_EMPTY_ICON`, `SIGIL_NONE()`, `sigilSlotOf(el)`. A preset stores `sigils: { <petInvId>: {attack, defense, elemental} }` (item ids) and `meta.sigils[itemId]` (name/image). **A missing slot key means "don't touch"** (that is how old presets stay safe). Capture (`captureCurrentToPreset`) loops `SIGIL_SLOTS` calling `fetchSigilInfo`. Restore (`restorePresetToTeam`) runs `sigilRemovalPass` (take off what shouldn't be there) then `sigilEquipPass`, using `findSigilHolder` / `findAllSigilHolders` for items worn by pets outside the preset (forced take-over, `CFG.FORCE_SIGILS`, default true; `CFG.TAKE_FROM_OTHER_TEAMS` for pets). DOM scanners (`scanSigilWearers`, `readCardSigilNames`, `collectSigilWearers`, `presetSigilsMatch`) classify slots by CSS class via `sigilSlotOf`; `installSigilOverride` hooks the page's own sigil modal. Editor chips: `buildSigilLayer` makes `.pp-sigil-layer` with two rows (`.pp-sigil-row`): row 1 = C, row 2 = A B; `pickerSigilChip` + `.pp-picker-sigil-line` mirror this in the link picker; `openSigilChooser` is the chooser dialog. To add another slot type: add it to the constants, give it a chip class/icon, and add a mock for it in your pets test page plus a test case.
+
+**Equipped badge** (`computeEquippedMap`, `presetMatchesLive`, `sigilEntryMatches`): a preset row shows "Equipped · PvE Attack / PvP Attack / PvP Defense" only when that live team matches the preset **exactly**: same pets in the same slots, the same Link 1/2 pets, and the same Attack sigil, Defense sigil and Elemental Orb on every pet the preset describes (mains and their linked pets). Anything different, or unreadable, means no badge. All three teams are checked from any page, and a preset live on two teams shows both. A slot key the preset never recorded is not compared (so presets saved before the orb existed still show). A wanted item whose name can't be looked up counts as a mismatch. Live data comes from the team pages (team and inventory cards render their sigil panel), with `pet_links_ajax.php` for links and `pet_sigils_ajax.php` as a fallback for pets not on the page. The panel re-checks (forced) when opened and after applying.
+
+**Apply** (`restorePresetToTeam`): reads all three team pages, then **checks `presetMatchesLive` first** and reports "already matches" immediately if so. Otherwise: unequip/pull pets, free linked pets, equip, then the "Checking links" and "Checking sigils and orbs" steps. Requests use `fetchTO` (30 s timeout).
+
+---
+
+## 15. How to work on a change, what is verified, ideas
+
+1. Read the relevant code (grep first; the addons are huge). Prefer **exact-match patches** (`str.replace` with an `assert old in s`) over rewrites. Never touch logic you were not asked to touch.
+2. `node --check` every changed JS file.
+3. Reproduce the user's problem or write the new behaviour as a test **first when practical** (there is no test harness in the repo; small jsdom scripts for logic and Playwright/Chromium for layout and scrollbars work well, with `--hide-scrollbars` turned off so classic scrollbars are measurable), and confirm a test fails on the old code (run it against the old file). The owner values proof that the test can catch the bug. If the old code can't be exercised by the test (different DOM or API), say so instead of claiming it proves the bug.
+4. Run the tests. Look at screenshots for anything visual.
+5. Bump versions (`version:` in `core.js` if Core changed; `addons.json` is optional for addons, see §4). Update `README.md` (basic!) and this guide if behaviour or API changed.
+6. Rebuild the zip, send the changed files, and say which of them the user must push.
+7. Final message: what changed; what was verified and how; which file(s) to push; what is **not** verified.
+
+Environment notes for a Linux sandbox: Playwright + Chromium are usually available (`/opt/pw-browsers`); `pip install` needs `--break-system-packages`; `jsdom` via `npm i`.
+
+**Verified vs not verified**
+
+**Verified** (headless Chromium + jsdom, mock pages from the real CSS/markup): loader (incl. self-updating Core bootstrap, manual update check, skipped-addon handling), float API, page scroll lock, dock style identical to the site's quick-set button, dock placement at 320–1280 px on two page types, single scroller, hidden scrollbars, crystal preview, pets capture/restore/forced take-over/old-preset safety/editor layout with the orb, GitHub URL normalisation, offline saved-copy fallback, player-id on sidebar-less pages.
+
+**NOT verified** (no live access): real equip/restore round-trips on the live server; the site's real CSP; `event-core.css` (only layout approximated); the real HTML of `power_crystals.php`/`inventory.php` (crystal/gear scanners are the user's original, unmodified logic); real Elemental Orb behaviour server-side (restrictions such as pet level are unknown; the addon surfaces the server's error text); how things look with the real pet artwork. Say so when relevant.
+
+**Ideas not done (only if the owner asks)**
+
+A changelog panel in ⚙️; owner tooling to hash (`sha256`) addons automatically; gear presets for any new site slot types; making the first-load battle page flash-free.
+
+---
+
+## 16. Brief for an AI that is writing an addon
 
 Paste this block, then describe what you want.
 
