@@ -50,9 +50,9 @@ README.md             BASIC end-user guide (install, use, troubleshoot). Keep it
 REFERENCE.md          this guide
 ```
 
-Versions: Core **3.5.1** (`version:` in `core.js`; ⚙️ shows "Core v3.5.1"), bootstrap **4.0.1**, crystal 1.5.0, gear 3.2.0, pet **2.7.0**, ui-cleanup 2.2.0, battle 15.10.
+Versions: Core **3.6.0** (`version:` in `core.js`; ⚙️ shows "Core v3.6.0"), bootstrap **4.0.1**, crystal 1.5.0, gear 3.2.0, pet **2.7.0**, ui-cleanup 2.2.0, battle 15.10.
 
-Recent changes (all tested): Elemental Orb slot; hover ⋯ menus; loader rewrite (instant start from saved copy); Equipped badge that matches pets, links, sigils and orbs exactly on all three teams; apply on an already-matching team finishes at once, with request timeouts; one **Check for updates** button; Core updates itself like an addon; page scroll lock while a modal is open.
+Recent changes (all tested): Elemental Orb slot; hover ⋯ menus; loader rewrite (instant start from saved copy); Equipped badge that matches pets, links, sigils and orbs exactly on all three teams; apply on an already-matching team finishes at once, with request timeouts; one **Check for updates** button; Core updates itself like an addon; page scroll lock while a modal is open; `Core.me` (stamina, level, exp, gold, server clock, pid from the top bar) and `Core.csrf` (one registry for CSRF tokens). Addons not yet migrated to them: pet-presets still keeps its own sigil token.
 
 ---
 
@@ -78,6 +78,7 @@ What this buys you:
 
 - **One floating row.** Every addon with UI adds its own button through `Core.float.add()`. Core draws the button in a shared dock, owns the modal, and keeps the dock clear of the site's own fixed buttons. There is **no hub** (the owner rejected one).
 - **One page cache.** Two addons asking for `inventory.php` cause one request; the cache is dropped after your own POSTs (in all open tabs).
+- **One place for "who/what am I" and CSRF.** `Core.me` reads the player's numbers from the site's top bar (and remembers them for pages without one); `Core.csrf` holds every CSRF token source. Addons should use these instead of reading the page themselves (that is how the pid bug happened).
 - **One of everything else:** one toast, one modal stack, one cookie lock, one DOM observer, one storage layer.
 - The three presets addons keep their original storage keys so players' data carries over: `pcPresets_<pid>`, `gearPresets_<pid>`, `petPresets_<pid>`. **Never change those keys or the preset data shape in a breaking way.**
 - Globals, CSS and storage are prefixed `Core` / `core-` / `core:` (originally "DS"; the owner disliked that name, `ds:` keys are obsolete).
@@ -360,6 +361,13 @@ All `pages.*` accept `{ fetch: true }` (force a fetched copy even when you're on
 | `state.get/set/update/watch` | in-memory, this page only |
 | `on / once / off / emit(evt, data, {shared})` | event bus |
 | `player.id()` | player id. Tries the sidebar link, then `expPotionSettings.userId`, then the event page's `#ecConfig`, then the last id seen. **Use this, not your own lookup**, or your addon will see a different id on pages without a sidebar |
+| `me.get()` | snapshot `{ pid, stamina:{cur,max,regen,nextTickAt}, gold, level, exp:{cur,max,pct}, server:{tzoff,skew}, stale, ageMs }`. Read live from the top bar (`.gtb-inner`); on pages without it, the last saved values with `stale:true`. Gems are not read |
+| `me.staminaEstimate(now?)` | stamina now. For a stale snapshot it adds the hourly regen that must have happened since (capped at max). An estimate |
+| `me.serverNow()` · `me.secondsToTick()` | the server's clock in ms (offset measured on the last top-bar page); seconds to the next top of the hour on the server's own clock (stamina tick) |
+| `me.watch(cb)` · `on('me:update', cb)` | fires when stamina, level, exp or gold really change (not on the ticking timer/clock) |
+| `csrf.register(name, {get, page, re, field, expired})` | declare where a token comes from: a page global (`get`), or a page + regex (`page`, `re`) to refetch it, the form `field` POSTs use (null = read-only), and what an expired reply looks like |
+| `csrf.get(name)` · `csrf.set(name, token)` · `csrf.refresh(name)` | current token (cached, else the page global) · store one you got from an ajax reply · refetch it from its page |
+| `csrf.post(name, url, params)` | POST with the token added; if the reply says it expired (`code:'csrf_expired'` or the `expired` regex) it refreshes and retries **once**. Built-ins: `petSigil` (`PET_SIGIL_CSRF` on `/pets.php`, field `csrf_token`), `expPotion` (`expPotionSettings.csrf`, read-only until its field name is known) |
 | `cookies.withMode(mode, fn)` | see recipe |
 | `dom.watch(fn, {for, immediate})` · `dom.when(sel, timeout)` · `dom.ready` | shared observer · wait for element · DOM-ready promise |
 | `esc sleep debounce fmt int compact parseJson` | small utilities |
@@ -436,6 +444,10 @@ Learned the hard way:
 
 **Floating-button style to copy** (site's `.quickset-drawer-trigger` / `.battle-drawer-trigger`): `display:flex; align-items:center; justify-content:center; gap:6px; background:#24263a; border:1px solid #2f324d; box-shadow:0 10px 24px rgba(0,0,0,.6); border-radius:12px; color:#fff; cursor:pointer; font-weight:700; font-size:14px; line-height:1.2; padding:10px 12px`; `:active{transform:scale(.97)}`; they sit at `bottom:17px` (⚔️ `right:120px`, 🧪 `right:65px`). The round ones: chat 💬 `right:14px;bottom:14px` 46px circle `#2a2b3a`; ☰ `left:14px;bottom:14px`.
 
+**Top bar** (`stats.php` and the other pages with site chrome; this is what `Core.me` parses): `.gtb-inner` > `.gtb-left` with `.gtb-stat` blocks (`.gtb-icon`, `.gtb-label`, `.gtb-value`). Stamina: `#stamina_span` holds the current value and the same `.gtb-value` text continues " / 6,890" (max); `#stamina_timer` shows "⏳ 21:08" (mm:ss to the next regen) and its `title` is "Next +383 at the top of the hour" (the regen amount). The hour is the SERVER's local hour. Gold: the `.gtb-stat` labelled "Gold", value abbreviated like `3746394.603K` (K/M/B/T). `#server_time` has `data-epoch` (seconds, the moment the server rendered the page; the text then ticks by script) and `data-tzoff` (seconds east of UTC, e.g. 19800 = +5:30). Right side: `.gtb-level` "LV 5671", `.gtb-exp-top` second span "175,046,828 / 201,072,500", `.gtb-exp-fill` `style="width: 87%"`. There is also a Gems stat and a Buffs button (not read). The pid is not in the bar; it comes from the side drawer link (`Core.player.id()`).
+
+**CSRF facts:** `pets.php` declares `const PET_SIGIL_CSRF = "…"` (readable by bare name from page scope; a page fetch + regex refreshes it); sigil replies carry `csrf_token`; pet link replies carry `csrf`; an expired sigil token replies `{status:'error', code:'csrf_expired', message:'Security token expired…'}`. Many pages set `window.expPotionSettings = {userId, csrf, items}`.
+
 **Site CSS palette** (for reference only; see §5): dark card `#171923`, border `#2B2D44`, row `#12131a`/`#232437`, primary `#4b5ef5`, soft `#2a2b3a`/`#3b3d55`, success `#4caf50`/`#2ecc71`, danger `#e74c3c`, dim text `#9aa0b8`, text `#e0e4ff`.
 
 **pets.php** (`/pets.php?team=attack|pvp_attack|defense`): sections titled "PvE Attack Team" / "PvP Attack Team" / "PvP Defense Team" and "🐾 Pet Inventory". Cards: `.slot-box.pet-card[data-pet-inv-id]` (+ `pet-card-legendary|epic|mythical`), `.pet-img-wrap img`, `.pet-stars-overlay`, `.pet-level`, `[data-attack]`, `[data-defense]`, `.pet-race b`, equipped cards have `unequipPet(slot)`, inventory cards `showEquipModal(id,'pet')`. **Sigil panel per card:** `.pet-sigil-slot.attack|defense|elemental` with `.filled` or `.empty-slot`; filled ones contain `.pet-sigil-copy b` (name) and `img` in `.pet-sigil-orb`; click calls `openPetSigilModal(petInvId, slotType)`. Endpoints: `GET pet_sigils_ajax.php?pet_inv_id=&slot_type=attack|defense|elemental` → `{status:'success', slot_label, pet:{name}, current, options:[{item_id,name,image_url,attack,defense,element,owned,equipped,available}], csrf_token, user_id}`; `POST pet_sigil_action.php` (`action=equip|remove`, `pet_inv_id`, `slot_type`, `item_id`, `csrf_token`; `data.code === 'csrf_expired'` means refetch). Links: `GET /pet_links_ajax.php?pet_inv_id=` and `POST /pet_link_action.php`. Equip/unequip pets: `POST inventory_ajax.php` (`action=equip_pet|unequip_pet`, `team`, `slot_id`, `pet_inv_id`) returns `OK`. Elemental orb copy on the page: "Overrides this pet's element to X while keeping its Element Rate". The page reads `const CURRENT_TEAM`, `PET_SIGIL_CSRF`, `PET_SIGIL_USER_ID`.
@@ -493,6 +505,7 @@ UI RULES
 - Dialogs/menus/toasts: Core.ui.modal({id,title,body,actions}).open(), Core.ui.menu(anchor, items), Core.ui.toast(msg, ok).
 - Build DOM with Core.ui.h(tag, props, ...kids) and Core.ui.btn(label, kind, onClick).
   Classes in panels: core-btn[-soft|-success|-danger], core-input, core-row, core-dim, core-empty, core-err, core-pill.
+- Player numbers (stamina, level, exp, gold, server time, pid): Core.me.get(), never your own DOM reads. CSRF tokens: Core.csrf (register a source once, then Core.csrf.post). On a page without the site's top bar, Core.me.get().stale is true.
 - Never give the top-level panel its own overflow/scrollbar (the modal card scrolls). Get the player id from Core.player.id().
 - Prefix your own CSS classes; inject once with Core.ui.css(id, text).
 
