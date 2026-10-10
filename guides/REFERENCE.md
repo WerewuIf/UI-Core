@@ -50,7 +50,7 @@ README.md             BASIC end-user guide (install, use, troubleshoot). Keep it
 REFERENCE.md          this guide
 ```
 
-Versions: Core **3.8.0** (`version:` in `core.js`; ⚙️ shows "Core v3.8.0"), bootstrap **4.0.1**, crystal 1.5.0, gear 3.2.0, pet **2.7.0**, ui-cleanup 2.2.0, battle 15.10.
+Versions: Core **3.8.1** (`version:` in `core.js`; ⚙️ shows "Core v3.8.1"), bootstrap **4.0.1**, crystal 1.5.0, gear 3.2.0, pet **2.7.0**, ui-cleanup 2.2.0, battle 15.10.
 
 Recent changes (all tested): Elemental Orb slot; hover ⋯ menus; loader rewrite (instant start from saved copy); Equipped badge that matches pets, links, sigils and orbs exactly on all three teams; apply on an already-matching team finishes at once, with request timeouts; one **Check for updates** button; Core updates itself like an addon; page scroll lock while a modal is open; `Core.me` (stamina, level, exp, gold, server clock, pid from the top bar) and `Core.csrf` (one registry for CSRF tokens); `Core.keepAlive` (Web Lock + loopback WebRTC + silent audio, to keep a background tab alive), `Core.lock` (Web Lock hold/steal/release/elect) and `Core.tab` (main-tab / idle-tab election with take-over, built on Core.lock). Addons not yet migrated to them: pet-presets still keeps its own sigil token.
 
@@ -93,7 +93,7 @@ What this buys you:
 | `addons/*.js` | automatically. Each saved addon is re-checked on (almost) every load (throttled to once a minute, content-compared; GitHub's raw CDN can lag ~5 min). **No `addons.json` change is needed.** |
 | `core.js` | automatically, same way, via the bootstrap |
 | `core.user.js` (bootstrap) | rarely changes. If it does: bump `@version`, push; Tampermonkey updates it about daily, or reinstall / paste |
-| `addons.json` | read on every load. Change it only to add/remove an addon, or change `match`/`early`/`url` |
+| `addons.json` | read on every load. Change it only to add/remove an addon, or change `name`/`match`/`early`/`url`. **If you don't touch it, every addon that is already listed still updates by itself**; what you lose is only: a brand-new addon is not found, a removed one keeps running, and changes to `match`/`early`/`url`/`name` are not applied. Its `version` is just a label (shown in ⚙️) and an optional "fetch this right now" nudge, never required |
 
 How an update lands: a saved copy always starts instantly (the page never waits on GitHub, even if GitHub hangs). In the background the loader fetches the newest file; if it differs, it is saved, and a toast says *"… updated — click here to reload"* (or *"Core updated — click here to reload"*). The next load runs it. A manifest `version` that differs from the saved copy still triggers an immediate fetch, but is optional. ⚙️ shows the version that is RUNNING, and `(vX ready)` when a newer one is saved.
 
@@ -150,7 +150,7 @@ Add `"match": "^/pets\\.php"` if it only belongs on certain pages (§11).
 
 **3. Commit, then reload the site twice** (the first reload fetches the new manifest, the second runs the addon). After that, edits to the file are picked up on their own; no `addons.json` change is needed (see §4).
 
-To test before committing: ⚙️ → **Add by URL** with a `http://localhost:8000/addons/my-addon.js` URL (`python3 -m http.server 8000`), and tick **Dev mode** so it always fetches fresh.
+To test before committing: ⚙️ → **Add by URL** with a `http://localhost:8000/addons/my-addon.js` URL (`python3 -m http.server 8000`). Addons served from localhost, 127.x, 192.168.x or 10.x are always fetched fresh (there is no dev-mode switch any more), so a reload picks up every edit.
 
 ---
 
