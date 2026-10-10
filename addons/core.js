@@ -3,7 +3,13 @@
 
 /* =============================================================================
  * Core — the ONLY userscript you install.
- 
+ *
+ *  1. Set CONFIG.manifest below to the raw URL of your addons.json.
+ *  2. Open the site: every addon that has a panel gets its OWN floating button
+ *     (💎 Crystals, ⚔️ Gear, 🐾 Pets, …) and a ⚙️ button manages the addon list.
+ *  3. Addons are plain .js files at URLs, listed in addons.json (or added with the
+ *     ⚙️ button). No separate userscripts to install.
+ *
  * Addon file API (everything hangs off the global `Core`, which is in scope in addon code):
  *   Core.float.add({ id, title, icon, order, width, render(el, Core, api), onShow, onHide })
  *                                  -> floating button + panel.   (or { id, icon, title, onClick } = button only)
@@ -18,6 +24,7 @@
 (function (root) {
   'use strict';
 
+  // >>> EDIT THIS ONE LINE: raw URL of your addons.json
   const CONFIG = { manifest: 'https://raw.githubusercontent.com/WerewuIf/UI-Core/main/addons.json' };
 
   const API = 2;
@@ -753,7 +760,7 @@
     const rec = !cfg.get().dev ? (readCode(e) || readAnyCode(e)) : null;
     if (rec && rec.code) {
       s.from = 'cache'; s.bytes = rec.code.length; s.ver = rec.ver || '';
-      const stale = rec.url !== e.url || (e.version && rec.ver !== e.version) || Date.now() - (rec.checked || 0) > 10 * 60 * 1000;
+      const stale = rec.url !== e.url || (e.version && rec.ver !== e.version) || Date.now() - (rec.checked || 0) > 60 * 1000;   // re-check on (almost) every load: a changed file is picked up without bumping the manifest version
       if (stale) refreshInBackground(e, rec);
       return rec.code;
     }
@@ -882,12 +889,14 @@
         } catch (err) { ui.toast('Could not reach the update list: ' + ((err && err.message) || err), false); return; }
       }
       const off = new Set(cfg.get().off);
-      const list = entries().filter((e) => !off.has(e.id));
+      // Same scope as the automatic check: only enabled addons that apply to THIS page. One that doesn't match
+      // here was never downloaded, so it can't be "updated" (it is refreshed on a page where it matches).
+      const list = entries().filter((e) => !off.has(e.id) && entryMatches(e));
       let failed = 0;
       await Promise.all(list.map(async (e) => {
         try {
           const rec = readAnyCode(e), t = await fetchCode(e);
-          if (!rec || !rec.code || rec.code !== t) rstat(e.id).update = true;
+          if (rec && rec.code && rec.code !== t) rstat(e.id).update = true;   // no saved copy = nothing to update
           writeCode(e, t);
         } catch (_) { failed++; }
       }));
@@ -934,7 +943,7 @@
 
   /* ------------------------------------------------------------ export --- */
   const Core = {
-    __isCore: true, apiLevel: API, version: '3.5.0', debug: false, tabId: TAB,
+    __isCore: true, apiLevel: API, version: '3.5.1', debug: false, tabId: TAB,
     esc, sleep, debounce, fmt, int, compact, parseJson,
     on, off, once, emit,
     state, store, player,
