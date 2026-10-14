@@ -110,6 +110,16 @@
       if (pid) { pidCache = pid; try { localStorage.setItem('core:lastPid', pid); } catch (_) { /* */ } return pid; }
       try { return localStorage.getItem('core:lastPid') || 'default'; } catch (_) { return 'default'; }
     },
+    // Who am I: { id, name, level, avatar } read from the sidebar block (.small-user); level falls back to the top bar.
+    // id is null when unknown; name / level / avatar are null on pages without the sidebar. avatar is an absolute URL.
+    info() {
+      const box = document.querySelector('.side-drawer .small-user');
+      const txt = (sel) => { const e = box && box.querySelector(sel); return e ? e.textContent.trim() : ''; };
+      const lv = parseInt((txt('.small-level') || (document.querySelector('.gtb-level') || {}).textContent || '').replace(/[^\d]/g, ''), 10);
+      const img = box && box.querySelector('.small-ava img');
+      const id = player.id();
+      return { id: id === 'default' ? null : id, name: txt('.small-name') || null, level: lv || null, avatar: (img && img.src) || null };
+    },
   };
 
   /* ------------------------------------------------------------- state --- */
@@ -981,6 +991,7 @@
       }
       const g = stat(bar, 'gold'); if (g) out.gold = abbr(g.textContent);
       const lv = bar.querySelector('.gtb-level'); if (lv) out.level = nint(lv.textContent);
+      const who = player.info(); if (who.name) out.name = who.name; if (who.avatar) out.avatar = who.avatar;
       const ex = bar.querySelector('.gtb-exp-top');
       if (ex) {
         const spans = ex.querySelectorAll('span'), mm = /([\d,]+)\s*\/\s*([\d,]+)/.exec(spans.length ? spans[spans.length - 1].textContent : ex.textContent);
@@ -1313,7 +1324,7 @@
 
   /* ------------------------------------------------------------ export --- */
   const Core = {
-    __isCore: true, apiLevel: API, version: '3.8.1', debug: false, tabId: TAB,
+    __isCore: true, apiLevel: API, version: '3.9.0', debug: false, tabId: TAB,
     esc, sleep, debounce, fmt, int, compact, parseJson,
     on, off, once, emit,
     state, store, player,
