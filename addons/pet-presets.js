@@ -6,7 +6,7 @@
 /* ===========================================================================
  * 2.8.0
  *
- * - Edit preset: the sigil chips (A attack, B defense, C elemental orb) now sit in a row under each pet's
+ * - Edit preset: the sigil chips (attack, defense, elemental orb) now sit in a row under each pet's
  *   name instead of overlaying the art, and are bigger. Elemental Orb picker only appears when an orb is
  *   available; otherwise it shows just "You don't have any available Elemental Orbs." (no "No orb" card). Panel footer matches Crystal Presets: Refresh left,
  *   + New Preset / Capture right.
@@ -1891,10 +1891,13 @@
         border:1px dashed rgba(255,255,255,.08); border-radius:16px; }
 
       .pp-editor-grid{ display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:12px; }
-      .pp-slot-column{ display:flex; flex-direction:column; gap:8px; }
-      .pp-slot-card{ background:#11192d; border:1px solid rgba(255,255,255,.06); border-radius:14px; padding:10px; text-align:center; }
+      /* Each slot column spans two grid rows (card, links) via subgrid, so cards in a row are the same height and
+         a one-line name is padded to match a two-line one; the sigil row sits at the bottom of every card. */
+      .pp-slot-column{ display:grid; grid-row:span 2; grid-template-rows:subgrid; row-gap:8px; }
+      .pp-slot-card{ background:#11192d; border:1px solid rgba(255,255,255,.06); border-radius:14px; padding:10px; text-align:center;
+        display:flex; flex-direction:column; }
       .pp-slot-label{ font-size:11px; color:#9caad0; margin-bottom:6px; }
-      .pp-slot-name{ margin-top:6px; font-size:12px; color:#cfd8f7; overflow-wrap:anywhere; }
+      .pp-slot-name{ margin-top:6px; font-size:12px; color:#cfd8f7; overflow-wrap:anywhere; flex:1 1 auto; }
 
       .pp-slot-icon{ width:110px; height:110px; margin:0 auto; border-radius:14px; background:#0d1322; overflow:hidden;
         position:relative; cursor:pointer; border:1px solid rgba(255,255,255,.08);
@@ -1906,16 +1909,13 @@
       .pp-slot-remove:hover{ background:rgba(255,107,122,.9); }
 
       /* Sigils layered over the base of the pet art: C (Elemental Orb) centred above A (Attack) and B (Defense). */
-      /* Sigils sit in a row UNDER the pet name (A attack, B defense, C elemental orb), not over the art. */
+      /* Sigils sit in a row UNDER the pet name (attack, defense, elemental orb), not over the art. */
       .pp-sigil-layer{ display:flex; justify-content:center; margin-top:8px; }
       .pp-sigil-row{ display:flex; gap:8px; justify-content:center; }
-      .pp-sigil-cell{ display:flex; flex-direction:column; align-items:center; gap:3px; }
-      .pp-sigil-letter{ font:800 10px Arial,sans-serif; color:#7f8ab8; }
       .pp-slot-card .pp-chip{ width:40px; height:40px; font-size:18px; border-radius:11px; }
       .pp-link-box .pp-sigil-layer{ margin-top:4px; }
       .pp-link-box .pp-sigil-row{ gap:3px; }
       .pp-link-box .pp-chip{ width:24px; height:24px; font-size:11px; border-radius:7px; }
-      .pp-link-box .pp-sigil-letter{ font-size:9px; }
       .pp-chip{ position:relative; width:28px; height:28px; border-radius:9px;
         background:rgba(9,13,24,.85); border:1px solid rgba(255,255,255,.22); cursor:pointer;
         display:flex; align-items:center; justify-content:center; font-size:13px; color:#95a0c6;
@@ -1935,7 +1935,7 @@
       .pp-links-title{ font:800 10px Arial,sans-serif; letter-spacing:.04em; text-transform:uppercase;
         color:#9caad0; margin-bottom:6px; text-align:center; }
       .pp-links-row{ display:flex; gap:8px; justify-content:center; }
-      .pp-link-box{ flex:1; text-align:center; min-width:0; }
+      .pp-link-box{ flex:1; text-align:center; min-width:0; display:flex; flex-direction:column; }
       .pp-link-label{ font-size:10px; color:#7f8ab8; margin-bottom:4px; }
       .pp-link-tile{
   position:relative;
@@ -1962,7 +1962,7 @@
       .pp-link-tile img{ width:100%; height:100%; object-fit:cover; display:block; border-radius:10px; }
       .pp-link-tile.locked{ cursor:not-allowed; color:#8a6a4a; background:#171313; }
       .pp-link-tile.empty{ border-style:dashed; opacity:.7; }
-      .pp-link-name{ margin-top:5px; font-size:11px; color:#cfd8f7; overflow-wrap:anywhere; }
+      .pp-link-name{ margin-top:5px; font-size:11px; color:#cfd8f7; overflow-wrap:anywhere; flex:1 1 auto; }
       .pp-links-loading{ font-size:11px; color:#9caad0; text-align:center; padding:6px 0; }
       .pp-links-error{ font-size:11px; color:#ff8a97; text-align:center; padding:6px 0; }
 
@@ -2847,7 +2847,7 @@ function openLinkChooser(mainInvId, level, info) {
     layer.appendChild(row);
     const { working } = editor;
 
-    SIGIL_SLOTS.forEach((slotType, idx) => {
+    SIGIL_SLOTS.forEach((slotType) => {
       const entry = working.sigils[invId] || {};
       const value = has(entry, slotType) ? entry[slotType] : null;
       const state = editor.sigilInfo[invId + '|' + slotType];
@@ -2886,13 +2886,7 @@ function openLinkChooser(mainInvId, level, info) {
       }
 
       chip.addEventListener('click', (e) => { e.stopPropagation(); openSigilChooser(invId, slotType); });
-      const cell = document.createElement('div');
-      cell.className = 'pp-sigil-cell';
-      const letter = document.createElement('div');
-      letter.className = 'pp-sigil-letter';
-      letter.textContent = 'ABC'[idx];
-      cell.append(chip, letter);
-      row.appendChild(cell);
+      row.appendChild(chip);
     });
 
     return layer;
