@@ -439,7 +439,11 @@
         h('div', { class: 'core-modal-card', style: { maxWidth: (o.width || 760) + 'px' } },
           h('div', { class: 'core-modal-head' }, titleEl, h('button', { class: 'core-close', type: 'button', onclick: () => m.close() }, '\u00d7')),
           body, foot));
-      el.addEventListener('click', (e) => { if (e.target === el) m.close(); });
+      // Click-outside closes only if the press STARTED on the backdrop too. Selecting text by dragging out of a field
+      // and releasing over the backdrop fires a click on the backdrop (common ancestor) and used to close the dialog.
+      let downOnBackdrop = false;
+      el.addEventListener('pointerdown', (e) => { downOnBackdrop = e.target === el; });
+      el.addEventListener('click', (e) => { if (e.target === el && downOnBackdrop) m.close(); });
       const m = {
         el, body, foot,
         setTitle: (t) => { titleEl.textContent = t; },
@@ -1324,7 +1328,7 @@
 
   /* ------------------------------------------------------------ export --- */
   const Core = {
-    __isCore: true, apiLevel: API, version: '3.9.0', debug: false, tabId: TAB,
+    __isCore: true, apiLevel: API, version: '3.9.1', debug: false, tabId: TAB,
     esc, sleep, debounce, fmt, int, compact, parseJson,
     on, off, once, emit,
     state, store, player,
