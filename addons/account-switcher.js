@@ -263,9 +263,10 @@ function openEdit(acc) {
   if (d) {
     sub.append('Unsaved draft restored.', h('button', { class: 'as-link', type: 'button', onclick: () => {
       draft = null;
-      alias.value = (detected && detected.name) || ''; user.value = ''; pass.value = ''; err.textContent = '';
-      if (here) here.checked = !!detected;
-      paint(); (alias.value ? user : alias).focus();
+      // Truly blank, so you can add an account you are NOT signed in as: no detected name, "signed in" box unticked.
+      alias.value = ''; user.value = ''; pass.value = ''; err.textContent = '';
+      if (here) here.checked = false;
+      paint(); alias.focus();
     } }, 'Start over'));
   } else if (detected) {
     sub.textContent = 'Detected you: ' + (w.name || 'this player') + (w.level ? ' · LV ' + w.level : '') + '. Add the login below.';
