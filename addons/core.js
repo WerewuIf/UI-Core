@@ -19,6 +19,8 @@
  *   Core.pages.{inventory,pets,crystals,stats,pvp,quests,battlePass,dungeons,define}
  *   Core.cookies.withMode · Core.player.id() · Core.state · Core.store · Core.on/once/emit
  *   Core.dom.{watch,when,ready} · Core.ui.{toast,modal,menu,h,btn,css}
+ *   Core.me.get() (stamina, gold, gems, level, exp, server clock) · Core.clock (server time zone: weekday, is('mon'), isAfter('14:30'), at(...))
+ *   Core.compact(n) -> "3.3B" · Core.parseNum("3.3B") -> 3300000000
  * Full reference with examples: REFERENCE.md in the repo.
  * ========================================================================== */
 (function (root) {
@@ -43,13 +45,32 @@
   const debounce = (fn, ms) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
   const fmt = (n) => Number(n || 0).toLocaleString();
   const int = (s) => parseInt(String(s ?? '').replace(/[^\d-]/g, ''), 10) || 0;
-  function compact(n) {
+  // Short number: 3303348038 -> "3.3B", 3100000 -> "3.1M", 12345 -> "12.3K". Max 3 significant digits
+  // (2 decimals under 10, 1 under 100, none from 100), trailing zeros dropped, K/M/B/T.
+  //   o.min  smallest size that gets abbreviated (default 1e3). Below it you get the plain rounded number with
+  //          thousands separators, e.g. compact(2279, { min: 1e6 }) -> "2,279".
+  // Rounding that reaches the next unit moves up to it: 999950 -> "1M" (not "1000K").
+  const SUFFIXES = [[1e12, 'T'], [1e9, 'B'], [1e6, 'M'], [1e3, 'K']];
+  function compact(n, o) {
     n = Number(n) || 0;
-    const a = Math.abs(n);
-    for (const [lim, s] of [[1e12, 'T'], [1e9, 'B'], [1e6, 'M'], [1e3, 'K']]) {
-      if (a >= lim) return (n / lim).toFixed(a / lim >= 100 ? 0 : a / lim >= 10 ? 1 : 2).replace(/\.?0+$/, '') + s;
+    if (!isFinite(n)) return String(n);
+    const a = Math.abs(n), min = o && o.min != null ? o.min : 1e3;
+    if (a < 1e3 || a < min) return Math.round(n).toLocaleString();
+    const scale = (lim) => { const v = a / lim; return Number(v.toFixed(v >= 100 ? 0 : v >= 10 ? 1 : 2)); };
+    for (let i = 0; i < SUFFIXES.length; i++) {
+      if (a < SUFFIXES[i][0]) continue;
+      let r = scale(SUFFIXES[i][0]), s = SUFFIXES[i][1];
+      if (r >= 1000 && i > 0) { r = scale(SUFFIXES[i - 1][0]); s = SUFFIXES[i - 1][1]; }
+      return (n < 0 ? '-' : '') + r + s;
     }
     return String(Math.round(n));
+  }
+  // The reverse: "3303348.038K" -> 3303348038, "3.3B" -> 3300000000, "2,345" -> 2345. 0 when there is no number.
+  // A suffix only counts when it is not the start of a word ("5 bars" is 5, not 5B).
+  const PARSE_MULT = { K: 1e3, M: 1e6, B: 1e9, T: 1e12 };
+  function parseNum(x) {
+    const m = /(\d[\d.,]*|\.\d+)\s*([KMBT])?(?![A-Za-z])/i.exec(String(x ?? ''));
+    return m ? (Math.round(parseFloat(m[1].replace(/,/g, '')) * (PARSE_MULT[(m[2] || '').toUpperCase()] || 1)) || 0) : 0;
   }
   function parseJson(raw) {
     const t = String(raw ?? '').replace(/^\uFEFF/, '').trim();
@@ -954,31 +975,87 @@
 
   /* ---------------------------------------------------------------- me --- */
   // The player's own numbers, read once here so no addon re-implements it: stamina (+ regen and next tick),
-  // level, exp, gold, the server clock, and the player id. Source: the site's top bar (.gtb-inner). On pages
+  // level, exp, gold, gems, the server clock, and the player id. Source: the site's top bar (.gtb-inner). On pages
   // without that bar (event map, fetched documents) get() returns the last values seen, marked stale.
-  // Gems are deliberately not read.
+  //
+  // The bar is live. The site's own scripts tick #stamina_timer and #server_time every second, and add the hourly
+  // stamina to #stamina_span when the timer reaches 0 (the server already did it at HH:00:00). Core.dom.watch re-reads
+  // the bar after every DOM change, so get() and 'me:update' follow those updates with no polling of their own.
+  //
+  // Big gold / gems are shown in short form in the bar ("3303348.038K" -> "3.3B"; see shortenBar). The exact value
+  // is kept in data-core-raw and that is what get() returns, so shortening never costs precision. EXP, level and
+  // stamina are left exactly as the site draws them.
   const me = (() => {
     const saved = store('me', { def: {} });
+    const srvStore = store('server', { def: null, key: 'core:server' });   // server clock offset, shared by every player
+    const DEFAULT_TZ = 19800;        // the game's server is on India time (UTC+5:30) until a page says otherwise
     const nint = (x) => parseInt(String(x == null ? '' : x).replace(/[^\d-]/g, ''), 10) || 0;
-    const MULT = { K: 1e3, M: 1e6, B: 1e9, T: 1e12 };
-    const abbr = (x) => {            // "3746394.603K" -> 3746394603, "2,345" -> 2345
-      const m = /([\d.,]+)\s*([KMBT]?)/i.exec(String(x || ''));
-      return m ? (Math.round(parseFloat(m[1].replace(/,/g, '')) * (MULT[m[2].toUpperCase()] || 1)) || 0) : 0;
-    };
     const stat = (bar, label) => {
       const el = Array.from(bar.querySelectorAll('.gtb-stat')).find((e) => {
         const l = e.querySelector('.gtb-label'); return l && l.textContent.trim().toLowerCase() === label;
       });
       return el ? el.querySelector('.gtb-value') : null;
     };
-    let skew = null;                 // server clock minus this browser's clock, ms
-    const renderedAt = () => {       // when the server rendered this page, on the browser's clock (about)
+
+    // ---- short form for the big numbers in the bar ----
+    const SHORT_STATS = ['gold', 'gems'];
+    const SHORT_MIN = 1e6;           // under this the site's own text ("2.279K") is already short
+    function statNum(v) {            // exact value of a gold/gems element, whether or not we shortened it
+      const t = v.textContent.trim(), raw = v.getAttribute('data-core-raw');
+      return raw && v.getAttribute('data-core-short') === t ? +raw : parseNum(t);
+    }
+    function shortenBar(bar) {
+      SHORT_STATS.forEach((label) => {
+        const v = stat(bar, label);
+        if (!v) return;
+        const t = v.textContent.trim();
+        if (v.getAttribute('data-core-short') === t) return;             // still the text we wrote
+        const n = parseNum(t);
+        if (Math.abs(n) >= SHORT_MIN) {
+          const s = compact(n, { min: SHORT_MIN });
+          v.setAttribute('data-core-raw', String(n)); v.setAttribute('data-core-short', s);
+          v.title = n.toLocaleString();                                   // hover for the exact number
+          v.textContent = s;
+        } else if (v.hasAttribute('data-core-short')) {                  // the site rewrote it to something small
+          v.removeAttribute('data-core-raw'); v.removeAttribute('data-core-short'); v.removeAttribute('title');
+        }
+      });
+    }
+
+    // ---- server clock ----
+    // The page's #server_time holds data-epoch (server seconds at the moment it rendered the page) and data-tzoff
+    // (seconds east of UTC). skew = server clock minus this browser's clock, measured once per page and remembered
+    // (core:server) so pages without a top bar still know the server's time. The site's own text clock only counts
+    // seconds from that epoch (and stalls in background tabs), so Core never reads the displayed text.
+    let srv = null;                  // { tzoff, skew, known } measured on THIS page
+    let fb = null, fbAt = 0;         // last remembered value, re-read at most every 5 s
+    const renderedAt = () => {       // when the server rendered this page, on the browser's clock (about); null = can't tell
       try {
         const n = performance.getEntriesByType('navigation')[0];
-        if (n && n.responseStart > 0 && performance.now() < 20000) return performance.timeOrigin + n.responseStart;
+        // A back/forward load can come straight from cache with an old epoch, and a page that has been open a while
+        // is too late to measure from: neither tells us anything about the clock.
+        if (n && n.responseStart > 0 && n.type !== 'back_forward' && performance.now() < 20000) return performance.timeOrigin + n.responseStart;
       } catch (_) { /* fall through */ }
-      return Date.now();
+      return null;
     };
+    function measure(st) {
+      const prior = srvStore.get(), at = renderedAt(), attr = st.getAttribute('data-tzoff');
+      const tzoff = attr != null && attr !== '' && isFinite(+attr) ? +attr : (prior && prior.tzoff != null ? prior.tzoff : DEFAULT_TZ);
+      const epochMs = (+st.getAttribute('data-epoch')) * 1000;
+      let skew;
+      if (at != null) skew = epochMs - at;
+      else if (prior && isFinite(prior.skew)) skew = prior.skew;         // old/cached page: its epoch is stale, trust the last good measurement
+      else skew = epochMs - Date.now();                                  // nothing better: assume the page is fresh
+      if (at != null || !prior) srvStore.set({ tzoff, skew, ts: Date.now() });
+      return { tzoff, skew, known: true };
+    }
+    // { tzoff, skew, known }. known:false = never seen a top bar, so this is the India-time default with no skew.
+    function server() {
+      if (srv) return Object.assign({}, srv);
+      const t = Date.now();
+      if (t - fbAt > 5000) { fbAt = t; fb = srvStore.get() || (saved.get() || {}).server || null; }
+      return fb && isFinite(fb.skew) ? { tzoff: fb.tzoff == null ? DEFAULT_TZ : fb.tzoff, skew: fb.skew, known: true } : { tzoff: DEFAULT_TZ, skew: 0, known: false };
+    }
 
     function readBar() {
       const bar = document.querySelector('.gtb-inner');
@@ -993,7 +1070,8 @@
         const secs = t ? (t[3] != null ? (+t[1]) * 3600 + (+t[2]) * 60 + (+t[3]) : (+t[1]) * 60 + (+t[2])) : null;
         out.stamina = { cur: nint(sp.textContent), max: mm ? nint(mm[2]) : 0, regen: regen ? nint(regen[1]) : 0, nextTickAt: secs == null ? 0 : Date.now() + secs * 1000 };
       }
-      const g = stat(bar, 'gold'); if (g) out.gold = abbr(g.textContent);
+      const g = stat(bar, 'gold'); if (g) out.gold = statNum(g);
+      const gm = stat(bar, 'gems'); if (gm) out.gems = statNum(gm);
       const lv = bar.querySelector('.gtb-level'); if (lv) out.level = nint(lv.textContent);
       const who = player.info(); if (who.name) out.name = who.name; if (who.avatar) out.avatar = who.avatar;
       const ex = bar.querySelector('.gtb-exp-top');
@@ -1003,17 +1081,17 @@
         if (mm) out.exp = { cur: nint(mm[1]), max: nint(mm[2]), pct: w ? parseFloat(w[1]) : (nint(mm[2]) ? Math.round(nint(mm[1]) / nint(mm[2]) * 1000) / 10 : 0) };
       }
       const st = bar.querySelector('#server_time');
-      if (st && st.getAttribute('data-epoch')) {
-        if (skew === null) skew = (+st.getAttribute('data-epoch')) * 1000 - renderedAt();
-        out.server = { tzoff: +(st.getAttribute('data-tzoff') || 0), skew };
-      }
+      if (st && st.getAttribute('data-epoch')) { if (!srv) srv = measure(st); out.server = Object.assign({}, srv); }
       return out;
     }
 
     // Change detector: ignores the ticking timer/clock so 'me:update' only fires when a real value moved.
-    const sigOf = (v) => JSON.stringify([v.stamina && [v.stamina.cur, v.stamina.max, v.stamina.regen], v.gold, v.level, v.exp && [v.exp.cur, v.exp.max]]);
+    const sigOf = (v) => JSON.stringify([v.stamina && [v.stamina.cur, v.stamina.max, v.stamina.regen], v.gold, v.gems, v.level, v.exp && [v.exp.cur, v.exp.max]]);
     let lastSig = '', lastSave = 0;
     function refresh() {
+      const bar = document.querySelector('.gtb-inner');
+      if (!bar) return null;
+      shortenBar(bar);
       const live = readBar();
       if (!live) return null;
       const sig = sigOf(live), changed = sig !== lastSig;
@@ -1023,9 +1101,9 @@
     }
     function get() {
       const live = readBar();
-      if (live) return Object.assign({ stale: false, ageMs: 0, ts: Date.now() }, live);
+      if (live) return Object.assign({ stale: false, ageMs: 0, ts: Date.now() }, live, { server: live.server || server() });
       const c = saved.get() || {};
-      return Object.assign({ pid: player.id() }, c, { stale: true, ageMs: c.ts ? Date.now() - c.ts : null });
+      return Object.assign({ pid: player.id() }, c, { server: server(), stale: true, ageMs: c.ts ? Date.now() - c.ts : null });
     }
     // Stamina now. When the numbers are old (stale snapshot) this adds the hourly regen that must have happened since.
     function staminaEstimate(now = Date.now()) {
@@ -1035,13 +1113,172 @@
       return Math.min(s.max || Infinity, s.cur + (Math.floor((now - s.nextTickAt) / 3600000) + 1) * s.regen);
     }
     // The server's clock (ms since epoch). Uses the offset measured on the last page that had the top bar.
-    function serverNow() { const sv = get().server; return Date.now() + (sv ? sv.skew : 0); }
+    function serverNow() { return Date.now() + server().skew; }
     // Seconds until the next top of the hour on the SERVER's local clock (when stamina ticks).
-    function secondsToTick(now = serverNow()) { const tz = (get().server || {}).tzoff || 0; return 3600 - (Math.floor(now / 1000) + tz) % 3600; }
+    function secondsToTick(now = serverNow()) { return 3600 - (Math.floor(now / 1000) + server().tzoff) % 3600; }
     const watch = (cb) => on('me:update', cb);
     dom.watch(refresh);
-    return { get, refresh, staminaEstimate, serverNow, secondsToTick, watch };
+    return { get, refresh, staminaEstimate, serverNow, secondsToTick, server, watch };
   })();
+
+  /* ------------------------------------------------------------- clock --- */
+  // The game's clock, on the SERVER's time zone (India, UTC+5:30, no daylight saving), not the player's. The game's
+  // "Monday" starts at 00:00 there, and stamina ticks on its hour, so "only on Mondays" or "after 14:30" has to be
+  // asked of THIS clock. It also puts the weekday next to the time in the top bar ("🕒 Server Thu 4:10:43 AM").
+  //
+  //   Core.clock.now()                 server time as epoch ms (same scale as Date.now(); only the offset is measured)
+  //   Core.clock.parts(ms?)            { year, month 1-12, date, hour, minute, second, dow, isoDow, dayName, dayShort,
+  //                                      secOfDay, ymd 'YYYY-MM-DD', hms 'HH:MM:SS', iso '...+05:30', offset '+05:30',
+  //                                      tzoff (seconds), epoch, known }     dow: 0 = Sunday .. 6 = Saturday (JS getDay)
+  //                                                                          isoDow: 1 = Monday .. 7 = Sunday
+  //   Core.clock.dow() · isoDow() · dayName(short?)     today's weekday as a number / name
+  //   Core.clock.dayIndex(d)           'mon' | 'Monday' | 1 -> 1 (0 and 7 both mean Sunday); -1 if it isn't a day
+  //   Core.clock.is('mon') · is('sat', 'sun') · is(['sat', 'sun'])      is it one of these days (server time)
+  //   Core.clock.isAfter('14:30', day?) · isBefore('18:00', day?)      time of day, 'HH:MM[:SS]' or '2:30 pm'; day optional
+  //   Core.clock.between('09:00', '17:00')                             may wrap midnight: between('22:00', '02:00')
+  //   Core.clock.matches({ day, after, before })   all given parts must hold: matches({ day: ['sat', 'sun'], after: '14:00' })
+  //   Core.clock.when(spec, fn)        runs fn(parts) only if matches(spec); returns whether it ran
+  //   Core.clock.next(day, time, from?) -> epoch ms of the next time it is that day + time (day null/'*' = any day)
+  //   Core.clock.until(day, time)      ms from now to that moment
+  //   Core.clock.at(day, time, fn, { repeat = true, grace = 300000 }) -> cancel()   call fn(parts) at that moment, every
+  //                                    week (or every day when day is null). A moment missed by more than `grace` ms
+  //                                    (computer asleep, tab frozen) is skipped.
+  //   Core.clock.onDay(cb) · onTick(cb) -> unsubscribe   server date rolled over / every second; also on the bus as
+  //                                    'clock:day' and 'clock:tick' once either is subscribed.
+  //   Core.clock.known                 false until a page with the top bar has been seen (then it is the India default)
+  const clock = (() => {
+    const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+    const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const DAY_MS = 864e5;
+    const p2 = (n) => (n < 10 ? '0' : '') + n;
+
+    function dayIndex(d) {
+      if (typeof d === 'number') return Number.isInteger(d) && d >= 0 && d <= 7 ? d % 7 : -1;
+      const s = String(d == null ? '' : d).trim().toLowerCase();
+      if (/^\d$/.test(s)) return dayIndex(+s);
+      return s.length >= 3 ? DAYS.findIndex((n) => n.toLowerCase().startsWith(s)) : -1;
+    }
+    function dayList(args) {
+      const out = [];
+      [].concat(args).flat(Infinity).forEach((d) => { const i = dayIndex(d); if (i < 0) warn('clock: "' + d + '" is not a day of the week'); else out.push(i); });
+      return out;
+    }
+    function timeSecs(t) {                 // 'HH:MM', 'HH:MM:SS', '2:30 pm', or seconds since midnight -> seconds, -1 if invalid
+      if (typeof t === 'number') return t >= 0 && t < 86400 ? Math.floor(t) : -1;
+      const m = /^\s*(\d{1,2}):(\d{2})(?::(\d{2}))?\s*([ap]m)?\s*$/i.exec(String(t == null ? '' : t));
+      if (!m) { warn('clock: "' + t + '" is not a time (use HH:MM)'); return -1; }
+      let h = +m[1]; const mi = +m[2], s = +(m[3] || 0), ap = (m[4] || '').toLowerCase();
+      if (ap) { if (h < 1 || h > 12) return -1; h = (h % 12) + (ap === 'pm' ? 12 : 0); }
+      return h > 23 || mi > 59 || s > 59 ? -1 : h * 3600 + mi * 60 + s;
+    }
+
+    const now = () => Date.now() + me.server().skew;
+    function parts(ms) {
+      const sv = me.server(), t = ms == null ? Date.now() + sv.skew : +ms;
+      const d = new Date(t + sv.tzoff * 1000);                 // shifted, so the UTC getters read the SERVER's wall clock
+      const dow = d.getUTCDay(), hour = d.getUTCHours(), minute = d.getUTCMinutes(), second = d.getUTCSeconds();
+      const year = d.getUTCFullYear(), month = d.getUTCMonth() + 1, date = d.getUTCDate();
+      const a = Math.abs(sv.tzoff), offset = (sv.tzoff < 0 ? '-' : '+') + p2(Math.floor(a / 3600)) + ':' + p2(Math.floor((a % 3600) / 60));
+      const ymd = year + '-' + p2(month) + '-' + p2(date), hms = p2(hour) + ':' + p2(minute) + ':' + p2(second);
+      return {
+        epoch: t, tzoff: sv.tzoff, offset, known: sv.known,
+        year, month, date, hour, minute, second,
+        dow, isoDow: dow || 7, dayName: DAYS[dow], dayShort: DAYS[dow].slice(0, 3),
+        secOfDay: hour * 3600 + minute * 60 + second, ymd, hms, iso: ymd + 'T' + hms + offset,
+      };
+    }
+
+    const dow = () => parts().dow;
+    const isoDow = () => parts().isoDow;
+    const dayName = (short) => (short ? parts().dayShort : parts().dayName);
+    const is = (...days) => dayList(days).includes(parts().dow);
+    function isAfter(time, day) {
+      const s = timeSecs(time); if (s < 0) return false;
+      const p = parts(); return (day == null || dayList([day]).includes(p.dow)) && p.secOfDay >= s;
+    }
+    function isBefore(time, day) {
+      const s = timeSecs(time); if (s < 0) return false;
+      const p = parts(); return (day == null || dayList([day]).includes(p.dow)) && p.secOfDay < s;
+    }
+    function between(from, to) {
+      const a = timeSecs(from), b = timeSecs(to); if (a < 0 || b < 0) return false;
+      const s = parts().secOfDay; return a <= b ? s >= a && s < b : s >= a || s < b;
+    }
+    function matches(spec) {
+      if (spec == null) return true;
+      if (typeof spec !== 'object' || Array.isArray(spec)) spec = { day: spec };
+      const p = parts();
+      if (spec.day != null && !dayList([spec.day]).includes(p.dow)) return false;
+      if (spec.after != null) { const s = timeSecs(spec.after); if (s < 0 || p.secOfDay < s) return false; }
+      if (spec.before != null) { const s = timeSecs(spec.before); if (s < 0 || p.secOfDay >= s) return false; }
+      return true;
+    }
+    function when(spec, fn) { if (!matches(spec)) return false; fn(parts()); return true; }
+
+    // Next moment (epoch ms) at or after `from` (default now) that is one of `day` at `time`. Null if the arguments are invalid.
+    function next(day, time, from) {
+      const secs = time == null ? 0 : timeSecs(time); if (secs < 0) return null;
+      const set = day == null || day === '*' ? null : dayList([day]);
+      if (set && !set.length) return null;
+      const off = me.server().tzoff * 1000, f = (from == null ? now() : +from) + off;   // server wall clock, as if it were UTC
+      const midnight = f - (((f % DAY_MS) + DAY_MS) % DAY_MS);
+      for (let k = 0; k < 8; k++) {
+        const t = midnight + k * DAY_MS + secs * 1000;
+        if (t >= f && (!set || set.includes(new Date(t).getUTCDay()))) return t - off;
+      }
+      return null;
+    }
+    const until = (day, time) => { const t = next(day, time); return t == null ? null : Math.max(0, t - now()); };
+
+    // One shared 1 s ticker, started by the first at / onDay / onTick. Jobs compare against the clock instead of
+    // using one long setTimeout, so a sleeping computer or a throttled background tab can't make them drift.
+    const jobs = new Set();
+    let timer = null, lastYmd = null;
+    function tick() {
+      const t = now();
+      jobs.forEach((j) => {
+        if (t < j.target) return;
+        const late = t - j.target;
+        if (j.repeat) j.target = next(j.day, j.time, Math.max(t, j.target) + 1000); else jobs.delete(j);
+        if (late <= j.grace) { try { j.fn(parts(t)); } catch (e) { warn('clock.at callback threw', e); } }
+      });
+      const p = parts(t);
+      if (lastYmd !== null && p.ymd !== lastYmd) emit('clock:day', p);
+      lastYmd = p.ymd;
+      emit('clock:tick', p);
+    }
+    const ensureTicker = () => { if (!timer) { lastYmd = parts().ymd; timer = setInterval(tick, 1000); } };
+    function at(day, time, fn, o = {}) {
+      const target = next(day, time);
+      if (target == null || typeof fn !== 'function') return () => {};
+      const job = { day, time, fn, target, repeat: o.repeat !== false, grace: o.grace == null ? 300000 : o.grace };
+      jobs.add(job); ensureTicker();
+      return () => jobs.delete(job);
+    }
+    const onDay = (cb) => { ensureTicker(); return on('clock:day', cb); };
+    const onTick = (cb) => { ensureTicker(); return on('clock:tick', cb); };
+
+    // The weekday beside the server time in the top bar. It is its own element: the site's script rewrites the
+    // text of #server_time every second, so anything put inside it would be erased. Idempotent (dom.watch).
+    ui.css('clock', '.gtb-day{font-weight:700;color:#ffd166;margin-right:4px}'
+      + '.gtb-stat.time-chip .gtb-label{display:none}');   // the 🕒 already says "server"; frees room for the weekday and the buttons beside the level
+    function paintDay() {
+      const st = document.getElementById('server_time'), chip = st && st.closest('.gtb-stat');
+      if (!chip) return;
+      let el = chip.querySelector('.gtb-day');
+      if (!el) { el = h('span', { class: 'gtb-day' }); st.before(el); }
+      const p = parts(), tip = p.dayName + ', ' + p.date + ' ' + MONTHS[p.month - 1] + ' ' + p.year + ' · server time (UTC' + p.offset + ')';
+      if (el.textContent !== p.dayShort) el.textContent = p.dayShort;
+      if (el.title !== tip) el.title = tip;
+    }
+    dom.watch(paintDay);
+
+    return {
+      now, parts, dow, isoDow, dayName, dayIndex, is, isAfter, isBefore, between, matches, when, next, until, at, onDay, onTick,
+      get known() { return me.server().known; },
+    };
+  })();
+
 
   /* -------------------------------------------------------------- csrf --- */
   // One registry for the site's CSRF tokens, so a later site change that adds a token to more endpoints is one
@@ -1160,22 +1397,35 @@
   //   audio  a near-silent 20 Hz oscillator (spares "recently audible" tabs). Needs the browser's autoplay
   //          permission: it retries resume() every 15 s and on any click/keypress in the tab.
   //   Core.keepAlive.start({ lock, rtc, audio })   all default true  -> Promise<status>
-  //   Core.keepAlive.stop() · status() -> { lock:bool, rtc:'open'|'connecting'|'closed'|'off', audio:'running'|'suspended'|'off' }
+  //   Core.keepAlive.stop() · status() -> { on:bool, lock:bool, rtc:'open'|'connecting'|'closed'|'off', audio:'running'|'suspended'|'off' }
   //   startLock/stopLock · startRtc/stopRtc · startAudio/stopAudio   each signal on its own
+  //   Core.keepAlive.on() -> bool: has it been asked to run in this tab (whatever the signals are doing right now)
+  //   Core.on('keepalive:change', status => ...)   fires on every real change of status() / on(), whoever caused it
+  //                                    (a button, an addon, Core.tab). status() also carries `on`. Per tab, not shared.
   // Only start it in the tab that really works in the background; every call is idempotent.
   const keepAlive = (() => {
     const LOCK = 'core_keepalive:' + TAB;       // per-tab name so a 2nd tab is never queued behind the 1st
     let wantLock = false, lockOn = false, wantRtc = false, rtc = null, rtcTimer = null, audio = null, resumeTimer = null, gesture = null;
 
+    // Tell listeners when something visible changed (deduped, so it is safe to call after every step).
+    let lastSig = '';
+    const wanted = () => wantLock || wantRtc || !!audio;
+    function notify() {
+      const st = status(), sig = JSON.stringify(st);
+      if (sig === lastSig) return;
+      lastSig = sig; emit('keepalive:change', st);
+    }
+
     let lockP = null;
     function startLock() {
       wantLock = true;
+      notify();
       if (lockOn) return Promise.resolve(true);
       if (lockP) return lockP;                                   // a request is already in flight
-      lockP = lock.hold(LOCK, {}).then((ok) => { lockP = null; if (ok && !wantLock) { lock.release(LOCK); return false; } lockOn = ok; return ok; });
+      lockP = lock.hold(LOCK, {}).then((ok) => { lockP = null; if (ok && !wantLock) { lock.release(LOCK); notify(); return false; } lockOn = ok; notify(); return ok; });
       return lockP;
     }
-    function stopLock() { wantLock = false; lockOn = false; lock.release(LOCK); }
+    function stopLock() { wantLock = false; lockOn = false; lock.release(LOCK); notify(); }
 
     function startRtc() {
       wantRtc = true;
@@ -1186,8 +1436,10 @@
         pc2.onicecandidate = (e) => { if (e.candidate) pc1.addIceCandidate(e.candidate).catch(() => {}); };
         const channel = pc1.createDataChannel('core-keepalive');
         // If it ever drops (e.g. after a long freeze/resume), reopen it rather than silently losing the exemption.
-        channel.onclose = () => { if (rtc && rtc.channel === channel) { rtc = null; if (wantRtc) { clearTimeout(rtcTimer); rtcTimer = setTimeout(startRtc, 1000); } } };
+        channel.onclose = () => { if (rtc && rtc.channel === channel) { rtc = null; if (wantRtc) { clearTimeout(rtcTimer); rtcTimer = setTimeout(startRtc, 1000); } } notify(); };
+        channel.onopen = notify;
         rtc = { pc1, pc2, channel };
+        notify();
         pc1.createOffer().then((o) => pc1.setLocalDescription(o))
           .then(() => pc2.setRemoteDescription(pc1.localDescription))
           .then(() => pc2.createAnswer()).then((a) => pc2.setLocalDescription(a))
@@ -1198,6 +1450,7 @@
     function stopRtc() {
       wantRtc = false; clearTimeout(rtcTimer);
       if (rtc) { try { rtc.channel.onclose = null; rtc.pc1.close(); rtc.pc2.close(); } catch (_) { /* */ } rtc = null; }
+      notify();
     }
 
     const tryResume = () => { if (audio && audio.ctx.state === 'suspended') audio.ctx.resume().catch(() => {}); };
@@ -1210,7 +1463,9 @@
         gain.gain.value = 0.001; osc.frequency.value = 20;
         osc.connect(gain).connect(ctx.destination); osc.start();
         audio = { ctx, osc };
+        ctx.onstatechange = notify;
         tryResume();
+        notify();
         gesture = tryResume;
         document.addEventListener('click', gesture, true); document.addEventListener('keydown', gesture, true);
         resumeTimer = setInterval(tryResume, 15000);
@@ -1219,10 +1474,11 @@
     function stopAudio() {
       clearInterval(resumeTimer); resumeTimer = null;
       if (gesture) { document.removeEventListener('click', gesture, true); document.removeEventListener('keydown', gesture, true); gesture = null; }
-      if (audio) { try { audio.osc.stop(); audio.ctx.close(); } catch (_) { /* */ } audio = null; }
+      if (audio) { try { audio.ctx.onstatechange = null; audio.osc.stop(); audio.ctx.close(); } catch (_) { /* */ } audio = null; }
+      notify();
     }
 
-    const status = () => ({ lock: lockOn, rtc: rtc ? rtc.channel.readyState : 'off', audio: audio ? audio.ctx.state : 'off' });
+    const status = () => ({ on: wanted(), lock: lockOn, rtc: rtc ? rtc.channel.readyState : 'off', audio: audio ? audio.ctx.state : 'off' });
     async function start(o = {}) {
       if (o.audio !== false) startAudio();
       if (o.rtc !== false) startRtc();
@@ -1230,7 +1486,7 @@
       return status();
     }
     function stop() { stopLock(); stopRtc(); stopAudio(); }
-    return { start, stop, status, startLock, stopLock, startRtc, stopRtc, startAudio, stopAudio };
+    return { start, stop, status, on: wanted, startLock, stopLock, startRtc, stopRtc, startAudio, stopAudio };
   })();
 
   /* --------------------------------------------------------------- tab --- */
@@ -1328,11 +1584,11 @@
 
   /* ------------------------------------------------------------ export --- */
   const Core = {
-    __isCore: true, apiLevel: API, version: '3.9.1', debug: false, tabId: TAB,
-    esc, sleep, debounce, fmt, int, compact, parseJson,
+    __isCore: true, apiLevel: API, version: '3.11.0', debug: false, tabId: TAB,
+    esc, sleep, debounce, fmt, int, compact, parseNum, parseJson,
     on, off, once, emit,
     state, store, player,
-    net, pages, dom, cookies, ui, me, csrf, lock, keepAlive, tab,
+    net, pages, dom, cookies, ui, me, clock, csrf, lock, keepAlive, tab,
     module: module_, use, get, status,
     float, addons: { list: entries, add: addCustom, remove: removeCustom, enable: setEnabled, status: rt, reload: startOne },
   };
