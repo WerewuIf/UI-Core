@@ -6,6 +6,8 @@
  * - Accounts live in ONE localStorage key (core:accountSwitcher), NOT per player: switching changes the player id.
  * - "Active" is the account whose player id matches the page you are on. The id is learned right after a switch
  *   (or by ticking "I'm signed in as this account" when adding one).
+ * - The Add dialog detects the player you are signed in as right now (Core.player.info: name, level, profile picture),
+ *   fills in the alias, and keeps whatever you typed if you cancel (in memory only, until the page reloads).
  * - The site's login form is described in CFG below. Change it there if the site changes its form.
  *
  * SECURITY: passwords are stored in plain text in this browser's localStorage, the same storage the game's own
@@ -34,6 +36,8 @@ const colorOf = (seed) => { let n = 0; for (const ch of String(seed)) n = (n * 3
 const initialOf = (a) => ((a.alias || a.username || '?').trim()[0] || '?').toUpperCase();
 const livePid = () => { const p = Core.player.id(); return p && p !== 'default' ? String(p) : null; };
 const isActive = (a) => !!a.pid && a.pid === livePid();
+// Name / level / avatar of the signed-in player (Core 3.9+; older Core only knows the id).
+const who = () => (Core.player.info ? Core.player.info() : { id: livePid(), name: null, level: null, avatar: null });
 
 // A switch ends in a page reload. On that next load, remember which player id the account turned out to be.
 // (If the id is unchanged we can't tell a stale id from the same account, so nothing is learned.)
@@ -44,6 +48,18 @@ const isActive = (a) => !!a.pid && a.pid === livePid();
     const a = d.accounts.find((x) => x.id === p.id);
     if (a && pid !== p.prevPid) a.pid = pid;
     d.pending = null;
+  });
+})();
+
+// Keep the active account's picture and level fresh.
+(function syncIdentity() {
+  const w = who(), pid = livePid();
+  const a = pid && db.get().accounts.find((x) => x.pid === pid);
+  if (!a || !((w.avatar && a.avatar !== w.avatar) || (w.level && a.level !== w.level))) return;
+  db.update((d) => {
+    const t = d.accounts.find((x) => x.pid === pid);
+    if (w.avatar) t.avatar = w.avatar;
+    if (w.level) t.level = w.level;
   });
 })();
 
@@ -66,8 +82,9 @@ Core.ui.css(ID, `
   .as-card.active{ border-color:rgba(51,181,127,.55); background:linear-gradient(180deg,#132a22,#11192d 70%); }
 
   .as-card-top{ display:flex; justify-content:space-between; align-items:flex-start; }
-  .as-avatar{ width:44px; height:44px; border-radius:14px; flex-shrink:0; display:flex; align-items:center; justify-content:center;
+  .as-avatar{ width:44px; height:44px; border-radius:14px; flex-shrink:0; display:flex; align-items:center; justify-content:center; overflow:hidden;
     font:800 18px Arial,sans-serif; color:#fff; box-shadow:inset 0 0 0 1px rgba(255,255,255,.2), 0 4px 10px rgba(0,0,0,.35); }
+  .as-avatar img{ width:100%; height:100%; object-fit:cover; display:block; }
   .as-avatar.big{ width:64px; height:64px; border-radius:20px; font-size:26px; }
   .as-more{ background:none; border:none; color:#7f8ab8; font:800 18px/1 Arial,sans-serif; cursor:pointer;
     width:28px; height:28px; border-radius:9px; opacity:0; transition:opacity .15s ease, background .15s ease; }
@@ -79,7 +96,9 @@ Core.ui.css(ID, `
   .as-card-text{ flex:1 1 auto; min-width:0; }
   .as-alias{ font:800 14px Arial,sans-serif; color:#eef3ff; overflow-wrap:anywhere; }
   .as-user{ font-size:12px; color:#9caad0; margin-top:3px; overflow-wrap:anywhere; word-break:break-all; }
-  .as-card-foot{ border-top:1px solid rgba(255,255,255,.06); padding-top:9px; font:700 12px Arial,sans-serif; }
+  .as-card-foot{ border-top:1px solid rgba(255,255,255,.06); padding-top:9px; font:700 12px Arial,sans-serif;
+    display:flex; justify-content:space-between; align-items:center; gap:8px; }
+  .as-lv{ color:#9caad0; font:700 11px Arial,sans-serif; }
   .as-go{ display:inline-block; color:#8fa0ff; transition:transform .15s ease, color .15s ease; }
   .as-card:hover .as-go{ transform:translateX(3px); color:#b7c3ff; }
   .as-live{ color:#8ee6a8; }
@@ -89,9 +108,16 @@ Core.ui.css(ID, `
   .as-form-head .as-avatar{ width:56px; height:56px; border-radius:18px; font-size:22px; }
   .as-form-sub{ color:#9caad0; font-size:12px; margin-top:3px; }
   .as-field label{ display:block; font:700 11px Arial,sans-serif; color:#9caad0; margin-bottom:6px; letter-spacing:.02em; }
-  .as-field .core-input{ width:100%; }
+  /* The site styles every input[type=text] (background, border, padding). Flipping the password field to
+     type=text for "show" made it pick that up and jump, so these rules out-rank it (element + 2 classes). */
+  .as-form input.core-input, .as-form textarea.core-input{ width:100%; box-sizing:border-box; border:1px solid #2b3859;
+    border-radius:10px; background:#0d1322; color:#eef3ff; padding:8px 10px; font:13px Arial,sans-serif; outline:none; }
+  .as-form input.core-input:focus, .as-form textarea.core-input:focus{ border-color:#4b6dd0; }
+  .as-form textarea.as-ta{ font:12px/1.5 monospace; }
   .as-pass{ position:relative; }
-  .as-pass .core-input{ padding-right:42px; }
+  .as-form .as-pass input.core-input{ padding-right:42px; }
+  .as-pass input::-ms-reveal, .as-pass input::-ms-clear{ display:none; }
+  .as-link{ background:none; border:none; padding:0; margin-left:6px; color:#8fa0ff; font:700 12px Arial,sans-serif; cursor:pointer; text-decoration:underline; }
   .as-eye{ position:absolute; right:5px; top:50%; transform:translateY(-50%); background:none; border:none; cursor:pointer;
     font-size:15px; width:30px; height:30px; border-radius:8px; opacity:.7; }
   .as-eye:hover{ opacity:1; background:rgba(255,255,255,.08); }
@@ -109,9 +135,17 @@ Core.ui.css(ID, `
 `);
 
 /* --------------------------------------------------------------- helpers --- */
-function avatar(acc, big) {
-  const el = h('div', { class: 'as-avatar' + (big ? ' big' : '') }, initialOf(acc));
+// The profile picture when we have one (falls back to the coloured initial if it fails to load).
+function fillAvatar(el, acc) {
   el.style.background = colorOf(acc.alias || acc.username || acc.id || '?');
+  el.replaceChildren(initialOf(acc));
+  if (!acc.avatar) return;
+  const img = h('img', { src: acc.avatar, alt: '', onerror: () => { img.remove(); el.textContent = initialOf(acc); } });
+  el.replaceChildren(img);
+}
+function avatar(acc, big) {
+  const el = h('div', { class: 'as-avatar' + (big ? ' big' : '') });
+  fillAvatar(el, acc);
   return el;
 }
 
@@ -187,78 +221,104 @@ function openSwitch(acc) {
 }
 
 /* ---------------------------------------------------------- add / edit ---- */
+// An unsaved "new account" form survives Cancel / ✕ / Esc / clicking outside (memory only: it holds a password,
+// so it is dropped on reload). It is cleared once the account is saved.
+let draft = null, editCtx = null;
+
 function openEdit(acc) {
   const isNew = !acc;
-  const m = Core.ui.modal({ id: 'as-edit', title: isNew ? 'Add account' : 'Edit account', width: 440 });
+  const m = Core.ui.modal({ id: 'as-edit', width: 440, onClose: () => { if (editCtx) { editCtx.stash(); editCtx = null; } } });
   m.setTitle(isNew ? 'Add account' : 'Edit account');
 
-  const alias = h('input', { class: 'core-input', placeholder: 'e.g. Main, Alt 1', value: acc ? acc.alias : '', maxlength: '40', autocomplete: 'off' });
-  const user = h('input', { class: 'core-input', placeholder: 'Email / username', value: acc ? acc.username : '', autocomplete: 'off' });
-  const pass = h('input', { class: 'core-input', type: 'password', placeholder: 'Password', value: acc ? acc.password : '', autocomplete: 'new-password' });
+  const w = who(), pid = livePid();
+  const unsaved = isNew && !!pid && !db.get().accounts.some((a) => a.pid === pid);   // you're signed in as someone not saved yet
+  const detected = unsaved && (w.name || w.avatar) ? w : null;
+  const d = isNew ? draft : null;
+
+  const mk = (props) => h('input', Object.assign({ class: 'core-input', autocomplete: 'off' }, props));
+  const alias = mk({ placeholder: 'e.g. Main, Alt 1', value: acc ? acc.alias : ((d && d.alias) || (detected && detected.name) || ''), maxlength: '40' });
+  const user = mk({ placeholder: 'Email / username', value: acc ? acc.username : (d ? d.user : '') });
+  const pass = mk({ type: 'password', placeholder: 'Password', value: acc ? acc.password : (d ? d.pass : ''), autocomplete: 'new-password' });
   const eye = h('button', { class: 'as-eye', type: 'button', title: 'Show / hide password', onclick: () => {
     pass.type = pass.type === 'password' ? 'text' : 'password';
     eye.textContent = pass.type === 'password' ? '👁' : '🙈';
   } }, '👁');
   const err = h('div', { class: 'core-err' });
 
-  // Only offered when the current player isn't already saved: lets "Active" work without a first switch.
-  const pid = livePid();
-  const here = isNew && pid && !db.get().accounts.some((a) => a.pid === pid)
-    ? h('input', { type: 'checkbox' }) : null;
+  // "I'm signed in as this account": ties the saved account to the current player (Active badge, picture, level).
+  const here = unsaved ? h('input', { type: 'checkbox' }) : null;
+  if (here) here.checked = d ? !!d.here : !!detected;
 
   const preview = h('div', { class: 'as-avatar' });
   const nameEl = h('div', { class: 'as-switch-title' });
   const paint = () => {
-    const seed = { alias: alias.value, username: user.value };
     nameEl.textContent = alias.value.trim() || user.value.trim() || (isNew ? 'New account' : 'Unnamed');
-    preview.textContent = initialOf(seed);
-    preview.style.background = colorOf(alias.value.trim() || user.value.trim() || '?');
+    fillAvatar(preview, { alias: alias.value.trim() || user.value.trim(), avatar: acc ? acc.avatar : (here && here.checked ? w.avatar : null) });
   };
   [alias, user].forEach((i) => i.addEventListener('input', paint));
+  if (here) here.addEventListener('change', paint);
   paint();
+
+  const sub = h('div', { class: 'as-form-sub' });
+  if (d) {
+    sub.append('Unsaved draft restored.', h('button', { class: 'as-link', type: 'button', onclick: () => {
+      draft = null;
+      alias.value = (detected && detected.name) || ''; user.value = ''; pass.value = ''; err.textContent = '';
+      if (here) here.checked = !!detected;
+      paint(); (alias.value ? user : alias).focus();
+    } }, 'Start over'));
+  } else if (detected) {
+    sub.textContent = 'Detected you: ' + (w.name || 'this player') + (w.level ? ' · LV ' + w.level : '') + '. Add the login below.';
+  } else sub.textContent = 'Saved in this browser only.';
 
   const field = (label, control) => h('div', { class: 'as-field' }, h('label', {}, label), control);
   const fail = (msg, el) => { err.textContent = msg; el.focus(); };
+
+  let done = false;
+  editCtx = { stash() {
+    if (!isNew || done) return;
+    draft = (alias.value || user.value || pass.value) ? { alias: alias.value, user: user.value, pass: pass.value, here: !!(here && here.checked) } : null;
+  } };
 
   const save = () => {
     const u = user.value.trim(), p = pass.value;
     if (!u) return fail('Enter the email / username.', user);
     if (!p) return fail('Enter the password.', pass);
     const a = alias.value.trim() || u;
-    db.update((d) => {
+    db.update((dd) => {
       if (isNew) {
         const n = { id: uid(), alias: a, username: u, password: p };
-        if (here && here.checked) n.pid = pid;
-        d.accounts.push(n);
+        if (here && here.checked) { n.pid = pid; if (w.avatar) n.avatar = w.avatar; if (w.level) n.level = w.level; }
+        dd.accounts.push(n);
       } else {
-        const t = d.accounts.find((x) => x.id === acc.id);
+        const t = dd.accounts.find((x) => x.id === acc.id);
         if (!t) return;
-        if (t.username !== u) delete t.pid;        // different login: the learned player id no longer applies
+        if (t.username !== u) { delete t.pid; delete t.avatar; delete t.level; }   // a different login: what we learned no longer applies
         Object.assign(t, { alias: a, username: u, password: p });
       }
     });
+    done = true; if (isNew) draft = null;
     m.close();
     Core.ui.toast(isNew ? 'Added "' + a + '".' : 'Saved "' + a + '".', true);
   };
   [alias, user, pass].forEach((i) => i.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); save(); } }));
 
   m.setBody(h('div', { class: 'as-form' },
-    h('div', { class: 'as-form-head' }, preview,
-      h('div', {}, nameEl, h('div', { class: 'as-form-sub' }, 'Saved in this browser only.'))),
+    h('div', { class: 'as-form-head' }, preview, h('div', {}, nameEl, sub)),
     field('Alias', alias),
     field('Email / username', user),
     field('Password', h('div', { class: 'as-pass' }, pass, eye)),
-    here ? h('label', { class: 'as-check' }, here, h('span', {}, 'I\'m signed in as this account right now (so it shows as Active)')) : null,
+    here ? h('label', { class: 'as-check' }, here, h('span', {}, 'I\'m signed in as this account right now (shows it as Active, with its picture)')) : null,
     err));
 
   m.setActions([
-    ...(isNew ? [] : [{ label: 'Delete', kind: 'danger', onClick: () => { m.close(); askDelete(acc); } }]),
+    ...(isNew ? [] : [{ label: 'Delete', kind: 'danger', onClick: () => { done = true; m.close(); askDelete(acc); } }]),
     { spacer: true },
     { label: 'Cancel', kind: 'soft', close: true },
     { label: isNew ? 'Add' : 'Save', kind: 'success', onClick: save },
   ]);
   m.open();
-  (isNew ? alias : user).focus();
+  (isNew && !alias.value ? alias : user).focus();
 }
 
 /* --------------------------------------------------------- import / export --- */
@@ -312,7 +372,8 @@ function accountCard(acc) {
   const card = h('div', active ? { class: 'as-card active' } : { class: 'as-card', role: 'button', tabindex: '0', title: 'Switch to ' + acc.alias },
     h('div', { class: 'as-card-top' }, avatar(acc), more),
     h('div', { class: 'as-card-text' }, h('div', { class: 'as-alias' }, acc.alias), h('div', { class: 'as-user' }, acc.username)),
-    h('div', { class: 'as-card-foot' }, active ? h('span', { class: 'as-live' }, '● Active') : h('span', { class: 'as-go' }, 'Switch →')));
+    h('div', { class: 'as-card-foot' }, active ? h('span', { class: 'as-live' }, '● Active') : h('span', { class: 'as-go' }, 'Switch →'),
+      acc.level ? h('span', { class: 'as-lv' }, 'LV ' + acc.level) : null));
   if (!active) {
     const pick = () => openSwitch(acc);
     card.addEventListener('click', pick);
