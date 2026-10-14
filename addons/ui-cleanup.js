@@ -1,7 +1,8 @@
 /* UI Cleanup — Core addon (migrated from the standalone userscript).
  * Loaded by core.user.js; `Core` is in scope. No @require / header needed.
  * Cookie helper + 3 toast copies removed (Core.cookies / Core.ui.toast); quest/battle-pass/PvP polls share Core.net cache.
- * Page scoping now lives in addons.json ("match"); the old @match list is mirrored there.
+ * Page scoping: v2.3 loads this addon on EVERY page (addons.json has no "match" for it any more) so MODULE 0 / 0b can put the Home
+ * button and the keep-alive pin in the top bar everywhere. Modules 1-5 each check their own page and return at once on any other.
  */
 
 /* =====================================================================
@@ -41,6 +42,117 @@
 
 /* Cross-tab-safe monster-cookie helper: now provided by Core (Core.cookies.withMode).
    window.__gsCookies is still defined by the core for any old script that checks it. */
+
+/* =====================================================================
+   MODULE 0: Top bar "Home" button — every page
+   Adds a 🏠 Home button to the game's top bar (.game-topbar > .gtb-inner > .gtb-right, in front of the level chip)
+   that goes straight to the User Dashboard. Unlike modules 1–5 this one is NOT scoped to a page: addons.json no
+   longer has a "match" for ui-cleanup, so the addon loads everywhere and modules 1–5 each check their own path.
+   - Skipped on game_dash.php itself (you are already home) and on pages without the top bar (it just waits for one).
+   - It lives in .gtb-right, not .gtb-left: on phones .gtb-left is a single packed row (stamina, gold, gems, clock,
+     buffs) with no room, while .gtb-right is [level][EXP bar] and the bar flexes to make room.
+   - It's a plain link, so middle-click / open in new tab work. Safe to re-add: the game or another addon may rebuild
+     the bar, so it is re-inserted if missing (idempotent).
+   ===================================================================== */
+(function () {
+  'use strict';
+  const HOME_URL = '/game_dash.php';
+  if (/\/game_dash\.php$/.test(location.pathname)) return;
+
+  Core.ui.css('ui-cleanup-home', `
+    .gtb-home-btn {
+      display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto;
+      background: #1e1e1e; border: 1px solid #2a2a2a; color: #fff !important;
+      border-radius: 10px; padding: 6px 10px; font-size: 12px; line-height: 1.2;
+      text-decoration: none !important; cursor: pointer; white-space: nowrap;
+    }
+    .gtb-home-btn:hover { background: #2a2a2a; border-color: #3a3a3a; }
+    .gtb-home-btn { padding: 6px 7px; }
+    /* two small buttons now sit in .gtb-right: tighter gaps keep the EXP numbers on one line at 1100px */
+    .gtb-right:has(.gtb-home-btn, .gtb-pin-btn) { gap: 7px; }
+    @media (max-width: 600px) { .gtb-home-btn { padding: 6px 8px; } .gtb-right:has(.gtb-home-btn, .gtb-pin-btn) { gap: 8px; } }
+  `);
+
+  Core.dom.watch(() => {
+    const bar = document.querySelector('.game-topbar .gtb-inner');
+    if (!bar) return;
+    const host = bar.querySelector('.gtb-right') || bar;
+    if (host.querySelector('.gtb-home-btn')) return;
+    // Icon only: with the weekday added to the clock chip there is no room for a text label on one line at 1100px.
+    const link = Core.ui.h('a', { class: 'gtb-home-btn', href: HOME_URL, title: 'Back to User Dashboard', 'aria-label': 'Back to User Dashboard' }, '🏠');
+    host.prepend(link);
+  });
+})();
+
+
+/* =====================================================================
+   MODULE 0b: Top bar keep-alive pin — every page (including game_dash.php)
+   A 📌 button in the top bar (.gtb-right, right after the Home button) that turns Core.keepAlive on/off for THIS tab
+   only, and always shows what keep-alive is really doing. It owns no state: it reads Core.keepAlive.status() and
+   re-reads it on every 'keepalive:change' event, so it follows anything else that starts or stops keep-alive
+   (an automation addon, Core.tab with keepAlive:true) as well as its own clicks.
+   - Not remembered: every reload starts with it off (browsers want a fresh click for audio anyway).
+   - Off = grey · On = green · On-but-incomplete = amber: the Web Lock is not held yet, or the browser is blocking the
+     silent audio. For blocked audio the first click is just the "user gesture" the browser needs (Core resumes the
+     audio on any click); if it is still blocked, the next click turns keep-alive off.
+   ===================================================================== */
+(function () {
+  'use strict';
+  if (!Core.keepAlive) return;
+
+  Core.ui.css('ui-cleanup-pin', `
+    .gtb-pin-btn {
+      display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto;
+      background: #1e1e1e; border: 1px solid #2a2a2a; color: #fff;
+      border-radius: 10px; padding: 6px 7px; font-size: 12px; line-height: 1.2; cursor: pointer;
+    }
+    @media (max-width: 600px) { .gtb-pin-btn { padding: 6px 8px; } }
+    .gtb-pin-btn .gtb-pin-ico { opacity: .45; filter: grayscale(1); transition: opacity .15s, filter .15s; }
+    .gtb-pin-btn:hover { background: #2a2a2a; }
+    .gtb-pin-btn[data-state="on"]   { background: #1f3a1f; border-color: #3b8a3b; }
+    .gtb-pin-btn[data-state="warn"] { background: #3a2e10; border-color: #b8860b; }
+    .gtb-pin-btn[data-state="on"] .gtb-pin-ico, .gtb-pin-btn[data-state="warn"] .gtb-pin-ico { opacity: 1; filter: none; }
+  `);
+
+  // 'off' | 'on' | 'warn' (+ the tooltip) from Core.keepAlive.status()
+  function view() {
+    const st = Core.keepAlive.status();
+    if (!st.on) return { state: 'off', title: 'Keep this tab alive: off \u2014 click to turn on (this tab only)' };
+    if (st.audio === 'suspended') return { state: 'warn', title: 'Keep-alive is on, but the browser is blocking the silent audio \u2014 click once to allow it' };
+    if (Core.lock.available() && !st.lock) return { state: 'warn', title: 'Keep-alive is starting\u2026' };
+    return { state: 'on', title: 'Keep-alive is ON for this tab \u2014 click to turn off' };
+  }
+  function paint() {
+    const b = document.querySelector('.gtb-pin-btn');
+    if (!b) return;
+    const v = view();
+    if (b.getAttribute('data-state') !== v.state) b.setAttribute('data-state', v.state);
+    b.setAttribute('aria-pressed', v.state === 'off' ? 'false' : 'true');
+    if (b.title !== v.title) { b.title = v.title; b.setAttribute('aria-label', v.title); }
+  }
+
+  let triedAudio = false;                      // a first click on an audio-blocked pin only counts as the gesture
+  function onClick() {
+    const st = Core.keepAlive.status();
+    if (!st.on) { triedAudio = false; Core.keepAlive.start(); }
+    else if (st.audio === 'suspended' && !triedAudio) { triedAudio = true; setTimeout(paint, 400); }
+    else { triedAudio = false; Core.keepAlive.stop(); }
+    paint();
+  }
+
+  Core.on('keepalive:change', paint);
+  Core.dom.watch(() => {
+    const bar = document.querySelector('.game-topbar .gtb-inner');
+    if (!bar) return;
+    const host = bar.querySelector('.gtb-right') || bar;
+    if (host.querySelector('.gtb-pin-btn')) return;
+    const b = Core.ui.h('button', { class: 'gtb-pin-btn', type: 'button', onclick: onClick }, Core.ui.h('span', { class: 'gtb-pin-ico' }, '\ud83d\udccc'));
+    const home = host.querySelector('.gtb-home-btn');
+    if (home) home.after(b); else host.prepend(b);
+    paint();
+  });
+})();
+
 
 /* =====================================================================
    MODULE 1: Guild Dashboard Cleanup
@@ -1492,7 +1604,9 @@
   }
 
   function isDungeonInstancePage() {
-    return !!document.querySelector('.mapframe') && !!document.querySelector('.lb');
+    // Path check added in v2.3: ui-cleanup now loads on every page (for the top bar Home button), and this used to
+    // rely on addons.json scoping it to guild_dungeon_instance.php. Without it any page with .mapframe + .lb matched.
+    return /\/guild_dungeon_instance\.php/.test(location.pathname) && !!document.querySelector('.mapframe') && !!document.querySelector('.lb');
   }
 
   function isLocationPage() {
