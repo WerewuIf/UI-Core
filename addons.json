@@ -3,6 +3,7 @@
     { "id": "crystal-presets",    "name": "Crystal Presets", "version": "1.5.1",  "url": "addons/crystal-presets.js" },
     { "id": "gear-presets",       "name": "Gear Presets",    "version": "3.2.2",  "url": "addons/gear-presets.js" },
     { "id": "pet-presets",        "name": "Pet Presets",     "version": "2.8.0",  "url": "addons/pet-presets.js" },
+    { "id": "account-switcher",  "name": "Account Switcher","version": "1.0.0",  "url": "addons/account-switcher.js" },
     { "id": "ui-cleanup",         "name": "UI Cleanup",      "version": "2.2.0",  "url": "addons/ui-cleanup.js",
       "match": "^/(guild_dash\\.php|guild_dungeon\\.php|guild_dungeon_instance\\.php\\?id=|guild_dungeon_location\\.php\\?|battle\\.php\\?|game_dash\\.php|active_wave\\.php)" },
     { "id": "battle-restructure", "name": "Battle Page",     "version": "15.10",  "url": "addons/battle.js",
