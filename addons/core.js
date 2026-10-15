@@ -366,7 +366,7 @@
   /* ---------------------------------------------------------------- ui --- */
   const ui = (() => {
     const CSS = `
-      .core-modal{position:fixed;inset:0;background:rgba(6,10,18,.74);display:none;align-items:center;justify-content:center;padding:20px;backdrop-filter:blur(7px)}
+      .core-modal{position:fixed;inset:0;background:rgba(6,10,18,.86);display:none;align-items:center;justify-content:center;padding:20px}
       .core-modal.show{display:flex}
       .core-modal-card{width:100%;max-height:90vh;overflow:auto;scrollbar-width:none;-ms-overflow-style:none;box-sizing:border-box;background:linear-gradient(180deg,rgba(24,34,56,.98),rgba(14,20,34,.98));border:1px solid rgba(255,255,255,.08);border-radius:22px;box-shadow:0 26px 60px rgba(0,0,0,.38);padding:22px;color:#eef3ff;font-family:Arial,sans-serif}
       .core-modal-card::-webkit-scrollbar{display:none;width:0;height:0}
@@ -414,9 +414,9 @@
       .core-addon-meta{display:flex;flex-direction:column;align-items:flex-end;gap:3px}
       .core-addon .core-btn{padding:6px 10px}
       .core-addon.core-placeholder{opacity:.35;border-style:dashed;border-color:rgba(110,168,255,.6)}
-      .core-ghost{position:fixed;z-index:2147483002;margin:0 !important;box-sizing:border-box;pointer-events:none;transform:scale(1.015);
+      .core-ghost{position:fixed;z-index:2147483002;margin:0 !important;box-sizing:border-box;pointer-events:none;will-change:transform;transform:scale(1.015);
         background:#17213a;border-color:rgba(110,168,255,.55);box-shadow:0 16px 34px rgba(0,0,0,.55)}
-      html.core-dragging,html.core-dragging *{cursor:grabbing !important;user-select:none !important;-webkit-user-select:none !important}
+      html.core-dragging .core-modal,html.core-dragging .core-modal *{cursor:grabbing !important;user-select:none !important;-webkit-user-select:none !important}
       .core-addon-ico{flex:0 0 auto;width:38px;height:38px;display:flex;align-items:center;justify-content:center;font-size:19px;
         background:#24263a;border:1px solid #2f324d;border-radius:11px}
       .core-addon-ico.none{background:none;border:1px dashed rgba(255,255,255,.18);color:#6d7aa3;font-size:15px}
@@ -616,7 +616,7 @@
     // is the button's own `order`; setRank(fn(id, order) -> number) lets the user's saved arrangement override it.
     let rankFn = null;
     const rankOf = (i) => (rankFn ? rankFn(i.id, i.order) : i.order);
-    const dockSorted = () => dockItems.slice().sort((a, c) => rankOf(a) - rankOf(c));
+    const dockSorted = () => { const r = new Map(dockItems.map((i) => [i, rankOf(i)])); return dockItems.slice().sort((a, c) => r.get(a) - r.get(c)); };
     const dock = {
       // ui.dock.add({ id, icon, title, onClick, order }) -> button element
       add(o) {
@@ -1066,18 +1066,15 @@
 
     // slide the other rows smoothly to their new places when the placeholder moves
     function flip(move) {
-      const others = rows().filter((r) => r !== row), before = new Map(others.map((r) => [r, r.getBoundingClientRect().top]));
+      const others = rows().filter((r) => r !== row), before = others.map((r) => r.getBoundingClientRect().top);
       move();
-      others.forEach((r) => {
-        const d = before.get(r) - r.getBoundingClientRect().top;
-        if (!d) return;
-        r.style.transition = 'none'; r.style.transform = 'translateY(' + d + 'px)';
-        r.getBoundingClientRect();
-        r.style.transition = 'transform .16s ease'; r.style.transform = '';
-      });
+      const d = others.map((r, i) => before[i] - r.getBoundingClientRect().top);
+      others.forEach((r, i) => { if (d[i]) { r.style.transition = 'none'; r.style.transform = 'translateY(' + d[i] + 'px)'; } });
+      void pane.offsetHeight;
+      others.forEach((r, i) => { if (d[i]) { r.style.transition = 'transform .16s ease'; r.style.transform = ''; } });
     }
     function place() {
-      ghost.style.top = (y - grab) + 'px';
+      ghost.style.transform = 'translate3d(0,' + (y - grab - rect.top) + 'px,0) scale(1.015)';
       const centre = y - grab + rect.height / 2;
       for (let guard = 0; guard < 50; guard++) {          // can cross several rows in one move
         const next = row.nextElementSibling, prev = row.previousElementSibling;
@@ -1093,12 +1090,13 @@
       scrollV = y < b.top + edge ? -Math.ceil((b.top + edge - y) / 4) : y > b.bottom - edge ? Math.ceil((y - (b.bottom - edge)) / 4) : 0;
     }
     const tick = setInterval(() => { if (scrollV && scroller) { scroller.scrollTop += scrollV; place(); } }, 16);
-    const onMove = (e) => { y = e.clientY; edgeScroll(); place(); };
+    let raf = 0;
+    const onMove = (e) => { y = e.clientY; raf = raf || requestAnimationFrame(() => { raf = 0; if (!ended) { edgeScroll(); place(); } }); };
     const onKey = (e) => { if (e.key === 'Escape') { e.preventDefault(); e.stopImmediatePropagation(); finish(false); } };   // on window, so it runs before the panel's own Esc-closes-it handler
     const onUp = () => finish(true);
     function finish(commit) {
       if (ended) return; ended = true;
-      clearInterval(tick);
+      clearInterval(tick); cancelAnimationFrame(raf);
       document.removeEventListener('pointermove', onMove, true);
       document.removeEventListener('pointerup', onUp, true);
       document.removeEventListener('pointercancel', onUp, true);
@@ -1117,8 +1115,8 @@
         if (others[at]) others[at].before(row); else if (others.length) others[others.length - 1].after(row);
       }
       const to = row.getBoundingClientRect();              // the ghost settles into the slot, then the real row takes over
-      ghost.style.transition = 'top .14s ease, transform .14s ease, box-shadow .14s ease';
-      ghost.style.top = to.top + 'px'; ghost.style.transform = 'none'; ghost.style.boxShadow = 'none';
+      ghost.style.transition = 'transform .14s ease, box-shadow .14s ease';
+      ghost.style.transform = 'translate3d(0,' + (to.top - rect.top) + 'px,0)'; ghost.style.boxShadow = 'none';
       setTimeout(done, 150);
     }
     document.addEventListener('pointermove', onMove, true);
@@ -1797,7 +1795,7 @@
 
   /* ------------------------------------------------------------ export --- */
   const Core = {
-    __isCore: true, apiLevel: API, version: '3.12.3', debug: false, tabId: TAB,
+    __isCore: true, apiLevel: API, version: '3.12.4', debug: false, tabId: TAB,
     esc, sleep, debounce, fmt, int, compact, parseNum, parseJson,
     on, off, once, emit,
     state, store, player,
