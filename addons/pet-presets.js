@@ -1500,22 +1500,31 @@
   }
 
   // `skip(wearer)` returns true for pets that must not give the sigil up.
+  // Returns { holder, why }: holder is null when nobody could be found, and why says what actually happened, so the
+  // note never claims "every pet wearing it is meant to keep it" when really none was found or a lookup failed.
+  // The card text is only a hint for who to ask first; the game's own answer (pet_sigils_ajax.php) decides, and if the
+  // names don't line up (spacing, case, extra text on the card) every other wearer is asked too.
   async function findSigilHolder(itemId, itemName, skip) {
     const { wearers, names } = await collectSigilWearers();
-    const candidates = wearers.filter((w) => w.name === itemName && !(skip && skip(w)));
+    const norm = (x) => String(x || '').replace(/\s+/g, ' ').trim().toLowerCase();
+    const kept = wearers.filter((w) => skip && skip(w));
+    const free = wearers.filter((w) => !(skip && skip(w)));
+    const byName = free.filter((w) => norm(w.name) === norm(itemName));
+    const candidates = byName.concat(free.filter((w) => !byName.includes(w)));
+    const nm = (w) => (names[w.invId] ? names[w.invId].name : 'Pet #' + w.invId);
+    let failed = 0;
     for (const c of candidates) {
       try {
         const info = await fetchSigilInfo(c.invId, c.slotType, true);
         if (info.current && info.current.itemId === String(itemId)) {
-          return {
-            invId: c.invId,
-            slotType: c.slotType,
-            petName: names[c.invId] ? names[c.invId].name : ('Pet #' + c.invId),
-          };
+          return { holder: { invId: c.invId, slotType: c.slotType, petName: nm(c) }, why: '' };
         }
-      } catch (_) { /* try the next one */ }
+      } catch (_) { failed++; }
     }
-    return null;
+    const keptNames = kept.filter((w) => norm(w.name) === norm(itemName)).map(nm);
+    const why = keptNames.length ? `${keptNames.join(', ')} ${keptNames.length > 1 ? 'are' : 'is'} meant to keep it`
+      : `none of the ${wearers.length} pets wearing a sigil or orb was found holding it` + (failed ? ` (${failed} couldn't be read)` : '');
+    return { holder: null, why };
   }
 
   async function findAllSigilHolders(itemId, itemName, excludeInvId /*, teamKey (unused now) */) {
@@ -1600,9 +1609,9 @@
             if (!entry || !has(entry, w.slotType)) return false;
             return entry[w.slotType] === want;
           };
-          const holder = await findSigilHolder(want, opt.name, protectedWearer);
+          const { holder, why } = await findSigilHolder(want, opt.name, protectedWearer);
           if (!holder) {
-            notes.push(`${pet.name} ${SIGIL_LABELS[slotType]}: no free copy of ${label}, and every pet wearing it is meant to keep it`);
+            notes.push(`${pet.name} ${SIGIL_LABELS[slotType]}: no free copy of ${label} — ${why}`);
             continue;
           }
           try {
