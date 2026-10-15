@@ -413,6 +413,18 @@
       .core-addon-name{font-weight:800}
       .core-addon-meta{display:flex;flex-direction:column;align-items:flex-end;gap:3px}
       .core-addon .core-btn{padding:6px 10px}
+      .core-addon.dragging{opacity:.4}
+      .core-addon.drop-before{box-shadow:0 -3px 0 #6ea8ff}
+      .core-addon.drop-after{box-shadow:0 3px 0 #6ea8ff}
+      .core-addon-sort{display:flex;flex-direction:column;align-items:center;gap:2px;flex:0 0 auto}
+      .core-grip{cursor:grab;color:#7f8ab8;font:800 16px/1 Arial,sans-serif;padding:2px 4px;user-select:none;touch-action:none}
+      .core-grip:active{cursor:grabbing}
+      .core-nudge{background:none;border:none;color:#7f8ab8;cursor:pointer;font:800 10px/1 Arial,sans-serif;padding:1px 5px;border-radius:5px}
+      .core-nudge:hover:not(:disabled){background:rgba(255,255,255,.08);color:#fff}
+      .core-nudge:disabled{opacity:.25;cursor:default}
+      .core-order{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:0 0 12px;padding:10px 12px;background:#0d1322;border:1px dashed rgba(255,255,255,.1);border-radius:12px}
+      .core-order-btns{display:flex;gap:6px}
+      .core-order-chip{min-width:34px;height:30px;display:inline-flex;align-items:center;justify-content:center;background:#24263a;border:1px solid #2f324d;border-radius:9px;font-size:15px}
     `;
     let baseDone = false;
     const modals = new Map(), openStack = [];
@@ -498,20 +510,59 @@
       return m;
     }
 
-    let menuEl = null, menuFor = null;
-    function closeMenu() { if (menuEl) menuEl.classList.remove('open'); menuFor = null; }
-    // ui.menu(anchorEl, [{label, onClick, danger}]) — toggles a dropdown under anchorEl.
-    function menu(anchor, items) {
-      base();
-      if (!menuEl) { menuEl = h('div', { class: 'core-menu' }); document.body.appendChild(menuEl); }
-      const same = menuEl.classList.contains('open') && menuFor === anchor;
-      closeMenu();
-      if (same) return;
+    let menuEl = null, menuFor = null, menuPinned = false, menuHideT = 0;
+    function closeMenu() {
+      clearTimeout(menuHideT); menuPinned = false;
+      if (menuEl) menuEl.classList.remove('open');
+      if (menuFor) menuFor.removeAttribute('data-core-menu-anchor');
+      menuFor = null;
+    }
+    function showMenu(anchor, items) {
+      if (!menuEl) {
+        menuEl = h('div', { class: 'core-menu' }); document.body.appendChild(menuEl);
+        // hover menus: the pointer can travel from the anchor onto the menu without it closing
+        menuEl.addEventListener('mouseenter', () => clearTimeout(menuHideT));
+        menuEl.addEventListener('mouseleave', () => armMenuHide());
+      }
       menuFor = anchor; anchor.setAttribute('data-core-menu-anchor', '');
       menuEl.replaceChildren(...items.map((it) => h('button', { class: 'core-menu-item' + (it.danger ? ' danger' : ''), type: 'button', onclick: (e) => { e.stopPropagation(); closeMenu(); it.onClick(); } }, it.label)));
       const r = anchor.getBoundingClientRect();
       Object.assign(menuEl.style, { top: (r.bottom + 6) + 'px', right: (root.innerWidth - r.right) + 'px', left: 'auto' });
       menuEl.classList.add('open');
+    }
+    // ui.menu(anchorEl, [{label, onClick, danger}]) — toggles a dropdown under anchorEl.
+    function menu(anchor, items) {
+      base();
+      const same = menuEl && menuEl.classList.contains('open') && menuFor === anchor;
+      closeMenu();
+      if (same) return;
+      showMenu(anchor, items);
+    }
+    // Closes shortly after the pointer has left both the anchor and the menu. A menu opened by a click stays until
+    // you pick, click away or press Esc.
+    function armMenuHide() {
+      clearTimeout(menuHideT);
+      menuHideT = setTimeout(() => {
+        if (menuPinned || !menuEl || !menuFor) return;
+        if (menuFor.matches(':hover') || menuEl.matches(':hover')) return;
+        closeMenu();
+      }, 220);
+    }
+    // ui.hoverMenu(anchorEl, items | () => items) — like ui.menu, but a mouse only has to hover the anchor to open it.
+    // A click (the way touch screens use it) opens it and keeps it open; clicking again closes it.
+    function hoverMenu(anchor, items) {
+      const get = () => (typeof items === 'function' ? items() : items);
+      const isOpen = () => !!(menuEl && menuEl.classList.contains('open') && menuFor === anchor);
+      if (root.matchMedia && root.matchMedia('(hover: hover)').matches) {
+        anchor.addEventListener('mouseenter', () => { clearTimeout(menuHideT); if (!isOpen()) { base(); closeMenu(); showMenu(anchor, get()); } });
+        anchor.addEventListener('mouseleave', () => armMenuHide());
+      }
+      anchor.addEventListener('click', (e) => {
+        e.stopPropagation(); base();
+        if (isOpen() && menuPinned) { closeMenu(); return; }
+        if (!isOpen()) { closeMenu(); showMenu(anchor, get()); }
+        menuPinned = true;
+      });
     }
 
     // ONE floating button row for every addon, kept clear of the site's own fixed buttons.
@@ -557,15 +608,20 @@
       dockEl.style.right = right + 'px';
       dockEl.style.bottom = bottom + 'px';
     }, 120);
+    // Position in the row = rank, lower = closer to the corner (the row is drawn right-to-left). By default the rank
+    // is the button's own `order`; setRank(fn(id, order) -> number) lets the user's saved arrangement override it.
+    let rankFn = null;
+    const rankOf = (i) => (rankFn ? rankFn(i.id, i.order) : i.order);
+    const dockSorted = () => dockItems.slice().sort((a, c) => rankOf(a) - rankOf(c));
     const dock = {
       // ui.dock.add({ id, icon, title, onClick, order }) -> button element
       add(o) {
         base();
         const b = h('button', { class: 'core-dock-btn', type: 'button', title: o.title || '', 'data-dock-id': o.id, onclick: o.onClick }, o.icon || '\u2022');
-        dockItems.push({ id: o.id, order: o.order ?? 100, el: b });
+        dockItems.push({ id: o.id, order: o.order ?? 100, icon: o.icon || '\u2022', title: o.title || o.id, el: b });
         ready.then(() => {
           if (!dockEl) { dockEl = h('div', { id: 'core-dock' }); document.body.appendChild(dockEl); root.addEventListener('resize', placeDock); }
-          dockEl.replaceChildren(...dockItems.slice().sort((a, c) => a.order - c.order).map((i) => i.el));
+          dockEl.replaceChildren(...dockSorted().map((i) => i.el));
           placeDock();
         });
         return b;
@@ -576,9 +632,18 @@
         dockItems[i].el.remove(); dockItems.splice(i, 1);
         if (dockEl) placeDock();
       },
+      // Re-sort the row after the arrangement changed.
+      refresh() {
+        if (!dockEl) return;
+        dockEl.replaceChildren(...dockSorted().map((i) => i.el));
+        placeDock();
+      },
+      setRank(fn) { rankFn = typeof fn === 'function' ? fn : null; dock.refresh(); },
+      // The buttons now in the row, in on-screen order, LEFT to RIGHT: [{ id, icon, title }]
+      items() { return dockSorted().reverse().map((i) => ({ id: i.id, icon: i.icon, title: i.title })); },
     };
 
-    return { css, h, btn, toast, modal, menu, dock };
+    return { css, h, btn, toast, modal, menu, hoverMenu, dock };
   })();
 
   /* ----------------------------------------------------------- modules --- */
@@ -589,7 +654,8 @@
   //   init   may be async; whatever it returns becomes the module's public api (Core.use / Core.get)
   const mods = new Map();   // id -> { def, state, api, waiters }
   // Shared by the module system and the addon loader: user addons and disabled ids.
-  const cfg = store('addons', { def: { custom: [], off: [] }, key: 'core:addons' });
+  // order: the ids in the order the user arranged them in the Addons panel (also the order of the buttons in the dock).
+  const cfg = store('addons', { def: { custom: [], off: [], order: [] }, key: 'core:addons' });
 
   function matches(def) {
     const t = def.match, p = root.location.pathname + root.location.search;
@@ -945,13 +1011,53 @@
     } finally { checking = false; float.refresh('addons'); }
   }
 
+  // ---- order ----
+  // The Addons panel lists addons in the order the user arranged them (cfg.order; ids not in it keep their normal
+  // place after the arranged ones). The same order sets the buttons in the dock: the top of the list is the button
+  // closest to the corner, and the Addons button itself always stays at the far end.
+  function orderedEntries() {
+    const o = cfg.get().order || [];
+    return entries().map((e, i) => { const k = o.indexOf(e.id); return { e, k: k >= 0 ? k : o.length + i }; })
+      .sort((a, b) => a.k - b.k).map((x) => x.e);
+  }
+  function saveOrder(ids) { cfg.update((c) => { c.order = ids; }); float.refresh('addons'); }
+  function nudgeAddon(id, d) {
+    const ids = orderedEntries().map((e) => e.id), i = ids.indexOf(id), j = i + d;
+    if (i < 0 || j < 0 || j >= ids.length) return;
+    ids.splice(j, 0, ids.splice(i, 1)[0]);
+    saveOrder(ids);
+  }
+  function dropAddon(id, targetId, after) {
+    if (id === targetId) return;
+    const ids = orderedEntries().map((e) => e.id).filter((x) => x !== id), t = ids.indexOf(targetId);
+    if (t < 0) return;
+    ids.splice(after ? t + 1 : t, 0, id);
+    saveOrder(ids);
+  }
+  // Dock position of a button: its place in the arranged list; buttons not in the list keep their built-in order
+  // after those; the Addons button is always last.
+  const dockRank = (id, dflt) => {
+    if (id === 'addons') return 1e9;
+    const k = (cfg.get().order || []).indexOf(id);
+    return k >= 0 ? k : 1000 + dflt;
+  };
+  ui.dock.setRank(dockRank);
+  cfg.watch(() => ui.dock.refresh());   // also fires when another tab rearranges
+
+  let dragId = null;
   function renderAddonsTab(el) {
     const c = cfg.get();
-    const rows = entries().map((e) => {
+    const list = orderedEntries();
+    const rows = list.map((e, idx) => {
       const s = rstat(e.id);
       const cb = h('input', { type: 'checkbox', onchange: (ev) => setEnabled(e.id, ev.target.checked) });
       cb.checked = !c.off.includes(e.id);
-      return h('div', { class: 'core-addon' }, cb,
+      const grip = h('span', { class: 'core-grip', draggable: 'true', title: 'Drag to rearrange', 'aria-hidden': 'true' }, '⠇');
+      const sort = h('div', { class: 'core-addon-sort' },
+        h('button', { class: 'core-nudge', type: 'button', title: 'Move up', 'aria-label': 'Move ' + (e.name || e.id) + ' up', disabled: idx === 0, onclick: () => nudgeAddon(e.id, -1) }, '▲'),
+        grip,
+        h('button', { class: 'core-nudge', type: 'button', title: 'Move down', 'aria-label': 'Move ' + (e.name || e.id) + ' down', disabled: idx === list.length - 1, onclick: () => nudgeAddon(e.id, 1) }, '▼'));
+      const row = h('div', { class: 'core-addon' }, sort, cb,
         h('div', { class: 'core-addon-main' },
           h('div', { class: 'core-addon-name' }, e.name || e.id, h('span', { class: 'core-dim' }, '  ' + e.id + ((s.ver || e.version) ? ' v' + (s.ver || e.version) + (s.ver && e.version && s.ver !== e.version ? ' (v' + e.version + ' ready)' : '') : '') + ' \u00b7 ' + e.source)),
           h('div', { class: 'core-dim' }, e.url),
@@ -960,10 +1066,38 @@
           h('span', { class: 'core-pill core-pill-' + s.state }, s.state + (s.update ? ' \u00b7 update ready' : '')),
           s.from ? h('span', { class: 'core-dim' }, s.from + (s.bytes ? ' \u00b7 ' + Math.round(s.bytes / 1024) + ' KB' : '')) : null),
         e.source === 'custom' ? ui.btn('\ud83d\uddd1', 'danger', () => removeCustom(e.id)) : null);
+      // Drag by the grip; the line shows whether it will land above or below the row under the pointer.
+      const clear = () => row.classList.remove('drop-before', 'drop-after');
+      grip.addEventListener('dragstart', (ev) => {
+        dragId = e.id; row.classList.add('dragging');
+        if (ev.dataTransfer) { ev.dataTransfer.effectAllowed = 'move'; try { ev.dataTransfer.setData('text/plain', e.id); ev.dataTransfer.setDragImage(row, 24, 24); } catch (_) { /* */ } }
+      });
+      grip.addEventListener('dragend', () => { dragId = null; el.querySelectorAll('.core-addon').forEach((r) => r.classList.remove('dragging', 'drop-before', 'drop-after')); });
+      row.addEventListener('dragover', (ev) => {
+        if (!dragId || dragId === e.id) return;
+        ev.preventDefault();
+        const r = row.getBoundingClientRect(), after = ev.clientY > r.top + r.height / 2;
+        row.classList.toggle('drop-after', after); row.classList.toggle('drop-before', !after);
+      });
+      row.addEventListener('dragleave', (ev) => { if (!row.contains(ev.relatedTarget)) clear(); });
+      row.addEventListener('drop', (ev) => {
+        if (!dragId) return;
+        ev.preventDefault();
+        const r = row.getBoundingClientRect(), after = ev.clientY > r.top + r.height / 2, id = dragId;
+        dragId = null; clear();
+        dropAddon(id, e.id, after);
+      });
+      return row;
     });
+    // What the dock really looks like right now, left to right, so the arrangement above can be checked at a glance.
+    const shown = ui.dock.items();
+    const orderHint = h('div', { class: 'core-order' },
+      h('span', { class: 'core-dim' }, 'Drag \u2807 or use \u25b2\u25bc to arrange. The top of the list is the button closest to the corner; \u2699\ufe0f stays last.'),
+      shown.length ? h('div', { class: 'core-order-btns', title: 'Your buttons, left to right' }, shown.map((b) => h('span', { class: 'core-order-chip', title: b.title }, b.icon))) : null);
     const url = h('input', { class: 'core-input', placeholder: 'Addon URL (.js)', title: 'e.g. https://raw.githubusercontent.com/you/repo/main/addons/x.js', style: { flex: '1 1 240px', minWidth: '120px' } });
     el.replaceChildren(
       h('div', { class: 'core-dim', style: { marginBottom: '12px' } }, 'Core v' + Core.version + (root.__coreBoot && root.__coreBoot.pending() && root.__coreBoot.readyVersion() ? ' (v' + root.__coreBoot.readyVersion() + ' ready)' : '') + '  \u00b7  Manifest: ' + (MANIFEST || '(none)')),
+      orderHint,
       ...rows.length ? rows : [h('div', { class: 'core-empty' }, 'No addons yet. Add a URL below or set CONFIG.manifest.')],
       h('div', { class: 'core-row', style: { marginTop: '16px' } }, url,
         ui.btn('Add by URL', 'success', () => { addCustom(url.value); url.value = ''; }),
@@ -1584,7 +1718,7 @@
 
   /* ------------------------------------------------------------ export --- */
   const Core = {
-    __isCore: true, apiLevel: API, version: '3.11.0', debug: false, tabId: TAB,
+    __isCore: true, apiLevel: API, version: '3.12.1', debug: false, tabId: TAB,
     esc, sleep, debounce, fmt, int, compact, parseNum, parseJson,
     on, off, once, emit,
     state, store, player,
