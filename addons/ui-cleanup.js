@@ -67,10 +67,11 @@
       text-decoration: none !important; cursor: pointer; white-space: nowrap;
     }
     .gtb-home-btn:hover { background: #2a2a2a; border-color: #3a3a3a; }
-    .gtb-home-btn { padding: 6px 7px; }
+    .gtb-home-btn { gap: 4px; font-weight: 700; }
     /* two small buttons now sit in .gtb-right: tighter gaps keep the EXP numbers on one line at 1100px */
     .gtb-right:has(.gtb-home-btn, .gtb-pin-btn) { gap: 7px; }
-    @media (max-width: 600px) { .gtb-home-btn { padding: 6px 8px; } .gtb-right:has(.gtb-home-btn, .gtb-pin-btn) { gap: 8px; } }
+    /* phones: .gtb-right is too tight for a word, so the 🏠 stands alone there (the title / aria-label still say Home) */
+    @media (max-width: 600px) { .gtb-home-btn { padding: 6px 8px; } .gtb-home-txt { display: none; } .gtb-right:has(.gtb-home-btn, .gtb-pin-btn) { gap: 8px; } }
   `);
 
   Core.dom.watch(() => {
@@ -78,8 +79,9 @@
     if (!bar) return;
     const host = bar.querySelector('.gtb-right') || bar;
     if (host.querySelector('.gtb-home-btn')) return;
-    // Icon only: with the weekday added to the clock chip there is no room for a text label on one line at 1100px.
-    const link = Core.ui.h('a', { class: 'gtb-home-btn', href: HOME_URL, title: 'Back to User Dashboard', 'aria-label': 'Back to User Dashboard' }, '🏠');
+    // 🏠 plus the word "Home" (the word is hidden on phones, see the CSS above).
+    const link = Core.ui.h('a', { class: 'gtb-home-btn', href: HOME_URL, title: 'Back to User Dashboard', 'aria-label': 'Home: back to User Dashboard' },
+      Core.ui.h('span', { class: 'gtb-home-ico', 'aria-hidden': 'true' }, '🏠'), Core.ui.h('span', { class: 'gtb-home-txt' }, 'Home'));
     host.prepend(link);
   });
 })();
