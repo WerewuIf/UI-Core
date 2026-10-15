@@ -319,6 +319,45 @@
     Core.ui.toast(msg, ok, 3000);
   }
 
+  // ---------- apply progress: ONE toast line + Cancel ----------
+  let cancelRun = false;      // set by Cancel while a preset is applying; checked before every request
+  let runToastTimer = null;
+  const requestCancel = () => { cancelRun = true; };
+  function runToastEl() {
+    let el = document.getElementById('notification') || document.getElementById('gp-toast');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'gp-toast';
+      el.style.cssText = 'position:fixed;top:20px;right:20px;z-index:100060;padding:12px 20px;' +
+        'border-radius:10px;color:#fff;font:600 15px Arial,sans-serif;box-shadow:0 4px 12px rgba(0,0,0,.4);';
+      document.body.appendChild(el);
+    }
+    return el;
+  }
+  function hideRunToast() {
+    clearTimeout(runToastTimer);
+    const el = runToastEl();
+    el.style.display = 'none'; el.style.whiteSpace = ''; el.style.maxWidth = ''; el.style.cursor = ''; el.onclick = null;
+  }
+  // holdMs 0 = stay until the next update; onCancel adds a Cancel button.
+  function showRunToast(msg, ok, holdMs, onCancel) {
+    const el = runToastEl();
+    clearTimeout(runToastTimer);
+    el.textContent = msg;
+    if (onCancel) {
+      const b = document.createElement('button');
+      b.type = 'button'; b.textContent = 'Cancel';
+      b.style.cssText = 'margin-left:12px;padding:2px 10px;border:1px solid #fff;border-radius:6px;background:transparent;color:#fff;font:700 13px Arial,sans-serif;cursor:pointer;';
+      b.onclick = (e) => { e.stopPropagation(); onCancel(); showRunToast(msg + ' \u2014 cancelling after this step\u2026', ok, 0); };
+      el.appendChild(b);
+    }
+    el.style.background = ok ? '#2ecc71' : '#e74c3c';
+    el.style.whiteSpace = 'normal'; el.style.maxWidth = '460px'; el.style.cursor = 'pointer'; el.style.display = 'block';
+    el.onclick = hideRunToast;
+    if (holdMs) runToastTimer = setTimeout(hideRunToast, holdMs);
+  }
+  const say = (msg, ok = true) => showRunToast(msg, ok, ok ? 6000 : 12000);
+
   function escapeHtml(str) {
     return String(str ?? '')
       .replaceAll('&', '&amp;')
@@ -491,14 +530,15 @@
   // ---------- restore ----------
 
   async function restorePresetToSet(preset, targetSetKey) {
-    if (presetOpBusy) { notify('Please wait for the current action to finish.', false); return; }
-    presetOpBusy = true;
+    if (presetOpBusy) { say('Please wait for the current action to finish.', false); return; }
+    presetOpBusy = true; cancelRun = false;
+    let done = 0, total = 0;
     try {
       let doc;
       try {
         doc = await getContextDoc(targetSetKey, true);
       } catch (err) {
-        notify('Could not reach the Inventory page to read current equipment.', false);
+        say('Could not reach the Inventory page to read current equipment.', false);
         return;
       }
       const currentSnap = scanEquippedSnapshot(doc);
@@ -524,37 +564,47 @@
         }
       });
 
-      const total = toUnequip.length + toEquip.length;
+      total = toUnequip.length + toEquip.length;
       if (!total) {
-        notify(missing.length
+        say(missing.length
                ? `Already matches (${missing.length} saved item(s) no longer owned).`
                : `Already matches this preset in ${SET_LABELS[targetSetKey]}.`, true);
         return;
       }
 
-      let done = 0;
+      const progress = () => showRunToast(`Applying "${preset.name}"\u2026 (${done}/${total})`, true, 0, requestCancel);
+      const checkCancel = () => { if (cancelRun) throw new Error('Cancelled'); };
+      progress();
       for (const slotId of toUnequip) {
+        checkCancel();
         await unequipItemFromSet(slotId, targetSetKey);
         done++;
-        notify(`Applying "${preset.name}"… (${done}/${total})`, true);
+        progress();
       }
       for (const item of toEquip) {
+        checkCancel();
         await equipItemToSet(item.invId, item.slotArg, targetSetKey);
         done++;
-        notify(`Applying "${preset.name}"… (${done}/${total})`, true);
+        progress();
       }
 
       invalidateContextCache(targetSetKey);
       if (isInventoryPage() && getUrlSet() === targetSetKey && typeof window.__invHelperSmartRefresh === 'function') {
         await window.__invHelperSmartRefresh();
       }
-      notify(missing.length
+      say(missing.length
              ? `Preset "${preset.name}" applied to ${SET_LABELS[targetSetKey]}. Skipped: ${missing.join(', ')}`
              : `Preset "${preset.name}" applied to ${SET_LABELS[targetSetKey]}.`, true);
     } catch (err) {
-      notify('Stopped: ' + (err?.message || 'action failed'), false);
+      if (cancelRun) {
+        say(`Cancelled "${preset.name}" \u2014 ${SET_LABELS[targetSetKey]} may be part-way` + (total ? ` (${done}/${total} steps done).` : '.'));
+        invalidateContextCache(targetSetKey);
+        try {
+          if (isInventoryPage() && getUrlSet() === targetSetKey && typeof window.__invHelperSmartRefresh === 'function') await window.__invHelperSmartRefresh();
+        } catch (_) { /* the page just shows the old state */ }
+      } else say('Stopped: ' + (err?.message || 'action failed'), false);
     } finally {
-      presetOpBusy = false;
+      presetOpBusy = false; cancelRun = false;
     }
   }
 
@@ -923,19 +973,16 @@
 
   function openApplyModal(preset) {
     activeApplyPreset = preset;
-    document.getElementById('gpApplyTitle').textContent = `Apply "${preset.name}" to:`;
+    document.getElementById('gpApplyTitle').textContent = presetOpBusy ? 'Applying\u2026' : `Apply "${preset.name}" to:`;
+    document.querySelectorAll('#gpApplyModal [data-apply-set]').forEach((b) => { b.textContent = presetOpBusy ? 'Cancel' : SET_LABELS[b.getAttribute('data-apply-set')] + ' Set'; });
     document.getElementById('gpApplyModal').classList.add('show');
   }
-  async function onApplyTarget(targetSetKey, btn) {
+  async function onApplyTarget(targetSetKey) {
+    if (presetOpBusy) { requestCancel(); closeGpModal('gpApplyModal'); return; }
     if (!activeApplyPreset) return;
     const preset = activeApplyPreset;
-    const original = btn.textContent;
-    btn.disabled = true;
-    btn.textContent = 'Applying…';
     closeGpModal('gpApplyModal');
     await restorePresetToSet(preset, targetSetKey);
-    btn.disabled = false;
-    btn.textContent = original;
     activeApplyPreset = null;
     renderPresetList();
   }
