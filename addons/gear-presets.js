@@ -322,13 +322,26 @@
   // ---------- apply progress: ONE toast line + Cancel ----------
   let cancelRun = false;      // set by Cancel while a preset is applying; checked before every request
   let runToastTimer = null;
-  const requestCancel = () => { cancelRun = true; };
+  let runPresetId = null;
+  const requestCancel = () => { cancelRun = true; syncRunButtons(); showRunToast('Cancelling after this step\u2026', true, 0); };
+  // The Apply button of the preset being applied turns into a red Cancel until the run ends.
+  function syncRunButtons() {
+    document.querySelectorAll('#gpList .gp-row[data-preset-id]').forEach((row) => {
+      const b = row.querySelector('[data-run-btn]');
+      if (!b) return;
+      const on = presetOpBusy && row.getAttribute('data-preset-id') === runPresetId;
+      b.className = 'gp-btn ' + (on ? 'gp-btn-cancel' : 'gp-btn-success');
+      b.textContent = on ? (cancelRun ? 'Cancelling\u2026' : '\u2716 Cancel') : '\u25b6 Apply';
+      b.disabled = on && cancelRun;
+    });
+  }
+
   function runToastEl() {
     let el = document.getElementById('notification') || document.getElementById('gp-toast');
     if (!el) {
       el = document.createElement('div');
       el.id = 'gp-toast';
-      el.style.cssText = 'position:fixed;top:20px;right:20px;z-index:100060;padding:12px 20px;' +
+      el.style.cssText = 'position:fixed;top:20px;right:20px;z-index:2147483001;padding:12px 20px;' +
         'border-radius:10px;color:#fff;font:600 15px Arial,sans-serif;box-shadow:0 4px 12px rgba(0,0,0,.4);';
       document.body.appendChild(el);
     }
@@ -339,24 +352,17 @@
     const el = runToastEl();
     el.style.display = 'none'; el.style.whiteSpace = ''; el.style.maxWidth = ''; el.style.cursor = ''; el.onclick = null;
   }
-  // holdMs 0 = stay until the next update; onCancel adds a Cancel button.
-  function showRunToast(msg, ok, holdMs, onCancel) {
+  // holdMs 0 = stay until the next update.
+  function showRunToast(msg, ok, holdMs) {
     const el = runToastEl();
     clearTimeout(runToastTimer);
     el.textContent = msg;
-    if (onCancel) {
-      const b = document.createElement('button');
-      b.type = 'button'; b.textContent = 'Cancel';
-      b.style.cssText = 'margin-left:12px;padding:2px 10px;border:1px solid #fff;border-radius:6px;background:transparent;color:#fff;font:700 13px Arial,sans-serif;cursor:pointer;';
-      b.onclick = (e) => { e.stopPropagation(); onCancel(); showRunToast(msg + ' \u2014 cancelling after this step\u2026', ok, 0); };
-      el.appendChild(b);
-    }
     el.style.background = ok ? '#2ecc71' : '#e74c3c';
     el.style.whiteSpace = 'normal'; el.style.maxWidth = '460px'; el.style.cursor = 'pointer'; el.style.display = 'block';
     el.onclick = hideRunToast;
     if (holdMs) runToastTimer = setTimeout(hideRunToast, holdMs);
   }
-  const say = (msg, ok = true) => showRunToast(msg, ok, ok ? 6000 : 12000);
+  const say = (msg, ok = true) => showRunToast(msg, ok, ok ? 10000 : 20000);
 
   function escapeHtml(str) {
     return String(str ?? '')
@@ -531,7 +537,7 @@
 
   async function restorePresetToSet(preset, targetSetKey) {
     if (presetOpBusy) { say('Please wait for the current action to finish.', false); return; }
-    presetOpBusy = true; cancelRun = false;
+    presetOpBusy = true; cancelRun = false; runPresetId = preset.id; syncRunButtons();
     let done = 0, total = 0;
     try {
       let doc;
@@ -572,7 +578,7 @@
         return;
       }
 
-      const progress = () => showRunToast(`Applying "${preset.name}"\u2026 (${done}/${total})`, true, 0, requestCancel);
+      const progress = () => showRunToast(`Applying "${preset.name}"\u2026 (${done}/${total})`, true, 0);
       const checkCancel = () => { if (cancelRun) throw new Error('Cancelled'); };
       progress();
       for (const slotId of toUnequip) {
@@ -604,7 +610,7 @@
         } catch (_) { /* the page just shows the old state */ }
       } else say('Stopped: ' + (err?.message || 'action failed'), false);
     } finally {
-      presetOpBusy = false; cancelRun = false;
+      presetOpBusy = false; cancelRun = false; runPresetId = null; syncRunButtons();
     }
   }
 
@@ -630,6 +636,7 @@
       .gp-btn:hover{ filter:brightness(1.06); }
       .gp-btn-soft{ background:linear-gradient(135deg, #222d49, #2b3859); box-shadow:none; }
       .gp-btn-success{ background:linear-gradient(135deg, #217f5b, #33b57f); }
+      .gp-btn-cancel{ background:linear-gradient(135deg,#a8283a,#e74c3c); }
       .gp-btn-danger{ background:linear-gradient(135deg, #7b3040, #b4465c); }
       .gp-btn:disabled{ opacity:.5; cursor:not-allowed; }
 
@@ -811,6 +818,7 @@
     presets.forEach((preset) => {
       const row = document.createElement('div');
       row.className = 'gp-row';
+      row.setAttribute('data-preset-id', preset.id);
       const itemCount = Object.keys(preset.slots).length;
 
       const info = document.createElement('div');
@@ -829,7 +837,11 @@
 
       const actions = document.createElement('div');
       actions.className = 'gp-row-actions';
-      actions.appendChild(mkBtn('gp-btn-success', '▶ Apply', () => openApplyModal(preset)));
+      const runBtn = mkBtn('gp-btn-success', '▶ Apply', () => (presetOpBusy
+        ? (runPresetId === preset.id ? requestCancel() : notify('Please wait for the current action to finish.', false))
+        : openApplyModal(preset)));
+      runBtn.setAttribute('data-run-btn', '');
+      actions.appendChild(runBtn);
       const menuBtn = mkBtn('gp-btn-soft gp-menu-btn', '⋯', (e) => { e.stopPropagation(); toggleMenu(menuBtn, preset, HOVER_OK); });
       attachHoverMenu(menuBtn, preset);
       actions.appendChild(menuBtn);
@@ -838,6 +850,7 @@
       wrap.appendChild(row);
       rowEls[preset.id] = row;
     });
+    syncRunButtons();
 
     // Check every set, not just whichever one is on screen right now, so the
     // badge shows up correctly no matter where this panel is opened from.
@@ -973,12 +986,10 @@
 
   function openApplyModal(preset) {
     activeApplyPreset = preset;
-    document.getElementById('gpApplyTitle').textContent = presetOpBusy ? 'Applying\u2026' : `Apply "${preset.name}" to:`;
-    document.querySelectorAll('#gpApplyModal [data-apply-set]').forEach((b) => { b.textContent = presetOpBusy ? 'Cancel' : SET_LABELS[b.getAttribute('data-apply-set')] + ' Set'; });
+    document.getElementById('gpApplyTitle').textContent = `Apply "${preset.name}" to:`;
     document.getElementById('gpApplyModal').classList.add('show');
   }
   async function onApplyTarget(targetSetKey) {
-    if (presetOpBusy) { requestCancel(); closeGpModal('gpApplyModal'); return; }
     if (!activeApplyPreset) return;
     const preset = activeApplyPreset;
     closeGpModal('gpApplyModal');
