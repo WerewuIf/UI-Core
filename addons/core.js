@@ -413,15 +413,19 @@
       .core-addon-name{font-weight:800}
       .core-addon-meta{display:flex;flex-direction:column;align-items:flex-end;gap:3px}
       .core-addon .core-btn{padding:6px 10px}
-      .core-addon.dragging{opacity:.4}
-      .core-addon.drop-before{box-shadow:0 -3px 0 #6ea8ff}
-      .core-addon.drop-after{box-shadow:0 3px 0 #6ea8ff}
-      .core-addon-sort{display:flex;flex-direction:column;align-items:center;gap:2px;flex:0 0 auto}
-      .core-grip{cursor:grab;color:#7f8ab8;font:800 16px/1 Arial,sans-serif;padding:2px 4px;user-select:none;touch-action:none}
-      .core-grip:active{cursor:grabbing}
-      .core-nudge{background:none;border:none;color:#7f8ab8;cursor:pointer;font:800 10px/1 Arial,sans-serif;padding:1px 5px;border-radius:5px}
-      .core-nudge:hover:not(:disabled){background:rgba(255,255,255,.08);color:#fff}
-      .core-nudge:disabled{opacity:.25;cursor:default}
+      .core-addon.core-placeholder{opacity:.35;border-style:dashed;border-color:rgba(110,168,255,.6)}
+      .core-ghost{position:fixed;z-index:2147483002;margin:0 !important;box-sizing:border-box;pointer-events:none;transform:scale(1.015);
+        background:#17213a;border-color:rgba(110,168,255,.55);box-shadow:0 16px 34px rgba(0,0,0,.55)}
+      html.core-dragging,html.core-dragging *{cursor:grabbing !important;user-select:none !important;-webkit-user-select:none !important}
+      .core-addon-ico{flex:0 0 auto;width:38px;height:38px;display:flex;align-items:center;justify-content:center;font-size:19px;
+        background:#24263a;border:1px solid #2f324d;border-radius:11px}
+      .core-addon-ico.none{background:none;border:1px dashed rgba(255,255,255,.18);color:#6d7aa3;font-size:15px}
+      .core-grip{flex:0 0 auto;width:32px;height:36px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;
+        border-radius:9px;cursor:grab;touch-action:none;user-select:none;-webkit-user-select:none;outline:none}
+      .core-grip i{display:block;width:16px;height:2px;border-radius:2px;background:#7f8ab8;transition:background .12s}
+      .core-grip:hover{background:rgba(255,255,255,.07)}
+      .core-grip:hover i,.core-grip:focus-visible i{background:#fff}
+      .core-grip:focus-visible{box-shadow:0 0 0 2px rgba(110,168,255,.55)}
       .core-order{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:0 0 12px;padding:10px 12px;background:#0d1322;border:1px dashed rgba(255,255,255,.1);border-radius:12px}
       .core-order-btns{display:flex;gap:6px}
       .core-order-chip{min-width:34px;height:30px;display:inline-flex;align-items:center;justify-content:center;background:#24263a;border:1px solid #2f324d;border-radius:9px;font-size:15px}
@@ -1027,13 +1031,6 @@
     ids.splice(j, 0, ids.splice(i, 1)[0]);
     saveOrder(ids);
   }
-  function dropAddon(id, targetId, after) {
-    if (id === targetId) return;
-    const ids = orderedEntries().map((e) => e.id).filter((x) => x !== id), t = ids.indexOf(targetId);
-    if (t < 0) return;
-    ids.splice(after ? t + 1 : t, 0, id);
-    saveOrder(ids);
-  }
   // Dock position of a button: its place in the arranged list; buttons not in the list keep their built-in order
   // after those; the Addons button is always last.
   const dockRank = (id, dflt) => {
@@ -1044,55 +1041,131 @@
   ui.dock.setRank(dockRank);
   cfg.watch(() => ui.dock.refresh());   // also fires when another tab rearranges
 
-  let dragId = null;
+  // Drag a row by its grip (two bars, right side). A ghost copy follows the pointer while the real row stays behind as
+  // a dashed placeholder that slides to where it would land; letting go drops it there. Works with mouse, pen and
+  // touch (pointer events). Esc cancels. The grip also takes the Up / Down arrow keys.
+  function startRowDrag(ev, row, pane) {
+    const rows = () => [...pane.querySelectorAll('.core-addon')];
+    const startIds = rows().map((r) => r.getAttribute('data-id'));
+    const rect = row.getBoundingClientRect(), grab = ev.clientY - rect.top;
+    const scroller = row.closest('.core-modal-card');
+    const ghost = row.cloneNode(true);
+    ghost.classList.add('core-ghost');
+    ghost.querySelectorAll('[id]').forEach((n) => n.removeAttribute('id'));
+    Object.assign(ghost.style, { left: rect.left + 'px', top: rect.top + 'px', width: rect.width + 'px', height: rect.height + 'px' });
+    document.body.appendChild(ghost);
+    row.classList.add('core-placeholder');
+    document.documentElement.classList.add('core-dragging');
+    let y = ev.clientY, scrollV = 0, ended = false;
+
+    // slide the other rows smoothly to their new places when the placeholder moves
+    function flip(move) {
+      const others = rows().filter((r) => r !== row), before = new Map(others.map((r) => [r, r.getBoundingClientRect().top]));
+      move();
+      others.forEach((r) => {
+        const d = before.get(r) - r.getBoundingClientRect().top;
+        if (!d) return;
+        r.style.transition = 'none'; r.style.transform = 'translateY(' + d + 'px)';
+        r.getBoundingClientRect();
+        r.style.transition = 'transform .16s ease'; r.style.transform = '';
+      });
+    }
+    function place() {
+      ghost.style.top = (y - grab) + 'px';
+      const centre = y - grab + rect.height / 2;
+      for (let guard = 0; guard < 50; guard++) {          // can cross several rows in one move
+        const next = row.nextElementSibling, prev = row.previousElementSibling;
+        const mid = (r) => { const b = r.getBoundingClientRect(); return b.top + b.height / 2; };
+        if (next && next.classList.contains('core-addon') && centre > mid(next)) flip(() => next.after(row));
+        else if (prev && prev.classList.contains('core-addon') && centre < mid(prev)) flip(() => prev.before(row));
+        else break;
+      }
+    }
+    function edgeScroll() {                                // near the top / bottom of the panel: keep scrolling
+      if (!scroller) return;
+      const b = scroller.getBoundingClientRect(), edge = 56;
+      scrollV = y < b.top + edge ? -Math.ceil((b.top + edge - y) / 4) : y > b.bottom - edge ? Math.ceil((y - (b.bottom - edge)) / 4) : 0;
+    }
+    const tick = setInterval(() => { if (scrollV && scroller) { scroller.scrollTop += scrollV; place(); } }, 16);
+    const onMove = (e) => { y = e.clientY; edgeScroll(); place(); };
+    const onKey = (e) => { if (e.key === 'Escape') { e.preventDefault(); e.stopImmediatePropagation(); finish(false); } };   // on window, so it runs before the panel's own Esc-closes-it handler
+    const onUp = () => finish(true);
+    function finish(commit) {
+      if (ended) return; ended = true;
+      clearInterval(tick);
+      document.removeEventListener('pointermove', onMove, true);
+      document.removeEventListener('pointerup', onUp, true);
+      document.removeEventListener('pointercancel', onUp, true);
+      window.removeEventListener('keydown', onKey, true);
+      document.documentElement.classList.remove('core-dragging');
+      const done = () => {
+        ghost.remove(); row.classList.remove('core-placeholder');
+        rows().forEach((r) => { r.style.transition = ''; r.style.transform = ''; });
+        if (!row.isConnected) return;                      // the panel was redrawn meanwhile
+        const ids = rows().map((r) => r.getAttribute('data-id'));
+        if (commit && ids.join('|') !== startIds.join('|')) saveOrder(ids);
+      };
+      if (!row.isConnected) { done(); return; }
+      if (!commit) {                                       // put it back where it was
+        const at = startIds.indexOf(row.getAttribute('data-id')), others = rows().filter((r) => r !== row);
+        if (others[at]) others[at].before(row); else if (others.length) others[others.length - 1].after(row);
+      }
+      const to = row.getBoundingClientRect();              // the ghost settles into the slot, then the real row takes over
+      ghost.style.transition = 'top .14s ease, transform .14s ease, box-shadow .14s ease';
+      ghost.style.top = to.top + 'px'; ghost.style.transform = 'none'; ghost.style.boxShadow = 'none';
+      setTimeout(done, 150);
+    }
+    document.addEventListener('pointermove', onMove, true);
+    document.addEventListener('pointerup', onUp, true);
+    document.addEventListener('pointercancel', onUp, true);
+    window.addEventListener('keydown', onKey, true);
+    place();
+  }
+
   function renderAddonsTab(el) {
     const c = cfg.get();
     const list = orderedEntries();
-    const rows = list.map((e, idx) => {
+    const buttons = new Map(ui.dock.items().map((b) => [b.id, b]));   // which addons really have a button (and its icon)
+    const rows = list.map((e) => {
       const s = rstat(e.id);
       const cb = h('input', { type: 'checkbox', onchange: (ev) => setEnabled(e.id, ev.target.checked) });
       cb.checked = !c.off.includes(e.id);
-      const grip = h('span', { class: 'core-grip', draggable: 'true', title: 'Drag to rearrange', 'aria-hidden': 'true' }, '⠇');
-      const sort = h('div', { class: 'core-addon-sort' },
-        h('button', { class: 'core-nudge', type: 'button', title: 'Move up', 'aria-label': 'Move ' + (e.name || e.id) + ' up', disabled: idx === 0, onclick: () => nudgeAddon(e.id, -1) }, '▲'),
-        grip,
-        h('button', { class: 'core-nudge', type: 'button', title: 'Move down', 'aria-label': 'Move ' + (e.name || e.id) + ' down', disabled: idx === list.length - 1, onclick: () => nudgeAddon(e.id, 1) }, '▼'));
-      const row = h('div', { class: 'core-addon' }, sort, cb,
+      const btn = buttons.get(e.id);
+      // The icon of this addon's button, so each row says which button it is. No icon = it works in the background.
+      const ico = btn
+        ? h('div', { class: 'core-addon-ico', title: 'Button: ' + btn.title }, btn.icon)
+        : h('div', { class: 'core-addon-ico none', title: s.state === 'ok' ? 'No button: this addon works in the background' : 'No button to show (' + s.state + ')' }, '—');
+      const noBtn = !btn && s.state === 'ok' ? ' · no button' : '';
+      const grip = h('div', { class: 'core-grip', tabindex: '0', role: 'button', title: 'Drag to rearrange', 'aria-label': 'Rearrange ' + (e.name || e.id) + ': drag, or press Up / Down', 'data-grip': e.id },
+        h('i'), h('i'));
+      const row = h('div', { class: 'core-addon', 'data-id': e.id }, ico, cb,
         h('div', { class: 'core-addon-main' },
-          h('div', { class: 'core-addon-name' }, e.name || e.id, h('span', { class: 'core-dim' }, '  ' + e.id + ((s.ver || e.version) ? ' v' + (s.ver || e.version) + (s.ver && e.version && s.ver !== e.version ? ' (v' + e.version + ' ready)' : '') : '') + ' \u00b7 ' + e.source)),
+          h('div', { class: 'core-addon-name' }, e.name || e.id, h('span', { class: 'core-dim' }, '  ' + e.id + ((s.ver || e.version) ? ' v' + (s.ver || e.version) + (s.ver && e.version && s.ver !== e.version ? ' (v' + e.version + ' ready)' : '') : '') + ' · ' + e.source + noBtn)),
           h('div', { class: 'core-dim' }, e.url),
           s.err ? h('div', { class: 'core-err' }, s.err) : null),
         h('div', { class: 'core-addon-meta' },
-          h('span', { class: 'core-pill core-pill-' + s.state }, s.state + (s.update ? ' \u00b7 update ready' : '')),
-          s.from ? h('span', { class: 'core-dim' }, s.from + (s.bytes ? ' \u00b7 ' + Math.round(s.bytes / 1024) + ' KB' : '')) : null),
-        e.source === 'custom' ? ui.btn('\ud83d\uddd1', 'danger', () => removeCustom(e.id)) : null);
-      // Drag by the grip; the line shows whether it will land above or below the row under the pointer.
-      const clear = () => row.classList.remove('drop-before', 'drop-after');
-      grip.addEventListener('dragstart', (ev) => {
-        dragId = e.id; row.classList.add('dragging');
-        if (ev.dataTransfer) { ev.dataTransfer.effectAllowed = 'move'; try { ev.dataTransfer.setData('text/plain', e.id); ev.dataTransfer.setDragImage(row, 24, 24); } catch (_) { /* */ } }
-      });
-      grip.addEventListener('dragend', () => { dragId = null; el.querySelectorAll('.core-addon').forEach((r) => r.classList.remove('dragging', 'drop-before', 'drop-after')); });
-      row.addEventListener('dragover', (ev) => {
-        if (!dragId || dragId === e.id) return;
+          h('span', { class: 'core-pill core-pill-' + s.state }, s.state + (s.update ? ' · update ready' : '')),
+          s.from ? h('span', { class: 'core-dim' }, s.from + (s.bytes ? ' · ' + Math.round(s.bytes / 1024) + ' KB' : '')) : null),
+        e.source === 'custom' ? ui.btn('🗑', 'danger', () => removeCustom(e.id)) : null,
+        grip);
+      grip.addEventListener('pointerdown', (ev) => {
+        if (ev.pointerType === 'mouse' && ev.button !== 0) return;
         ev.preventDefault();
-        const r = row.getBoundingClientRect(), after = ev.clientY > r.top + r.height / 2;
-        row.classList.toggle('drop-after', after); row.classList.toggle('drop-before', !after);
+        startRowDrag(ev, row, el);
       });
-      row.addEventListener('dragleave', (ev) => { if (!row.contains(ev.relatedTarget)) clear(); });
-      row.addEventListener('drop', (ev) => {
-        if (!dragId) return;
+      grip.addEventListener('keydown', (ev) => {
+        const d = ev.key === 'ArrowUp' ? -1 : ev.key === 'ArrowDown' ? 1 : 0;
+        if (!d) return;
         ev.preventDefault();
-        const r = row.getBoundingClientRect(), after = ev.clientY > r.top + r.height / 2, id = dragId;
-        dragId = null; clear();
-        dropAddon(id, e.id, after);
+        nudgeAddon(e.id, d);
+        const again = el.querySelector('[data-grip="' + e.id + '"]'); if (again) again.focus();
       });
       return row;
     });
     // What the dock really looks like right now, left to right, so the arrangement above can be checked at a glance.
     const shown = ui.dock.items();
     const orderHint = h('div', { class: 'core-order' },
-      h('span', { class: 'core-dim' }, 'Drag \u2807 or use \u25b2\u25bc to arrange. The top of the list is the button closest to the corner; \u2699\ufe0f stays last.'),
+      h('span', { class: 'core-dim' }, 'Drag the bars on the right of a row to rearrange. The top of the list is the button closest to the corner; \u2699\ufe0f stays last.'),
       shown.length ? h('div', { class: 'core-order-btns', title: 'Your buttons, left to right' }, shown.map((b) => h('span', { class: 'core-order-chip', title: b.title }, b.icon))) : null);
     const url = h('input', { class: 'core-input', placeholder: 'Addon URL (.js)', title: 'e.g. https://raw.githubusercontent.com/you/repo/main/addons/x.js', style: { flex: '1 1 240px', minWidth: '120px' } });
     el.replaceChildren(
@@ -1718,7 +1791,7 @@
 
   /* ------------------------------------------------------------ export --- */
   const Core = {
-    __isCore: true, apiLevel: API, version: '3.12.1', debug: false, tabId: TAB,
+    __isCore: true, apiLevel: API, version: '3.12.2', debug: false, tabId: TAB,
     esc, sleep, debounce, fmt, int, compact, parseNum, parseJson,
     on, off, once, emit,
     state, store, player,
