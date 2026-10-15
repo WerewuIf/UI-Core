@@ -17,14 +17,7 @@ It also tidies a few game pages (guild, home, battle) in the background.
 
 **1. Get Tampermonkey.** It's a free browser extension that runs scripts on websites: [tampermonkey.net](https://www.tampermonkey.net/) (Chrome, Edge, Firefox, Safari).
 
-**2. Turn off any old versions.** Open Tampermonkey's dashboard and switch **off** these if you have them (leaving them on makes everything run twice):
-
-- Power Crystals — Presets
-- Inventory Helper + Gear Presets
-- UI Cleanup
-- Pet Team Presets
-- Battle Page Restructure
-- any "DS Central" script
+**2. Turn off any old versions.** Open Tampermonkey's dashboard and switch **off** old scripts
 
 **3. Install Core.** Open this link and click **Install**:
 
@@ -58,7 +51,7 @@ You should now see the buttons in the bottom-right corner: **💎 ⚔️ 🐾 �
 | No buttons appear | Make sure Tampermonkey is on and **Core** is enabled in its dashboard, then reload with **Ctrl+Shift+R**. |
 | Buttons appear twice, or things act strangely | An old script is still on. Turn off the old ones from step 2. |
 | Only ⚙️ shows | Reload once or twice. If it's still just ⚙️, check your internet connection and reload again. |
-| A tool shows a red row in ⚙️ | Click the **↻** button on that row and reload. If it stays red, tell whoever gave you the link and tell them what the row says. |
+| A tool shows a red row in ⚙️ | Click the **↻** button on that row and reload. If it stays red, show what the row says. |
 | Things look old, or a fix doesn't show up | Reloading the page doesn't update the script itself. Open **⚙️** and check the version, then re-open the install link in step 3 and click **Reinstall** / **Update**. |
 | Still stuck | Open **⚙️ → Clear cache**, then reload. |
 
