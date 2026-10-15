@@ -4,14 +4,14 @@
  */
 
 /* ===========================================================================
- * 2.9.0
+ * 2.9.1
  *
  * - Applying a preset shows ONE line in the toast, like every other notice: while it runs
- *   "Applying "x" (3/12) — <current step>  [Cancel]", when it ends one green line, or one red line with the
+ *   "Applying "x" (3/12) — <current step>", when it ends one green line, or one red line with the
  *   first problem (+N more) if anything went wrong (the full list goes to the console).
- * - Cancel: the toast's Cancel button, or the three team buttons in the Apply window (they read "Cancel" while
- *   a run is going), stops the run before its next step. The step already sent finishes; the team is left
- *   wherever it got to, and the toast says so.
+ * - Cancel: while a preset applies, its own Apply button in the list turns into a red Cancel. It stops the run
+ *   before its next step. The step already sent finishes; the team is left wherever it got to, and the toast
+ *   says so. Result toasts stay up longer.
  *
  * 2.8.0
  *
@@ -270,7 +270,7 @@
     if (!el) {
       el = document.createElement('div');
       el.id = 'pp-toast';
-      el.style.cssText = 'position:fixed;top:20px;right:20px;z-index:100060;padding:12px 20px;' +
+      el.style.cssText = 'position:fixed;top:20px;right:20px;z-index:2147483001;padding:12px 20px;' +
         'border-radius:10px;color:#fff;font:600 15px Arial,sans-serif;box-shadow:0 4px 12px rgba(0,0,0,.4);';
       document.body.appendChild(el);
     }
@@ -286,17 +286,10 @@
     el.onclick = null;
   }
   // holdMs 0 = stay until the next update.
-  function showRunToast(msg, ok, holdMs, onCancel) {
+  function showRunToast(msg, ok, holdMs) {
     const el = runToastEl();
     clearTimeout(runToastTimer);
     el.textContent = msg;
-    if (onCancel) {
-      const b = document.createElement('button');
-      b.type = 'button'; b.textContent = 'Cancel';
-      b.style.cssText = 'margin-left:12px;padding:2px 10px;border:1px solid #fff;border-radius:6px;background:transparent;color:#fff;font:700 13px Arial,sans-serif;cursor:pointer;';
-      b.onclick = (e) => { e.stopPropagation(); onCancel(); };
-      el.appendChild(b);
-    }
     el.style.background = ok ? '#2ecc71' : '#e74c3c';
     el.style.whiteSpace = 'normal';
     el.style.maxWidth = '460px';
@@ -305,12 +298,24 @@
     el.onclick = hideRunToast;
     if (holdMs) runToastTimer = setTimeout(hideRunToast, holdMs);
   }
-  function requestCancel() { if (stepRun && !cancelRun) { cancelRun = true; renderRun(); } }
+  function requestCancel() { if (stepRun && !cancelRun) { cancelRun = true; renderRun(); syncRunButtons(); } }
+  // The Apply button of the preset being applied turns into a red Cancel until the run ends.
+  function syncRunButtons() {
+    document.querySelectorAll('#ppList .pp-row[data-preset-id]').forEach((row) => {
+      const b = row.querySelector('[data-run-btn]');
+      if (!b) return;
+      const on = presetBusy && row.getAttribute('data-preset-id') === runPresetId;
+      b.className = 'pp-btn ' + (on ? 'pp-btn-cancel' : 'pp-btn-success');
+      b.textContent = on ? (cancelRun ? 'Cancelling\u2026' : '\u2716 Cancel') : '\u25b6 Apply';
+      b.disabled = on && cancelRun;
+    });
+  }
+  let runPresetId = null;
   function renderRun() {
     if (!stepRun) return;
     const last = stepRun.log[stepRun.log.length - 1];
     const head = stepRun.title + (stepRun.total ? ` (${stepRun.done}/${stepRun.total})` : '');
-    showRunToast(head + (cancelRun ? ' — cancelling after this step…' : last ? ' — ' + last.label : ''), true, 0, cancelRun ? null : requestCancel);
+    showRunToast(head + (cancelRun ? ' — cancelling after this step…' : last ? ' — ' + last.label : ''), true, 0);
   }
   // One line: the summary, plus the first problem (and how many more) if there were any. Red when there were.
   function finishRun(summary, ok, notes) {
@@ -321,7 +326,7 @@
     const issues = ok ? failed.map((s) => s.label + ' — ' + s.err).concat(extra) : [];
     if (issues.length > 1) console.warn('[Pet Presets] ' + summary, issues);
     const msg = issues.length ? summary.replace(/\.$/, '') + ' — ' + issues[0] + (issues.length > 1 ? ` (+${issues.length - 1} more, see console)` : '') : summary;
-    showRunToast(msg, ok && !issues.length, ok && !issues.length ? 6000 : 15000);
+    showRunToast(msg, ok && !issues.length, ok && !issues.length ? 10000 : 20000);
   }
 
   // Runs fn as one visible step. With no run in progress it just runs fn.
@@ -1649,7 +1654,7 @@
 
   async function restorePresetToTeam(preset, targetTeam) {
     if (presetBusy) { notify('Wait for the current action to finish.', false); return; }
-    presetBusy = true; cancelRun = false;
+    presetBusy = true; cancelRun = false; runPresetId = preset.id; syncRunButtons();
     stepRun = { title: 'Applying "' + preset.name + '"', log: [], done: 0, total: 0 };
     try {
       // Read all three team pages: a pet this preset wants may be sitting on
@@ -1846,13 +1851,13 @@
       if (cancelRun) {
         const d = stepRun.done, n = stepRun.total;
         cancelRun = false;
-        showRunToast(`Cancelled "${preset.name}" — ${TEAM_LABELS[targetTeam]} may be part-way` + (n ? ` (${d}/${n} steps done).` : '.'), true, 8000);
+        showRunToast(`Cancelled "${preset.name}" — ${TEAM_LABELS[targetTeam]} may be part-way` + (n ? ` (${d}/${n} steps done).` : '.'), true, 12000);
         dropDocCache(); dropLinkIndex();
         try { if (isPetsPage()) await smartRefreshTeamSections(getUrlTeam()); else scheduleAugment(); } catch (_) { /* the page just shows the old state */ }
       } else finishRun('Stopped: ' + (err?.message || 'action failed'), false, []);
     } finally {
       stepRun = null; cancelRun = false;
-      presetBusy = false;
+      presetBusy = false; runPresetId = null; syncRunButtons();
     }
   }
 
@@ -1880,6 +1885,7 @@
       .pp-btn:hover{ filter:brightness(1.06); }
       .pp-btn-soft{ background:linear-gradient(135deg,#222d49,#2b3859); box-shadow:none; }
       .pp-btn-success{ background:linear-gradient(135deg,#217f5b,#33b57f); }
+      .pp-btn-cancel{ background:linear-gradient(135deg,#a8283a,#e74c3c); }
       .pp-btn:disabled{ opacity:.5; cursor:not-allowed; }
 
       .pp-row{ display:flex; justify-content:space-between; align-items:center; gap:12px; padding:12px;
@@ -2191,7 +2197,11 @@
 
       const actions = document.createElement('div');
       actions.className = 'pp-row-actions';
-      actions.appendChild(mkBtn('pp-btn-success', '▶ Apply', () => openApplyModal(preset)));
+      const runBtn = mkBtn('pp-btn-success', '▶ Apply', () => (presetBusy
+        ? (runPresetId === preset.id ? requestCancel() : notify('Wait for the current action to finish.', false))
+        : openApplyModal(preset)));
+      runBtn.setAttribute('data-run-btn', '');
+      actions.appendChild(runBtn);
       const menuBtn = mkBtn('pp-btn-soft pp-menu-btn', '⋯', (e) => { e.stopPropagation(); toggleMenu(menuBtn, preset, HOVER_OK); });
       attachHoverMenu(menuBtn, preset);
       actions.appendChild(menuBtn);
@@ -2199,6 +2209,7 @@
 
       wrap.appendChild(row);
     });
+    syncRunButtons();
     paintEquipped();              // last known result right away, no flicker
     refreshEquippedBadges(force); // then re-check all three teams
   }
@@ -3409,12 +3420,10 @@ function openLinkChooser(mainInvId, level, info) {
 
   function openApplyModal(preset) {
     activeApplyPreset = preset;
-    document.getElementById('ppApplyTitle').textContent = presetBusy ? 'Applying…' : `Apply "${preset.name}" to:`;
-    document.querySelectorAll('#ppApplyModal [data-apply-team]').forEach((b) => { b.textContent = presetBusy ? 'Cancel' : TEAM_LABELS[b.getAttribute('data-apply-team')]; });
+    document.getElementById('ppApplyTitle').textContent = `Apply "${preset.name}" to:`;
     document.getElementById('ppApplyModal').classList.add('show');
   }
   async function onApplyTarget(targetTeam) {
-    if (presetBusy) { requestCancel(); closeModal('ppApplyModal'); return; }
     if (!activeApplyPreset) return;
     const preset = activeApplyPreset;
     closeModal('ppApplyModal');
