@@ -658,8 +658,8 @@
   //   init   may be async; whatever it returns becomes the module's public api (Core.use / Core.get)
   const mods = new Map();   // id -> { def, state, api, waiters }
   // Shared by the module system and the addon loader: user addons and disabled ids.
-  // order: the ids in the order the user arranged them in the Addons panel (also the order of the buttons in the dock).
-  const cfg = store('addons', { def: { custom: [], off: [], order: [] }, key: 'core:addons' });
+  // order: the ids in the order the user arranged them in the Addons panel, top to bottom = the dock's buttons left to right (orderV 2).
+  const cfg = store('addons', { def: { custom: [], off: [], order: [], orderV: 2 }, key: 'core:addons' });
 
   function matches(def) {
     const t = def.match, p = root.location.pathname + root.location.search;
@@ -1016,27 +1016,33 @@
   }
 
   // ---- order ----
-  // The Addons panel lists addons in the order the user arranged them (cfg.order; ids not in it keep their normal
-  // place after the arranged ones). The same order sets the buttons in the dock: the top of the list is the button
-  // closest to the corner, and the Addons button itself always stays at the far end.
+  // The Addons panel lists addons in the order of the buttons on screen: the TOP of the list is the LEFT-most button.
+  // The Addons button (\u2699\ufe0f) always stays at the far left, ahead of the list. cfg.order holds the ids in list order
+  // (cfg.orderV = 2). Orders saved by an earlier version (top = nearest the right corner, no orderV) are read back reversed,
+  // so nothing moves on screen.
+  const savedOrder = () => { const c = cfg.get(), o = Array.isArray(c.order) ? c.order : []; return c.orderV === 2 ? o : o.slice().reverse(); };
   function orderedEntries() {
-    const o = cfg.get().order || [];
-    return entries().map((e, i) => { const k = o.indexOf(e.id); return { e, k: k >= 0 ? k : o.length + i }; })
-      .sort((a, b) => a.k - b.k).map((x) => x.e);
+    const es = entries(), byId = new Map(es.map((e) => [e.id, e]));
+    const out = savedOrder().filter((id) => byId.has(id)).map((id) => byId.get(id)), seen = new Set(out.map((e) => e.id));
+    // not arranged yet: addons that have a button follow the buttons' current on-screen order, then the rest as listed
+    const withBtn = ui.dock.items().map((b) => byId.get(b.id)).filter((e) => e && !seen.has(e.id));
+    withBtn.forEach((e) => seen.add(e.id));
+    return out.concat(withBtn, es.filter((e) => !seen.has(e.id)));
   }
-  function saveOrder(ids) { cfg.update((c) => { c.order = ids; }); float.refresh('addons'); }
+  function saveOrder(ids) { cfg.update((c) => { c.order = ids; c.orderV = 2; }); float.refresh('addons'); }
   function nudgeAddon(id, d) {
     const ids = orderedEntries().map((e) => e.id), i = ids.indexOf(id), j = i + d;
     if (i < 0 || j < 0 || j >= ids.length) return;
     ids.splice(j, 0, ids.splice(i, 1)[0]);
     saveOrder(ids);
   }
-  // Dock position of a button: its place in the arranged list; buttons not in the list keep their built-in order
-  // after those; the Addons button is always last.
+  // Dock rank of a button (lower = nearer the corner, i.e. further right). Arranged buttons: first in the list = highest
+  // rank = left-most. Buttons not arranged yet keep their built-in rank, which is lower than any arranged one, so they sit to
+  // the right of them. The Addons button is always left-most.
   const dockRank = (id, dflt) => {
     if (id === 'addons') return 1e9;
-    const k = (cfg.get().order || []).indexOf(id);
-    return k >= 0 ? k : 1000 + dflt;
+    const k = savedOrder().indexOf(id);
+    return k >= 0 ? 1e6 - k : dflt;
   };
   ui.dock.setRank(dockRank);
   cfg.watch(() => ui.dock.refresh());   // also fires when another tab rearranges
@@ -1165,7 +1171,7 @@
     // What the dock really looks like right now, left to right, so the arrangement above can be checked at a glance.
     const shown = ui.dock.items();
     const orderHint = h('div', { class: 'core-order' },
-      h('span', { class: 'core-dim' }, 'Drag the bars on the right of a row to rearrange. The top of the list is the button closest to the corner; \u2699\ufe0f stays last.'),
+      h('span', { class: 'core-dim' }, 'Drag the bars on the right of a row to rearrange. The top of the list is the left-most button; \u2699\ufe0f stays at the far left.'),
       shown.length ? h('div', { class: 'core-order-btns', title: 'Your buttons, left to right' }, shown.map((b) => h('span', { class: 'core-order-chip', title: b.title }, b.icon))) : null);
     const url = h('input', { class: 'core-input', placeholder: 'Addon URL (.js)', title: 'e.g. https://raw.githubusercontent.com/you/repo/main/addons/x.js', style: { flex: '1 1 240px', minWidth: '120px' } });
     el.replaceChildren(
@@ -1791,7 +1797,7 @@
 
   /* ------------------------------------------------------------ export --- */
   const Core = {
-    __isCore: true, apiLevel: API, version: '3.12.2', debug: false, tabId: TAB,
+    __isCore: true, apiLevel: API, version: '3.12.3', debug: false, tabId: TAB,
     esc, sleep, debounce, fmt, int, compact, parseNum, parseJson,
     on, off, once, emit,
     state, store, player,
