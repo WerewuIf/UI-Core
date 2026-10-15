@@ -96,6 +96,45 @@
     Core.ui.toast(msg, ok, 3000);
   }
 
+  // ---------- apply progress: ONE toast line + Cancel ----------
+  let cancelRun = false;      // set by Cancel while a preset is applying; checked before every request
+  let runToastTimer = null;
+  const requestCancel = () => { cancelRun = true; };
+  function runToastEl() {
+    let el = document.getElementById('notification') || document.getElementById('pcp-toast');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'pcp-toast';
+      el.style.cssText = 'position:fixed;top:20px;right:20px;z-index:100060;padding:12px 20px;' +
+        'border-radius:10px;color:#fff;font:600 15px Arial,sans-serif;box-shadow:0 4px 12px rgba(0,0,0,.4);';
+      document.body.appendChild(el);
+    }
+    return el;
+  }
+  function hideRunToast() {
+    clearTimeout(runToastTimer);
+    const el = runToastEl();
+    el.style.display = 'none'; el.style.whiteSpace = ''; el.style.maxWidth = ''; el.style.cursor = ''; el.onclick = null;
+  }
+  // holdMs 0 = stay until the next update; onCancel adds a Cancel button.
+  function showRunToast(msg, ok, holdMs, onCancel) {
+    const el = runToastEl();
+    clearTimeout(runToastTimer);
+    el.textContent = msg;
+    if (onCancel) {
+      const b = document.createElement('button');
+      b.type = 'button'; b.textContent = 'Cancel';
+      b.style.cssText = 'margin-left:12px;padding:2px 10px;border:1px solid #fff;border-radius:6px;background:transparent;color:#fff;font:700 13px Arial,sans-serif;cursor:pointer;';
+      b.onclick = (e) => { e.stopPropagation(); onCancel(); showRunToast(msg + ' \u2014 cancelling after this step\u2026', ok, 0); };
+      el.appendChild(b);
+    }
+    el.style.background = ok ? '#2ecc71' : '#e74c3c';
+    el.style.whiteSpace = 'normal'; el.style.maxWidth = '460px'; el.style.cursor = 'pointer'; el.style.display = 'block';
+    el.onclick = hideRunToast;
+    if (holdMs) runToastTimer = setTimeout(hideRunToast, holdMs);
+  }
+  const say = (msg, ok = true) => showRunToast(msg, ok, ok ? 6000 : 12000);
+
   function escapeHtmlLocal(str) {
     return String(str ?? '')
       .replaceAll('&', '&amp;')
@@ -357,10 +396,10 @@
   }
 
   async function restorePreset(preset) {
-    if (presetOpBusy) { notify('Please wait for the current action to finish.', false); return; }
+    if (presetOpBusy) { requestCancel(); return; }   // the Restore button reads Cancel while a run is going
     if (!confirm('Restore preset "' + preset.name + '"? This re-equips crystals to match the saved layout.')) return;
 
-    presetOpBusy = true;
+    presetOpBusy = true; cancelRun = false;
     Core.float.close('crystal-presets');
 
     try {
@@ -368,7 +407,7 @@
       try {
         currentSnap = scanEquipmentSnapshot(await getContextDoc());
       } catch (err) {
-        notify('Could not reach power_crystals.php to read current equipment.', false);
+        say('Could not reach power_crystals.php to read current equipment.', false);
         return;
       }
       const currentLinks = {}; // crystalId -> key
@@ -387,42 +426,51 @@
       const total = toUnequip.length + toEquip.length;
 
       if (!total) {
-        notify(skippedOrphans ? 'Already matches (ignoring gear no longer equipped).' : 'Already matches this preset.', true);
+        say(skippedOrphans ? 'Already matches (ignoring gear no longer equipped).' : 'Already matches this preset.', true);
         return;
       }
 
       let done = 0;
+      const progress = () => showRunToast('Restoring "' + preset.name + '"\u2026 (' + done + '/' + total + ')', true, 0, requestCancel);
+      const cancelled = () => {
+        if (!cancelRun) return false;
+        say('Cancelled "' + preset.name + '" \u2014 crystals may be part-way (' + done + '/' + total + ' steps done).');
+        return true;
+      };
+      progress();
 
       for (const crystalId of toUnequip) {
+        if (cancelled()) return;
         const r = await unequipCrystal(crystalId);
-        if (!r.ok) { notify('Stopped: failed to unequip crystal #' + crystalId + (r.error ? ' — ' + r.error : '.'), false); return; }
+        if (!r.ok) { say('Stopped: failed to unequip crystal #' + crystalId + (r.error ? ' — ' + r.error : '.'), false); return; }
         done++;
-        notify('Restoring "' + preset.name + '"… (' + done + '/' + total + ')', true);
+        progress();
       }
 
       for (const crystalId of toEquip) {
+        if (cancelled()) return;
         const key = desiredLinks[crystalId];
         const freshSnap = scanEquipmentSnapshot(await getContextDoc());
         const target = freshSnap.find((e) => e.key === key);
         const equipmentInvId = target ? target.equipmentInvId : null;
         if (!equipmentInvId) {
-          notify('Skipped crystal #' + crystalId + ' — no open slot found.', false);
+          say('Skipped crystal #' + crystalId + ' — no open slot found.', false);
           continue;
         }
         const r = await equipCrystal(crystalId, equipmentInvId);
-        if (!r.ok) { notify('Stopped: failed to equip crystal #' + crystalId + (r.error ? ' — ' + r.error : '.'), false); return; }
+        if (!r.ok) { say('Stopped: failed to equip crystal #' + crystalId + (r.error ? ' — ' + r.error : '.'), false); return; }
         done++;
-        notify('Restoring "' + preset.name + '"… (' + done + '/' + total + ')', true);
+        progress();
       }
 
-      notify(
+      say(
         skippedOrphans
           ? 'Preset restored. ' + skippedOrphans + ' saved slot(s) skipped (gear not currently equipped).'
           : 'Preset "' + preset.name + '" restored.',
         true
       );
     } finally {
-      presetOpBusy = false;
+      presetOpBusy = false; cancelRun = false;
     }
   }
 
@@ -993,7 +1041,7 @@
 
       const actions = document.createElement('div');
       actions.className = 'pcp-row-actions';
-      actions.appendChild(mkBtn('pcp-btn-success', '▶ Restore', () => restorePreset(preset)));
+      actions.appendChild(mkBtn('pcp-btn-success', presetOpBusy ? '✖ Cancel' : '▶ Restore', () => restorePreset(preset)));
       const menuBtn = mkBtn('pcp-btn-soft pcp-menu-btn', '⋯', (e) => {
         e.stopPropagation();
         togglePresetMenu(menuBtn, preset, HOVER_OK);
