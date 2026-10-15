@@ -327,7 +327,7 @@ function openIO() {
   const m = Core.ui.modal({ id: 'as-io', title: 'Import / Export', width: 520 });
   const ta = h('textarea', { class: 'core-input as-ta', spellcheck: 'false', placeholder: 'Paste accounts here to import (a JSON list)…' });
   m.setBody(h('div', { class: 'as-form' },
-    h('div', { class: 'core-dim' }, 'Export copies your saved accounts as JSON, passwords included in plain text. Import adds the pasted accounts, skipping any username you already have.'),
+    h('div', { class: 'core-dim' }, 'Export copies your saved accounts as JSON, passwords included in plain text. Import adds the pasted accounts, skipping any email you already have (the alias doesn\'t matter).'),
     ta));
   m.setActions([
     { label: '⧉ Copy export', kind: 'soft', onClick: async () => {
@@ -341,19 +341,25 @@ function openIO() {
       let src;
       try { src = JSON.parse(ta.value); } catch (_) { Core.ui.toast('That isn\'t valid JSON.', false); return; }
       const rows = (Array.isArray(src) ? src : src && src.accounts) || [];
-      let added = 0;
+      let added = 0, dupes = 0;
       db.update((d) => {
-        const have = new Set(d.accounts.map((a) => a.username.toLowerCase()));
+        // An account is the same account when its EMAIL is the same (ignoring case and stray spaces), whatever alias it
+        // goes by. This also drops repeats inside the pasted list itself. Rows may call the field "email" or "username".
+        const key = (s) => String(s || '').trim().toLowerCase();
+        const have = new Set(d.accounts.map((a) => key(a.username)));
         rows.forEach((r) => {
-          if (!r || typeof r.username !== 'string' || typeof r.password !== 'string' || !r.username.trim()) return;
-          const u = r.username.trim();
-          if (have.has(u.toLowerCase())) return;
-          have.add(u.toLowerCase());
+          if (!r || typeof r !== 'object') return;
+          const login = typeof r.email === 'string' && r.email.trim() ? r.email : r.username;
+          if (typeof login !== 'string' || typeof r.password !== 'string' || !login.trim()) return;
+          const u = login.trim();
+          if (have.has(key(u))) { dupes++; return; }
+          have.add(key(u));
           d.accounts.push({ id: uid(), alias: String(r.alias || '').trim() || u, username: u, password: r.password });
           added++;
         });
       });
-      Core.ui.toast(added ? 'Imported ' + added + ' account(s).' : 'Nothing new to import.', !!added);
+      const skipped = dupes ? ' Skipped ' + dupes + ' with an email you already have.' : '';
+      Core.ui.toast(added ? 'Imported ' + added + ' account(s).' + skipped : (dupes ? 'Nothing new: all ' + dupes + ' emails are already saved.' : 'Nothing new to import.'), !!added);
       if (added) m.close();
     } },
   ]);
@@ -363,13 +369,15 @@ function openIO() {
 /* ----------------------------------------------------------------- panel --- */
 function accountCard(acc) {
   const active = isActive(acc);
-  const more = h('button', { class: 'as-more', type: 'button', title: 'Edit or delete', onclick: (e) => {
-    e.stopPropagation();
-    Core.ui.menu(more, [
-      { label: '✏️ Edit', onClick: () => openEdit(acc) },
-      { label: '🗑️ Delete', danger: true, onClick: () => askDelete(acc) },
-    ]);
-  } }, '⋯');
+  const more = h('button', { class: 'as-more', type: 'button', title: 'Edit or delete' }, '⋯');
+  const items = [
+    { label: '✏️ Edit', onClick: () => openEdit(acc) },
+    { label: '🗑️ Delete', danger: true, onClick: () => askDelete(acc) },
+  ];
+  // Hover the ⋯ to open the menu (a click opens it too, and keeps it open: that is how touch screens use it).
+  // Older Core without hoverMenu falls back to the click-only menu.
+  if (Core.ui.hoverMenu) Core.ui.hoverMenu(more, items);
+  else more.addEventListener('click', (e) => { e.stopPropagation(); Core.ui.menu(more, items); });
   const card = h('div', active ? { class: 'as-card active' } : { class: 'as-card', role: 'button', tabindex: '0', title: 'Switch to ' + acc.alias },
     h('div', { class: 'as-card-top' }, avatar(acc), more),
     h('div', { class: 'as-card-text' }, h('div', { class: 'as-alias' }, acc.alias), h('div', { class: 'as-user' }, acc.username)),
