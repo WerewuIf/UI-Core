@@ -99,13 +99,26 @@
   // ---------- apply progress: ONE toast line + Cancel ----------
   let cancelRun = false;      // set by Cancel while a preset is applying; checked before every request
   let runToastTimer = null;
-  const requestCancel = () => { cancelRun = true; };
+  let runPresetId = null;
+  const requestCancel = () => { cancelRun = true; syncRunButtons(); showRunToast('Cancelling after this step\u2026', true, 0); };
+  // The Apply button of the preset being applied turns into a red Cancel until the run ends.
+  function syncRunButtons() {
+    document.querySelectorAll('#pcpList .pcp-row[data-preset-id]').forEach((row) => {
+      const b = row.querySelector('[data-run-btn]');
+      if (!b) return;
+      const on = presetOpBusy && row.getAttribute('data-preset-id') === runPresetId;
+      b.className = 'pcp-btn ' + (on ? 'pcp-btn-cancel' : 'pcp-btn-success');
+      b.textContent = on ? (cancelRun ? 'Cancelling\u2026' : '\u2716 Cancel') : '\u25b6 Restore';
+      b.disabled = on && cancelRun;
+    });
+  }
+
   function runToastEl() {
     let el = document.getElementById('notification') || document.getElementById('pcp-toast');
     if (!el) {
       el = document.createElement('div');
       el.id = 'pcp-toast';
-      el.style.cssText = 'position:fixed;top:20px;right:20px;z-index:100060;padding:12px 20px;' +
+      el.style.cssText = 'position:fixed;top:20px;right:20px;z-index:2147483001;padding:12px 20px;' +
         'border-radius:10px;color:#fff;font:600 15px Arial,sans-serif;box-shadow:0 4px 12px rgba(0,0,0,.4);';
       document.body.appendChild(el);
     }
@@ -116,24 +129,17 @@
     const el = runToastEl();
     el.style.display = 'none'; el.style.whiteSpace = ''; el.style.maxWidth = ''; el.style.cursor = ''; el.onclick = null;
   }
-  // holdMs 0 = stay until the next update; onCancel adds a Cancel button.
-  function showRunToast(msg, ok, holdMs, onCancel) {
+  // holdMs 0 = stay until the next update.
+  function showRunToast(msg, ok, holdMs) {
     const el = runToastEl();
     clearTimeout(runToastTimer);
     el.textContent = msg;
-    if (onCancel) {
-      const b = document.createElement('button');
-      b.type = 'button'; b.textContent = 'Cancel';
-      b.style.cssText = 'margin-left:12px;padding:2px 10px;border:1px solid #fff;border-radius:6px;background:transparent;color:#fff;font:700 13px Arial,sans-serif;cursor:pointer;';
-      b.onclick = (e) => { e.stopPropagation(); onCancel(); showRunToast(msg + ' \u2014 cancelling after this step\u2026', ok, 0); };
-      el.appendChild(b);
-    }
     el.style.background = ok ? '#2ecc71' : '#e74c3c';
     el.style.whiteSpace = 'normal'; el.style.maxWidth = '460px'; el.style.cursor = 'pointer'; el.style.display = 'block';
     el.onclick = hideRunToast;
     if (holdMs) runToastTimer = setTimeout(hideRunToast, holdMs);
   }
-  const say = (msg, ok = true) => showRunToast(msg, ok, ok ? 6000 : 12000);
+  const say = (msg, ok = true) => showRunToast(msg, ok, ok ? 10000 : 20000);
 
   function escapeHtmlLocal(str) {
     return String(str ?? '')
@@ -396,11 +402,10 @@
   }
 
   async function restorePreset(preset) {
-    if (presetOpBusy) { requestCancel(); return; }   // the Restore button reads Cancel while a run is going
+    if (presetOpBusy) { if (runPresetId === preset.id) requestCancel(); else say('Please wait for the current action to finish.', false); return; }
     if (!confirm('Restore preset "' + preset.name + '"? This re-equips crystals to match the saved layout.')) return;
 
-    presetOpBusy = true; cancelRun = false;
-    Core.float.close('crystal-presets');
+    presetOpBusy = true; cancelRun = false; runPresetId = preset.id; syncRunButtons();
 
     try {
       let currentSnap;
@@ -431,7 +436,7 @@
       }
 
       let done = 0;
-      const progress = () => showRunToast('Restoring "' + preset.name + '"\u2026 (' + done + '/' + total + ')', true, 0, requestCancel);
+      const progress = () => showRunToast('Restoring "' + preset.name + '"\u2026 (' + done + '/' + total + ')', true, 0);
       const cancelled = () => {
         if (!cancelRun) return false;
         say('Cancelled "' + preset.name + '" \u2014 crystals may be part-way (' + done + '/' + total + ' steps done).');
@@ -470,7 +475,7 @@
         true
       );
     } finally {
-      presetOpBusy = false; cancelRun = false;
+      presetOpBusy = false; cancelRun = false; runPresetId = null; syncRunButtons();
     }
   }
 
@@ -826,6 +831,7 @@
       .pcp-btn-soft{ background:linear-gradient(135deg, #222d49, #2b3859); box-shadow:none; }
       .pcp-btn-danger{ background:linear-gradient(135deg, #7b3040, #b4465c); }
       .pcp-btn-success{ background:linear-gradient(135deg, #217f5b, #33b57f); }
+      .pcp-btn-cancel{ background:linear-gradient(135deg,#a8283a,#e74c3c); }
       .pcp-btn:disabled{
         opacity:.45; cursor:not-allowed; transform:none !important;
         filter:none !important; box-shadow:none;
@@ -1020,6 +1026,7 @@
     presets.forEach((preset) => {
       const row = document.createElement('div');
       row.className = 'pcp-row';
+      row.setAttribute('data-preset-id', preset.id);
 
       const info = document.createElement('div');
       const totalCrystals = preset.items.reduce((n, i) => n + i.crystalIds.length, 0);
@@ -1041,7 +1048,8 @@
 
       const actions = document.createElement('div');
       actions.className = 'pcp-row-actions';
-      actions.appendChild(mkBtn('pcp-btn-success', presetOpBusy ? '✖ Cancel' : '▶ Restore', () => restorePreset(preset)));
+      actions.appendChild(mkBtn('pcp-btn-success', '▶ Restore', () => restorePreset(preset)));
+      actions.lastChild.setAttribute('data-run-btn', '');
       const menuBtn = mkBtn('pcp-btn-soft pcp-menu-btn', '⋯', (e) => {
         e.stopPropagation();
         togglePresetMenu(menuBtn, preset, HOVER_OK);
@@ -1052,6 +1060,7 @@
 
       wrap.appendChild(row);
     });
+    syncRunButtons();
   }
 
     function presetMatchesCurrent(preset, currentSnap) {
