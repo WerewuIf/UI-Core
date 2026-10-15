@@ -4,6 +4,15 @@
  */
 
 /* ===========================================================================
+ * 2.9.0
+ *
+ * - Applying a preset shows ONE line in the toast, like every other notice: while it runs
+ *   "Applying "x" (3/12) — <current step>  [Cancel]", when it ends one green line, or one red line with the
+ *   first problem (+N more) if anything went wrong (the full list goes to the console).
+ * - Cancel: the toast's Cancel button, or the three team buttons in the Apply window (they read "Cancel" while
+ *   a run is going), stops the run before its next step. The step already sent finishes; the team is left
+ *   wherever it got to, and the toast says so.
+ *
  * 2.8.0
  *
  * - Edit preset: the sigil chips (attack, defense, elemental orb) now sit in a row under each pet's
@@ -225,8 +234,10 @@
   }
   function has(obj, key) { return !!obj && Object.prototype.hasOwnProperty.call(obj, key); }
 
+  let cancelRun = false;    // set by Cancel while a preset is applying; stops the run before its next step
   // fetch that gives up after CFG.REQUEST_TIMEOUT_MS instead of waiting forever.
   function fetchTO(url, opts) {
+    if (cancelRun) return Promise.reject(new Error('Cancelled'));
     const ctl = (typeof AbortController === 'function') ? new AbortController() : null;
     let timer;
     const timeout = new Promise((_, reject) => {
@@ -275,47 +286,48 @@
     el.onclick = null;
   }
   // holdMs 0 = stay until the next update.
-  function showRunToast(msg, ok, holdMs) {
+  function showRunToast(msg, ok, holdMs, onCancel) {
     const el = runToastEl();
     clearTimeout(runToastTimer);
     el.textContent = msg;
+    if (onCancel) {
+      const b = document.createElement('button');
+      b.type = 'button'; b.textContent = 'Cancel';
+      b.style.cssText = 'margin-left:12px;padding:2px 10px;border:1px solid #fff;border-radius:6px;background:transparent;color:#fff;font:700 13px Arial,sans-serif;cursor:pointer;';
+      b.onclick = (e) => { e.stopPropagation(); onCancel(); };
+      el.appendChild(b);
+    }
     el.style.background = ok ? '#2ecc71' : '#e74c3c';
-    el.style.whiteSpace = 'pre-line';
+    el.style.whiteSpace = 'normal';
     el.style.maxWidth = '460px';
     el.style.cursor = 'pointer';
     el.style.display = 'block';
     el.onclick = hideRunToast;
     if (holdMs) runToastTimer = setTimeout(hideRunToast, holdMs);
   }
-  function stepLine(s) {
-    return (s.state === 'ok' ? '✔ ' : s.state === 'fail' ? '✖ ' : '⏳ ') + s.label + (s.err ? ' — ' + s.err : '');
-  }
+  function requestCancel() { if (stepRun && !cancelRun) { cancelRun = true; renderRun(); } }
   function renderRun() {
     if (!stepRun) return;
+    const last = stepRun.log[stepRun.log.length - 1];
     const head = stepRun.title + (stepRun.total ? ` (${stepRun.done}/${stepRun.total})` : '');
-    showRunToast([head].concat(stepRun.log.slice(-4).map(stepLine)).join('\n'), true, 0);
+    showRunToast(head + (cancelRun ? ' — cancelling after this step…' : last ? ' — ' + last.label : ''), true, 0, cancelRun ? null : requestCancel);
   }
+  // One line: the summary, plus the first problem (and how many more) if there were any. Red when there were.
   function finishRun(summary, ok, notes) {
     const log = stepRun ? stepRun.log : [];
-    const failedErrs = log.filter((s) => s.state === 'fail' && s.err).map((s) => s.err);
-    // Notes already shown as a failed step, or plain "X came off Y" results of
-    // steps that are listed anyway, would just repeat themselves.
-    const extra = (notes || []).filter((n) =>
-      !failedErrs.some((e) => n.includes(e)) && !/\bcame off\b|^Took /.test(n));
-    const lines = [summary];
-    if (log.length && log.length <= 12) log.forEach((s) => lines.push(stepLine(s)));
-    else if (log.length) {
-      lines.push(`${log.filter((s) => s.state === 'ok').length}/${log.length} steps done`);
-      log.filter((s) => s.state === 'fail').forEach((s) => lines.push(stepLine(s)));
-    }
-    extra.forEach((n) => lines.push('• ' + n));
-    const trouble = !ok || extra.length || log.some((s) => s.state === 'fail');
-    showRunToast(lines.join('\n'), ok, trouble ? 15000 : 6000);
+    const failed = log.filter((s) => s.state === 'fail' && s.err);
+    // Notes that repeat a failed step, or plain "X came off Y" results of steps that ran fine, aren't problems.
+    const extra = (notes || []).filter((n) => !failed.some((s) => n.includes(s.err)) && !/\bcame off\b|^Took /.test(n));
+    const issues = ok ? failed.map((s) => s.label + ' — ' + s.err).concat(extra) : [];
+    if (issues.length > 1) console.warn('[Pet Presets] ' + summary, issues);
+    const msg = issues.length ? summary.replace(/\.$/, '') + ' — ' + issues[0] + (issues.length > 1 ? ` (+${issues.length - 1} more, see console)` : '') : summary;
+    showRunToast(msg, ok && !issues.length, ok && !issues.length ? 6000 : 15000);
   }
 
   // Runs fn as one visible step. With no run in progress it just runs fn.
   async function step(label, fn) {
     if (!stepRun) return fn();
+    if (cancelRun) throw new Error('Cancelled');
     const s = { label: String(label), state: 'run' };
     stepRun.log.push(s);
     renderRun();
@@ -1500,31 +1512,22 @@
   }
 
   // `skip(wearer)` returns true for pets that must not give the sigil up.
-  // Returns { holder, why }: holder is null when nobody could be found, and why says what actually happened, so the
-  // note never claims "every pet wearing it is meant to keep it" when really none was found or a lookup failed.
-  // The card text is only a hint for who to ask first; the game's own answer (pet_sigils_ajax.php) decides, and if the
-  // names don't line up (spacing, case, extra text on the card) every other wearer is asked too.
   async function findSigilHolder(itemId, itemName, skip) {
     const { wearers, names } = await collectSigilWearers();
-    const norm = (x) => String(x || '').replace(/\s+/g, ' ').trim().toLowerCase();
-    const kept = wearers.filter((w) => skip && skip(w));
-    const free = wearers.filter((w) => !(skip && skip(w)));
-    const byName = free.filter((w) => norm(w.name) === norm(itemName));
-    const candidates = byName.concat(free.filter((w) => !byName.includes(w)));
-    const nm = (w) => (names[w.invId] ? names[w.invId].name : 'Pet #' + w.invId);
-    let failed = 0;
+    const candidates = wearers.filter((w) => w.name === itemName && !(skip && skip(w)));
     for (const c of candidates) {
       try {
         const info = await fetchSigilInfo(c.invId, c.slotType, true);
         if (info.current && info.current.itemId === String(itemId)) {
-          return { holder: { invId: c.invId, slotType: c.slotType, petName: nm(c) }, why: '' };
+          return {
+            invId: c.invId,
+            slotType: c.slotType,
+            petName: names[c.invId] ? names[c.invId].name : ('Pet #' + c.invId),
+          };
         }
-      } catch (_) { failed++; }
+      } catch (_) { /* try the next one */ }
     }
-    const keptNames = kept.filter((w) => norm(w.name) === norm(itemName)).map(nm);
-    const why = keptNames.length ? `${keptNames.join(', ')} ${keptNames.length > 1 ? 'are' : 'is'} meant to keep it`
-      : `none of the ${wearers.length} pets wearing a sigil or orb was found holding it` + (failed ? ` (${failed} couldn't be read)` : '');
-    return { holder: null, why };
+    return null;
   }
 
   async function findAllSigilHolders(itemId, itemName, excludeInvId /*, teamKey (unused now) */) {
@@ -1609,9 +1612,9 @@
             if (!entry || !has(entry, w.slotType)) return false;
             return entry[w.slotType] === want;
           };
-          const { holder, why } = await findSigilHolder(want, opt.name, protectedWearer);
+          const holder = await findSigilHolder(want, opt.name, protectedWearer);
           if (!holder) {
-            notes.push(`${pet.name} ${SIGIL_LABELS[slotType]}: no free copy of ${label} — ${why}`);
+            notes.push(`${pet.name} ${SIGIL_LABELS[slotType]}: no free copy of ${label}, and every pet wearing it is meant to keep it`);
             continue;
           }
           try {
@@ -1646,7 +1649,7 @@
 
   async function restorePresetToTeam(preset, targetTeam) {
     if (presetBusy) { notify('Wait for the current action to finish.', false); return; }
-    presetBusy = true;
+    presetBusy = true; cancelRun = false;
     stepRun = { title: 'Applying "' + preset.name + '"', log: [], done: 0, total: 0 };
     try {
       // Read all three team pages: a pet this preset wants may be sitting on
@@ -1840,10 +1843,15 @@
         : `Applied "${preset.name}" to ${TEAM_LABELS[targetTeam]}.`;
       finishRun(summary, true, rawNotes);
     } catch (err) {
-      const msg = 'Stopped: ' + (err?.message || 'action failed');
-      finishRun(msg, false, []);
+      if (cancelRun) {
+        const d = stepRun.done, n = stepRun.total;
+        cancelRun = false;
+        showRunToast(`Cancelled "${preset.name}" — ${TEAM_LABELS[targetTeam]} may be part-way` + (n ? ` (${d}/${n} steps done).` : '.'), true, 8000);
+        dropDocCache(); dropLinkIndex();
+        try { if (isPetsPage()) await smartRefreshTeamSections(getUrlTeam()); else scheduleAugment(); } catch (_) { /* the page just shows the old state */ }
+      } else finishRun('Stopped: ' + (err?.message || 'action failed'), false, []);
     } finally {
-      stepRun = null;
+      stepRun = null; cancelRun = false;
       presetBusy = false;
     }
   }
@@ -3401,19 +3409,16 @@ function openLinkChooser(mainInvId, level, info) {
 
   function openApplyModal(preset) {
     activeApplyPreset = preset;
-    document.getElementById('ppApplyTitle').textContent = `Apply "${preset.name}" to:`;
+    document.getElementById('ppApplyTitle').textContent = presetBusy ? 'Applying…' : `Apply "${preset.name}" to:`;
+    document.querySelectorAll('#ppApplyModal [data-apply-team]').forEach((b) => { b.textContent = presetBusy ? 'Cancel' : TEAM_LABELS[b.getAttribute('data-apply-team')]; });
     document.getElementById('ppApplyModal').classList.add('show');
   }
-  async function onApplyTarget(targetTeam, btn) {
+  async function onApplyTarget(targetTeam) {
+    if (presetBusy) { requestCancel(); closeModal('ppApplyModal'); return; }
     if (!activeApplyPreset) return;
     const preset = activeApplyPreset;
-    const original = btn.textContent;
-    btn.disabled = true;
-    btn.textContent = 'Applying…';
     closeModal('ppApplyModal');
     await restorePresetToTeam(preset, targetTeam);
-    btn.disabled = false;
-    btn.textContent = original;
     activeApplyPreset = null;
     renderPresetList(true);
   }
