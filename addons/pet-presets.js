@@ -1993,6 +1993,10 @@
 
       .pp-picker-clickable{ cursor:pointer; transition: transform .12s ease, border-color .12s ease, background .12s ease; }
       .pp-picker-clickable:hover{ transform:translateY(-2px); border-color:rgba(110,168,255,.3); background:#141d38; }
+      .pp-picker-clickable:focus-visible{ outline:none; border-color:rgba(110,168,255,.55); }
+      .pp-buy-label{ color:#8fa0ff; font-weight:800; text-align:center; }
+      .pp-picker-clickable:hover .pp-buy-label{ color:#b7c3ff; }
+      .pp-picker-busy{ opacity:.6; pointer-events:none; }
 
       .pp-picker-sigil-row{ position:absolute; left:50%; bottom:6px; transform:translateX(-50%);
         display:flex; flex-direction:column; align-items:center; gap:3px; z-index:2; }
@@ -3205,20 +3209,34 @@ function openLinkChooser(mainInvId, level, info) {
 
             card.appendChild(money);
 
-            let btn;
+            // Same hover-select as every other card: the whole card lifts and highlights, and clicking it buys.
+            // buySigilFromMelanippe() reports progress through .textContent / .disabled, so this label stands in
+            // for the old button. (A sigil Melanippe doesn't sell can't be bought, so that card stays plain.)
+            const buyLabel = document.createElement('div');
+            buyLabel.className = 'pp-picker-tag pp-buy-label';
+            buyLabel.textContent = 'Click to buy from Melanippe';
+            let busy = false;
+            Object.defineProperty(buyLabel, 'disabled', {
+              get: () => busy,
+              set: (v) => { busy = !!v; card.classList.toggle('pp-picker-busy', busy); },
+            });
 
-            btn = mkBtn(
-              'pp-btn pp-buy-action-btn',
-              'Buy from Melanippe',
-              () => p.onBuy(btn)
-            );
-
-            btn.disabled = !p.melanippeAvailable;
-
-            card.appendChild(btn);
+            if (p.melanippeAvailable) {
+              card.appendChild(buyLabel);
+              card.classList.add('pp-picker-clickable');
+              card.setAttribute('role', 'button');
+              card.tabIndex = 0;
+              card.title = 'Buy ' + p.name + ' from Melanippe';
+              const doBuy = () => { if (!busy) p.onBuy(buyLabel); };
+              card.addEventListener('click', doBuy);
+              card.addEventListener('keydown', (e) => {
+                if (e.target === card && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); doBuy(); }
+              });
+            }
 
             if (p.onUnlink) {
-              const unlinkBtn = mkBtn('pp-btn-soft pp-buy-action-btn', 'Unlink one', p.onUnlink);
+              // A separate action inside the card: it must not also trigger the buy.
+              const unlinkBtn = mkBtn('pp-btn-soft pp-buy-action-btn', 'Unlink one', (e) => { e.stopPropagation(); p.onUnlink(); });
               unlinkBtn.style.marginTop = '6px';
               card.appendChild(unlinkBtn);
             }
