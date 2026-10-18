@@ -1181,6 +1181,7 @@
     // The unspent-points badge rides on the Core dock button (attached in init).
     const badge = document.createElement('span');
     badge.id = 'sbDrawerBadge';
+    badge.className = 'core-pill';
     badge.textContent = '0';
 
     // Built once and re-attached by Core.float every time the panel opens (see init).
@@ -1193,13 +1194,15 @@
         <div class="sb-arow" id="sbRow_${k}">
           <div class="sb-aname"><span>${ICON[k]} ${NAME[k]}</span><span class="sb-muted" id="sbCur_${k}">0</span></div>
           <div class="sb-step">
-            <button type="button" class="sb-stepbtn" data-step="${k}" data-d="-1">−</button>
-            <input type="number" class="sb-stepin" id="sbP_${k}" min="0" max="9999" step="1">
-            <button type="button" class="sb-stepbtn" data-step="${k}" data-d="1">+</button>
+            <button type="button" class="sb-stepbtn core-btn core-btn-soft" data-step="${k}" data-d="-1">−</button>
+            <input type="number" class="sb-stepin core-input" id="sbP_${k}" min="0" max="9999" step="1">
+            <button type="button" class="sb-stepbtn core-btn core-btn-soft" data-step="${k}" data-d="1">+</button>
           </div>
         </div>`
     ).join('');
     drawer.innerHTML = `
+      <div class="core-dim">Allocate by hand, or aim for a target.</div>
+
       <div class="sb-card">
         <div class="sb-row between"><span class="sb-label">Unspent points</span><span id="sbLevel" class="sb-muted">LV --</span></div>
         <div class="sb-big" id="sbPoints">0</div>
@@ -1217,9 +1220,9 @@
         <div class="sb-label" id="sbAdvLabel" style="cursor:help">Targets ⓘ</div>
         <div id="sbAdv"></div>
         <div class="sb-customrow" id="sbCustomRow">
-          <select class="sb-cinput sb-csel" id="sbCKind"><option value="level">Level</option><option value="pet">Pet</option></select>
-          <input type="number" class="sb-cinput" id="sbCV" min="0.05" max="0.99" step="0.01">
-          <button type="button" class="sb-mini" id="sbCAdd">+ Custom</button>
+          <select class="sb-cinput sb-csel core-input" id="sbCKind"><option value="level">Level</option><option value="pet">Pet</option></select>
+          <input type="number" class="sb-cinput core-input" id="sbCV" min="0.05" max="0.99" step="0.01">
+          <button type="button" class="sb-mini core-btn core-btn-soft" id="sbCAdd">+ Custom</button>
         </div>
         <div id="sbManualRows">${rows}</div>
         <div id="sbCombat">
@@ -1232,10 +1235,10 @@
           <div class="sb-muted" id="sbCombatText"></div>
         </div>
         <div class="sb-total" id="sbInfo"></div>
-        <button type="button" class="sb-primary" id="sbAlloc">Allocate</button>
+        <button type="button" class="sb-primary core-btn" id="sbAlloc">Allocate</button>
         <div class="sb-muted" id="sbNeed"></div>
         <div class="sb-whatif">
-          <div class="sb-row between"><span class="sb-sublabel" style="margin:0" title="Leave empty to use your real unspent points. Uses the same planner as the Allocate button.">If I spend at once</span><input type="number" class="sb-input" id="sbWhatN" min="1" step="1" style="width:78px"></div>
+          <div class="sb-row between"><span class="sb-sublabel" style="margin:0" title="Leave empty to use your real unspent points. Uses the same planner as the Allocate button.">If I spend at once</span><input type="number" class="sb-input core-input" id="sbWhatN" min="1" step="1" style="width:78px"></div>
           <div class="sb-preview" id="sbWhatOut"></div>
         </div>
       </div>
@@ -1253,7 +1256,7 @@
         <summary>Advanced</summary>
         <div class="sb-row between">
           <span>Check every</span>
-          <span class="sb-inline"><input type="number" class="sb-input" id="sbPoll" min="${POLL_MIN_SECONDS}"> <span class="sb-muted">sec</span></span>
+          <span class="sb-inline"><input type="number" class="sb-input core-input" id="sbPoll" min="${POLL_MIN_SECONDS}"> <span class="sb-muted">sec</span></span>
         </div>
       </details>
     `;
@@ -1419,77 +1422,71 @@
 
   function injectStyles() {
     const css = `
-#sbDrawerBadge{background:#3a3d66;border:1px solid #4d5096;border-radius:999px;padding:2px 6px;font-size:11px;font-weight:700;color:#cfd4ff;font-variant-numeric:tabular-nums}
-#sbDrawer{display:flex;flex-direction:column;gap:12px;color:#fff;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;box-sizing:border-box}
+#sbDrawerBadge{padding:1px 7px;font-size:11px;letter-spacing:0;text-transform:none;color:#cfdcff;border-color:rgba(110,168,255,.4);background:rgba(110,168,255,.12);font-variant-numeric:tabular-nums}
+#sbDrawer{display:flex;flex-direction:column;gap:12px;color:#eef3ff;font:13px Arial,sans-serif;box-sizing:border-box}
 #sbDrawer *{box-sizing:border-box}
-.sb-card{background:#1c1e29;border:1px solid #262940;border-radius:12px;padding:12px;display:flex;flex-direction:column;gap:10px;box-shadow:0 6px 16px rgba(0,0,0,.35);flex-shrink:0}
-.sb-label{font-size:12px;color:#9aa0b8;font-weight:700;text-transform:uppercase;letter-spacing:.03em}
-.sb-strong{font-weight:800;color:#e9ecff;font-size:13px;font-variant-numeric:tabular-nums}
-.sb-muted{font-size:11px;color:#767c96;line-height:1.5}
-.sb-small{font-size:12px;color:#e9ecff;font-variant-numeric:tabular-nums}
-.sb-row{display:flex;align-items:center;gap:8px;font-size:13px;color:#e9ecff}
+.sb-card{background:#11192d;border:1px solid rgba(255,255,255,.06);border-radius:16px;padding:14px;display:flex;flex-direction:column;gap:10px;flex-shrink:0}
+.sb-label,.sb-sublabel{font-size:11px;color:#9caad0;font-weight:700;text-transform:uppercase;letter-spacing:.03em}
+.sb-sublabel{margin-bottom:6px}
+.sb-strong{font-weight:800;color:#eef3ff;font-size:13px}
+.sb-muted{font-size:12px;color:#9caad0;line-height:1.5}
+.sb-muted:empty,#sbNeed:empty,#sbInfo:empty,.sb-preview:empty{display:none}
+.sb-row{display:flex;align-items:center;gap:8px;font-size:13px;color:#eef3ff}
 .sb-row.between{justify-content:space-between}
 .sb-inline{display:inline-flex;align-items:center;gap:6px}
-.sb-status{font-size:12px;color:#9aa0b8;line-height:1.4}
-.sb-preview{font-size:12px;color:#dfe1f5;line-height:1.45;white-space:pre-line;font-variant-numeric:tabular-nums}
-.sb-preview:empty{display:none}
+.sb-status{font-size:12px;color:#9caad0;line-height:1.4}
+.sb-preview{font-size:12px;color:#cfd8f7;line-height:1.45;white-space:pre-line;font-variant-numeric:tabular-nums}
+.sb-big{font-size:34px;font-weight:800;color:#eef3ff;font-variant-numeric:tabular-nums;line-height:1}
 .sb-chips{display:flex;gap:8px}
-.sb-chip{flex:1;display:flex;flex-direction:column;align-items:center;gap:2px;background:#12131c;border:1px solid #232437;border-radius:8px;padding:8px 4px;font-variant-numeric:tabular-nums;text-align:center}
-.sb-input{width:64px;padding:6px 8px;font-size:13px;border-radius:8px;border:1px solid #2b2e49;background:#1b1f30;color:#e9ecff;font-weight:600;font-variant-numeric:tabular-nums}
-.sb-big{font-size:34px;font-weight:800;color:#e9ecff;font-variant-numeric:tabular-nums;line-height:1}
+.sb-chip{flex:1;display:flex;flex-direction:column;align-items:center;gap:2px;background:#0d1322;border:1px solid rgba(255,255,255,.06);border-radius:12px;padding:9px 4px;font-variant-numeric:tabular-nums;text-align:center;cursor:help;outline:none}
+.sb-chip b{font-size:16px;font-weight:800;color:#eef3ff}
+.sb-chip:focus-visible{border-color:#4b6dd0}
+.sb-chip .sb-muted{border-bottom:1px dotted #4b6dd0}
+#sbDrawer .sb-input{width:72px}
+#sbDrawer .sb-stepin{width:62px;text-align:center;font-weight:700;font-variant-numeric:tabular-nums}
+#sbDrawer .sb-cinput{width:76px;text-align:center;font-weight:700;font-variant-numeric:tabular-nums}
+#sbDrawer .sb-csel{width:78px;text-align:left}
+#sbDrawer .sb-stepbtn{width:34px;height:34px;padding:0;font-size:18px;line-height:1;box-shadow:none}
+#sbDrawer .sb-mini{flex:1;padding:8px 2px;white-space:nowrap}
+#sbDrawer .sb-primary{width:100%;padding:11px;font-size:14px}
 .sb-arow{display:flex;align-items:center;justify-content:space-between;gap:8px}
-.sb-aname{display:flex;flex-direction:column;gap:2px;font-size:13px;font-weight:700;color:#e9ecff}
+.sb-aname{display:flex;flex-direction:column;gap:2px;font-size:13px;font-weight:800;color:#eef3ff}
 .sb-step{display:flex;align-items:center;gap:4px}
-.sb-stepbtn{width:34px;height:34px;border-radius:8px;border:1px solid #2b2e49;background:#23253a;color:#e9ecff;font-size:18px;font-weight:700;cursor:pointer;line-height:1}
-.sb-stepbtn:active{background:#2b2e49}
-.sb-stepin{width:58px;height:34px;text-align:center;border-radius:8px;border:1px solid #2b2e49;background:#1b1f30;color:#e9ecff;font-size:14px;font-weight:700;font-variant-numeric:tabular-nums}
-.sb-total{font-size:12px;color:#9aa0b8;font-weight:700}
-.sb-primary{width:100%;padding:11px;border:none;border-radius:10px;background:#565cf0;color:#fff;font-size:14px;font-weight:800;cursor:pointer}
-.sb-primary:disabled{background:#2b2e49;color:#767c96;cursor:default}
-.sb-seg{display:flex;background:#12131c;border:1px solid #232437;border-radius:10px;padding:3px;gap:3px}
-.sb-seg-btn{flex:1;background:transparent;border:none;color:#8b90a8;font-size:12px;font-weight:700;padding:8px 4px;border-radius:8px;cursor:pointer}
-.sb-seg-btn:hover{color:#dfe1f5}
-.sb-seg-btn.active{background:#2b2e49;color:#eef0fa}
-.sb-sublabel{font-size:12px;color:#9aa0b8;font-weight:700;margin-bottom:6px}
-.sb-cinput{width:52px;height:32px;text-align:center;border-radius:8px;border:1px solid #2b2e49;background:#1b1f30;color:#e9ecff;font-size:12px;font-weight:700;font-variant-numeric:tabular-nums}
-.sb-advrow{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:2px 8px;padding:5px 8px;border:1px solid transparent;border-radius:8px;font-size:12px}
-.sb-advrow + .sb-advrow{margin-top:2px}
-.sb-advl{font-weight:800;color:#e9ecff}
-.sb-advon{border-color:#565cf0;background:#1a1c2c}
-.sb-pick{cursor:pointer}
-.sb-pick:hover{background:#1a1c2c}
-.sb-customrow{display:flex;gap:6px;align-items:center}
-.sb-csel{width:70px;text-align:left;padding:0 6px}
-.sb-mini{flex:1;background:#12131c;border:1px solid #232437;color:#9aa0b8;font-size:12px;font-weight:700;padding:9px 2px;border-radius:8px;cursor:pointer;white-space:nowrap}
-.sb-mini:hover{background:#1b1d2c;color:#dfe1f5}
 #sbManualRows{display:flex;flex-direction:column;gap:10px}
-.sb-muted:empty{display:none}
-.sb-whatif{display:flex;flex-direction:column;gap:6px;margin-top:4px;padding-top:10px;border-top:1px solid #262940}
-#sbNeed:empty,#sbInfo:empty{display:none}
-.sb-chip b{font-size:15px;font-weight:800;color:#e9ecff}
-.sb-chip{cursor:help;outline:none}
-.sb-chip:focus-visible{border-color:#565cf0}
-.sb-chip .sb-muted{border-bottom:1px dotted #565cf0}
-.sb-tip{position:fixed;z-index:300000;width:min(270px,calc(100vw - 16px));box-sizing:border-box;background:#1c1e29;border:1px solid #3a3d66;border-radius:12px;box-shadow:0 14px 34px rgba(0,0,0,.65);padding:12px 13px;color:#e9ecff;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;font-size:12px;line-height:1.4;pointer-events:none;opacity:0;visibility:hidden;transform:translateY(4px);transition:opacity .12s ease,transform .12s ease,visibility .12s}
+.sb-total{font-size:12px;color:#9caad0;font-weight:700}
+.sb-seg{display:flex;background:#0d1322;border:1px solid #2b3859;border-radius:12px;padding:3px;gap:3px}
+.sb-seg-btn{flex:1;background:transparent;border:none;color:#9caad0;font:700 12px Arial,sans-serif;padding:8px 4px;border-radius:9px;cursor:pointer}
+.sb-seg-btn:hover{color:#eef3ff}
+.sb-seg-btn.active{background:linear-gradient(135deg,#3657a7,#4b6dd0);color:#fff}
+.sb-advrow{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:2px 8px;padding:7px 10px;border:1px solid transparent;border-radius:12px;font-size:12px;transition:background .15s ease,border-color .15s ease}
+.sb-advrow + .sb-advrow{margin-top:2px}
+.sb-advl{font-weight:800;color:#eef3ff}
+.sb-pick{cursor:pointer}
+.sb-pick:hover{background:#141d38;border-color:rgba(110,168,255,.3)}
+.sb-advon,.sb-advon:hover{border-color:rgba(51,181,127,.55);background:linear-gradient(180deg,#132a22,#11192d 70%)}
+.sb-customrow{display:flex;gap:6px;align-items:center}
+.sb-whatif{display:flex;flex-direction:column;gap:6px;margin-top:4px;padding-top:10px;border-top:1px solid rgba(255,255,255,.06)}
+.sb-tip{position:fixed;z-index:300000;width:min(270px,calc(100vw - 16px));box-sizing:border-box;background:#171e33;border:1px solid rgba(255,255,255,.1);border-radius:12px;box-shadow:0 12px 28px rgba(0,0,0,.45);padding:12px 13px;color:#eef3ff;font:12px/1.4 Arial,sans-serif;pointer-events:none;opacity:0;visibility:hidden;transform:translateY(4px);transition:opacity .12s ease,transform .12s ease,visibility .12s}
 .sb-tip[data-side=above]{transform:translateY(-4px)}
 .sb-tip.on{opacity:1;visibility:visible;transform:none}
-.sb-tip-arrow{position:absolute;left:var(--ax,50%);width:10px;height:10px;background:#1c1e29;border:1px solid #3a3d66;transform:translateX(-50%) rotate(45deg)}
+.sb-tip-arrow{position:absolute;left:var(--ax,50%);width:10px;height:10px;background:#171e33;border:1px solid rgba(255,255,255,.1);transform:translateX(-50%) rotate(45deg)}
 .sb-tip[data-side=below] .sb-tip-arrow{top:-6px;border-right:none;border-bottom:none}
 .sb-tip[data-side=above] .sb-tip-arrow{bottom:-6px;border-left:none;border-top:none}
-.sb-tip-title{font-size:11px;font-weight:800;letter-spacing:.04em;text-transform:uppercase;color:#9aa0b8;margin-bottom:8px}
-.sb-tip-formula{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;background:#12131c;border:1px solid #232437;border-radius:8px;padding:8px 9px;color:#cfd4ff}
-.sb-tip-work{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11.5px;color:#9aa0b8;margin-top:8px;font-variant-numeric:tabular-nums;word-break:break-word}
+.sb-tip-title{font-size:11px;font-weight:800;letter-spacing:.04em;text-transform:uppercase;color:#9caad0;margin-bottom:8px}
+.sb-tip-formula{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;background:#0d1322;border:1px solid rgba(255,255,255,.06);border-radius:10px;padding:8px 9px;color:#cfd8f7}
+.sb-tip-work{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11.5px;color:#9caad0;margin-top:8px;font-variant-numeric:tabular-nums;word-break:break-word}
 .sb-tip-result{font-size:20px;font-weight:800;color:#fff;margin-top:2px;font-variant-numeric:tabular-nums}
-.sb-tip-used{margin-top:10px;padding-top:9px;border-top:1px solid #262940;display:flex;flex-direction:column;gap:4px}
+.sb-tip-used{margin-top:10px;padding-top:9px;border-top:1px solid rgba(255,255,255,.06);display:flex;flex-direction:column;gap:4px}
 .sb-tip-row{display:flex;justify-content:space-between;gap:8px;font-size:12px}
-.sb-tip-row span:last-child{color:#767c96}
+.sb-tip-row span:last-child{color:#9caad0}
 .sb-switch{position:relative;display:inline-flex;align-items:center}
 .sb-switch input{position:absolute;opacity:0;pointer-events:none}
-.sb-slider{position:relative;width:40px;height:22px;border-radius:999px;background:#3a3f63;border:1px solid #2b2d44;transition:background .18s ease}
+.sb-slider{position:relative;width:40px;height:22px;border-radius:999px;background:#2b3859;border:1px solid rgba(255,255,255,.08);transition:background .18s ease}
 .sb-slider::before{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#fff;transition:left .18s ease}
-.sb-switch input:checked + .sb-slider{background:#565cf0}
+.sb-switch input:checked + .sb-slider{background:#33b57f}
 .sb-switch input:checked + .sb-slider::before{left:20px}
-.sb-adv summary{cursor:pointer;font-size:12px;font-weight:700;color:#9aa0b8;text-transform:uppercase;letter-spacing:.03em}
+.sb-switch input:focus-visible + .sb-slider{box-shadow:0 0 0 2px rgba(110,168,255,.55)}
+.sb-adv summary{cursor:pointer;font-size:11px;font-weight:700;color:#9caad0;text-transform:uppercase;letter-spacing:.03em}
 .sb-adv[open] summary{margin-bottom:6px}
 `;
     Core.ui.css(ID, css);
@@ -1512,7 +1509,7 @@
       title: 'Auto Stat Builder',
       icon: '📊',
       order: 40,
-      width: 360,
+      width: 460,
       render(el) {
         el.replaceChildren(els.drawer);
         syncUI();
