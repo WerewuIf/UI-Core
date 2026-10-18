@@ -1019,13 +1019,19 @@
     if (s.level > 1) {
       const keys = visibleKeys();
       GROUPS.forEach((g) => {
-        g.keys.filter((k) => keys.includes(k)).forEach((k, i) => {
+        const col = document.createElement('div'); // one column per group: Level on the left, Pet on the right
+        col.className = 'sb-advcol';
+        const head = document.createElement('div');
+        head.className = 'sb-label';
+        head.textContent = g.name;
+        col.appendChild(head);
+        els.adv.appendChild(col);
+        g.keys.filter((k) => keys.includes(k)).forEach((k) => {
           const r = rows[k];
           const T = TARGETS[k];
           const sel = state[g.id] === k;
           const row = document.createElement('div');
           row.className = 'sb-advrow sb-pick' + (sel ? ' sb-advon' : '');
-          if (i === 0 && g.id === 'pet') row.style.marginTop = '8px'; // small gap between the Level rows and the Pet rows
           const l = document.createElement('span');
           l.className = 'sb-advl';
           l.textContent = r.label;
@@ -1051,7 +1057,7 @@
             changed();
           });
           row.append(l, v);
-          els.adv.appendChild(row);
+          col.appendChild(row);
         });
       });
     }
@@ -1201,64 +1207,70 @@
         </div>`
     ).join('');
     drawer.innerHTML = `
-      <div class="core-dim">Allocate by hand, or aim for a target.</div>
-
-      <div class="sb-card">
-        <div class="sb-row between"><span class="sb-label">Unspent points</span><span id="sbLevel" class="sb-muted">LV --</span></div>
-        <div class="sb-big" id="sbPoints">0</div>
-        <div class="sb-chips">
-          <span class="sb-chip" data-tip="ratio" tabindex="0"><span class="sb-muted">Level ratio</span><b id="sbRatio">—</b></span>
-          <span class="sb-chip" data-tip="share" tabindex="0"><span class="sb-muted">Pet ratio</span><b id="sbShare">—</b></span>
-        </div>
-      </div>
-
-      <div class="sb-card">
-        <div class="sb-seg">
-          <button type="button" class="sb-seg-btn" data-mode="target">Target</button>
-          <button type="button" class="sb-seg-btn" data-mode="manual">My amounts</button>
-        </div>
-        <div class="sb-label" id="sbAdvLabel" style="cursor:help">Targets ⓘ</div>
-        <div id="sbAdv"></div>
-        <div class="sb-customrow" id="sbCustomRow">
-          <select class="sb-cinput sb-csel core-input" id="sbCKind"><option value="level">Level</option><option value="pet">Pet</option></select>
-          <input type="number" class="sb-cinput core-input" id="sbCV" min="0.05" max="0.99" step="0.01">
-          <button type="button" class="sb-mini core-btn core-btn-soft" id="sbCAdd">+ Custom</button>
-        </div>
-        <div id="sbManualRows">${rows}</div>
-        <div id="sbCombat">
-          <div class="sb-sublabel">Points for ATK/DEF go to</div>
-          <div class="sb-seg">
-            <button type="button" class="sb-seg-btn" data-combat="attack">Attack</button>
-            <button type="button" class="sb-seg-btn" data-combat="defense">Defense</button>
-            <button type="button" class="sb-seg-btn" data-combat="build">Like my stats</button>
+      <div class="sb-col">
+        <div class="sb-card sb-hero">
+          <span class="sb-label">Unspent points</span>
+          <div class="sb-big" id="sbPoints">0</div>
+          <span id="sbLevel" class="core-pill">LV --</span>
+          <div class="sb-chips">
+            <span class="sb-chip" data-tip="ratio" tabindex="0"><span class="sb-muted">Level ratio</span><b id="sbRatio">—</b></span>
+            <span class="sb-chip" data-tip="share" tabindex="0"><span class="sb-muted">Pet ratio</span><b id="sbShare">—</b></span>
           </div>
-          <div class="sb-muted" id="sbCombatText"></div>
         </div>
-        <div class="sb-total" id="sbInfo"></div>
-        <button type="button" class="sb-primary core-btn" id="sbAlloc">Allocate</button>
-        <div class="sb-muted" id="sbNeed"></div>
-        <div class="sb-whatif">
-          <div class="sb-row between"><span class="sb-sublabel" style="margin:0" title="Leave empty to use your real unspent points. Uses the same planner as the Allocate button.">If I spend at once</span><input type="number" class="sb-input core-input" id="sbWhatN" min="1" step="1" style="width:78px"></div>
-          <div class="sb-preview" id="sbWhatOut"></div>
+
+        <div class="sb-card">
+          <div class="sb-seg">
+            <button type="button" class="sb-seg-btn" data-mode="target">Target</button>
+            <button type="button" class="sb-seg-btn" data-mode="manual">My amounts</button>
+          </div>
+          <div class="sb-label" id="sbAdvLabel" style="cursor:help">Targets ⓘ</div>
+          <div id="sbAdv"></div>
+          <div class="sb-customrow" id="sbCustomRow">
+            <select class="sb-cinput sb-csel core-input" id="sbCKind"><option value="level">Level</option><option value="pet">Pet</option></select>
+            <input type="number" class="sb-cinput core-input" id="sbCV" min="0.05" max="0.99" step="0.01">
+            <button type="button" class="sb-mini core-btn core-btn-soft" id="sbCAdd">+ Custom</button>
+          </div>
+          <div id="sbManualRows">${rows}</div>
+          <div id="sbCombat">
+            <div class="sb-sublabel">Points for ATK/DEF go to</div>
+            <div class="sb-seg">
+              <button type="button" class="sb-seg-btn" data-combat="attack">Attack</button>
+              <button type="button" class="sb-seg-btn" data-combat="defense">Defense</button>
+              <button type="button" class="sb-seg-btn" data-combat="build">Like my stats</button>
+            </div>
+            <div class="sb-muted" id="sbCombatText"></div>
+          </div>
         </div>
       </div>
 
-      <div class="sb-card">
-        <div class="sb-row between">
-          <span class="sb-strong">Repeat automatically</span>
-          <label class="sb-switch"><input type="checkbox" id="sbAuto"><span class="sb-slider"></span></label>
+      <div class="sb-col">
+        <div class="sb-card">
+          <div class="sb-total" id="sbInfo"></div>
+          <button type="button" class="sb-primary core-btn" id="sbAlloc">Allocate</button>
+          <div class="sb-muted" id="sbNeed"></div>
+          <div class="sb-whatif">
+            <div class="sb-row between"><span class="sb-sublabel" style="margin:0" title="Leave empty to use your real unspent points. Uses the same planner as the Allocate button.">If I spend at once</span><input type="number" class="sb-input core-input" id="sbWhatN" min="1" step="1"></div>
+            <div class="sb-preview" id="sbWhatOut"></div>
+          </div>
         </div>
-        <div class="sb-muted" id="sbAutoText"></div>
-        <div class="sb-status" id="sbStatus">Ready.</div>
-      </div>
 
-      <details class="sb-card sb-adv">
-        <summary>Advanced</summary>
-        <div class="sb-row between">
-          <span>Check every</span>
-          <span class="sb-inline"><input type="number" class="sb-input core-input" id="sbPoll" min="${POLL_MIN_SECONDS}"> <span class="sb-muted">sec</span></span>
+        <div class="sb-card">
+          <div class="sb-row between">
+            <span class="sb-strong">Repeat automatically</span>
+            <label class="sb-switch"><input type="checkbox" id="sbAuto"><span class="sb-slider"></span></label>
+          </div>
+          <div class="sb-muted" id="sbAutoText"></div>
+          <div class="sb-status" id="sbStatus">Ready.</div>
         </div>
-      </details>
+
+        <details class="sb-card sb-adv">
+          <summary>Advanced</summary>
+          <div class="sb-row between">
+            <span>Check every</span>
+            <span class="sb-inline"><input type="number" class="sb-input core-input" id="sbPoll" min="${POLL_MIN_SECONDS}"> <span class="sb-muted">sec</span></span>
+          </div>
+        </details>
+      </div>
     `;
 
     const tip = document.createElement('div');
@@ -1423,9 +1435,13 @@
   function injectStyles() {
     const css = `
 #sbDrawerBadge{padding:1px 7px;font-size:11px;letter-spacing:0;text-transform:none;color:#cfdcff;border-color:rgba(110,168,255,.4);background:rgba(110,168,255,.12);font-variant-numeric:tabular-nums}
-#sbDrawer{display:flex;flex-direction:column;gap:12px;color:#eef3ff;font:13px Arial,sans-serif;box-sizing:border-box}
+#sbDrawer{display:grid;grid-template-columns:1fr 1fr;gap:12px;align-items:start;color:#eef3ff;font:13px Arial,sans-serif;box-sizing:border-box}
+.sb-col{display:flex;flex-direction:column;gap:12px;min-width:0}
+@media (max-width:760px){#sbDrawer{grid-template-columns:1fr}}
 #sbDrawer *{box-sizing:border-box}
-.sb-card{background:#11192d;border:1px solid rgba(255,255,255,.06);border-radius:16px;padding:14px;display:flex;flex-direction:column;gap:10px;flex-shrink:0}
+.sb-card{background:#11192d;border:1px solid rgba(255,255,255,.06);border-radius:16px;padding:12px;display:flex;flex-direction:column;gap:8px;flex-shrink:0}
+.sb-hero{align-items:center;text-align:center;gap:6px}
+.sb-hero .sb-chips{width:100%}
 .sb-label,.sb-sublabel{font-size:11px;color:#9caad0;font-weight:700;text-transform:uppercase;letter-spacing:.03em}
 .sb-sublabel{margin-bottom:6px}
 .sb-strong{font-weight:800;color:#eef3ff;font-size:13px}
@@ -1436,7 +1452,7 @@
 .sb-inline{display:inline-flex;align-items:center;gap:6px}
 .sb-status{font-size:12px;color:#9caad0;line-height:1.4}
 .sb-preview{font-size:12px;color:#cfd8f7;line-height:1.45;white-space:pre-line;font-variant-numeric:tabular-nums}
-.sb-big{font-size:34px;font-weight:800;color:#eef3ff;font-variant-numeric:tabular-nums;line-height:1}
+.sb-big{font-size:40px;font-weight:800;color:#eef3ff;font-variant-numeric:tabular-nums;line-height:1}
 .sb-chips{display:flex;gap:8px}
 .sb-chip{flex:1;display:flex;flex-direction:column;align-items:center;gap:2px;background:#0d1322;border:1px solid rgba(255,255,255,.06);border-radius:12px;padding:9px 4px;font-variant-numeric:tabular-nums;text-align:center;cursor:help;outline:none}
 .sb-chip b{font-size:16px;font-weight:800;color:#eef3ff}
@@ -1450,16 +1466,17 @@
 #sbDrawer .sb-mini{flex:1;padding:8px 2px;white-space:nowrap}
 #sbDrawer .sb-primary{width:100%;padding:11px;font-size:14px}
 .sb-arow{display:flex;align-items:center;justify-content:space-between;gap:8px}
-.sb-aname{display:flex;flex-direction:column;gap:2px;font-size:13px;font-weight:800;color:#eef3ff}
+.sb-aname{display:flex;align-items:baseline;gap:8px;font-size:13px;font-weight:800;color:#eef3ff}
 .sb-step{display:flex;align-items:center;gap:4px}
-#sbManualRows{display:flex;flex-direction:column;gap:10px}
+#sbManualRows{display:flex;flex-direction:column;gap:6px}
 .sb-total{font-size:12px;color:#9caad0;font-weight:700}
 .sb-seg{display:flex;background:#0d1322;border:1px solid #2b3859;border-radius:12px;padding:3px;gap:3px}
 .sb-seg-btn{flex:1;background:transparent;border:none;color:#9caad0;font:700 12px Arial,sans-serif;padding:8px 4px;border-radius:9px;cursor:pointer}
 .sb-seg-btn:hover{color:#eef3ff}
 .sb-seg-btn.active{background:linear-gradient(135deg,#3657a7,#4b6dd0);color:#fff}
-.sb-advrow{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:2px 8px;padding:7px 10px;border:1px solid transparent;border-radius:12px;font-size:12px;transition:background .15s ease,border-color .15s ease}
-.sb-advrow + .sb-advrow{margin-top:2px}
+#sbAdv{display:grid;grid-template-columns:1fr 1fr;gap:8px;align-items:start}
+.sb-advcol{display:flex;flex-direction:column;gap:4px;min-width:0}
+.sb-advrow{display:flex;flex-direction:column;align-items:flex-start;gap:1px;padding:6px 10px;border:1px solid transparent;border-radius:12px;font-size:12px;transition:background .15s ease,border-color .15s ease}
 .sb-advl{font-weight:800;color:#eef3ff}
 .sb-pick{cursor:pointer}
 .sb-pick:hover{background:#141d38;border-color:rgba(110,168,255,.3)}
@@ -1508,7 +1525,7 @@
       id: ID,
       title: 'Auto Stat Builder',
       order: 40,
-      width: 460,
+      width: 800,
       render(el) {
         el.replaceChildren(els.drawer);
         syncUI();
