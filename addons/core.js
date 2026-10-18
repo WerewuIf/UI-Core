@@ -426,9 +426,10 @@
       .core-grip:hover{background:rgba(255,255,255,.07)}
       .core-grip:hover i,.core-grip:focus-visible i{background:#fff}
       .core-grip:focus-visible{box-shadow:0 0 0 2px rgba(110,168,255,.55)}
-      .core-order{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:0 0 12px;padding:10px 12px;background:#0d1322;border:1px dashed rgba(255,255,255,.1);border-radius:12px}
-      .core-order-btns{display:flex;gap:6px}
-      .core-order-chip{min-width:34px;height:30px;display:inline-flex;align-items:center;justify-content:center;background:#24263a;border:1px solid #2f324d;border-radius:9px;font-size:15px}
+      .core-order{margin:0 0 16px}
+      .core-order-btns{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px}
+      .core-order-chip{display:inline-flex;align-items:center;justify-content:center;min-width:40px;padding:8px 10px;background:#24263a;border:1px solid #2f324d;border-radius:12px;box-shadow:0 4px 10px rgba(0,0,0,.35);font-size:16px;line-height:1.2;cursor:default;transition:transform .12s}
+      .core-order-chip:hover{transform:translateY(-1px)}
     `;
     let baseDone = false;
     const modals = new Map(), openStack = [];
@@ -1169,8 +1170,8 @@
     // What the dock really looks like right now, left to right, so the arrangement above can be checked at a glance.
     const shown = ui.dock.items();
     const orderHint = h('div', { class: 'core-order' },
-      h('span', { class: 'core-dim' }, 'Drag the bars on the right of a row to rearrange. The top of the list is the left-most button; \u2699\ufe0f stays at the far left.'),
-      shown.length ? h('div', { class: 'core-order-btns', title: 'Your buttons, left to right' }, shown.map((b) => h('span', { class: 'core-order-chip', title: b.title }, b.icon))) : null);
+      shown.length ? h('div', { class: 'core-order-btns', title: 'Your buttons, left to right' }, shown.map((b) => h('span', { class: 'core-order-chip', title: b.title }, b.icon))) : null,
+      h('div', { class: 'core-dim' }, 'Drag the bars on the right of a row to rearrange. The top of the list is the left-most button; \u2699\ufe0f stays at the far left.'));
     const url = h('input', { class: 'core-input', placeholder: 'Addon URL (.js)', title: 'e.g. https://raw.githubusercontent.com/you/repo/main/addons/x.js', style: { flex: '1 1 240px', minWidth: '120px' } });
     el.replaceChildren(
       h('div', { class: 'core-dim', style: { marginBottom: '12px' } }, 'Core v' + Core.version + (root.__coreBoot && root.__coreBoot.pending() && root.__coreBoot.readyVersion() ? ' (v' + root.__coreBoot.readyVersion() + ' ready)' : '') + '  \u00b7  Manifest: ' + (MANIFEST || '(none)')),
