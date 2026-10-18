@@ -1462,8 +1462,10 @@
   function injectStyles() {
     const css = `
 #sbDrawerBadge{padding:1px 7px;font-size:11px;letter-spacing:0;text-transform:none;color:#cfdcff;border-color:rgba(110,168,255,.4);background:rgba(110,168,255,.12);font-variant-numeric:tabular-nums}
-#sbDrawer{display:grid;grid-template-columns:1fr 1fr;gap:12px;align-items:start;color:#eef3ff;font:13px Arial,sans-serif;box-sizing:border-box}
+#sbDrawer{display:grid;grid-template-columns:1fr 1fr;gap:12px;align-items:stretch;color:#eef3ff;font:13px Arial,sans-serif;box-sizing:border-box}
 .sb-col{display:flex;flex-direction:column;gap:12px;min-width:0}
+/* Both columns end on the same line: the last card in each one takes up any spare height. */
+.sb-col > .sb-card:last-child{flex-grow:1}
 @media (max-width:760px){#sbDrawer{grid-template-columns:1fr}}
 #sbDrawer *{box-sizing:border-box}
 .sb-card{background:#11192d;border:1px solid rgba(255,255,255,.06);border-radius:16px;padding:12px;display:flex;flex-direction:column;gap:8px;flex-shrink:0}
@@ -1512,6 +1514,8 @@
 .sb-seg-btn.active{background:linear-gradient(135deg,#3657a7,#4b6dd0);color:#fff}
 #sbAdv{display:grid;grid-template-columns:1fr 1fr;gap:8px;align-items:start}
 .sb-advcol{display:flex;flex-direction:column;gap:4px;min-width:0}
+/* line the LEVEL / PET headers up with the text inside the rows (row padding 10px + 1px border) */
+.sb-advcol > .sb-label{padding-left:11px}
 .sb-advrow{display:flex;flex-direction:column;align-items:flex-start;gap:1px;padding:6px 10px;border:1px solid transparent;border-radius:12px;font-size:12px;transition:transform .15s ease,box-shadow .15s ease,border-color .15s ease,background .15s ease}
 .sb-advl{font-weight:800;color:#eef3ff}
 .sb-pick{cursor:pointer}
