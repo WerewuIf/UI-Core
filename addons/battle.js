@@ -3,6 +3,26 @@
  * Runs early (document-start) — addons.json sets "early": true. /stats.php, /inventory.php, /pets.php reads share the Core.net cache.
  */
 
+//               v15.14b: THE GAME'S OWN TOTALS ARE READ FROM stats.php (checked against a real copy of the page). On that page
+//                 ATK/DEF always read fine; the 0 most likely came from the gear / pet ATK that was re-derived by scraping
+//                 inventory.php / pets.php. Now primary: PvE "Equipment ATK", "Pet ATK" (links included), the PvE element, the
+//                 class-adjusted core (pve_attack / pve_defense) and the enemy ATK/DEF relic reductions, all from stats.php;
+//                 the scrape is only the fallback, and any disagreement is logged ("[BattlePage] gear ATK: stats.php says ...").
+//               v15.14 fixes (STATS READ AS 0 + CONCISE ELEMENT WARNING):
+//                 - YOUR ATK / DEF NOW READ FIELD BY FIELD. v15.13 threw away a valid ATK/DEF when stamina was missing from
+//                   stats.php's #stats-state and replaced everything with 0 from the v-ids. Order now: #stats-state (incl. a
+//                   by-name search), [data-value], v-ids; the first non-zero value per field wins; nothing is overwritten by 0.
+//                 - A FAILED READ IS NO LONGER KEPT FOR THE WHOLE PAGE. It retries (at most every 30 s) and falls back to a direct
+//                   fetch if the shared Core.net cache returns an unusable page. The console logs what was read and via which source.
+//                 - EQUIPPED GEAR ATK is read like the Build Optimizer does (.boosted-stat / .label span; then "N ATK"; then the item
+//                   text) -- the v15.13 "N ATK" regex found nothing on bare-number labels. Equipped slots with their own element
+//                   text no longer need a duplicate in the bag. inventory / pets are fetched with ?set=attack / ?team=attack.
+//                 - NO MORE MADE-UP ZEROS: a damage-term warning is hidden when its input (ATK/DEF, equipped gear, PvE team) could
+//                   not be read, and one yellow "Some of your stats could not be read" icon says which.
+//                 - ELEMENT TOOLTIP IS 2-3 LINES: "FIRE 31.2% x2 - WATER 25% = +37.4", then the elemental damage per stamina, or
+//                   (red) "All damage -33%" plus the minimum rate each counter / same element needs. The old long explanation
+//                   (sources, bonuses, formulas) is logged to the console as "[BattlePage] Element ..." when it changes.
+//
 //               v15.9 adds: WYVERN / REINDEER BONUSES ARE NOW AUTO-DETECTED (no more hand-set ELEMENT_BONUS).
 //                 Read from the passive text of your PvE team AND their linked pets:
 //                   - "X% <ELEMENT> Element Rate Increase" (Nullscale Wyvern: VOID) multiplies that
@@ -2159,8 +2179,11 @@
     const obs = monsterId ? readLS('veyra_mob_observed')[String(monsterId)] : null;
     const obsPen = monsterName ? readLS('veyra_mob_pen')[monsterName] : null;
     const relics = P.relics || {};
-    const pAtk = Math.round((P.atk || 0) * (1 + (P.classAtk || 0)));
-    const pDef = Math.round((P.def || 0) * (1 + (P.classDef || 0)));
+    // v15.14b: stats.php's PvE class-adjusted core already includes the permanent relic ATK/DEF, so take the relic back
+    // out here (it is added again below). Falls back to raw x class when the page doesn't show it.
+    const hasEff = P.effAtk > 0 && P.effDef > 0;
+    const pAtk = hasEff ? Math.max(0, P.effAtk - (P.relicATK || 0)) : Math.round((P.atk || 0) * (1 + (P.classAtk || 0)));
+    const pDef = hasEff ? Math.max(0, P.effDef - (P.relicDEF || 0)) : Math.round((P.def || 0) * (1 + (P.classDef || 0)));
     const dom = (c) => !c || (c === 'atkDom' ? pAtk > (mob.atk || 0) && pAtk > pDef : pDef > (mob.def || 0) && pDef > pAtk);
 
     let lEq = 0, lPet = 0, lArmor = 0;
@@ -2234,9 +2257,6 @@
     return { name, passiveText, petInvId };
   }
 
-  let playerRemoteStats = null;
-  let playerRemoteStatsPromise = null;
-
   // v15.13: same sources as the Build Optimizer. stats.php's #stats-state JSON (core.attack / defense / stamina plus
   // relic_attack / relic_defense; the v-ids are the fallback), classes.php for your class (Hunter and Mage change
   // DEF / ATK), relics.php for the relic bonuses (enemy ATK / DEF reduction, relic ATK / DEF).
@@ -2265,51 +2285,139 @@
     const num = k => out[k] || 0;
     return { atk: num('Attack'), def: num('Defense'), enemyAtkRed: num('Enemy Attack reduction'), enemyDefRed: num('Enemy Defense reduction'), parsed: Object.keys(out).length > 0 };
   }
+  // v15.14: reads ATK / DEF / stamina FIELD BY FIELD, first non-zero source wins:
+  //   1. stats.php's #stats-state JSON (core.attack ... plus a deep search by key name if the layout moved),
+  //   2. [data-value="attack"] (the optimizer's second tier),
+  //   3. the #v-attack / #v-defense / #v-stamina elements.
+  // v15.13 treated "any of the three missing" as "nothing found" and then OVERWROTE a valid ATK / DEF with 0 from
+  // the v-ids (stamina isn't needed for any warning). Stamina is now optional, and nothing is ever overwritten by 0.
+  function statInt(v) {
+    if (v === null || v === undefined || v === '') return 0;
+    const n = typeof v === 'number' ? v : parseInt(String(v).replace(/[^0-9-]/g, ''), 10);
+    return isFinite(n) && n > 0 ? n : 0;
+  }
+  function deepFindNum(obj, names, depth) {
+    if (!obj || typeof obj !== 'object' || (depth || 0) > 4) return 0;
+    for (const k of Object.keys(obj)) {
+      if (names.indexOf(k.toLowerCase()) >= 0) { const n = statInt(obj[k]); if (n) return n; }
+    }
+    for (const k of Object.keys(obj)) {
+      const v = obj[k];
+      if (v && typeof v === 'object') { const n = deepFindNum(v, names, (depth || 0) + 1); if (n) return n; }
+    }
+    return 0;
+  }
   function readStatsDoc(doc) {
-    let atk = 0, def = 0, stamina = 0, relicATK = 0, relicDEF = 0, ok = false;
-    const st = doc.getElementById('stats-state');
+    const out = { atk: 0, def: 0, stamina: 0, relicATK: 0, relicDEF: 0, via: [] };
+    const fill = (k, v, via) => { if (!out[k] && v > 0) { out[k] = v; out.via.indexOf(via) < 0 && out.via.push(via); } };
+    const st = doc.getElementById ? doc.getElementById('stats-state') : null;
     if (st) {
       try {
         const j = JSON.parse(st.textContent || ''), c = (j && j.core) || {}, u = (j && j.user) || {};
-        atk = parseInt(c.attack != null ? c.attack : u.ATTACK, 10) || 0;
-        def = parseInt(c.defense != null ? c.defense : u.DEFENSE, 10) || 0;
-        stamina = parseInt(c.stamina != null ? c.stamina : u.MAX_STAMINA, 10) || 0;
-        relicATK = parseInt(c.relic_attack, 10) || 0;
-        relicDEF = parseInt(c.relic_defense, 10) || 0;
-        ok = !!(atk && def && stamina);
-      } catch (_) { /* fall through to the v-ids */ }
+        fill('atk', statInt(c.attack) || statInt(u.ATTACK) || statInt(u.attack) || deepFindNum(j, ['attack', 'atk']), 'stats-state');
+        fill('def', statInt(c.defense) || statInt(u.DEFENSE) || statInt(u.defense) || deepFindNum(j, ['defense', 'def']), 'stats-state');
+        fill('stamina', statInt(c.stamina) || statInt(c.max_stamina) || statInt(u.MAX_STAMINA) || statInt(u.STAMINA) || deepFindNum(j, ['stamina', 'max_stamina']), 'stats-state');
+        fill('relicATK', statInt(c.relic_attack) || deepFindNum(j, ['relic_attack']), 'stats-state');
+        fill('relicDEF', statInt(c.relic_defense) || deepFindNum(j, ['relic_defense']), 'stats-state');
+      } catch (_) { /* fall through to the other sources */ }
     }
-    if (!ok) {
-      const num = id => {
-        const el = doc.getElementById(id);
-        return el ? (parseInt((el.textContent || '').replace(/[^0-9]/g, ''), 10) || 0) : 0;
-      };
-      atk = num('v-attack'); def = num('v-defense'); stamina = num('v-stamina');
+    const byAttr = k => { const el = doc.querySelector ? doc.querySelector('[data-value="' + k + '"]') : null; return el ? statInt(el.textContent) : 0; };
+    const byId = id => { const el = doc.getElementById ? doc.getElementById(id) : null; return el ? statInt(el.textContent) : 0; };
+    fill('atk', byAttr('attack'), 'data-value'); fill('def', byAttr('defense'), 'data-value'); fill('stamina', byAttr('stamina'), 'data-value');
+    fill('atk', byId('v-attack'), 'v-ids'); fill('def', byId('v-defense'), 'v-ids'); fill('stamina', byId('v-stamina'), 'v-ids');
+    return out;
+  }
+
+  // v15.14b: the Attributes page (stats.php) already shows the game's OWN totals for the PvE set, so they are read from
+  // there (verified against the real page) instead of being re-derived from inventory.php / pets.php:
+  //   [data-class-value="pve_attack|pve_defense"]  class-adjusted core incl. permanent relic ATK/DEF  (26,221 / 1,245)
+  //   .loadout-card "PvE Set"   -> "Equipment ATK", "N equipped pieces"
+  //   .pet-set "PvE Set"        -> "Pet ATK" (links already included), number of .pet-entry, .element-button "FIRE · 25%"
+  //   [data-relic-bonus="enemy_attack_flat|enemy_defense_flat|pve_damage_pct|damage_vs_goblins_pct"]
+  function readStatsPageExtras(doc) {
+    const out = { effAtk: 0, effDef: 0, equipATK: null, equipCount: null, petATK: null, teamCount: null, element: null, relicBonus: null };
+    if (!doc || !doc.querySelector) return out;
+    const toNum = t => { const m = String(t || '').replace(/,/g, '').match(/-?\d+(?:\.\d+)?/); return m ? parseFloat(m[0]) : null; };
+    const cv = k => { const el = doc.querySelector('[data-class-value="' + k + '"]'); return el ? statInt(el.textContent) : 0; };
+    out.effAtk = cv('pve_attack'); out.effDef = cv('pve_defense');
+    const setCard = sel => Array.from(doc.querySelectorAll(sel)).filter(c => { const h = c.querySelector('h3'); return h && /^\s*PvE\s+Set\s*$/i.test(h.textContent || ''); })[0] || null;
+    const metric = (card, label) => {
+      const rows = card.querySelectorAll('dl.metric-list > div, .metric-list > div');
+      for (let i = 0; i < rows.length; i++) {
+        const dt = rows[i].querySelector('dt'), dd = rows[i].querySelector('dd');
+        if (dt && dd && (dt.textContent || '').trim().toLowerCase() === label) return toNum(dd.textContent);
+      }
+      return null;
+    };
+    const lo = setCard('.loadout-card');
+    if (lo) {
+      out.equipATK = metric(lo, 'equipment atk');
+      const pm = (lo.textContent || '').match(/(\d+)\s+equipped\s+pieces?/i);
+      out.equipCount = pm ? parseInt(pm[1], 10) : null;
     }
-    return { atk, def, stamina, relicATK, relicDEF };
+    const pet = setCard('.pet-set');
+    if (pet) {
+      out.petATK = metric(pet, 'pet atk');
+      out.teamCount = pet.querySelectorAll('.pet-entry').length;
+    }
+    const elText = ((doc.querySelector('#elements-pve .element-result') || (pet && pet.querySelector('.element-button')) || {}).textContent || '');
+    const em = elText.match(/([A-Za-z]+)\s*[\u00B7\u2022.]\s*(\d+(?:\.\d+)?)\s*%/);
+    if (em && /^(FIRE|WATER|FROST|NATURE|THUNDER|VOID|LIGHT)$/i.test(em[1])) out.element = { element: em[1].toUpperCase(), rate: parseFloat(em[2]) };
+    const rb = k => { const el = doc.querySelector('[data-relic-bonus="' + k + '"] dd'); return el ? toNum(el.textContent) : null; };
+    const ea = rb('enemy_attack_flat'), ed = rb('enemy_defense_flat');
+    if (ea !== null || ed !== null) out.relicBonus = { enemyAtkRed: ea || 0, enemyDefRed: ed || 0, pveDamage: (rb('pve_damage_pct') || 0) / 100, goblinDmg: (rb('damage_vs_goblins_pct') || 0) / 100 };
+    return out;
+  }
+
+  let playerRemoteStats = null;
+  let playerRemoteStatsPromise = null;
+  let playerRemoteStatsTriedAt = 0;
+  const statsOk = s => !!(s && s.atk > 0 && s.def > 0);
+  // Plain network read for when the shared Core.net cache hands back something unusable.
+  function fetchDirect(url) {
+    return fetch(url, { credentials: 'same-origin', cache: 'no-store' })
+      .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.text(); });
   }
   function fetchPlayerRemoteStats() {
-    if (playerRemoteStats) return Promise.resolve(playerRemoteStats);
+    if (statsOk(playerRemoteStats)) return Promise.resolve(playerRemoteStats);
     if (playerRemoteStatsPromise) return playerRemoteStatsPromise;
+    // An unreadable result is NOT kept forever (v15.13 did): retry, but at most every 30 s, because this runs on every DOM change.
+    if (playerRemoteStats && Date.now() - playerRemoteStatsTriedAt < 30000) return Promise.resolve(playerRemoteStats);
+    playerRemoteStatsTriedAt = Date.now();
     const parse = html => new DOMParser().parseFromString(html, 'text/html');
-    const none = { atk: 0, def: 0, stamina: 0, relicATK: 0, relicDEF: 0, classAtk: 0, classDef: 0, playerClass: 'Unknown', relics: { atk: 0, def: 0, enemyAtkRed: 0, enemyDefRed: 0, parsed: false } };
+    const none = { atk: 0, def: 0, stamina: 0, relicATK: 0, relicDEF: 0, classAtk: 0, classDef: 0, playerClass: 'Unknown', statsVia: 'none', relics: { atk: 0, def: 0, enemyAtkRed: 0, enemyDefRed: 0, parsed: false } };
+    const get = url => Core.net.fetchText(url).catch(err => { console.warn('[BattlePage] Core.net.fetchText failed for ' + url + ':', err); return fetchDirect(url); });
+    const readStats = async () => {
+      let s = { atk: 0, def: 0, stamina: 0, relicATK: 0, relicDEF: 0, via: [] }, page = readStatsPageExtras(null);
+      try { const d = parse(await get('/stats.php')); s = readStatsDoc(d); page = readStatsPageExtras(d); } catch (e) { console.warn('[BattlePage] /stats.php read failed:', e); }
+      if (!statsOk(s)) {
+        try { const d2 = parse(await fetchDirect('/stats.php')), s2 = readStatsDoc(d2); if (statsOk(s2) || s2.atk + s2.def > s.atk + s.def) { s = s2; page = readStatsPageExtras(d2); } } catch (e) { console.warn('[BattlePage] direct /stats.php read failed:', e); }
+      }
+      s.page = page;
+      return s;
+    };
     playerRemoteStatsPromise = Promise.all([
-      Core.net.fetchText('/stats.php'),
-      Core.net.fetchText('/classes.php').catch(() => ''),
-      Core.net.fetchText('/relics.php').catch(() => ''),
-    ]).then(([statsHtml, classHtml, relicHtml]) => {
-      const s = readStatsDoc(parse(statsHtml));
+      readStats(),
+      get('/classes.php').catch(() => ''),
+      get('/relics.php').catch(() => ''),
+    ]).then(([s, classHtml, relicHtml]) => {
       const pill = classHtml ? parse(classHtml).querySelector('.section-classes-pill') : null;
       const cls = pill ? (pill.textContent.trim().replace(/[\s\S]*Your class:\s*/i, '').trim() || 'Unknown') : 'Unknown';
       const mod = CLASS_MODS[cls.toLowerCase()] || { atk: 0, def: 0 };
       const r = relicHtml ? parseRelicPower(docText(parse(relicHtml))) : null;
-      const relics = r && r.parsed ? r : none.relics;
+      const pg = s.page || {};
+      const relics = pg.relicBonus
+        ? Object.assign({}, (r && r.parsed) ? r : none.relics, { enemyAtkRed: pg.relicBonus.enemyAtkRed, enemyDefRed: pg.relicBonus.enemyDefRed, parsed: true })
+        : (r && r.parsed ? r : none.relics);
       if (!s.relicATK && relics.atk) s.relicATK = relics.atk;
       if (!s.relicDEF && relics.def) s.relicDEF = relics.def;
-      playerRemoteStats = Object.assign(s, { playerClass: cls, classAtk: mod.atk, classDef: mod.def, relics });
+      playerRemoteStats = Object.assign(s, { playerClass: cls, classAtk: mod.atk, classDef: mod.def, relics, effAtk: pg.effAtk || 0, effDef: pg.effDef || 0, statsVia: s.via.join('+') || 'none' });
+      console.log('[BattlePage] your stats: ATK ' + s.atk + ', DEF ' + s.def + ', STA ' + s.stamina + ' (read via ' + playerRemoteStats.statsVia + '); relic ATK/DEF ' + s.relicATK + '/' + s.relicDEF + '; class ' + cls + '; page totals: eff ATK/DEF ' + (pg.effAtk || '-') + '/' + (pg.effDef || '-') + ', gear ATK ' + pg.equipATK + ' (' + pg.equipCount + ' pcs), pet ATK ' + pg.petATK + ' (' + pg.teamCount + ' pets), element ' + (pg.element ? pg.element.element + ' ' + pg.element.rate + '%' : 'none') + ', enemy ATK/DEF red ' + (pg.relicBonus ? pg.relicBonus.enemyAtkRed + '/' + pg.relicBonus.enemyDefRed : '-'));
+      statsOk(playerRemoteStats) || console.warn('[BattlePage] ATK/DEF could not be read from /stats.php. Is #stats-state (or #v-attack / #v-defense) still on that page?');
       return playerRemoteStats;
     })
-      .catch(() => { playerRemoteStats = none; return playerRemoteStats; });
+      .catch(err => { console.error('[BattlePage] fetchPlayerRemoteStats failed:', err); playerRemoteStats = none; return playerRemoteStats; })
+      .then(res => { playerRemoteStatsPromise = null; return res; });
     return playerRemoteStatsPromise;
   }
 
@@ -2441,11 +2549,16 @@
       byName[name] = { element, elemPct };
     });
     invDoc.querySelectorAll('.slot-box:not([data-inv-id])').forEach(card => {
-      const btn = card.querySelector('button');
-      if (!btn || !btn.textContent.includes('Unequip')) return;
+      if (!isEquippedBox(card)) return;
       const img = card.querySelector('img[alt]');
       const name = img ? img.getAttribute('alt').trim() : null;
-      const item = name && byName[name];
+      let item = name && byName[name];
+      if (!(item && item.element)) {
+        const d = card.querySelector('.info-btn[data-desc]');
+        const desc = d ? (d.getAttribute('data-desc') || '') : '';
+        const em = desc.match(/Element:\s*(FIRE|WATER|FROST|NATURE|THUNDER|VOID|LIGHT)\s*\(\+([0-9.]+)%\)/i) || desc.match(/(FIRE|WATER|FROST|NATURE|THUNDER|VOID|LIGHT)\s*\+([0-9.]+)%/i);
+        if (em) item = { element: em[1].toUpperCase(), elemPct: parseFloat(em[2]) };
+      }
       if (item && item.element) rates[item.element] = (rates[item.element] || 0) + item.elemPct;
     });
     return rates;
@@ -2532,18 +2645,38 @@
     });
     return { byInv, byName };
   }
-  function scrapeEquippedGearATK(invDoc) {
-    let total = 0;
-    invDoc.querySelectorAll('.slot-box:not([data-inv-id])').forEach(card => {
-      const btn = card.querySelector('button');
-      if (!btn || !btn.textContent.includes('Unequip')) return;
+  // v15.14: an equipped slot is a .slot-box without data-inv-id that has an Unequip button. Its ATK is read the way
+  // the Build Optimizer's gearParseInventory() does -- the first .boosted-stat / .label span -- then falls back to an
+  // "N ATK" label, then to the item's own info text ("ATK 1,000 -> 2,000": the last number is the boosted one).
+  // v15.13 only had the "N ATK" label regex, which finds nothing when the label shows bare numbers -> gear ATK 0.
+  function isEquippedBox(card) {
+    return Array.from(card.querySelectorAll('button')).some(b => /unequip/i.test(b.textContent || '') || /unequipItem\s*\(/.test(b.getAttribute('onclick') || ''));
+  }
+  function equippedBoxAtk(card) {
+    const num = el => (el ? parseInt((el.textContent || '').replace(/[^0-9]/g, ''), 10) || 0 : 0);
+    const spans = card.querySelectorAll('.boosted-stat, .label span');
+    let atk = num(spans[0]);
+    if (!atk) {
       const label = card.querySelector('.label');
-      if (!label) return;
-      const atkMatch = (label.textContent || '').match(/([\d,]+)\s*ATK/i);
-      const atk = atkMatch ? parseInt(atkMatch[1].replace(/,/g, ''), 10) || 0 : 0;
-      total += atk;
+      const m = label && (label.textContent || '').match(/([\d,]+)\s*ATK/i);
+      if (m) atk = parseInt(m[1].replace(/,/g, ''), 10) || 0;
+    }
+    if (!atk) {
+      const d = card.querySelector('.info-btn[data-desc]');
+      const m = d && (d.getAttribute('data-desc') || '').match(/(?:^|\n)\s*ATK\s+([\d,]+(?:\s*\u2192\s*[\d,]+)*)/);
+      const nums = m && m[1].match(/[\d,]+/g);
+      if (nums && nums.length) atk = parseInt(nums[nums.length - 1].replace(/,/g, ''), 10) || 0;
+    }
+    return atk;
+  }
+  function scrapeEquippedGearATK(invDoc) {
+    let total = 0, count = 0;
+    invDoc.querySelectorAll('.slot-box:not([data-inv-id])').forEach(card => {
+      if (!isEquippedBox(card)) return;
+      count++;
+      total += equippedBoxAtk(card);
     });
-    return total;
+    return { total, count };
   }
 
   function scrapeMainTeamPetATK(petDoc) {
@@ -2564,10 +2697,10 @@
   function fetchPlayerGearPetSummary() {
     if (playerGearPetPromise) return playerGearPetPromise;
     playerGearPetPromise = Promise.all([
-      Core.net.fetchText('/inventory.php').catch(() => null),
-      Core.net.fetchText('/pets.php').catch(() => null)
+      Core.net.fetchText('/inventory.php?set=attack').catch(() => null),
+      Core.net.fetchText('/pets.php?team=attack').catch(() => null)
     ]).then(([invHtml, petHtml]) => {
-      const result = { element: null, rates: {}, sources: {}, bonus: { rate: {}, dmg: 0, src: [] }, ratesKnown: false, equipATK: 0, petATK: 0, pens: [], moonveilPct: 0 };
+      const result = { element: null, rates: {}, sources: {}, bonus: { rate: {}, dmg: 0, src: [] }, ratesKnown: false, equipATK: 0, equipCount: 0, petATK: 0, teamCount: 0, pens: [], moonveilPct: 0 };
       const rates = {};
       const addBonus = (kind, elem, frac, pet, where) => {
         if (!(frac > 0)) return;
@@ -2584,7 +2717,9 @@
         const invDoc = new DOMParser().parseFromString(invHtml, 'text/html');
         const gearRates = scrapeEquippedElementRates(invDoc);
         Object.keys(gearRates).forEach(k => addSource(k, 'gear', gearRates[k]));
-        result.equipATK = scrapeEquippedGearATK(invDoc);
+        const g = scrapeEquippedGearATK(invDoc);
+        result.equipATK = g.total;
+        result.equipCount = g.count;
       }
 
       function finish() {
@@ -2603,6 +2738,7 @@
       const petRates = scrapeMainTeamElementRates(petDoc);
       Object.keys(petRates).forEach(k => addSource(k, 'pets', petRates[k]));
       result.petATK = scrapeMainTeamPetATK(petDoc);
+      result.teamCount = petDoc.querySelectorAll('.section').length ? (function () { let n = 0; petDoc.querySelectorAll('.section').forEach(sec => { const t = sec.querySelector('.section-title'); if (t && /PvE Attack Team/i.test(t.textContent.trim())) n = sec.querySelectorAll('.pet-card').length; }); return n; })() : 0;
       const petElemIndex = indexPetElements(petDoc);
 
       // Penetration: name -> passiveText for every owned pet, then collect
@@ -2691,7 +2827,14 @@
       });
     }).catch(err => {
       console.error('[BattlePage] fetchPlayerGearPetSummary failed:', err);
-      return { element: null, rates: {}, sources: {}, bonus: { rate: {}, dmg: 0, src: [] }, ratesKnown: false, equipATK: 0, petATK: 0, pens: [], moonveilPct: 0 };
+      return { element: null, rates: {}, sources: {}, bonus: { rate: {}, dmg: 0, src: [] }, ratesKnown: false, equipATK: 0, equipCount: 0, petATK: 0, teamCount: 0, pens: [], moonveilPct: 0 };
+    });
+    const _gp = playerGearPetPromise;
+    _gp.then(r => {
+      if (!r || !r.ratesKnown || !r.equipCount || !r.teamCount) {
+        console.warn('[BattlePage] gear/pet read incomplete (equipped slots ' + (r && r.equipCount) + ', PvE team pets ' + (r && r.teamCount) + ', known ' + !!(r && r.ratesKnown) + '); will retry in 30 s.');
+        setTimeout(() => { if (playerGearPetPromise === _gp) playerGearPetPromise = null; }, 30000);
+      }
     });
     return playerGearPetPromise;
   }
@@ -2714,6 +2857,22 @@
                   detail: `You've already dealt enough damage to hit this monster's EXP cap (${expCap.value}). Further hits give no extra EXP.` });
     }
 
+    // v15.14: a term whose input could not be read is hidden instead of being shown with a made-up 0.
+    // (The equipment / pet terms also need ATK+DEF: the base penetration tier is derived from them.)
+    const okStats = !!(remoteStats && remoteStats.atk > 0 && remoteStats.def > 0);
+    const okGear = !!(remoteStats && remoteStats.equipCount > 0);
+    const okTeam = !!(remoteStats && remoteStats.teamCount > 0);
+    if (remoteStats) {
+      const miss = [];
+      if (!okStats) miss.push('ATK/DEF');
+      if (!okGear) miss.push('equipped gear');
+      if (!okTeam) miss.push('PvE team');
+      if (miss.length) {
+        warns.push({ color: 'yellow', icon: '\u2754', title: 'Some of your stats could not be read',
+                    detail: `Not read: ${miss.join(', ')}. The warnings that need ${miss.length > 1 ? 'them' : 'it'} are hidden.\nCheck the console (\u201C[BattlePage]\u201D) for why.` });
+      }
+    }
+
     if (modalStats && remoteStats) {
       const T = computeDamageTerms(remoteStats, playerLevel, modalStats, getMonsterId(), currentMonsterName());
       const relics = remoteStats.relics || {};
@@ -2724,19 +2883,19 @@
         return total > 0 ? `, after ${pctStr(total)} penetration (${bits.join(' + ')})` : '';
       };
 
-      if (modalStats.def > 0 && T.atk.floored) {
+      if (okStats && modalStats.def > 0 && T.atk.floored) {
         const floored = Math.round(atkTermValue(T.atk.gap));
         const mine = [remoteStats.classAtk ? `${pctStr(remoteStats.classAtk)} ${remoteStats.playerClass} bonus` : '', remoteStats.relicATK ? `+${fmt(remoteStats.relicATK)} relic` : ''].filter(Boolean).join(', ');
         warns.push({ color: 'red', icon: '🗡️', title: 'ATK damage term floored',
                     detail: `Your ATK (${fmt(Math.round(T.atk.value))}${mine ? `, incl. ${mine}` : ''}) vs this monster's DEF (${fmt(Math.round(T.atk.defEff))}${relics.enemyDefRed ? `, after your -${fmt(relics.enemyDefRed)} relic Enemy DEF reduction` : ''}) is only a ${fmt(Math.round(T.atk.gap))} gap. Below a ${DMG_ENGINE.FLOOR} gap this damage term is capped at its minimum (${fmt(floored)}) and gets zero benefit from further ATK — you need at least ${fmt(T.atk.deficit)} more ATK just to start climbing above the floor. (Penetration does not apply to this term.)` });
       }
 
-      if (typeof modalStats.eqDef === 'number' && modalStats.eqDef > 0 && T.eq.floored) {
+      if (okStats && okGear && typeof modalStats.eqDef === 'number' && modalStats.eqDef > 0 && T.eq.floored) {
         warns.push({ color: 'red', icon: '🧱', title: 'Equipment damage term floored',
                     detail: `Your equipped gear ATK total (${fmt(Math.round(T.eq.value))}) vs this monster's Equipment Defense (${fmt(Math.round(T.eq.defEff))}${penNote(T.pen.totalEqPen, T.pen.linkEq)}) is only a ${fmt(Math.round(T.eq.gap))} gap. This term is floored — you need at least ${fmt(T.eq.deficit)} more equipped ATK to escape it.` });
       }
 
-      if (T.pet.rawDef > 0 && T.pet.floored) {
+      if (okStats && okTeam && T.pet.rawDef > 0 && T.pet.floored) {
         const mv = T.pet.moonveil ? `, with ${fmt(T.pet.moonveil)} transferred by Moonveil` : '';
         warns.push({ color: 'red', icon: '🐾', title: 'Pet damage term floored',
                     detail: `Your main pets' ATK total (${fmt(Math.round(T.pet.value))}${mv}) vs this monster's Pet Defense (${fmt(Math.round(T.pet.defEff))}${penNote(T.pen.totalPetPen, T.pen.linkPet)}${T.pet.observedDef ? ', observed value' : ''}) is only a ${fmt(Math.round(T.pet.gap))} gap. This term is floored — you need at least ${fmt(T.pet.deficit)} more pet ATK to escape it.` });
@@ -2749,7 +2908,7 @@
       // (v15.13: compared with your effective DEF -- class + relic -- and the monster's relic-reduced ATK.)
       const defEff = T.pDef + (remoteStats.relicDEF || 0);
       const mobAtkEff = Math.max(0, (modalStats.atk || 0) - (relics.enemyAtkRed || 0));
-      if (mobAtkEff > 0 && defEff > 0 && defEff < mobAtkEff) {
+      if (okStats && mobAtkEff > 0 && defEff > 0 && defEff < mobAtkEff) {
         const short = Math.round(mobAtkEff - defEff);
         warns.push({ color: 'yellow', icon: '🛡️', title: 'DEF below monster ATK',
                     detail: `Monster ATK (${fmt(mobAtkEff)}${relics.enemyAtkRed ? ` after your -${fmt(relics.enemyAtkRed)} relic reduction` : ''}) exceeds your DEF (${fmt(defEff)}) by ${fmt(short)} — possible increased damage taken on retaliation. Unlike the damage-dealt checks above, this isn't derived from a confirmed formula.` });
@@ -2789,6 +2948,7 @@
     const key = warnKey(warns);
     if (key === lastRenderedWarnKey && (rail || !warns.length)) return;
     lastRenderedWarnKey = key;
+    warns.forEach(w => { w.log && console.info('[BattlePage] ' + w.title + '\n' + w.log); });
 
     if (!warns.length) { if (rail) rail.remove(); return; }
     if (!rail) { rail = make('div', 'bm-warn-rail'); arenaRow.appendChild(rail); }
@@ -2809,6 +2969,22 @@
     document.querySelectorAll('.bm-warn-icon.bm-warn-open').forEach(i => i.classList.remove('bm-warn-open'));
   });
 
+  // v15.14b: stats.php shows the element the game itself picked for your PvE set ("FIRE . 25%", stronger of gear + pets,
+  // and already including any element-rate amplifier). If the inventory/pets scrape found nothing, or a LOWER rate, the
+  // page's value wins; the scrape wins when it is higher (it also counts linked pets). When the page value is used, the
+  // rate bonus for that element is dropped so the amplifier is not applied twice.
+  function reconcileElement(gearPet, pageEl) {
+    if (!pageEl) return gearPet;
+    const own = gearPet && gearPet.ratesKnown ? gearPet.element : null;
+    if (own && own.rate >= pageEl.rate - 0.05) {
+      if (own.element !== pageEl.element || Math.abs(own.rate - pageEl.rate) > 0.05) console.info('[BattlePage] element: scrape ' + own.element + ' ' + own.rate + '% vs stats.php ' + pageEl.element + ' ' + pageEl.rate + '% (scrape is higher, used).');
+      return gearPet;
+    }
+    const bonus = { rate: Object.assign({}, gearPet && gearPet.bonus && gearPet.bonus.rate), dmg: (gearPet && gearPet.bonus && gearPet.bonus.dmg) || 0, src: ((gearPet && gearPet.bonus && gearPet.bonus.src) || []).filter(b => b.label !== pageEl.element + ' rate') };
+    delete bonus.rate[pageEl.element];
+    return Object.assign({}, gearPet, { ratesKnown: true, element: pageEl, rates: Object.assign({}, gearPet && gearPet.rates, { [pageEl.element]: pageEl.rate }), sources: {}, bonus, fromPage: true });
+  }
+
   let warnRefreshBusy = false;
   function refreshWarnings() {
     if (warnRefreshBusy) return;
@@ -2819,11 +2995,20 @@
     const divineMult = getDivineShieldMult();
     Promise.all([fetchPlayerRemoteStats(), fetchPlayerGearPetSummary()])
       .then(([remoteStatsBase, gearPet]) => {
+      const pg = remoteStatsBase.page || {};
+      const pick = (pageVal, scraped) => (pageVal !== null && pageVal !== undefined ? pageVal : scraped);
       const remoteStats = Object.assign({}, remoteStatsBase, {
-        equipATK: gearPet.equipATK, petATK: gearPet.petATK,
+        equipATK: pick(pg.equipATK, gearPet.equipATK), equipCount: pick(pg.equipCount, gearPet.equipCount),
+        petATK: pick(pg.petATK, gearPet.petATK), teamCount: pick(pg.teamCount, gearPet.teamCount),
         pens: gearPet.pens, moonveilPct: gearPet.moonveilPct
       });
-      renderWarnings(buildWarnings(playerLevel, remoteStats, infoChips, modalStats, divineMult, gearPet.element, gearPet));
+      if (!refreshWarnings._cmp && gearPet.ratesKnown) {
+        refreshWarnings._cmp = true;
+        if (pg.equipATK != null && pg.equipATK !== gearPet.equipATK) console.warn('[BattlePage] gear ATK: stats.php says ' + pg.equipATK + ', the inventory.php scrape found ' + gearPet.equipATK + ' (stats.php is used).');
+        if (pg.petATK != null && Math.abs(pg.petATK - gearPet.petATK) > 1) console.warn('[BattlePage] pet ATK: stats.php says ' + pg.petATK + ', the pets.php scrape found ' + gearPet.petATK + ' (stats.php is used).');
+      }
+      const gp = reconcileElement(gearPet, pg.element);
+      renderWarnings(buildWarnings(playerLevel, remoteStats, infoChips, modalStats, divineMult, gp.element, gp));
       warnRefreshBusy = false;
     })
       .catch(err => {
@@ -2917,58 +3102,79 @@
     return (mRate * mMult) / mult;
   }
 
+  function elemCompact(n) {
+    n = Number(n) || 0;
+    const a = Math.abs(n), f = (v, u) => (Math.round(v * 10) / 10) + u;
+    return a >= 1e9 ? f(n / 1e9, 'B') : a >= 1e6 ? f(n / 1e6, 'M') : a >= 1e3 ? f(n / 1e3, 'K') : String(Math.round(n));
+  }
+  function elemSigned(x) { return (x > 0 ? '+' : x < 0 ? '\u2212' : '') + elemNum(Math.abs(x)); }
+
+  // v15.14: the tooltip is now 2-3 short lines. The long explanation (sources, bonuses, formulas) goes to the
+  // console under "[BattlePage] Element ..." when it changes.
+  //   green : "FIRE 31.2% ×2 − WATER 25% = +37.4"  /  "≈ +56.1K elemental dmg per stamina"
+  //   red   : same formula  /  "All damage −33%."  /  "Need (top element): LIGHT ≥10% · FROST ≥12.5% · VOID ≥25%"
   function buildElementWarning(gearPet) {
     const m = currentMonsterElement();
     if (m.status === 'none') return null;            // monster has no element: no icon
     if (m.status === 'unknown') {
       if (m.loading) return null;                    // still trying the page re-fetch
-      return { color: 'yellow', icon: '❔', title: 'Monster element unknown',
-               detail: 'Open \u201CView Monster Stats\u201D once so the monster\u2019s element can be read. This icon turns green/red by itself afterwards.' };
+      return { color: 'yellow', icon: '\u2754', title: 'Monster element unknown',
+               detail: 'Open \u201CView Monster Stats\u201D once to read it.' };
     }
 
     const known = !!(gearPet && gearPet.ratesKnown);
     const rates = (gearPet && gearPet.rates) || {};
     const own = known ? gearPet.element : null;      // your CURRENT element = your highest-rate one
-    const icon = ELEMENT_EMOJI[m.element] || '⚡';
-
-    const lines = [`Monster: ${m.element} ${elemPct(m.rate)}`];
-    let color = 'yellow', title = 'Element check unavailable';
+    const icon = ELEMENT_EMOJI[m.element] || '\u26A1';
 
     if (!known) {
-      lines.push('You: could not read your gear/pets.');
-    } else {
-      const mu = computeElementMatchup(own ? own.element : null, own ? own.rate : 0, m.element, m.rate, gearPet.bonus);
-      color = mu.disadvantaged ? 'red' : 'green';
-      title = mu.disadvantaged ? `Element disadvantage vs ${m.element}` : `Element OK vs ${m.element}`;
-      lines.push(`You: ${own ? `${own.element} ${elemPct(own.rate)}` : 'no element'}`);
-      const srcOwn = own && gearPet.sources && gearPet.sources[own.element];
-      if (srcOwn) {
-        const bits = [];
-        if (srcOwn.gear) bits.push(`gear ${elemPct(srcOwn.gear)}`);
-        if (srcOwn.pets) bits.push(`main pets ${elemPct(srcOwn.pets)}`);
-        if (srcOwn.links) bits.push(`links ${elemPct(srcOwn.links)}`);
-        if (bits.length) lines.push('Sources: ' + bits.join(' \u00B7 '));
-      }
-      const bsrc = gearPet.bonus && gearPet.bonus.src;
-      if (bsrc && bsrc.length) {
-        lines.push('Bonuses: ' + bsrc.map(b => `${b.label} +${elemPct(b.pct * 100)} (${b.pet}${b.where ? ', ' + b.where : ''})`).join(' \u00B7 '));
-      }
-      lines.push(explainElementMatchup(mu, own ? own.element : null, own ? own.rate : 0, m.element));
+      return { color: 'yellow', icon, title: 'Element check unavailable',
+               detail: `Monster: ${m.element} ${elemPct(m.rate)}\nYour gear/pets could not be read.` };
     }
 
-    // Suggestions: the minimum rate each element needs for advantage >= 0.
-    const fmtNeed = (e) => {
-      const need = minRateToPass(e, m.element, m.rate, gearPet && gearPet.bonus);
-      const have = rates[e] || 0;
-      const cur = own && own.element === e ? ' (current)' : '';
-      return `${e} ${need <= ELEMENT_WEAK_MAX ? 'any rate' : '\u2265' + elemPct(need)} (you ${elemPct(have)})${cur}`;
-    };
-    const counters = ELEMENT_TIE_ORDER.filter(e => elemBeats(e, m.element));
-    lines.push('Counters: ' + (counters.length ? counters.map(fmtNeed).join(' \u00B7 ') : 'none known'));
-    lines.push('Same element: ' + fmtNeed(m.element));
-    lines.push('The element you use is your highest-rate one (gear + PvE team), so a suggested element also has to be your top element.');
+    const mu = computeElementMatchup(own ? own.element : null, own ? own.rate : 0, m.element, m.rate, gearPet.bonus);
+    const color = mu.disadvantaged ? 'red' : 'green';
+    const title = mu.disadvantaged ? `Element disadvantage vs ${m.element}` : `Element OK vs ${m.element}`;
 
-    return { color, icon, title, detail: lines.join('\n') };
+    const mine = own
+      ? `${own.element} ${elemPct(own.rate)}${mu.pStrong ? ' \u00D72' : ''}${mu.pBonus ? ` \u00D7${(1 + mu.pBonus).toFixed(2)}` : ''}`
+      : 'No element';
+    const theirs = `${m.element} ${elemPct(mu.mEff)}${mu.mStrong ? ' \u00D72' : ''}`;
+    const lines = [`${mine} \u2212 ${theirs} = ${elemSigned(mu.adv)}`];
+
+    if (mu.disadvantaged) {
+      lines.push('All damage \u221233%.');
+      const need = (e) => {
+        const n = minRateToPass(e, m.element, m.rate, gearPet.bonus);
+        return `${e} ${n <= ELEMENT_WEAK_MAX ? 'any' : '\u2265' + elemPct(n)}`;
+      };
+      const opts = ELEMENT_TIE_ORDER.filter(e => elemBeats(e, m.element)).concat([m.element]);
+      lines.push('Need (top element): ' + opts.map(need).join(' \u00B7 '));
+    } else if (mu.adv > 0) {
+      lines.push(`\u2248 +${elemCompact(elemDmgPerStamina(mu))} elemental dmg per stamina${mu.weak ? ' (\u22645% strength: no penalty)' : ''}`);
+    } else if (mu.weak) {
+      lines.push('\u22645% strength: no penalty.');
+    } else {
+      lines.push('No elemental bonus.');
+    }
+
+    const log = [];
+    log.push(`Monster: ${m.element} ${elemPct(m.rate)}`);
+    log.push(`You: ${own ? `${own.element} ${elemPct(own.rate)}` : 'no element'}`);
+    const srcOwn = own && gearPet.sources && gearPet.sources[own.element];
+    if (srcOwn) {
+      const bits = [];
+      if (srcOwn.gear) bits.push(`gear ${elemPct(srcOwn.gear)}`);
+      if (srcOwn.pets) bits.push(`main pets ${elemPct(srcOwn.pets)}`);
+      if (srcOwn.links) bits.push(`links ${elemPct(srcOwn.links)}`);
+      bits.length && log.push('Sources: ' + bits.join(' \u00B7 '));
+    }
+    const bsrc = gearPet.bonus && gearPet.bonus.src;
+    bsrc && bsrc.length && log.push('Bonuses: ' + bsrc.map(b => `${b.label} +${elemPct(b.pct * 100)} (${b.pet}${b.where ? ', ' + b.where : ''})`).join(' \u00B7 '));
+    log.push(explainElementMatchup(mu, own ? own.element : null, own ? own.rate : 0, m.element));
+    log.push('Your rates: ' + (Object.keys(rates).map(e => `${e} ${elemPct(rates[e])}`).join(' \u00B7 ') || 'none'));
+
+    return { color, icon, title, detail: lines.join('\n'), log: log.join('\n') };
   }
 
 
