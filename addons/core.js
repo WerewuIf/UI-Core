@@ -396,7 +396,8 @@
       #core-dock{position:fixed;z-index:99990;display:flex;gap:10px;flex-direction:row-reverse}
       /* The floating buttons that open each panel: an exact copy of the game's own
          .quickset-drawer-trigger / .battle-drawer-trigger buttons (the rounded ⚔️ and 🧪 ones). */
-      .core-dock-btn{display:flex;align-items:center;justify-content:center;gap:6px;background:#24263a;border:1px solid #2f324d;box-shadow:0 10px 24px rgba(0,0,0,.6);border-radius:12px;color:#fff;cursor:pointer;font-weight:700;font-size:14px;line-height:1.2;padding:10px 12px}
+      .core-dock-btn,.core-btn,.core-close,.core-menu-item{margin:0}
+.core-dock-btn{display:flex;align-items:center;justify-content:center;gap:6px;background:#24263a;border:1px solid #2f324d;box-shadow:0 10px 24px rgba(0,0,0,.6);border-radius:12px;color:#fff;cursor:pointer;font-weight:700;font-size:14px;line-height:1.2;padding:10px 12px}
       .core-dock-btn:active{transform:scale(.97)}
       .core-row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
       .core-input{box-sizing:border-box;padding:8px 10px;border-radius:10px;border:1px solid #2b3859;background:#0d1322;color:#eef3ff;font:13px Arial,sans-serif}
