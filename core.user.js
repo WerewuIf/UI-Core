@@ -32,6 +32,20 @@
   const K = 'coreboot:code', K_GOOD = 'coreboot:good', K_BAD = 'coreboot:bad';
   const warn = (...a) => console.warn('[Core boot]', ...a);
 
+  async function pinned(url) {
+    try {
+      let c; try { c = JSON.parse(localStorage.getItem('core:sha')); } catch (_) {}
+      let sha = c && Date.now() - c.ts < 60000 ? c.sha : null;
+      if (!sha) {
+        const r = await root.fetch('https://api.github.com/repos/WerewuIf/UI-Core/commits/main', { headers: { Accept: 'application/vnd.github.sha' } });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        sha = (await r.text()).trim();
+        try { localStorage.setItem('core:sha', JSON.stringify({ sha, ts: Date.now() })); } catch (_) {}
+      }
+      return url.replace(/(raw\.githubusercontent\.com\/WerewuIf\/UI-Core\/)(?:refs\/heads\/)?main\//, '$1' + sha + '/');
+    } catch (_) { return url; }
+  }
+
   const ls = {
     get(k) { try { return JSON.parse(localStorage.getItem(k) || 'null'); } catch (_) { return null; } },
     set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); return true; } catch (_) { return false; } },
@@ -40,7 +54,7 @@
   async function fetchText(url) {
     const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), 8000);
     try {
-      const res = await root.fetch(url, { cache: 'no-cache', signal: ctl.signal });
+      const res = await root.fetch(await pinned(url), { cache: 'no-cache', signal: ctl.signal });
       if (!res.ok) throw new Error('HTTP ' + res.status);
       return await res.text();
     } finally { clearTimeout(timer); }
