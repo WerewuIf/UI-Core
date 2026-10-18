@@ -971,6 +971,32 @@
     return lines;
   }
 
+  // Presents previewLines() as: head line, one tile per stat, the two ratios, status pills. previewLines() itself is
+  // untouched (it is also what the test hook exposes); this only decides how its lines look.
+  function renderPreview(el, lines, w) {
+    const div = (cls, text) => {
+      const d = document.createElement('div');
+      d.className = cls;
+      if (text != null) d.textContent = text;
+      return d;
+    };
+    const tiles = div('sb-pv-tiles');
+    STATS.forEach((k) => {
+      const t = div('sb-pv-tile');
+      t.append(div('sb-pv-k', ICON[k] + ' ' + SHORT[k]), div('sb-pv-v', fmt(w.plan[k])));
+      tiles.appendChild(t);
+    });
+    const ratios = div('sb-pv-ratio');
+    (lines[2] || '').split(' · ').forEach((r) => ratios.appendChild(div('', r)));
+    const marks = div('sb-pv-marks');
+    (lines[3] || '').split(' · ').filter(Boolean).forEach((m) => {
+      marks.appendChild(div('core-pill ' + (m.startsWith('✅') ? 'core-pill-ok' : m.startsWith('❌') ? 'core-pill-error' : 'core-pill-loading'), m));
+    });
+    const kids = [div('sb-pv-head', lines[0]), tiles, ratios, marks];
+    if (lines[4]) kids.push(div('sb-pv-warn', lines[4]));
+    el.replaceChildren(...kids);
+  }
+
   // Rows shown in the Targets list: the four presets, plus a custom one only while it is the chosen one.
   function visibleKeys() {
     const held = heldKeys(state);
@@ -1094,7 +1120,7 @@
       els.whatN.placeholder = String(dflt);
       const w = whatIf(s, n, cfgFromState(previewCarry()));
       const lines = previewLines(s, n, w, maintain);
-      els.whatOut.textContent = lines.join('\n');
+      renderPreview(els.whatOut, lines, w);
     }
   }
 
@@ -1245,13 +1271,14 @@
 
       <div class="sb-col">
         <div class="sb-card">
+          <div class="sb-row between"><span class="sb-label" style="cursor:help" title="Leave empty to use your real unspent points. Uses the same planner as the Allocate button.">If I spend at once</span><input type="number" class="sb-input core-input" id="sbWhatN" min="1" step="1"></div>
+          <div class="sb-preview" id="sbWhatOut"></div>
+        </div>
+
+        <div class="sb-card">
           <div class="sb-total" id="sbInfo"></div>
           <button type="button" class="sb-primary core-btn" id="sbAlloc">Allocate</button>
           <div class="sb-muted" id="sbNeed"></div>
-          <div class="sb-whatif">
-            <div class="sb-row between"><span class="sb-sublabel" style="margin:0" title="Leave empty to use your real unspent points. Uses the same planner as the Allocate button.">If I spend at once</span><input type="number" class="sb-input core-input" id="sbWhatN" min="1" step="1"></div>
-            <div class="sb-preview" id="sbWhatOut"></div>
-          </div>
         </div>
 
         <div class="sb-card">
@@ -1451,7 +1478,16 @@
 .sb-row.between{justify-content:space-between}
 .sb-inline{display:inline-flex;align-items:center;gap:6px}
 .sb-status{font-size:12px;color:#9caad0;line-height:1.4}
-.sb-preview{font-size:12px;color:#cfd8f7;line-height:1.45;white-space:pre-line;font-variant-numeric:tabular-nums}
+.sb-preview{display:flex;flex-direction:column;gap:10px;font-variant-numeric:tabular-nums}
+.sb-pv-head{font-size:12px;color:#9caad0}
+.sb-pv-tiles{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.sb-pv-tile{background:#0d1322;border:1px solid rgba(255,255,255,.06);border-radius:12px;padding:10px 4px;text-align:center}
+.sb-pv-k{font-size:11px;font-weight:700;color:#9caad0;letter-spacing:.03em}
+.sb-pv-v{font-size:24px;font-weight:800;color:#eef3ff;line-height:1.25}
+.sb-pv-ratio{display:flex;justify-content:space-between;gap:8px;font-size:12px;color:#cfd8f7}
+.sb-pv-marks{display:flex;flex-wrap:wrap;gap:6px}
+.sb-pv-marks .core-pill{text-transform:none;font-size:11px;letter-spacing:0;padding:3px 9px}
+.sb-pv-warn{font-size:12px;color:#ffd978}
 .sb-big{font-size:40px;font-weight:800;color:#eef3ff;font-variant-numeric:tabular-nums;line-height:1}
 .sb-chips{display:flex;gap:8px}
 .sb-chip{flex:1;display:flex;flex-direction:column;align-items:center;gap:2px;background:#0d1322;border:1px solid rgba(255,255,255,.06);border-radius:12px;padding:9px 4px;font-variant-numeric:tabular-nums;text-align:center;cursor:help;outline:none}
@@ -1476,13 +1512,13 @@
 .sb-seg-btn.active{background:linear-gradient(135deg,#3657a7,#4b6dd0);color:#fff}
 #sbAdv{display:grid;grid-template-columns:1fr 1fr;gap:8px;align-items:start}
 .sb-advcol{display:flex;flex-direction:column;gap:4px;min-width:0}
-.sb-advrow{display:flex;flex-direction:column;align-items:flex-start;gap:1px;padding:6px 10px;border:1px solid transparent;border-radius:12px;font-size:12px;transition:background .15s ease,border-color .15s ease}
+.sb-advrow{display:flex;flex-direction:column;align-items:flex-start;gap:1px;padding:6px 10px;border:1px solid transparent;border-radius:12px;font-size:12px;transition:transform .15s ease,box-shadow .15s ease,border-color .15s ease,background .15s ease}
 .sb-advl{font-weight:800;color:#eef3ff}
 .sb-pick{cursor:pointer}
-.sb-pick:hover{background:#141d38;border-color:rgba(110,168,255,.3)}
-.sb-advon,.sb-advon:hover{border-color:rgba(51,181,127,.55);background:linear-gradient(180deg,#132a22,#11192d 70%)}
+.sb-pick:hover{transform:translateY(-2px);border-color:rgba(110,168,255,.3);box-shadow:0 8px 20px rgba(0,0,0,.35);background:#141d38}
+.sb-advon{border-color:rgba(110,168,255,.35);background:rgba(110,168,255,.05);box-shadow:inset 3px 0 0 #6ea8ff}
+.sb-advon:hover{border-color:rgba(110,168,255,.35);background:rgba(110,168,255,.05);box-shadow:0 0 0 2px rgba(110,168,255,.45) inset,0 10px 24px rgba(110,168,255,.22)}
 .sb-customrow{display:flex;gap:6px;align-items:center}
-.sb-whatif{display:flex;flex-direction:column;gap:6px;margin-top:4px;padding-top:10px;border-top:1px solid rgba(255,255,255,.06)}
 .sb-tip{position:fixed;z-index:300000;width:min(270px,calc(100vw - 16px));box-sizing:border-box;background:#171e33;border:1px solid rgba(255,255,255,.1);border-radius:12px;box-shadow:0 12px 28px rgba(0,0,0,.45);padding:12px 13px;color:#eef3ff;font:12px/1.4 Arial,sans-serif;pointer-events:none;opacity:0;visibility:hidden;transform:translateY(4px);transition:opacity .12s ease,transform .12s ease,visibility .12s}
 .sb-tip[data-side=above]{transform:translateY(-4px)}
 .sb-tip.on{opacity:1;visibility:visible;transform:none}
@@ -1500,7 +1536,7 @@
 .sb-switch input{position:absolute;opacity:0;pointer-events:none}
 .sb-slider{position:relative;width:40px;height:22px;border-radius:999px;background:#2b3859;border:1px solid rgba(255,255,255,.08);transition:background .18s ease}
 .sb-slider::before{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#fff;transition:left .18s ease}
-.sb-switch input:checked + .sb-slider{background:#33b57f}
+.sb-switch input:checked + .sb-slider{background:linear-gradient(135deg,#3657a7,#4b6dd0)}
 .sb-switch input:checked + .sb-slider::before{left:20px}
 .sb-switch input:focus-visible + .sb-slider{box-shadow:0 0 0 2px rgba(110,168,255,.55)}
 .sb-adv summary{cursor:pointer;font-size:11px;font-weight:700;color:#9caad0;text-transform:uppercase;letter-spacing:.03em}
