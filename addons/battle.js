@@ -1,25 +1,250 @@
 /* Battle Page Restructure — Core addon (migrated from the standalone userscript).
  * Loaded by core.user.js; `Core` is in scope. No @require / header needed.
- * Runs early (document-start) — addons.json sets "early": true. The only page it reads about you is /stats.php (via the Core.net cache).
+ * Runs early (document-start) — addons.json sets "early": true. /stats.php, /inventory.php, /pets.php reads share the Core.net cache.
  */
 
-// v15.17  Wyvern: the game's own "Void-power multiplier: x1.205" (stats.php, #elements-pve) is used when it is shown, else the
-//         "X% <ELEMENT> Element Rate Increase" passive. Removed the unused manual ELEMENT_BONUS and isElementDisadvantaged();
-//         the old per-version notes below were condensed.
-// v15.16  stats.php is the ONLY page read about you (ATK/DEF, class-adjusted core, relics, PvE gear/pet ATK, element list,
-//         link penetration, Moonveil, Wyvern/Reindeer). No inventory.php / pets.php / pet_links_ajax.php / classes.php / relics.php.
-//         Link passives are used as shown (already scaled by the 50% / 25% link share).
-// v15.14  Fields read one by one (a missing stamina no longer zeroes ATK/DEF); a failed read retries every 30 s; an unreadable
-//         input hides its warning and one yellow icon lists what was not read; the element tooltip is 2-3 lines (details in the console).
-// v15.9   Wyvern / Reindeer bonuses auto-detected from pet passives (PvP-only lines ignored).
-// v15.7   Element check follows the game's Damage Formula panel (computeElementMatchup):
-//           - monster without element: no icon.  Your element = your highest-rate element (ties: ELEMENT_TIE_ORDER).
-//           - strength <= 5%: the monster counts as 0.5% and you cannot take the disadvantage.
-//           - the side that counters the other has its rate x2.  Advantage = your adjusted rate - monster's adjusted rate;
-//             below 0 = disadvantage (all damage -33%, red).  Elemental damage = advantage x 1500 x stamina cost x (1 + Reindeer).
-// v15.6   Always-on element icon: green = OK, red = disadvantage, yellow ? = monster element unknown (open "View Monster Stats").
-// <= v15.5  Battle page layout, side panels (collapsible, state in localStorage), AutoSlash, World Breaker, matchup warnings.
+//               v15.9 adds: WYVERN / REINDEER BONUSES ARE NOW AUTO-DETECTED (no more hand-set ELEMENT_BONUS).
+//                 Read from the passive text of your PvE team AND their linked pets:
+//                   - "X% <ELEMENT> Element Rate Increase" (Nullscale Wyvern: VOID) multiplies that
+//                     element's rate by (1 + X%) in the advantage formula. Works for any element name.
+//                   - "X% Extra Elemental Damage ..." (Hellfrost Reindeer) multiplies elemental damage
+//                     by (1 + X%).
+//                 Main-team pets count at full value. A LINKED pet's passive counts at its link share
+//                 (Link 1 = 50%, Link 2 = 25%) -- unless the Links panel's own effect text for that link
+//                 already shows a smaller (i.e. pre-scaled) number, in which case that server number is used.
+//                 PvP-only lines are ignored. The tooltip's "Bonuses" line lists each detected bonus and
+//                 where it came from; the console logs every link passive under "[BattlePage] link passive".
+//                 ELEMENT_BONUS is now only a manual EXTRA on top of the detected values (leave at 0).
+//               v15.8 adds: LINKED PETS NOW COUNT TOWARD YOUR ELEMENT RATE. A pet on your PvE team
+//                 contributes its own element rate in full (e.g. 5%); the pet in its Link 1 slot
+//                 contributes 50% of ITS element rate (2.5%), Link 2 contributes 25% (1.25%). These
+//                 are added into the same per-element totals as gear + main pets, so the
+//                 highest-rate element (and therefore your element / advantage) reflects links too.
+//                 Same-race link bonuses are NOT applied to element (the game says transferred-stat
+//                 boosts don't touch elemental contribution). The tooltip shows a Sources line
+//                 (gear / pets / links) for your element so the total can be sanity-checked against
+//                 the game, and the console logs every link contribution under "[BattlePage] link element".
+//               v15.7 fixes (ELEMENT CHECK REWRITTEN TO MATCH THE GAME'S DAMAGE FORMULA):
+//                 The old isElementDisadvantaged() was wrong in several places. It is replaced by
+//                 computeElementMatchup(), which follows the rules from the Damage Formula panel:
+//                   - Monster has no element  -> whole check skipped (no icon).
+//                   - Your element = your highest-rate element (gear + PvE team). Ties now resolve
+//                     via ELEMENT_TIE_ORDER instead of "whichever key came first".
+//                   - Your strength <= 5%: the monster's rate counts as 0.5% and you can NOT take the
+//                     disadvantage (this includes having no element at all -> green, not red).
+//                   - Counter doubling: if element A counters element B, A's rate is x2. This applies
+//                     to whichever side counters (you, the monster, or neither).
+//                   - Advantage = your adjusted rate - monster's adjusted rate. Below 0 = disadvantage
+//                     (all damage -33%), i.e. red. A lower rate than the monster's is NOT automatically
+//                     fine any more (the old "pRate < mRate -> OK" shortcut was backwards).
+//                   - Elemental damage = (your adj. rate - monster adj. rate) x 1500 x stamina_cost.
+//                     The tooltip shows it per 1 stamina and for a World Breaker hit.
+//                 Suggestions now list the exact minimum rate each counter element / the monster's own
+//                 element needs to reach advantage >= 0 (no longer "any rate").
+//                 ELEMENT_BONUS (Wyvern for Void, Reindeer for elemental damage) defaults to 0 because the
+//                 script can't read pet bonuses; set them by hand near WARN_COUNTERS.
+//               v15.6 adds:
+//                 ELEMENT WARNING ICON (always on when the monster has an element): the first icon on
+//                 the warning rail, with the monster's element as its emoji. GREEN = your current
+//                 element passes the script's elemental check (counters / higher); RED = it fails it (or you have none).
+//                 Hover/tap it for: monster element + rate, your element + rate, the suggested counter
+//                 elements with the minimum rate each needs (and what you have of each), and the
+//                 same-element rate needed. Replaces the old yellow "Elemental disadvantage" icon.
+//                 Verdict = computeElementMatchup() (rewritten in v15.7, see above): green = not
+//                 disadvantaged, red = disadvantaged.
+//                 Yellow "?" icon = monster element couldn't be read yet (opening "View Monster Stats"
+//                 fills it in automatically).
+//                 The monster's element is read from the live stats grid, else from a one-time
+//                 re-fetch of this page.
 
+//               v15.3 fixes:
+//                 (1) LEADERBOARD vs ATTACK LOG STILL DIDN'T END EVENLY, AND LEADERBOARD GREW A
+//                     PHANTOM HORIZONTAL SCROLLBAR THAT HID THE NAMES: giving Leaderboard the same
+//                     "overflow-y:auto + max-height" treatment as Log in v15.2 had a side effect
+//                     neither of us caught — per the CSS overflow spec, setting only overflow-y to
+//                     a non-'visible' value forces the OTHER axis (overflow-x) to compute as 'auto'
+//                     too. That gave Leaderboard's body a horizontal scrollbar it never needed, and
+//                     the presence of that scrollable axis let the row's flex children size to
+//                     their preferred (max-content) width instead of being constrained to the
+//                     visible column width — which is what pushed the name off to the right, out of
+//                     view, behind the "DMG" figure. Leaderboard no longer gets a max-height/
+//                     scrollbox at all (the game already paginates it — see the v12.0 note below),
+//                     and Log/Battle Info/Rewards now pin overflow-x:hidden alongside overflow-y:
+//                     auto so this can't recur on any of them. Leaderboard and Log are still made
+//                     to end at the same spot when both are expanded, but now via align-self:stretch
+//                     on just that pair (see .bm-pair-stretch below) rather than by force-capping
+//                     Leaderboard's height — and that stretch is turned off the moment either one is
+//                     collapsed, so collapsing still shrinks down to just its toggle bar instead of
+//                     leaving a tall empty box (same concern the v15.1 INFO-GRID COLLAPSE fix was
+//                     about).
+//                 (2) LEADERBOARD/LOG NAME TRUNCATION HARDENED: belt-and-suspenders on top of (1) —
+//                     .lb-row and its scroll ancestors now pin min-width:0 / overflow-x:hidden
+//                     explicitly rather than relying on the default (which is what let this regress
+//                     in the first place) so a name column collapsing to zero width can't quietly
+//                     happen again.
+//                 (3) ATTACK-TIME FLICKER, THE REMAINING BIT: v15.2 fixed the forced-layout half of
+//                     this; the piece it explicitly left as "separate, pre-existing" — the
+//                     Leaderboard/Attack Log toggle header flashing away and back on every hit — is
+//                     fixed now too. The native game replaces those two panels' innerHTML wholesale
+//                     on every attack, which wipes our toggle-bar wrapper; it was getting rebuilt by
+//                     the shared MutationObserver, but that's on a 50ms debounce shared with every
+//                     other DOM change on the page, so the header was visibly gone for up to 50ms
+//                     after every hit. Leaderboard and Log now each get their own dedicated,
+//                     un-debounced MutationObserver scoped just to that one element, so the toggle
+//                     bar gets rebuilt in the same tick as the native swap instead of waiting in
+//                     line behind the shared debounce.
+//                 (4) AUTOSLASH DELAY MENU OPENED DOWNWARD, OFF THE BOTTOM OF THE SCREEN: it was
+//                     positioned relative to the caret assuming the caret had room below it — true
+//                     back when the attack buttons lived inline in the monster card, no longer true
+//                     now that they live in the v15.0 bar pinned to the bottom of the viewport. The
+//                     menu now opens upward from the caret (falling back to downward only if there
+//                     genuinely isn't room above either), and uses position:fixed + a viewport-
+//                     relative measurement instead of document coordinates so it doesn't drift out
+//                     of place if the page is scrolled while it's open.
+//               v15.2 fixes:
+//                 (1) DAMAGE RANKING REWARDS NOW SCROLLS: it had no capped height at all, so a
+//                     monster with many rank brackets just made the whole column sprawl. It now
+//                     gets the same max-height + scrollbar treatment as Log/Battle Info.
+//                 (2) LEADERBOARD vs ATTACK LOG NO LONGER END UNEVENLY: Leaderboard was
+//                     deliberately left unbounded back in v12.0 (each panel had its own full-width
+//                     row then, so height didn't need to match anything). Now that the wide-screen
+//                     layout pairs it side-by-side with Attack Log in the 2-up grid, it gets the
+//                     same capped height + scrollbar so both panels in a row end at the same spot.
+//                 (3) ATTACK-TIME FLICKER REDUCED: pinTopStatBar()/pinAttackBar() were reading
+//                     .offsetHeight (which forces a synchronous browser layout) on every single
+//                     run() — and run() re-fires on a ~50ms debounce for every DOM mutation,
+//                     including the leaderboard/log/HP-bar rewrites that happen on every hit. During
+//                     AutoSlash that added up to a lot of forced layout work packed into a very
+//                     short window. Both bars now only get measured once, the first time they're
+//                     pinned; a shared remeasureStickyBars() handles keeping them in sync on resize
+//                     instead. (Note: some brief flicker of the Leaderboard/Attack Log toggle
+//                     header on every hit is a separate, pre-existing thing — the native game fully
+//                     replaces those two panels' HTML on every attack, which wipes and then rebuilds
+//                     our collapse-toggle wrapper each time; see the v11.0 note further down.)
+//                 (4) HEAL ROW CENTERED: was right-aligned; centered to match everything else now
+//                     that the pill/bubble background around it is gone (see v15.1).
+//                 (5) LEADERBOARD DAMAGE NUMBERS NO LONGER WRAP: the Leaderboard column got roughly
+//                     half as wide once it moved into the 2-up grid, which was wrapping the damage
+//                     figure/"DMG" label across multiple lines. The player name now truncates with
+//                     an ellipsis instead, so the damage number always stays on one line.
+//               v15.1 fixes:
+//                 (1) BOTTOM BAR NO LONGER SPREAD OUT / FULL-WIDTH: it was left:0/right:0 full
+//                     viewport width with buttons allowed to wrap, which both spaced them out
+//                     more than before AND let the bar's background bleed across the whole bottom
+//                     edge — covering native page controls sitting in the bottom corners. It's now
+//                     a small pill sized to its own content (buttons stay in one tight, non-
+//                     wrapping row, same tight spacing as before), centered via left:50% + a
+//                     transform (not vw-based sizing), so it stays put and the same size whether
+//                     the page is zoomed in or out, and never touches the left/right edges.
+//                 (2) HEAL ROW "BUBBLE" REMOVED: the pill background/border/padding wrapping the
+//                     Heal/potion controls is gone — just the plain right-aligned row now.
+//                 (3) INFO-GRID COLLAPSE BUG FIXED: on the wide-screen 2-up info grid, panels were
+//                     stretching (default grid align-items:stretch) to match the height of
+//                     whichever panel shared their row, so collapsing a panel still left a full-
+//                     height empty box instead of shrinking — same reason the (unrelated, native)
+//                     Monster Debuffs card was showing a big empty gap next to Rewards. Panels now
+//                     size to their own content (align-items:start) instead.
+//               v15.0 fixes:
+//                 (1) STAMINA STAYS VISIBLE WHILE SCROLLED: the game's own top stat bar (Stamina /
+//                   Gold / Gems / Server / Buffs / Level / EXP — the ".gtb-inner" row) is now
+//                   pinned with position:sticky so it stays on screen instead of scrolling away
+//                   once you're down near the attack buttons. Only position/z-index is touched;
+//                   the bar's own markup and whatever script keeps its numbers updated is
+//                   untouched. If a second bar (e.g. an HP/MP row) sits directly underneath it in
+//                   the DOM, that gets pinned too, stacked right below using the first bar's
+//                   measured height — but that row belongs to a DIFFERENT userscript entirely, so
+//                   this script never creates, styles, or duplicates any HP/MP display of its own
+//                   at the top of the page.
+//               (2) ATTACK BUTTONS PINNED TO THE BOTTOM OF THE SCREEN: Slash / AutoSlash / World
+//                   Breaker (whatever ".battle-actions-buttons" ends up containing) now live in a
+//                   fixed bar pinned to the bottom of the viewport instead of inside the monster
+//                   card, so they're always reachable with zero scrolling, however far down the
+//                   page you are. The "⚔️ Attacks" label and the now-empty divider strip it lived
+//                   in are trimmed down rather than left as a dead gap.
+//               (3) LOOT MOVED INTO A REAL 3RD COLUMN ON WIDE SCREENS: Loot used to render as one
+//                   big block below the entire grid, leaving the whole right-hand side of the
+//                   arena empty on wide screens. It's now a genuine grid child, so past ~1400px
+//                   viewport width it becomes a sidebar column next to the monster card instead —
+//                   below that width it still renders exactly as before (a full-width block under
+//                   the grid).
+//               (4) INFO COLUMN TILES 2-UP ON WIDE SCREENS: Leaderboard / Attack Log / Battle Info
+//                   / Damage Ranking Rewards switch from one tall stack of rows to a 2-column grid
+//                   on wide screens, cutting the vertical scroll needed to reach the bottom panels
+//                   roughly in half. (If a monster only has 3 of the 4 panels, the last one spans
+//                   the full width instead of leaving a lopsided single-column gap next to it.)
+//               (5) BIGGER HP/MP BARS: your HP/MP bars and the monster's HP bar are taller and
+//                   allowed more width now that there's more breathing room around them, instead
+//                   of staying thin lines inside a mostly-empty card.
+//               v14.0 fixes:
+//                 (1) HEAL CONTROLS SPLIT OFF THE "YOU" LINE: Heal/potion controls no longer share
+//                     a line with the "YOU" tag. YOU now sits alone, centered, on its own row; Heal
+//                     sits in its own row directly below, aligned to the right.
+//                 (2) MONSTER HP NO LONGER ABBREVIATED: dropped the v13.0 formatCompact()/
+//                     compactMonsterHpLabel() logic that shortened huge HP values (e.g. "2.40T").
+//                     The exact full number is always shown now — see (3) for why that no longer
+//                     causes wrapping problems.
+//                 (3) MONSTER HP BAR IS HORIZONTAL AGAIN: the v11-v13 "big vertical red bar"
+//                     treatment (portrait on the left, HP rotated 90 degrees into a pillar on the
+//                     right) is gone. The monster's HP bar is a full-width horizontal bar directly
+//                     under the portrait again — same orientation the game natively uses, just
+//                     bigger/bolder. This is what actually fixes the label-wrapping problem: a long
+//                     HP string gets a full card-width line to sit on instead of a ~70px vertical
+//                     label column.
+//                 (4) "VIEW MONSTER STATS" -> TOP-LEFT CORNER: relocated off the name/note stack
+//                     into a small pinned badge in the monster card's top-left corner.
+//                 (5) AUTO-DIE COUNTDOWN -> TOP-RIGHT CORNER: the "will Auto die in HH:MM:SS" chip
+//                     moves to a matching pinned badge in the top-right corner, instead of sitting
+//                     inline under the monster name.
+//                 (6) DAMAGE RANKING REWARDS PANEL: if the page has a ".ranking-rewards-panel" (it
+//                     isn't present on every monster), it's now folded into the same collapsible-
+//                     panel system as Leaderboard/Attack Log/Battle Info, plus gets matching
+//                     card/chip styling for its rank brackets and reward items instead of rendering
+//                     as plain unstyled HTML. No-ops harmlessly if the panel doesn't exist on a
+//                     given page.
+//               v13.0 fixes:
+//                 (1) YOU / Heal row + HP / MP bars read as mismatched sizes ("wonky") — gave the
+//                     heal controls one shared pill container and forced the HP/MP bar wrappers to
+//                     the exact same width.
+//                 (2) Boss HP pillar label ragged-wrapping a huge HP value across three lines —
+//                     superseded by fix (3) above (horizontal bar), formatCompact() removed.
+//                 (3) The "Joined" chip rendering as an orphaned box below the whole card —
+//                     relocated up next to the monster name/auto-die chip with matching pill
+//                     styling.
+//                 (4) The class-skill bar leaving a large dead gap with only one or two skills —
+//                     capped skill slots to content-sized, centered chips.
+//                 (5) The left-hand info column tracking the viewport while scrolling — reset any
+//                     sticky positioning back to static.
+//                 (6) "View Monster Stats" rendering as a full-width block — superseded by fix (4)
+//                     above (top-left corner badge).
+//               v12.0 fixes:
+//                 (1) POISON AUTOSLASH DID NOTHING: asSendSlashOnce() queried a *direct*-child
+//                     selector that stopped matching once integrateAutoSlash() wrapped the button.
+//                     Fixed with a descendant selector.
+//                 (2) MONSTER HP <-> YOUR HP/MP SWAPPED: monster HP got the big-bar treatment,
+//                     your HP/MP kept the plain native horizontal bars.
+//                 (3) YOUR DAMAGE RELOCATED: moved into its own row directly under the arena.
+//                 (4) VIEW MONSTER STATS MOVED: under the monster's name/note block.
+//                 (5) LEADERBOARD SCROLL REMOVED: native game already paginates it.
+//                 (6) HEAL ROW INLINE WITH "YOU": superseded by v14.0 fix (1) above.
+//                 (7) AUTO-DIE CHIP STAYS ON MONSTER CARD: superseded by v14.0 fix (5) above.
+//               v11.0 fixes:
+//                 (1) COLLAPSE DIDN'T ACTUALLY HIDE THE ATTACK LOG: bare text nodes have no
+//                     display property, so every collapsible panel's content now lives inside one
+//                     ".bm-panel-body" wrapper that gets hidden as a whole.
+//                 (2) MONSTER ART FIXED AT 340x420 REGARDLESS OF ZOOM/SCREEN: replaced with fluid
+//                     sizing via a single --bm-portrait-w custom property.
+//                 (3) MONSTER STATS: the site's own "View Monster Stats" modal replaced the old
+//                     inline stat-line this script used to rebuild; old merge code kept as a
+//                     harmless no-op for older templates.
+//                 (4) Modest type-scale bump + distinct left-border accent per info panel.
+//               v10.1 adds:
+//                 (6) COLLAPSIBLE SIDE PANELS with per-panel localStorage-persisted state.
+//               v10.0 fixes:
+//                 (1) Monster image bump (superseded by fluid sizing in v11.0).
+//                 (2) Real AUTO caret button; AutoSlash clicks the native Slash button.
+//                 (3) Duplicate World Breaker button guard.
+//                 (4) Info column row order.
+//                 (5) Single shared MutationObserver that never disconnects.
 
 (function () {
   'use strict';
@@ -1934,11 +2159,8 @@
     const obs = monsterId ? readLS('veyra_mob_observed')[String(monsterId)] : null;
     const obsPen = monsterName ? readLS('veyra_mob_pen')[monsterName] : null;
     const relics = P.relics || {};
-    // v15.14b: stats.php's PvE class-adjusted core already includes the permanent relic ATK/DEF, so take the relic back
-    // out here (it is added again below). Falls back to raw x class when the page doesn't show it.
-    const hasEff = P.effAtk > 0 && P.effDef > 0;
-    const pAtk = hasEff ? Math.max(0, P.effAtk - (P.relicATK || 0)) : Math.round((P.atk || 0) * (1 + (P.classAtk || 0)));
-    const pDef = hasEff ? Math.max(0, P.effDef - (P.relicDEF || 0)) : Math.round((P.def || 0) * (1 + (P.classDef || 0)));
+    const pAtk = Math.round((P.atk || 0) * (1 + (P.classAtk || 0)));
+    const pDef = Math.round((P.def || 0) * (1 + (P.classDef || 0)));
     const dom = (c) => !c || (c === 'atkDom' ? pAtk > (mob.atk || 0) && pAtk > pDef : pDef > (mob.def || 0) && pDef > pAtk);
 
     let lEq = 0, lPet = 0, lArmor = 0;
@@ -1995,133 +2217,99 @@
     if (apM) out.armorPen = toFrac(parseFloat(apM[1]), apM[2] === '%');
     return out;
   }
-  // v15.16: EVERYTHING ABOUT YOU COMES FROM ONE PAGE, stats.php (the game's own totals; checked against a real copy):
-  //   #stats-state JSON .core.attack / defense / stamina / relic_attack / relic_defense   (fallback: [data-value="attack|defense|stamina"])
-  //   [data-class-value="pve_attack|pve_defense"]   class-adjusted core, permanent relic ATK/DEF included;  #class-heading
-  //   [data-relic-bonus="enemy_attack_flat|enemy_defense_flat"]
-  //   PvE Set cards: "Equipment ATK" + "N equipped pieces", "Pet ATK" (links included), the .pet-entry list
-  //   #elements-pve: the game's own list of element sources and its strongest combined element
-  //   #elements-pve .active-effect: the stated element multiplier.  .pet-entry / .linked-pet passive texts: penetration, Moonveil, element bonuses. A LINKED pet's
-  //   text already shows the value after its link share (50% / 25%); the numbers add up exactly to the page's own pet crit totals.
-  // classes.php, relics.php, inventory.php, pets.php and pet_links_ajax.php are no longer read at all.
-  function statInt(v) {
-    if (v === null || v === undefined || v === '') return 0;
-    const n = typeof v === 'number' ? v : parseInt(String(v).replace(/[^0-9-]/g, ''), 10);
-    return isFinite(n) && n > 0 ? n : 0;
-  }
-  function readStatsPage(doc) {
-    const out = { atk: 0, def: 0, stamina: 0, relicATK: 0, relicDEF: 0, effAtk: 0, effDef: 0, equipATK: null, equipCount: null, petATK: null, teamCount: null,
-                  element: null, elementKnown: false, rates: {}, sources: {}, bonus: { rate: {}, dmg: 0, src: [] }, pens: [], moonveilPct: 0,
-                  playerClass: 'Unknown', classAtk: 0, classDef: 0, relics: { enemyAtkRed: 0, enemyDefRed: 0 } };
-    if (!doc || !doc.querySelector) return out;
-    const q = sel => doc.querySelector(sel);
-    const toNum = t => { const m = String(t || '').replace(/,/g, '').match(/-?\d+(?:\.\d+)?/); return m ? parseFloat(m[0]) : null; };
-    try {
-      const j = JSON.parse((q('#stats-state') || {}).textContent || ''), c = (j && j.core) || {}, u = (j && j.user) || {};
-      out.atk = statInt(c.attack) || statInt(u.ATTACK); out.def = statInt(c.defense) || statInt(u.DEFENSE);
-      out.stamina = statInt(c.stamina) || statInt(u.MAX_STAMINA);
-      out.relicATK = statInt(c.relic_attack); out.relicDEF = statInt(c.relic_defense);
-    } catch (_) { /* fall back to the [data-value] elements below */ }
-    const val = k => { const el = q('[data-value="' + k + '"]'); return el ? statInt(el.textContent) : 0; };
-    out.atk = out.atk || val('attack'); out.def = out.def || val('defense'); out.stamina = out.stamina || val('stamina');
-    const cv = k => { const el = q('[data-class-value="' + k + '"]'); return el ? statInt(el.textContent) : 0; };
-    out.effAtk = cv('pve_attack'); out.effDef = cv('pve_defense');
-    const ch = q('#class-heading');
-    out.playerClass = ch ? (ch.textContent.split('/')[0].trim() || 'Unknown') : 'Unknown';
-    const mod = CLASS_MODS[out.playerClass.toLowerCase()] || { atk: 0, def: 0 };
-    out.classAtk = mod.atk; out.classDef = mod.def;
-    const setCard = sel => Array.from(doc.querySelectorAll(sel)).filter(c => { const h = c.querySelector('h3'); return h && /^\s*PvE\s+Set\s*$/i.test(h.textContent || ''); })[0] || null;
-    const metric = (card, label) => {
-      const rows = card.querySelectorAll('.metric-list > div');
-      for (let i = 0; i < rows.length; i++) {
-        const dt = rows[i].querySelector('dt'), dd = rows[i].querySelector('dd');
-        if (dt && dd && (dt.textContent || '').trim().toLowerCase() === label) return toNum(dd.textContent);
-      }
-      return null;
-    };
-    const lo = setCard('.loadout-card'), pet = setCard('.pet-set');
-    if (lo) {
-      out.equipATK = metric(lo, 'equipment atk');
-      const pm = (lo.textContent || '').match(/(\d+)\s+equipped\s+pieces?/i);
-      out.equipCount = pm ? parseInt(pm[1], 10) : null;
+  function parsePetCardBasic(card) {
+    const infoBtn = card.querySelector('.info-btn[data-name]');
+    const img = card.querySelector('img[alt]');
+    const name = infoBtn ? infoBtn.getAttribute('data-name').trim() : (img ? img.getAttribute('alt').trim() : null);
+    if (!name) return null;
+    const descBtn = card.querySelector('.info-btn[data-desc]');
+    const passiveText = descBtn ? (descBtn.getAttribute('data-desc') || '') : '';
+    let petInvId = null;
+    const linksBtn = Array.from(card.querySelectorAll('button')).find(b => /links/i.test(b.textContent));
+    if (linksBtn) {
+      const oc = linksBtn.getAttribute('onclick') || '';
+      const idM = oc.match(/openLinksModal\((\d+)\)/);
+      if (idM) petInvId = parseInt(idM[1], 10);
     }
-    if (pet) { out.petATK = metric(pet, 'pet atk'); out.teamCount = pet.querySelectorAll('.pet-entry').length; }
-    const elText = ((q('#elements-pve .element-result') || (pet && pet.querySelector('.element-button')) || {}).textContent || '');
-    const em = elText.match(/([A-Za-z]+)\s*[\u00B7\u2022.]\s*(\d+(?:\.\d+)?)\s*%/);
-    if (em && /^(FIRE|WATER|FROST|NATURE|THUNDER|VOID|LIGHT)$/i.test(em[1])) out.element = { element: em[1].toUpperCase(), rate: parseFloat(em[2]) };
-    const rb = k => { const el = q('[data-relic-bonus="' + k + '"] dd'); return el ? toNum(el.textContent) || 0 : 0; };
-    out.relics = { enemyAtkRed: rb('enemy_attack_flat'), enemyDefRed: rb('enemy_defense_flat') };
-
-    // element sources: the game's own list (gear + main pets [+ links, if it ever lists them]) and its strongest element
-    out.elementKnown = !!q('#elements-pve'); out.rates = {}; out.sources = {};
-    doc.querySelectorAll('#elements-pve .element-sources li').forEach(li => {
-      const sp = li.querySelector('span'), sm = li.querySelector('small');
-      const m = /([A-Za-z]+)\s*(\d+(?:\.\d+)?)\s*%/.exec(sp ? sp.textContent : '');
-      if (!m) return;
-      const el = m[1].toUpperCase(), v = parseFloat(m[2]), who = sm ? sm.textContent : '';
-      const kind = /main pet/i.test(who) ? 'pets' : /equipment/i.test(who) ? 'gear' : 'links';
-      out.rates[el] = (out.rates[el] || 0) + v;
-      (out.sources[el] || (out.sources[el] = { gear: 0, pets: 0, links: 0 }))[kind] += v;
-    });
-
-    // pet passives of the PvE team: penetration (links), Moonveil (main pets), Wyvern / Reindeer-style bonuses
-    out.bonus = { rate: {}, dmg: 0, src: [] }; out.pens = []; out.moonveilPct = 0;
-    const addBonus = (b, pet, where) => {
-      Object.keys(b.rate).forEach(e => { out.bonus.rate[e] = (out.bonus.rate[e] || 0) + b.rate[e]; out.bonus.src.push({ label: e + ' rate', pct: b.rate[e], pet, where }); });
-      if (b.dmg > 0) { out.bonus.dmg += b.dmg; out.bonus.src.push({ label: 'elem dmg', pct: b.dmg, pet, where }); }
-    };
-    if (pet) pet.querySelectorAll('.pet-entry').forEach(entry => {
-      const mainName = ((entry.querySelector('h4') || {}).textContent || 'main pet').trim();
-      Array.from(entry.children).filter(c => c.classList.contains('passive-text')).forEach(p => {
-        const mv = /transfer\s+(\d[\d.]*)\s*%\s+of\s+the\s+target.?s\s+pet\s+def/i.exec(p.textContent || '');
-        if (mv) out.moonveilPct += parseFloat(mv[1]) / 100;
-        addBonus(parseElementPassives(p.textContent), mainName, 'main');
-      });
-      entry.querySelectorAll('.linked-pet').forEach(l => {
-        const lv = /Link\s*(\d+)\s*:\s*(.*)/i.exec(((l.querySelector('h4') || {}).textContent || '').trim());
-        const lname = lv ? lv[2] : 'linked pet';
-        const text = Array.from(l.querySelectorAll('.passive-text')).map(p => p.textContent || '').join('\n'), lower = text.toLowerCase();
-        addBonus(parseElementPassives(text), lname, 'link ' + (lv ? lv[1] : '?'));
-        const pp = parsePenetrationFromText(text);
-        const cond = /attack\s*(?:exceeds|is\s*higher)/.test(lower) ? 'atkDom' : /defense\s*(?:exceeds|is\s*higher)/.test(lower) ? 'defDom' : null;
-        if (pp.eqPen) out.pens.push({ kind: 'eq', val: pp.eqPen, factor: 1, cond, pet: lname });
-        if (pp.petPen) out.pens.push({ kind: 'pet', val: pp.petPen, factor: 1, cond, pet: lname });
-        if (pp.armorPen) out.pens.push({ kind: 'armor', val: pp.armorPen, factor: 1, cond: null, pet: lname });
-      });
-    });
-    // the game states the element-rate multiplier itself ("Void-power multiplier: ×1.205", applied only when that element is
-    // selected). It is the authority; the passive texts above are the fallback (and give the pet name for the tooltip).
-    const pm = new RegExp('(' + ELEMENT_NAME_RE + ')-power\\s*multiplier:\\s*[\\u00D7x]\\s*(\\d+(?:\\.\\d+)?)', 'i')
-      .exec((q('#elements-pve .active-effect') || {}).textContent || '');
-    if (pm && parseFloat(pm[2]) >= 1) {
-      const e = pm[1].toUpperCase(), r = Math.round((parseFloat(pm[2]) - 1) * 1e4) / 1e4, had = out.bonus.src.some(x => x.label === e + ' rate');
-      out.bonus.rate[e] = r;
-      had || out.bonus.src.push({ label: e + ' rate', pct: r, pet: 'stats.php', where: 'multiplier' });
-    }
-    return out;
+    return { name, passiveText, petInvId };
   }
 
   let playerRemoteStats = null;
   let playerRemoteStatsPromise = null;
-  let playerRemoteStatsTriedAt = 0;
-  const statsOk = s => !!(s && s.atk > 0 && s.def > 0);
+
+  // v15.13: same sources as the Build Optimizer. stats.php's #stats-state JSON (core.attack / defense / stamina plus
+  // relic_attack / relic_defense; the v-ids are the fallback), classes.php for your class (Hunter and Mage change
+  // DEF / ATK), relics.php for the relic bonuses (enemy ATK / DEF reduction, relic ATK / DEF).
+  const RELIC_LABELS = ['Attack', 'Defense', 'Lifesteal boost', 'Crit damage resistance', 'Crit rate resistance', 'Enemy Attack reduction', 'Enemy Defense reduction', 'PvE damage', 'Damage against Goblins'];
+  function docText(doc) {
+    const c = doc.body ? doc.body.cloneNode(true) : null;
+    if (!c) return '';
+    c.querySelectorAll('style,script,noscript,template').forEach(n => n.remove());
+    return c.textContent || '';
+  }
+  function parseRelicPower(text) {
+    const t0 = String(text || '');
+    const a = t0.indexOf('Current Relic Power');
+    if (a < 0) return null;
+    const b = t0.indexOf('Completed collections', a);
+    let t = t0.slice(a, b < 0 ? a + 2000 : b);
+    const out = {};
+    RELIC_LABELS.slice().sort((x, y) => y.length - x.length).forEach(lab => {
+      const re = new RegExp(lab.replace(/ /g, '\\s+'), 'i');
+      const m = re.exec(t);
+      if (!m) return;
+      const v = t.slice(m.index + m[0].length).match(/^[\s:]*\+?(-?[0-9]+(?:\.[0-9]+)?)\s*(%?)/);
+      if (v) out[lab] = parseFloat(v[1]);
+      t = t.replace(re, '_'.repeat(lab.length));
+    });
+    const num = k => out[k] || 0;
+    return { atk: num('Attack'), def: num('Defense'), enemyAtkRed: num('Enemy Attack reduction'), enemyDefRed: num('Enemy Defense reduction'), parsed: Object.keys(out).length > 0 };
+  }
+  function readStatsDoc(doc) {
+    let atk = 0, def = 0, stamina = 0, relicATK = 0, relicDEF = 0, ok = false;
+    const st = doc.getElementById('stats-state');
+    if (st) {
+      try {
+        const j = JSON.parse(st.textContent || ''), c = (j && j.core) || {}, u = (j && j.user) || {};
+        atk = parseInt(c.attack != null ? c.attack : u.ATTACK, 10) || 0;
+        def = parseInt(c.defense != null ? c.defense : u.DEFENSE, 10) || 0;
+        stamina = parseInt(c.stamina != null ? c.stamina : u.MAX_STAMINA, 10) || 0;
+        relicATK = parseInt(c.relic_attack, 10) || 0;
+        relicDEF = parseInt(c.relic_defense, 10) || 0;
+        ok = !!(atk && def && stamina);
+      } catch (_) { /* fall through to the v-ids */ }
+    }
+    if (!ok) {
+      const num = id => {
+        const el = doc.getElementById(id);
+        return el ? (parseInt((el.textContent || '').replace(/[^0-9]/g, ''), 10) || 0) : 0;
+      };
+      atk = num('v-attack'); def = num('v-defense'); stamina = num('v-stamina');
+    }
+    return { atk, def, stamina, relicATK, relicDEF };
+  }
   function fetchPlayerRemoteStats() {
-    if (statsOk(playerRemoteStats)) return Promise.resolve(playerRemoteStats);
+    if (playerRemoteStats) return Promise.resolve(playerRemoteStats);
     if (playerRemoteStatsPromise) return playerRemoteStatsPromise;
-    // A failed read is retried, but at most every 30 s (this runs on every DOM change).
-    if (playerRemoteStats && Date.now() - playerRemoteStatsTriedAt < 30000) return Promise.resolve(playerRemoteStats);
-    playerRemoteStatsTriedAt = Date.now();
-    const parse = html => readStatsPage(new DOMParser().parseFromString(html, 'text/html'));
-    const direct = () => fetch('/stats.php', { credentials: 'same-origin', cache: 'no-store' }).then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.text(); });
-    playerRemoteStatsPromise = Core.net.fetchText('/stats.php').then(parse).catch(() => readStatsPage(null))
-      .then(s => (statsOk(s) ? s : direct().then(parse).catch(() => s)))   // shared cache gave something unusable: one plain read
-      .then(s => {
-        console.log('[BattlePage] stats.php:', { atk: s.atk, def: s.def, effAtk: s.effAtk, effDef: s.effDef, relic: s.relicATK + '/' + s.relicDEF, class: s.playerClass,
-          gearATK: s.equipATK, gearPcs: s.equipCount, petATK: s.petATK, pets: s.teamCount, element: s.element, pens: s.pens.length, moonveil: s.moonveilPct, enemyRed: s.relics.enemyAtkRed + '/' + s.relics.enemyDefRed });
-        statsOk(s) || console.warn('[BattlePage] ATK/DEF could not be read from /stats.php (#stats-state / [data-value] missing?)');
-        return (playerRemoteStats = s);
-      })
-      .then(res => { playerRemoteStatsPromise = null; return res; });
+    const parse = html => new DOMParser().parseFromString(html, 'text/html');
+    const none = { atk: 0, def: 0, stamina: 0, relicATK: 0, relicDEF: 0, classAtk: 0, classDef: 0, playerClass: 'Unknown', relics: { atk: 0, def: 0, enemyAtkRed: 0, enemyDefRed: 0, parsed: false } };
+    playerRemoteStatsPromise = Promise.all([
+      Core.net.fetchText('/stats.php'),
+      Core.net.fetchText('/classes.php').catch(() => ''),
+      Core.net.fetchText('/relics.php').catch(() => ''),
+    ]).then(([statsHtml, classHtml, relicHtml]) => {
+      const s = readStatsDoc(parse(statsHtml));
+      const pill = classHtml ? parse(classHtml).querySelector('.section-classes-pill') : null;
+      const cls = pill ? (pill.textContent.trim().replace(/[\s\S]*Your class:\s*/i, '').trim() || 'Unknown') : 'Unknown';
+      const mod = CLASS_MODS[cls.toLowerCase()] || { atk: 0, def: 0 };
+      const r = relicHtml ? parseRelicPower(docText(parse(relicHtml))) : null;
+      const relics = r && r.parsed ? r : none.relics;
+      if (!s.relicATK && relics.atk) s.relicATK = relics.atk;
+      if (!s.relicDEF && relics.def) s.relicDEF = relics.def;
+      playerRemoteStats = Object.assign(s, { playerClass: cls, classAtk: mod.atk, classDef: mod.def, relics });
+      return playerRemoteStats;
+    })
+      .catch(() => { playerRemoteStats = none; return playerRemoteStats; });
     return playerRemoteStatsPromise;
   }
 
@@ -2188,11 +2376,21 @@
   };
 
   // v15.7: rules taken from the game's Damage Formula panel.
-  // Element-rate bonus (Wyvern: +20.48% on VOID) and elemental-damage bonus (Reindeer), both read from stats.php.
-  function elemBonusOf(bonus, e) { return (bonus && bonus.rate && e && bonus.rate[e]) || 0; }
-  function elemDmgBonusOf(bonus) { return (bonus && bonus.dmg) || 0; }
+  // Manual EXTRA bonuses, added on top of the auto-detected ones (0.25 = +25%). Leave at 0 --
+  // v15.9 reads "X% <ELEMENT> Element Rate Increase" (Wyvern) and "X% Extra Elemental Damage"
+  // (Reindeer) from your team + linked pets by itself.
+  const ELEMENT_BONUS = { wyvernVoid: 0, reindeer: 0 };
+  // Element-rate multiplier bonus for element e, from detected passives (bonus.rate) + manual override.
+  function elemBonusOf(bonus, e) {
+    const det = (bonus && bonus.rate && e && bonus.rate[e]) || 0;
+    return det + (e === 'VOID' ? ELEMENT_BONUS.wyvernVoid : 0);
+  }
+  function elemDmgBonusOf(bonus) { return ELEMENT_BONUS.reindeer + ((bonus && bonus.dmg) || 0); }
   // In-game tie order is "predetermined". This is a PLACEHOLDER: confirm the real order.
   const ELEMENT_TIE_ORDER = ['FIRE', 'WATER', 'FROST', 'NATURE', 'THUNDER', 'VOID', 'LIGHT'];
+  // Share of a LINKED pet's element rate that counts for you (link slot -> fraction of that pet's own rate).
+  // Main pet = 100% (5%), Link 1 = 50% (2.5%), Link 2 = 25% (1.25%).
+  const LINK_ELEMENT_SHARE = { 1: 0.5, 2: 0.25 };
   const ELEMENT_DMG_PER_POINT = 1500;   // per 1% of advantage, per stamina
   const ELEMENT_WEAK_MAX = 5;           // your strength <= 5% -> can't take a disadvantage
   const ELEMENT_WEAK_MONSTER_RATE = 0.5; // ...and the monster counts as 0.5%
@@ -2214,6 +2412,69 @@
     return { adv, pAdj, mAdj, pStrong, mStrong, weak, mEff, pBonus, dmgBonus: elemDmgBonusOf(bonus), disadvantaged: !weak && adv < 0 };
   }
 
+  // Kept under the old name so nothing else that calls it breaks.
+  function isElementDisadvantaged(pElem, pRate, mElem, mRate, bonus) {
+    const mu = computeElementMatchup(pElem, pRate, mElem, mRate, bonus);
+    return mu ? { disadvantaged: mu.disadvantaged, mu } : null;
+  }
+
+  // Best-effort player elemental rate. This duplicates a slice of the Build
+  // Optimizer script's scraping logic since these two scripts run on
+  // different pages (battle.php vs stats.php) and can never share state at
+  // runtime. Counts EQUIPPED gear + the equipped PvE team + (v15.8) that team's
+  // linked pets at their link-slot share (Link 1 = 50%, Link 2 = 25%).
+  function scrapeEquippedElementRates(invDoc) {
+    const rates = {}, byName = {};
+    invDoc.querySelectorAll('.slot-box[data-inv-id]').forEach(card => {
+      const infoBtn = card.querySelector('.info-btn[data-name]');
+      const img = card.querySelector('img[alt]');
+      const name = infoBtn ? infoBtn.getAttribute('data-name').trim() : (img ? img.getAttribute('alt').trim() : null);
+      if (!name || byName[name]) return;
+      const descBtn = card.querySelector('.info-btn[data-desc]');
+      let element = null, elemPct = 0;
+      if (descBtn) {
+        const desc = descBtn.getAttribute('data-desc') || '';
+        const elemM = desc.match(/Element:\s*(FIRE|WATER|FROST|NATURE|THUNDER|VOID|LIGHT)\s*\(\+([0-9.]+)%\)/i)
+        || desc.match(/(FIRE|WATER|FROST|NATURE|THUNDER|VOID|LIGHT)\s*\+([0-9.]+)%/i);
+        if (elemM) { element = elemM[1].toUpperCase(); elemPct = parseFloat(elemM[2]); }
+      }
+      byName[name] = { element, elemPct };
+    });
+    invDoc.querySelectorAll('.slot-box:not([data-inv-id])').forEach(card => {
+      const btn = card.querySelector('button');
+      if (!btn || !btn.textContent.includes('Unequip')) return;
+      const img = card.querySelector('img[alt]');
+      const name = img ? img.getAttribute('alt').trim() : null;
+      const item = name && byName[name];
+      if (item && item.element) rates[item.element] = (rates[item.element] || 0) + item.elemPct;
+    });
+    return rates;
+  }
+  function scrapeMainTeamElementRates(petDoc) {
+    const rates = {};
+    let mainSection = null;
+    petDoc.querySelectorAll('.section').forEach(sec => {
+      const titleEl = sec.querySelector('.section-title');
+      if (titleEl && /PvE Attack Team/i.test(titleEl.textContent.trim())) mainSection = sec;
+    });
+    if (!mainSection) return rates;
+    mainSection.querySelectorAll('.pet-card').forEach(card => {
+      const el = card.dataset.element;
+      const rateRaw = parseFloat(card.dataset.elementRate || card.dataset.elemRate || 0) || 0;
+      if (!el || !rateRaw) return;
+      const rate = rateRaw <= 1 ? rateRaw * 100 : rateRaw;
+      rates[el.toUpperCase()] = (rates[el.toUpperCase()] || 0) + rate;
+    });
+    return rates;
+  }
+  // v15.8: every pet card on pets.php carries data-pet-inv-id / data-element / data-element-rate
+  // (rate is a fraction: 0.05 = 5%). Index them so a LINKED pet's own element can be looked up.
+  function readCardElement(card) {
+    const el = (card.dataset.element || '').trim().toUpperCase();
+    const raw = parseFloat(card.dataset.elementRate || card.dataset.elemRate || 0) || 0;
+    if (!el || el === 'NONE' || !(raw > 0)) return null;
+    return { element: el, rate: raw <= 1 ? raw * 100 : raw };
+  }
   // v15.9: passive-text parsing for the two element bonuses.
   //   "20.48% Void Element Rate Increase"           -> rate.VOID = 0.2048
   //   "20.99% Extra Elemental Damage To Monsters"   -> dmg = 0.2099
@@ -2233,6 +2494,208 @@
     if (dm) out.dmg = parseFloat(dm[1]) / 100;
     return out;
   }
+  // Card's live passive line ([data-power]) first, its info-button description as fallback.
+  function parsePassivesFromCard(card) {
+    const power = card.querySelector('[data-power]');
+    const a = parseElementPassives(power ? power.textContent : '');
+    const basic = parsePetCardBasic(card);
+    const b = parseElementPassives(basic ? basic.passiveText : '');
+    return { rate: Object.keys(a.rate).length ? a.rate : b.rate, dmg: a.dmg || b.dmg };
+  }
+  function indexPetPassives(petDoc) {
+    const byInv = {}, byName = {};
+    petDoc.querySelectorAll('.pet-card[data-pet-inv-id]').forEach(card => {
+      const parsed = parsePassivesFromCard(card);
+      const id = parseInt(card.getAttribute('data-pet-inv-id'), 10);
+      if (id && !byInv[id]) byInv[id] = parsed;
+      const basic = parsePetCardBasic(card);
+      if (basic && basic.name && !byName[basic.name]) byName[basic.name] = parsed;
+    });
+    return { byInv, byName };
+  }
+  // A linked pet's passive: if the Links panel's own text for that link already shows a SMALLER
+  // number than the pet's full passive, it is pre-scaled by the server -> trust it. Otherwise scale
+  // the full value by the link share.
+  function scaleLinkedPassive(full, serverVal, share) {
+    if (serverVal > 0 && serverVal < full - 1e-9) return serverVal;
+    return full * share;
+  }
+  function indexPetElements(petDoc) {
+    const byInv = {}, byName = {};
+    petDoc.querySelectorAll('.pet-card[data-pet-inv-id]').forEach(card => {
+      const info = readCardElement(card);
+      if (!info) return;
+      const id = parseInt(card.getAttribute('data-pet-inv-id'), 10);
+      if (id) byInv[id] = info;
+      const basic = parsePetCardBasic(card);
+      if (basic && basic.name && !byName[basic.name]) byName[basic.name] = info;
+    });
+    return { byInv, byName };
+  }
+  function scrapeEquippedGearATK(invDoc) {
+    let total = 0;
+    invDoc.querySelectorAll('.slot-box:not([data-inv-id])').forEach(card => {
+      const btn = card.querySelector('button');
+      if (!btn || !btn.textContent.includes('Unequip')) return;
+      const label = card.querySelector('.label');
+      if (!label) return;
+      const atkMatch = (label.textContent || '').match(/([\d,]+)\s*ATK/i);
+      const atk = atkMatch ? parseInt(atkMatch[1].replace(/,/g, ''), 10) || 0 : 0;
+      total += atk;
+    });
+    return total;
+  }
+
+  function scrapeMainTeamPetATK(petDoc) {
+    let total = 0, mainSection = null;
+    petDoc.querySelectorAll('.section').forEach(sec => {
+      const titleEl = sec.querySelector('.section-title');
+      if (titleEl && /PvE Attack Team/i.test(titleEl.textContent.trim())) mainSection = sec;
+    });
+    if (!mainSection) return 0;
+    mainSection.querySelectorAll('.pet-card').forEach(card => {
+      const atkEl = card.querySelector('.pet-atk');
+      total += atkEl ? (parseInt((atkEl.textContent || '').replace(/[^0-9]/g, ''), 10) || 0) : 0;
+    });
+    return total;
+  }
+
+  let playerGearPetPromise = null;
+  function fetchPlayerGearPetSummary() {
+    if (playerGearPetPromise) return playerGearPetPromise;
+    playerGearPetPromise = Promise.all([
+      Core.net.fetchText('/inventory.php').catch(() => null),
+      Core.net.fetchText('/pets.php').catch(() => null)
+    ]).then(([invHtml, petHtml]) => {
+      const result = { element: null, rates: {}, sources: {}, bonus: { rate: {}, dmg: 0, src: [] }, ratesKnown: false, equipATK: 0, petATK: 0, pens: [], moonveilPct: 0 };
+      const rates = {};
+      const addBonus = (kind, elem, frac, pet, where) => {
+        if (!(frac > 0)) return;
+        if (kind === 'rate') result.bonus.rate[elem] = (result.bonus.rate[elem] || 0) + frac;
+        else result.bonus.dmg += frac;
+        result.bonus.src.push({ label: kind === 'rate' ? `${elem} rate` : 'elem dmg', pct: frac, pet: pet || '?', where: where || '' });
+      };
+      const addSource = (elem, kind, amount) => {
+        const src = result.sources[elem] || (result.sources[elem] = { gear: 0, pets: 0, links: 0 });
+        src[kind] += amount;
+        rates[elem] = (rates[elem] || 0) + amount;
+      };
+      if (invHtml) {
+        const invDoc = new DOMParser().parseFromString(invHtml, 'text/html');
+        const gearRates = scrapeEquippedElementRates(invDoc);
+        Object.keys(gearRates).forEach(k => addSource(k, 'gear', gearRates[k]));
+        result.equipATK = scrapeEquippedGearATK(invDoc);
+      }
+
+      function finish() {
+        let best = null, bestRate = 0;
+        // v15.7: strictly-greater wins, iterated in ELEMENT_TIE_ORDER, so ties resolve deterministically.
+        const order = ELEMENT_TIE_ORDER.concat(Object.keys(rates).filter(k => ELEMENT_TIE_ORDER.indexOf(k) < 0));
+        order.forEach(k => { const r = rates[k] || 0; if (r > bestRate) { bestRate = r; best = k; } });
+        result.element = best ? { element: best, rate: bestRate } : null;
+        result.rates = Object.assign({}, rates);
+        result.ratesKnown = !!(invHtml && petHtml);
+        return result;
+      }
+      if (!petHtml) return finish();
+
+      const petDoc = new DOMParser().parseFromString(petHtml, 'text/html');
+      const petRates = scrapeMainTeamElementRates(petDoc);
+      Object.keys(petRates).forEach(k => addSource(k, 'pets', petRates[k]));
+      result.petATK = scrapeMainTeamPetATK(petDoc);
+      const petElemIndex = indexPetElements(petDoc);
+
+      // Penetration: name -> passiveText for every owned pet, then collect
+      // eq_pen/pet_pen/armor_pen off pets actually LINKED to the equipped
+      // PvE team (via pet_links_ajax.php). v15.13: each entry keeps its link
+      // factor and any "attack/defense exceeds" condition, and
+      // computeDamageTerms() combines them the way the build optimizer
+      // (v11.81) does -- the old "pen is NOT scaled by link factor" note
+      // (optimizer v11.3) no longer holds.
+      const passiveByName = {};
+      petDoc.querySelectorAll('.pet-card').forEach(card => {
+        const p = parsePetCardBasic(card);
+        if (p) passiveByName[p.name] = p.passiveText;
+      });
+      let mainSection = null;
+      petDoc.querySelectorAll('.section').forEach(sec => {
+        const titleEl = sec.querySelector('.section-title');
+        if (titleEl && /PvE Attack Team/i.test(titleEl.textContent.trim())) mainSection = sec;
+      });
+      const mains = mainSection ? Array.from(mainSection.querySelectorAll('.pet-card')).map(parsePetCardBasic).filter(Boolean) : [];
+      // v15.13: Moonveil-style main passive ("transfer X% of the target's pet def"), same regex as the optimizer.
+      mains.forEach(m => {
+        const mv = /transfer\s+(\d[\d.]*)\s*%\s+of\s+the\s+target.?s\s+pet\s+def/i.exec(m.passiveText || '');
+        if (mv) result.moonveilPct += parseFloat(mv[1]) / 100;
+      });
+
+      // v15.9: passives on the MAIN team count at full value.
+      const passiveIndex = indexPetPassives(petDoc);
+      if (mainSection) {
+        mainSection.querySelectorAll('.pet-card').forEach(card => {
+          const nm = (parsePetCardBasic(card) || {}).name || 'main pet';
+          const pp = parsePassivesFromCard(card);
+          Object.keys(pp.rate).forEach(el => addBonus('rate', el, pp.rate[el], nm, 'main'));
+          addBonus('dmg', null, pp.dmg, nm, 'main');
+        });
+      }
+
+      return Promise.all(mains.map(main => {
+        if (!main.petInvId) return null;
+        return fetch(`/pet_links_ajax.php?pet_inv_id=${main.petInvId}`, { credentials: 'same-origin' })
+          .then(r => r.json()).catch(() => null);
+      })).then(linkResults => {
+        linkResults.forEach((data, mainIdx) => {
+          if (!data || data.status !== 'success' || !Array.isArray(data.links)) return;
+          data.links.forEach(l => {
+            // v15.8: linked pet's element counts at its link-slot share (Link 1 = 50%, Link 2 = 25%).
+            const linkedElem = petElemIndex.byInv[Number(l.link_pet_id)] || petElemIndex.byName[l.name];
+            const share = LINK_ELEMENT_SHARE[Number(l.link_level)];
+            if (linkedElem && share) {
+              const add = linkedElem.rate * share;
+              addSource(linkedElem.element, 'links', add);
+              console.debug('[BattlePage] link element', mains[mainIdx] && mains[mainIdx].name, '-> link', l.link_level, l.name,
+                            linkedElem.element, linkedElem.rate + '% x' + share + ' = +' + add);
+            }
+            // v15.9: linked pet's Wyvern/Reindeer-style passives, at link share (or the server's own scaled number).
+            const fullP = passiveIndex.byInv[Number(l.link_pet_id)] || passiveIndex.byName[l.name];
+            if (fullP && share) {
+              const srvP = parseElementPassives(l.effect_text);
+              Object.keys(fullP.rate).forEach(el => {
+                const val = scaleLinkedPassive(fullP.rate[el], srvP.rate[el] || 0, share);
+                console.debug('[BattlePage] link passive', l.name, el + ' rate', 'full', fullP.rate[el], 'server', srvP.rate[el] || 0, '->', val);
+                addBonus('rate', el, val, l.name, 'link ' + l.link_level);
+              });
+              if (fullP.dmg > 0) {
+                const val = scaleLinkedPassive(fullP.dmg, srvP.dmg || 0, share);
+                console.debug('[BattlePage] link passive', l.name, 'elem dmg', 'full', fullP.dmg, 'server', srvP.dmg || 0, '->', val);
+                addBonus('dmg', null, val, l.name, 'link ' + l.link_level);
+              }
+            }
+            // v15.13: pen passives count at the link's share (share_pct_label, capped 50% / 25%) -- the optimizer's
+            // factor -- not at full value; eq/pet pen with an "attack/defense exceeds" clause carry that condition.
+            const text = passiveByName[l.name] || l.effect_text || '';
+            const parsed = parsePenetrationFromText(text);
+            const maxShare = Number(l.link_level) === 1 ? 0.5 : 0.25;
+            const lbl = l.share_pct_label;
+            const sp = lbl != null && lbl !== '' ? parseFloat(String(lbl).replace('%', '')) / 100 : NaN;
+            const factor = Math.min(isFinite(sp) ? sp : maxShare, maxShare);
+            const lower = text.toLowerCase();
+            const cond = /attack\s*(?:exceeds|is\s*higher)/.test(lower) ? 'atkDom' : /defense\s*(?:exceeds|is\s*higher)/.test(lower) ? 'defDom' : null;
+            if (parsed.eqPen) result.pens.push({ kind: 'eq', val: parsed.eqPen, factor, cond, pet: l.name });
+            if (parsed.petPen) result.pens.push({ kind: 'pet', val: parsed.petPen, factor, cond, pet: l.name });
+            if (parsed.armorPen) result.pens.push({ kind: 'armor', val: parsed.armorPen, factor, cond: null, pet: l.name });
+          });
+        });
+        return finish();
+      });
+    }).catch(err => {
+      console.error('[BattlePage] fetchPlayerGearPetSummary failed:', err);
+      return { element: null, rates: {}, sources: {}, bonus: { rate: {}, dmg: 0, src: [] }, ratesKnown: false, equipATK: 0, petATK: 0, pens: [], moonveilPct: 0 };
+    });
+    return playerGearPetPromise;
+  }
+
   function buildWarnings(playerLevel, remoteStats, infoChips, modalStats, divineMult, playerElem, gearPet) {
     const warns = [];
 
@@ -2251,22 +2714,6 @@
                   detail: `You've already dealt enough damage to hit this monster's EXP cap (${expCap.value}). Further hits give no extra EXP.` });
     }
 
-    // v15.14: a term whose input could not be read is hidden instead of being shown with a made-up 0.
-    // (The equipment / pet terms also need ATK+DEF: the base penetration tier is derived from them.)
-    const okStats = !!(remoteStats && remoteStats.atk > 0 && remoteStats.def > 0);
-    const okGear = !!(remoteStats && remoteStats.equipCount > 0);
-    const okTeam = !!(remoteStats && remoteStats.teamCount > 0);
-    if (remoteStats) {
-      const miss = [];
-      if (!okStats) miss.push('ATK/DEF');
-      if (!okGear) miss.push('equipped gear');
-      if (!okTeam) miss.push('PvE team');
-      if (miss.length) {
-        warns.push({ color: 'yellow', icon: '\u2754', title: 'Some of your stats could not be read',
-                    detail: `Not read: ${miss.join(', ')}. The warnings that need ${miss.length > 1 ? 'them' : 'it'} are hidden.\nCheck the console (\u201C[BattlePage]\u201D) for why.` });
-      }
-    }
-
     if (modalStats && remoteStats) {
       const T = computeDamageTerms(remoteStats, playerLevel, modalStats, getMonsterId(), currentMonsterName());
       const relics = remoteStats.relics || {};
@@ -2277,19 +2724,19 @@
         return total > 0 ? `, after ${pctStr(total)} penetration (${bits.join(' + ')})` : '';
       };
 
-      if (okStats && modalStats.def > 0 && T.atk.floored) {
+      if (modalStats.def > 0 && T.atk.floored) {
         const floored = Math.round(atkTermValue(T.atk.gap));
         const mine = [remoteStats.classAtk ? `${pctStr(remoteStats.classAtk)} ${remoteStats.playerClass} bonus` : '', remoteStats.relicATK ? `+${fmt(remoteStats.relicATK)} relic` : ''].filter(Boolean).join(', ');
         warns.push({ color: 'red', icon: '🗡️', title: 'ATK damage term floored',
                     detail: `Your ATK (${fmt(Math.round(T.atk.value))}${mine ? `, incl. ${mine}` : ''}) vs this monster's DEF (${fmt(Math.round(T.atk.defEff))}${relics.enemyDefRed ? `, after your -${fmt(relics.enemyDefRed)} relic Enemy DEF reduction` : ''}) is only a ${fmt(Math.round(T.atk.gap))} gap. Below a ${DMG_ENGINE.FLOOR} gap this damage term is capped at its minimum (${fmt(floored)}) and gets zero benefit from further ATK — you need at least ${fmt(T.atk.deficit)} more ATK just to start climbing above the floor. (Penetration does not apply to this term.)` });
       }
 
-      if (okStats && okGear && typeof modalStats.eqDef === 'number' && modalStats.eqDef > 0 && T.eq.floored) {
+      if (typeof modalStats.eqDef === 'number' && modalStats.eqDef > 0 && T.eq.floored) {
         warns.push({ color: 'red', icon: '🧱', title: 'Equipment damage term floored',
                     detail: `Your equipped gear ATK total (${fmt(Math.round(T.eq.value))}) vs this monster's Equipment Defense (${fmt(Math.round(T.eq.defEff))}${penNote(T.pen.totalEqPen, T.pen.linkEq)}) is only a ${fmt(Math.round(T.eq.gap))} gap. This term is floored — you need at least ${fmt(T.eq.deficit)} more equipped ATK to escape it.` });
       }
 
-      if (okStats && okTeam && T.pet.rawDef > 0 && T.pet.floored) {
+      if (T.pet.rawDef > 0 && T.pet.floored) {
         const mv = T.pet.moonveil ? `, with ${fmt(T.pet.moonveil)} transferred by Moonveil` : '';
         warns.push({ color: 'red', icon: '🐾', title: 'Pet damage term floored',
                     detail: `Your main pets' ATK total (${fmt(Math.round(T.pet.value))}${mv}) vs this monster's Pet Defense (${fmt(Math.round(T.pet.defEff))}${penNote(T.pen.totalPetPen, T.pen.linkPet)}${T.pet.observedDef ? ', observed value' : ''}) is only a ${fmt(Math.round(T.pet.gap))} gap. This term is floored — you need at least ${fmt(T.pet.deficit)} more pet ATK to escape it.` });
@@ -2302,7 +2749,7 @@
       // (v15.13: compared with your effective DEF -- class + relic -- and the monster's relic-reduced ATK.)
       const defEff = T.pDef + (remoteStats.relicDEF || 0);
       const mobAtkEff = Math.max(0, (modalStats.atk || 0) - (relics.enemyAtkRed || 0));
-      if (okStats && mobAtkEff > 0 && defEff > 0 && defEff < mobAtkEff) {
+      if (mobAtkEff > 0 && defEff > 0 && defEff < mobAtkEff) {
         const short = Math.round(mobAtkEff - defEff);
         warns.push({ color: 'yellow', icon: '🛡️', title: 'DEF below monster ATK',
                     detail: `Monster ATK (${fmt(mobAtkEff)}${relics.enemyAtkRed ? ` after your -${fmt(relics.enemyAtkRed)} relic reduction` : ''}) exceeds your DEF (${fmt(defEff)}) by ${fmt(short)} — possible increased damage taken on retaliation. Unlike the damage-dealt checks above, this isn't derived from a confirmed formula.` });
@@ -2342,7 +2789,6 @@
     const key = warnKey(warns);
     if (key === lastRenderedWarnKey && (rail || !warns.length)) return;
     lastRenderedWarnKey = key;
-    warns.forEach(w => { w.log && console.info('[BattlePage] ' + w.title + '\n' + w.log); });
 
     if (!warns.length) { if (rail) rail.remove(); return; }
     if (!rail) { rail = make('div', 'bm-warn-rail'); arenaRow.appendChild(rail); }
@@ -2371,11 +2817,13 @@
     const infoChips = getMonsterInfoChips();
     const modalStats = getMonsterModalStats();
     const divineMult = getDivineShieldMult();
-    fetchPlayerRemoteStats()
-      .then(remoteStats => {
-      // the element check wants { element, rates, sources, bonus, ratesKnown }: all of it is on the same page now
-      const gp = { element: remoteStats.element, rates: remoteStats.rates, sources: remoteStats.sources, bonus: remoteStats.bonus, ratesKnown: remoteStats.elementKnown };
-      renderWarnings(buildWarnings(playerLevel, remoteStats, infoChips, modalStats, divineMult, gp.element, gp));
+    Promise.all([fetchPlayerRemoteStats(), fetchPlayerGearPetSummary()])
+      .then(([remoteStatsBase, gearPet]) => {
+      const remoteStats = Object.assign({}, remoteStatsBase, {
+        equipATK: gearPet.equipATK, petATK: gearPet.petATK,
+        pens: gearPet.pens, moonveilPct: gearPet.moonveilPct
+      });
+      renderWarnings(buildWarnings(playerLevel, remoteStats, infoChips, modalStats, divineMult, gearPet.element, gearPet));
       warnRefreshBusy = false;
     })
       .catch(err => {
@@ -2469,79 +2917,58 @@
     return (mRate * mMult) / mult;
   }
 
-  function elemCompact(n) {
-    n = Number(n) || 0;
-    const a = Math.abs(n), f = (v, u) => (Math.round(v * 10) / 10) + u;
-    return a >= 1e9 ? f(n / 1e9, 'B') : a >= 1e6 ? f(n / 1e6, 'M') : a >= 1e3 ? f(n / 1e3, 'K') : String(Math.round(n));
-  }
-  function elemSigned(x) { return (x > 0 ? '+' : x < 0 ? '\u2212' : '') + elemNum(Math.abs(x)); }
-
-  // v15.14: the tooltip is now 2-3 short lines. The long explanation (sources, bonuses, formulas) goes to the
-  // console under "[BattlePage] Element ..." when it changes.
-  //   green : "FIRE 31.2% ×2 − WATER 25% = +37.4"  /  "≈ +56.1K elemental dmg per stamina"
-  //   red   : same formula  /  "All damage −33%."  /  "Need (top element): LIGHT ≥10% · FROST ≥12.5% · VOID ≥25%"
   function buildElementWarning(gearPet) {
     const m = currentMonsterElement();
     if (m.status === 'none') return null;            // monster has no element: no icon
     if (m.status === 'unknown') {
       if (m.loading) return null;                    // still trying the page re-fetch
-      return { color: 'yellow', icon: '\u2754', title: 'Monster element unknown',
-               detail: 'Open \u201CView Monster Stats\u201D once to read it.' };
+      return { color: 'yellow', icon: '❔', title: 'Monster element unknown',
+               detail: 'Open \u201CView Monster Stats\u201D once so the monster\u2019s element can be read. This icon turns green/red by itself afterwards.' };
     }
 
     const known = !!(gearPet && gearPet.ratesKnown);
     const rates = (gearPet && gearPet.rates) || {};
     const own = known ? gearPet.element : null;      // your CURRENT element = your highest-rate one
-    const icon = ELEMENT_EMOJI[m.element] || '\u26A1';
+    const icon = ELEMENT_EMOJI[m.element] || '⚡';
+
+    const lines = [`Monster: ${m.element} ${elemPct(m.rate)}`];
+    let color = 'yellow', title = 'Element check unavailable';
 
     if (!known) {
-      return { color: 'yellow', icon, title: 'Element check unavailable',
-               detail: `Monster: ${m.element} ${elemPct(m.rate)}\nYour gear/pets could not be read.` };
-    }
-
-    const mu = computeElementMatchup(own ? own.element : null, own ? own.rate : 0, m.element, m.rate, gearPet.bonus);
-    const color = mu.disadvantaged ? 'red' : 'green';
-    const title = mu.disadvantaged ? `Element disadvantage vs ${m.element}` : `Element OK vs ${m.element}`;
-
-    const mine = own
-      ? `${own.element} ${elemPct(own.rate)}${mu.pStrong ? ' \u00D72' : ''}${mu.pBonus ? ` \u00D7${(1 + mu.pBonus).toFixed(2)}` : ''}`
-      : 'No element';
-    const theirs = `${m.element} ${elemPct(mu.mEff)}${mu.mStrong ? ' \u00D72' : ''}`;
-    const lines = [`${mine} \u2212 ${theirs} = ${elemSigned(mu.adv)}`];
-
-    if (mu.disadvantaged) {
-      lines.push('All damage \u221233%.');
-      const need = (e) => {
-        const n = minRateToPass(e, m.element, m.rate, gearPet.bonus);
-        return `${e} ${n <= ELEMENT_WEAK_MAX ? 'any' : '\u2265' + elemPct(n)}`;
-      };
-      const opts = ELEMENT_TIE_ORDER.filter(e => elemBeats(e, m.element)).concat([m.element]);
-      lines.push('Need (top element): ' + opts.map(need).join(' \u00B7 '));
-    } else if (mu.adv > 0) {
-      lines.push(`\u2248 +${elemCompact(elemDmgPerStamina(mu))} elemental dmg per stamina${mu.weak ? ' (\u22645% strength: no penalty)' : ''}`);
-    } else if (mu.weak) {
-      lines.push('\u22645% strength: no penalty.');
+      lines.push('You: could not read your gear/pets.');
     } else {
-      lines.push('No elemental bonus.');
+      const mu = computeElementMatchup(own ? own.element : null, own ? own.rate : 0, m.element, m.rate, gearPet.bonus);
+      color = mu.disadvantaged ? 'red' : 'green';
+      title = mu.disadvantaged ? `Element disadvantage vs ${m.element}` : `Element OK vs ${m.element}`;
+      lines.push(`You: ${own ? `${own.element} ${elemPct(own.rate)}` : 'no element'}`);
+      const srcOwn = own && gearPet.sources && gearPet.sources[own.element];
+      if (srcOwn) {
+        const bits = [];
+        if (srcOwn.gear) bits.push(`gear ${elemPct(srcOwn.gear)}`);
+        if (srcOwn.pets) bits.push(`main pets ${elemPct(srcOwn.pets)}`);
+        if (srcOwn.links) bits.push(`links ${elemPct(srcOwn.links)}`);
+        if (bits.length) lines.push('Sources: ' + bits.join(' \u00B7 '));
+      }
+      const bsrc = gearPet.bonus && gearPet.bonus.src;
+      if (bsrc && bsrc.length) {
+        lines.push('Bonuses: ' + bsrc.map(b => `${b.label} +${elemPct(b.pct * 100)} (${b.pet}${b.where ? ', ' + b.where : ''})`).join(' \u00B7 '));
+      }
+      lines.push(explainElementMatchup(mu, own ? own.element : null, own ? own.rate : 0, m.element));
     }
 
-    const log = [];
-    log.push(`Monster: ${m.element} ${elemPct(m.rate)}`);
-    log.push(`You: ${own ? `${own.element} ${elemPct(own.rate)}` : 'no element'}`);
-    const srcOwn = own && gearPet.sources && gearPet.sources[own.element];
-    if (srcOwn) {
-      const bits = [];
-      if (srcOwn.gear) bits.push(`gear ${elemPct(srcOwn.gear)}`);
-      if (srcOwn.pets) bits.push(`main pets ${elemPct(srcOwn.pets)}`);
-      if (srcOwn.links) bits.push(`links ${elemPct(srcOwn.links)}`);
-      bits.length && log.push('Sources: ' + bits.join(' \u00B7 '));
-    }
-    const bsrc = gearPet.bonus && gearPet.bonus.src;
-    bsrc && bsrc.length && log.push('Bonuses: ' + bsrc.map(b => `${b.label} +${elemPct(b.pct * 100)} (${b.pet}${b.where ? ', ' + b.where : ''})`).join(' \u00B7 '));
-    log.push(explainElementMatchup(mu, own ? own.element : null, own ? own.rate : 0, m.element));
-    log.push('Your rates: ' + (Object.keys(rates).map(e => `${e} ${elemPct(rates[e])}`).join(' \u00B7 ') || 'none'));
+    // Suggestions: the minimum rate each element needs for advantage >= 0.
+    const fmtNeed = (e) => {
+      const need = minRateToPass(e, m.element, m.rate, gearPet && gearPet.bonus);
+      const have = rates[e] || 0;
+      const cur = own && own.element === e ? ' (current)' : '';
+      return `${e} ${need <= ELEMENT_WEAK_MAX ? 'any rate' : '\u2265' + elemPct(need)} (you ${elemPct(have)})${cur}`;
+    };
+    const counters = ELEMENT_TIE_ORDER.filter(e => elemBeats(e, m.element));
+    lines.push('Counters: ' + (counters.length ? counters.map(fmtNeed).join(' \u00B7 ') : 'none known'));
+    lines.push('Same element: ' + fmtNeed(m.element));
+    lines.push('The element you use is your highest-rate one (gear + PvE team), so a suggested element also has to be your top element.');
 
-    return { color, icon, title, detail: lines.join('\n'), log: log.join('\n') };
+    return { color, icon, title, detail: lines.join('\n') };
   }
 
 
