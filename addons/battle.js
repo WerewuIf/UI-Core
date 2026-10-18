@@ -1,12 +1,15 @@
 /* Battle Page Restructure — Core addon (migrated from the standalone userscript).
  * Loaded by core.user.js; `Core` is in scope. No @require / header needed.
- * Runs early (document-start) — addons.json sets "early": true. /stats.php, /inventory.php, /pets.php reads share the Core.net cache.
+ * Runs early (document-start) — addons.json sets "early": true. The only page it reads about you is /stats.php (via the Core.net cache).
  */
 
+//               v15.16: NO MORE inventory.php / pets.php / pet_links_ajax.php. Element (the game's own #elements-pve list), link penetration,
+//                 Moonveil and the Wyvern / Reindeer bonuses are read from stats.php too: one request instead of five, and no scraping of
+//                 pages whose markup can change. Link passives are taken as shown (already scaled by the link share). Gone: about 300 lines.
 //               v15.15 (SLIMMED): stats.php IS NOW THE ONLY SOURCE FOR YOUR NUMBERS. Removed: the classes.php and relics.php fetches and the
 //                 relic-text parser, the v-id / deep-search ATK fallbacks, and the inventory.php / pets.php re-derivation of gear ATK, pet ATK
-//                 and PvE team size (about 145 lines). Class now comes from #class-heading. Warnings are unchanged. inventory.php and
-//                 pets.php are still read for element rates, link passives, penetration and Moonveil, which stats.php doesn't show.
+//                 and PvE team size (about 145 lines). Class now comes from #class-heading. Warnings are unchanged. (v15.16 then removed the
+//                 remaining inventory.php / pets.php reads too.)
 //               v15.14b: THE GAME'S OWN TOTALS ARE READ FROM stats.php (checked against a real copy of the page). On that page
 //                 ATK/DEF always read fine; the 0 most likely came from the gear / pet ATK that was re-derived by scraping
 //                 inventory.php / pets.php. Now primary: PvE "Equipment ATK", "Pet ATK" (links included), the PvE element, the
@@ -2244,29 +2247,15 @@
     if (apM) out.armorPen = toFrac(parseFloat(apM[1]), apM[2] === '%');
     return out;
   }
-  function parsePetCardBasic(card) {
-    const infoBtn = card.querySelector('.info-btn[data-name]');
-    const img = card.querySelector('img[alt]');
-    const name = infoBtn ? infoBtn.getAttribute('data-name').trim() : (img ? img.getAttribute('alt').trim() : null);
-    if (!name) return null;
-    const descBtn = card.querySelector('.info-btn[data-desc]');
-    const passiveText = descBtn ? (descBtn.getAttribute('data-desc') || '') : '';
-    let petInvId = null;
-    const linksBtn = Array.from(card.querySelectorAll('button')).find(b => /links/i.test(b.textContent));
-    if (linksBtn) {
-      const oc = linksBtn.getAttribute('onclick') || '';
-      const idM = oc.match(/openLinksModal\((\d+)\)/);
-      if (idM) petInvId = parseInt(idM[1], 10);
-    }
-    return { name, passiveText, petInvId };
-  }
-
-  // v15.15: EVERYTHING ABOUT YOU COMES FROM ONE PAGE, stats.php (it shows the game's own totals; checked against a real copy):
+  // v15.16: EVERYTHING ABOUT YOU COMES FROM ONE PAGE, stats.php (the game's own totals; checked against a real copy):
   //   #stats-state JSON .core.attack / defense / stamina / relic_attack / relic_defense   (fallback: [data-value="attack|defense|stamina"])
-  //   [data-class-value="pve_attack|pve_defense"]   class-adjusted core, permanent relic ATK/DEF included
-  //   PvE Set cards: "Equipment ATK" + "N equipped pieces", "Pet ATK" (links included) + .pet-entry count, the element button
-  //   [data-relic-bonus="enemy_attack_flat|enemy_defense_flat"]   and #class-heading ("Mage / Grand Mage")
-  // classes.php, relics.php and the inventory/pets re-derivation of ATK numbers are gone.
+  //   [data-class-value="pve_attack|pve_defense"]   class-adjusted core, permanent relic ATK/DEF included;  #class-heading
+  //   [data-relic-bonus="enemy_attack_flat|enemy_defense_flat"]
+  //   PvE Set cards: "Equipment ATK" + "N equipped pieces", "Pet ATK" (links included), the .pet-entry list
+  //   #elements-pve: the game's own list of element sources and its strongest combined element
+  //   .pet-entry / .linked-pet passive texts: penetration, Moonveil, element-rate / elemental-damage bonuses. A LINKED pet's
+  //   text already shows the value after its link share (50% / 25%); the numbers add up exactly to the page's own pet crit totals.
+  // classes.php, relics.php, inventory.php, pets.php and pet_links_ajax.php are no longer read at all.
   function statInt(v) {
     if (v === null || v === undefined || v === '') return 0;
     const n = typeof v === 'number' ? v : parseInt(String(v).replace(/[^0-9-]/g, ''), 10);
@@ -2274,7 +2263,8 @@
   }
   function readStatsPage(doc) {
     const out = { atk: 0, def: 0, stamina: 0, relicATK: 0, relicDEF: 0, effAtk: 0, effDef: 0, equipATK: null, equipCount: null, petATK: null, teamCount: null,
-                  element: null, playerClass: 'Unknown', classAtk: 0, classDef: 0, relics: { enemyAtkRed: 0, enemyDefRed: 0 } };
+                  element: null, elementKnown: false, rates: {}, sources: {}, bonus: { rate: {}, dmg: 0, src: [] }, pens: [], moonveilPct: 0,
+                  playerClass: 'Unknown', classAtk: 0, classDef: 0, relics: { enemyAtkRed: 0, enemyDefRed: 0 } };
     if (!doc || !doc.querySelector) return out;
     const q = sel => doc.querySelector(sel);
     const toNum = t => { const m = String(t || '').replace(/,/g, '').match(/-?\d+(?:\.\d+)?/); return m ? parseFloat(m[0]) : null; };
@@ -2313,6 +2303,44 @@
     if (em && /^(FIRE|WATER|FROST|NATURE|THUNDER|VOID|LIGHT)$/i.test(em[1])) out.element = { element: em[1].toUpperCase(), rate: parseFloat(em[2]) };
     const rb = k => { const el = q('[data-relic-bonus="' + k + '"] dd'); return el ? toNum(el.textContent) || 0 : 0; };
     out.relics = { enemyAtkRed: rb('enemy_attack_flat'), enemyDefRed: rb('enemy_defense_flat') };
+
+    // element sources: the game's own list (gear + main pets [+ links, if it ever lists them]) and its strongest element
+    out.elementKnown = !!q('#elements-pve'); out.rates = {}; out.sources = {};
+    doc.querySelectorAll('#elements-pve .element-sources li').forEach(li => {
+      const sp = li.querySelector('span'), sm = li.querySelector('small');
+      const m = /([A-Za-z]+)\s*(\d+(?:\.\d+)?)\s*%/.exec(sp ? sp.textContent : '');
+      if (!m) return;
+      const el = m[1].toUpperCase(), v = parseFloat(m[2]), who = sm ? sm.textContent : '';
+      const kind = /main pet/i.test(who) ? 'pets' : /equipment/i.test(who) ? 'gear' : 'links';
+      out.rates[el] = (out.rates[el] || 0) + v;
+      (out.sources[el] || (out.sources[el] = { gear: 0, pets: 0, links: 0 }))[kind] += v;
+    });
+
+    // pet passives of the PvE team: penetration (links), Moonveil (main pets), Wyvern / Reindeer-style bonuses
+    out.bonus = { rate: {}, dmg: 0, src: [] }; out.pens = []; out.moonveilPct = 0;
+    const addBonus = (b, pet, where) => {
+      Object.keys(b.rate).forEach(e => { out.bonus.rate[e] = (out.bonus.rate[e] || 0) + b.rate[e]; out.bonus.src.push({ label: e + ' rate', pct: b.rate[e], pet, where }); });
+      if (b.dmg > 0) { out.bonus.dmg += b.dmg; out.bonus.src.push({ label: 'elem dmg', pct: b.dmg, pet, where }); }
+    };
+    if (pet) pet.querySelectorAll('.pet-entry').forEach(entry => {
+      const mainName = ((entry.querySelector('h4') || {}).textContent || 'main pet').trim();
+      Array.from(entry.children).filter(c => c.classList.contains('passive-text')).forEach(p => {
+        const mv = /transfer\s+(\d[\d.]*)\s*%\s+of\s+the\s+target.?s\s+pet\s+def/i.exec(p.textContent || '');
+        if (mv) out.moonveilPct += parseFloat(mv[1]) / 100;
+        addBonus(parseElementPassives(p.textContent), mainName, 'main');
+      });
+      entry.querySelectorAll('.linked-pet').forEach(l => {
+        const lv = /Link\s*(\d+)\s*:\s*(.*)/i.exec(((l.querySelector('h4') || {}).textContent || '').trim());
+        const lname = lv ? lv[2] : 'linked pet';
+        const text = Array.from(l.querySelectorAll('.passive-text')).map(p => p.textContent || '').join('\n'), lower = text.toLowerCase();
+        addBonus(parseElementPassives(text), lname, 'link ' + (lv ? lv[1] : '?'));
+        const pp = parsePenetrationFromText(text);
+        const cond = /attack\s*(?:exceeds|is\s*higher)/.test(lower) ? 'atkDom' : /defense\s*(?:exceeds|is\s*higher)/.test(lower) ? 'defDom' : null;
+        if (pp.eqPen) out.pens.push({ kind: 'eq', val: pp.eqPen, factor: 1, cond, pet: lname });
+        if (pp.petPen) out.pens.push({ kind: 'pet', val: pp.petPen, factor: 1, cond, pet: lname });
+        if (pp.armorPen) out.pens.push({ kind: 'armor', val: pp.armorPen, factor: 1, cond: null, pet: lname });
+      });
+    });
     return out;
   }
 
@@ -2332,7 +2360,7 @@
       .then(s => (statsOk(s) ? s : direct().then(parse).catch(() => s)))   // shared cache gave something unusable: one plain read
       .then(s => {
         console.log('[BattlePage] stats.php:', { atk: s.atk, def: s.def, effAtk: s.effAtk, effDef: s.effDef, relic: s.relicATK + '/' + s.relicDEF, class: s.playerClass,
-          gearATK: s.equipATK, gearPcs: s.equipCount, petATK: s.petATK, pets: s.teamCount, element: s.element, enemyRed: s.relics.enemyAtkRed + '/' + s.relics.enemyDefRed });
+          gearATK: s.equipATK, gearPcs: s.equipCount, petATK: s.petATK, pets: s.teamCount, element: s.element, pens: s.pens.length, moonveil: s.moonveilPct, enemyRed: s.relics.enemyAtkRed + '/' + s.relics.enemyDefRed });
         statsOk(s) || console.warn('[BattlePage] ATK/DEF could not be read from /stats.php (#stats-state / [data-value] missing?)');
         return (playerRemoteStats = s);
       })
@@ -2415,9 +2443,6 @@
   function elemDmgBonusOf(bonus) { return ELEMENT_BONUS.reindeer + ((bonus && bonus.dmg) || 0); }
   // In-game tie order is "predetermined". This is a PLACEHOLDER: confirm the real order.
   const ELEMENT_TIE_ORDER = ['FIRE', 'WATER', 'FROST', 'NATURE', 'THUNDER', 'VOID', 'LIGHT'];
-  // Share of a LINKED pet's element rate that counts for you (link slot -> fraction of that pet's own rate).
-  // Main pet = 100% (5%), Link 1 = 50% (2.5%), Link 2 = 25% (1.25%).
-  const LINK_ELEMENT_SHARE = { 1: 0.5, 2: 0.25 };
   const ELEMENT_DMG_PER_POINT = 1500;   // per 1% of advantage, per stamina
   const ELEMENT_WEAK_MAX = 5;           // your strength <= 5% -> can't take a disadvantage
   const ELEMENT_WEAK_MONSTER_RATE = 0.5; // ...and the monster counts as 0.5%
@@ -2445,68 +2470,6 @@
     return mu ? { disadvantaged: mu.disadvantaged, mu } : null;
   }
 
-  // Best-effort player elemental rate. This duplicates a slice of the Build
-  // Optimizer script's scraping logic since these two scripts run on
-  // different pages (battle.php vs stats.php) and can never share state at
-  // runtime. Counts EQUIPPED gear + the equipped PvE team + (v15.8) that team's
-  // linked pets at their link-slot share (Link 1 = 50%, Link 2 = 25%).
-  function scrapeEquippedElementRates(invDoc) {
-    const rates = {}, byName = {};
-    invDoc.querySelectorAll('.slot-box[data-inv-id]').forEach(card => {
-      const infoBtn = card.querySelector('.info-btn[data-name]');
-      const img = card.querySelector('img[alt]');
-      const name = infoBtn ? infoBtn.getAttribute('data-name').trim() : (img ? img.getAttribute('alt').trim() : null);
-      if (!name || byName[name]) return;
-      const descBtn = card.querySelector('.info-btn[data-desc]');
-      let element = null, elemPct = 0;
-      if (descBtn) {
-        const desc = descBtn.getAttribute('data-desc') || '';
-        const elemM = desc.match(/Element:\s*(FIRE|WATER|FROST|NATURE|THUNDER|VOID|LIGHT)\s*\(\+([0-9.]+)%\)/i)
-        || desc.match(/(FIRE|WATER|FROST|NATURE|THUNDER|VOID|LIGHT)\s*\+([0-9.]+)%/i);
-        if (elemM) { element = elemM[1].toUpperCase(); elemPct = parseFloat(elemM[2]); }
-      }
-      byName[name] = { element, elemPct };
-    });
-    invDoc.querySelectorAll('.slot-box:not([data-inv-id])').forEach(card => {
-      if (!isEquippedBox(card)) return;
-      const img = card.querySelector('img[alt]');
-      const name = img ? img.getAttribute('alt').trim() : null;
-      let item = name && byName[name];
-      if (!(item && item.element)) {
-        const d = card.querySelector('.info-btn[data-desc]');
-        const desc = d ? (d.getAttribute('data-desc') || '') : '';
-        const em = desc.match(/Element:\s*(FIRE|WATER|FROST|NATURE|THUNDER|VOID|LIGHT)\s*\(\+([0-9.]+)%\)/i) || desc.match(/(FIRE|WATER|FROST|NATURE|THUNDER|VOID|LIGHT)\s*\+([0-9.]+)%/i);
-        if (em) item = { element: em[1].toUpperCase(), elemPct: parseFloat(em[2]) };
-      }
-      if (item && item.element) rates[item.element] = (rates[item.element] || 0) + item.elemPct;
-    });
-    return rates;
-  }
-  function scrapeMainTeamElementRates(petDoc) {
-    const rates = {};
-    let mainSection = null;
-    petDoc.querySelectorAll('.section').forEach(sec => {
-      const titleEl = sec.querySelector('.section-title');
-      if (titleEl && /PvE Attack Team/i.test(titleEl.textContent.trim())) mainSection = sec;
-    });
-    if (!mainSection) return rates;
-    mainSection.querySelectorAll('.pet-card').forEach(card => {
-      const el = card.dataset.element;
-      const rateRaw = parseFloat(card.dataset.elementRate || card.dataset.elemRate || 0) || 0;
-      if (!el || !rateRaw) return;
-      const rate = rateRaw <= 1 ? rateRaw * 100 : rateRaw;
-      rates[el.toUpperCase()] = (rates[el.toUpperCase()] || 0) + rate;
-    });
-    return rates;
-  }
-  // v15.8: every pet card on pets.php carries data-pet-inv-id / data-element / data-element-rate
-  // (rate is a fraction: 0.05 = 5%). Index them so a LINKED pet's own element can be looked up.
-  function readCardElement(card) {
-    const el = (card.dataset.element || '').trim().toUpperCase();
-    const raw = parseFloat(card.dataset.elementRate || card.dataset.elemRate || 0) || 0;
-    if (!el || el === 'NONE' || !(raw > 0)) return null;
-    return { element: el, rate: raw <= 1 ? raw * 100 : raw };
-  }
   // v15.9: passive-text parsing for the two element bonuses.
   //   "20.48% Void Element Rate Increase"           -> rate.VOID = 0.2048
   //   "20.99% Extra Elemental Damage To Monsters"   -> dmg = 0.2099
@@ -2526,189 +2489,6 @@
     if (dm) out.dmg = parseFloat(dm[1]) / 100;
     return out;
   }
-  // Card's live passive line ([data-power]) first, its info-button description as fallback.
-  function parsePassivesFromCard(card) {
-    const power = card.querySelector('[data-power]');
-    const a = parseElementPassives(power ? power.textContent : '');
-    const basic = parsePetCardBasic(card);
-    const b = parseElementPassives(basic ? basic.passiveText : '');
-    return { rate: Object.keys(a.rate).length ? a.rate : b.rate, dmg: a.dmg || b.dmg };
-  }
-  function indexPetPassives(petDoc) {
-    const byInv = {}, byName = {};
-    petDoc.querySelectorAll('.pet-card[data-pet-inv-id]').forEach(card => {
-      const parsed = parsePassivesFromCard(card);
-      const id = parseInt(card.getAttribute('data-pet-inv-id'), 10);
-      if (id && !byInv[id]) byInv[id] = parsed;
-      const basic = parsePetCardBasic(card);
-      if (basic && basic.name && !byName[basic.name]) byName[basic.name] = parsed;
-    });
-    return { byInv, byName };
-  }
-  // A linked pet's passive: if the Links panel's own text for that link already shows a SMALLER
-  // number than the pet's full passive, it is pre-scaled by the server -> trust it. Otherwise scale
-  // the full value by the link share.
-  function scaleLinkedPassive(full, serverVal, share) {
-    if (serverVal > 0 && serverVal < full - 1e-9) return serverVal;
-    return full * share;
-  }
-  function indexPetElements(petDoc) {
-    const byInv = {}, byName = {};
-    petDoc.querySelectorAll('.pet-card[data-pet-inv-id]').forEach(card => {
-      const info = readCardElement(card);
-      if (!info) return;
-      const id = parseInt(card.getAttribute('data-pet-inv-id'), 10);
-      if (id) byInv[id] = info;
-      const basic = parsePetCardBasic(card);
-      if (basic && basic.name && !byName[basic.name]) byName[basic.name] = info;
-    });
-    return { byInv, byName };
-  }
-  // An equipped slot is a .slot-box without data-inv-id that has an Unequip button (used for gear ELEMENT rates).
-  function isEquippedBox(card) {
-    return Array.from(card.querySelectorAll('button')).some(b => /unequip/i.test(b.textContent || '') || /unequipItem\s*\(/.test(b.getAttribute('onclick') || ''));
-  }
-  let playerGearPetPromise = null;
-  function fetchPlayerGearPetSummary() {
-    if (playerGearPetPromise) return playerGearPetPromise;
-    playerGearPetPromise = Promise.all([
-      Core.net.fetchText('/inventory.php?set=attack').catch(() => null),
-      Core.net.fetchText('/pets.php?team=attack').catch(() => null)
-    ]).then(([invHtml, petHtml]) => {
-      const result = { element: null, rates: {}, sources: {}, bonus: { rate: {}, dmg: 0, src: [] }, ratesKnown: false, pens: [], moonveilPct: 0 };
-      const rates = {};
-      const addBonus = (kind, elem, frac, pet, where) => {
-        if (!(frac > 0)) return;
-        if (kind === 'rate') result.bonus.rate[elem] = (result.bonus.rate[elem] || 0) + frac;
-        else result.bonus.dmg += frac;
-        result.bonus.src.push({ label: kind === 'rate' ? `${elem} rate` : 'elem dmg', pct: frac, pet: pet || '?', where: where || '' });
-      };
-      const addSource = (elem, kind, amount) => {
-        const src = result.sources[elem] || (result.sources[elem] = { gear: 0, pets: 0, links: 0 });
-        src[kind] += amount;
-        rates[elem] = (rates[elem] || 0) + amount;
-      };
-      if (invHtml) {
-        const invDoc = new DOMParser().parseFromString(invHtml, 'text/html');
-        const gearRates = scrapeEquippedElementRates(invDoc);
-        Object.keys(gearRates).forEach(k => addSource(k, 'gear', gearRates[k]));
-      }
-
-      function finish() {
-        let best = null, bestRate = 0;
-        // v15.7: strictly-greater wins, iterated in ELEMENT_TIE_ORDER, so ties resolve deterministically.
-        const order = ELEMENT_TIE_ORDER.concat(Object.keys(rates).filter(k => ELEMENT_TIE_ORDER.indexOf(k) < 0));
-        order.forEach(k => { const r = rates[k] || 0; if (r > bestRate) { bestRate = r; best = k; } });
-        result.element = best ? { element: best, rate: bestRate } : null;
-        result.rates = Object.assign({}, rates);
-        result.ratesKnown = !!(invHtml && petHtml);
-        return result;
-      }
-      if (!petHtml) return finish();
-
-      const petDoc = new DOMParser().parseFromString(petHtml, 'text/html');
-      const petRates = scrapeMainTeamElementRates(petDoc);
-      Object.keys(petRates).forEach(k => addSource(k, 'pets', petRates[k]));
-      const petElemIndex = indexPetElements(petDoc);
-
-      // Penetration: name -> passiveText for every owned pet, then collect
-      // eq_pen/pet_pen/armor_pen off pets actually LINKED to the equipped
-      // PvE team (via pet_links_ajax.php). v15.13: each entry keeps its link
-      // factor and any "attack/defense exceeds" condition, and
-      // computeDamageTerms() combines them the way the build optimizer
-      // (v11.81) does -- the old "pen is NOT scaled by link factor" note
-      // (optimizer v11.3) no longer holds.
-      const passiveByName = {};
-      petDoc.querySelectorAll('.pet-card').forEach(card => {
-        const p = parsePetCardBasic(card);
-        if (p) passiveByName[p.name] = p.passiveText;
-      });
-      let mainSection = null;
-      petDoc.querySelectorAll('.section').forEach(sec => {
-        const titleEl = sec.querySelector('.section-title');
-        if (titleEl && /PvE Attack Team/i.test(titleEl.textContent.trim())) mainSection = sec;
-      });
-      const mains = mainSection ? Array.from(mainSection.querySelectorAll('.pet-card')).map(parsePetCardBasic).filter(Boolean) : [];
-      // v15.13: Moonveil-style main passive ("transfer X% of the target's pet def"), same regex as the optimizer.
-      mains.forEach(m => {
-        const mv = /transfer\s+(\d[\d.]*)\s*%\s+of\s+the\s+target.?s\s+pet\s+def/i.exec(m.passiveText || '');
-        if (mv) result.moonveilPct += parseFloat(mv[1]) / 100;
-      });
-
-      // v15.9: passives on the MAIN team count at full value.
-      const passiveIndex = indexPetPassives(petDoc);
-      if (mainSection) {
-        mainSection.querySelectorAll('.pet-card').forEach(card => {
-          const nm = (parsePetCardBasic(card) || {}).name || 'main pet';
-          const pp = parsePassivesFromCard(card);
-          Object.keys(pp.rate).forEach(el => addBonus('rate', el, pp.rate[el], nm, 'main'));
-          addBonus('dmg', null, pp.dmg, nm, 'main');
-        });
-      }
-
-      return Promise.all(mains.map(main => {
-        if (!main.petInvId) return null;
-        return fetch(`/pet_links_ajax.php?pet_inv_id=${main.petInvId}`, { credentials: 'same-origin' })
-          .then(r => r.json()).catch(() => null);
-      })).then(linkResults => {
-        linkResults.forEach((data, mainIdx) => {
-          if (!data || data.status !== 'success' || !Array.isArray(data.links)) return;
-          data.links.forEach(l => {
-            // v15.8: linked pet's element counts at its link-slot share (Link 1 = 50%, Link 2 = 25%).
-            const linkedElem = petElemIndex.byInv[Number(l.link_pet_id)] || petElemIndex.byName[l.name];
-            const share = LINK_ELEMENT_SHARE[Number(l.link_level)];
-            if (linkedElem && share) {
-              const add = linkedElem.rate * share;
-              addSource(linkedElem.element, 'links', add);
-              console.debug('[BattlePage] link element', mains[mainIdx] && mains[mainIdx].name, '-> link', l.link_level, l.name,
-                            linkedElem.element, linkedElem.rate + '% x' + share + ' = +' + add);
-            }
-            // v15.9: linked pet's Wyvern/Reindeer-style passives, at link share (or the server's own scaled number).
-            const fullP = passiveIndex.byInv[Number(l.link_pet_id)] || passiveIndex.byName[l.name];
-            if (fullP && share) {
-              const srvP = parseElementPassives(l.effect_text);
-              Object.keys(fullP.rate).forEach(el => {
-                const val = scaleLinkedPassive(fullP.rate[el], srvP.rate[el] || 0, share);
-                console.debug('[BattlePage] link passive', l.name, el + ' rate', 'full', fullP.rate[el], 'server', srvP.rate[el] || 0, '->', val);
-                addBonus('rate', el, val, l.name, 'link ' + l.link_level);
-              });
-              if (fullP.dmg > 0) {
-                const val = scaleLinkedPassive(fullP.dmg, srvP.dmg || 0, share);
-                console.debug('[BattlePage] link passive', l.name, 'elem dmg', 'full', fullP.dmg, 'server', srvP.dmg || 0, '->', val);
-                addBonus('dmg', null, val, l.name, 'link ' + l.link_level);
-              }
-            }
-            // v15.13: pen passives count at the link's share (share_pct_label, capped 50% / 25%) -- the optimizer's
-            // factor -- not at full value; eq/pet pen with an "attack/defense exceeds" clause carry that condition.
-            const text = passiveByName[l.name] || l.effect_text || '';
-            const parsed = parsePenetrationFromText(text);
-            const maxShare = Number(l.link_level) === 1 ? 0.5 : 0.25;
-            const lbl = l.share_pct_label;
-            const sp = lbl != null && lbl !== '' ? parseFloat(String(lbl).replace('%', '')) / 100 : NaN;
-            const factor = Math.min(isFinite(sp) ? sp : maxShare, maxShare);
-            const lower = text.toLowerCase();
-            const cond = /attack\s*(?:exceeds|is\s*higher)/.test(lower) ? 'atkDom' : /defense\s*(?:exceeds|is\s*higher)/.test(lower) ? 'defDom' : null;
-            if (parsed.eqPen) result.pens.push({ kind: 'eq', val: parsed.eqPen, factor, cond, pet: l.name });
-            if (parsed.petPen) result.pens.push({ kind: 'pet', val: parsed.petPen, factor, cond, pet: l.name });
-            if (parsed.armorPen) result.pens.push({ kind: 'armor', val: parsed.armorPen, factor, cond: null, pet: l.name });
-          });
-        });
-        return finish();
-      });
-    }).catch(err => {
-      console.error('[BattlePage] fetchPlayerGearPetSummary failed:', err);
-      return { element: null, rates: {}, sources: {}, bonus: { rate: {}, dmg: 0, src: [] }, ratesKnown: false, pens: [], moonveilPct: 0 };
-    });
-    const _gp = playerGearPetPromise;
-    _gp.then(r => {
-      if (!r || !r.ratesKnown) {
-        console.warn('[BattlePage] inventory/pets read incomplete; will retry in 30 s.');
-        setTimeout(() => { if (playerGearPetPromise === _gp) playerGearPetPromise = null; }, 30000);
-      }
-    });
-    return playerGearPetPromise;
-  }
-
   function buildWarnings(playerLevel, remoteStats, infoChips, modalStats, divineMult, playerElem, gearPet) {
     const warns = [];
 
@@ -2839,22 +2619,6 @@
     document.querySelectorAll('.bm-warn-icon.bm-warn-open').forEach(i => i.classList.remove('bm-warn-open'));
   });
 
-  // v15.14b: stats.php shows the element the game itself picked for your PvE set ("FIRE . 25%", stronger of gear + pets,
-  // and already including any element-rate amplifier). If the inventory/pets scrape found nothing, or a LOWER rate, the
-  // page's value wins; the scrape wins when it is higher (it also counts linked pets). When the page value is used, the
-  // rate bonus for that element is dropped so the amplifier is not applied twice.
-  function reconcileElement(gearPet, pageEl) {
-    if (!pageEl) return gearPet;
-    const own = gearPet && gearPet.ratesKnown ? gearPet.element : null;
-    if (own && own.rate >= pageEl.rate - 0.05) {
-      if (own.element !== pageEl.element || Math.abs(own.rate - pageEl.rate) > 0.05) console.info('[BattlePage] element: scrape ' + own.element + ' ' + own.rate + '% vs stats.php ' + pageEl.element + ' ' + pageEl.rate + '% (scrape is higher, used).');
-      return gearPet;
-    }
-    const bonus = { rate: Object.assign({}, gearPet && gearPet.bonus && gearPet.bonus.rate), dmg: (gearPet && gearPet.bonus && gearPet.bonus.dmg) || 0, src: ((gearPet && gearPet.bonus && gearPet.bonus.src) || []).filter(b => b.label !== pageEl.element + ' rate') };
-    delete bonus.rate[pageEl.element];
-    return Object.assign({}, gearPet, { ratesKnown: true, element: pageEl, rates: Object.assign({}, gearPet && gearPet.rates, { [pageEl.element]: pageEl.rate }), sources: {}, bonus, fromPage: true });
-  }
-
   let warnRefreshBusy = false;
   function refreshWarnings() {
     if (warnRefreshBusy) return;
@@ -2863,11 +2627,10 @@
     const infoChips = getMonsterInfoChips();
     const modalStats = getMonsterModalStats();
     const divineMult = getDivineShieldMult();
-    Promise.all([fetchPlayerRemoteStats(), fetchPlayerGearPetSummary()])
-      .then(([remoteStatsBase, gearPet]) => {
-      const pg = remoteStatsBase;
-      const remoteStats = Object.assign({}, remoteStatsBase, { pens: gearPet.pens, moonveilPct: gearPet.moonveilPct });
-      const gp = reconcileElement(gearPet, pg.element);
+    fetchPlayerRemoteStats()
+      .then(remoteStats => {
+      // the element check wants { element, rates, sources, bonus, ratesKnown }: all of it is on the same page now
+      const gp = { element: remoteStats.element, rates: remoteStats.rates, sources: remoteStats.sources, bonus: remoteStats.bonus, ratesKnown: remoteStats.elementKnown };
       renderWarnings(buildWarnings(playerLevel, remoteStats, infoChips, modalStats, divineMult, gp.element, gp));
       warnRefreshBusy = false;
     })
