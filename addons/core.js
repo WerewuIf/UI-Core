@@ -26,7 +26,7 @@
 (function (root) {
   'use strict';
 
-  // >>> EDIT THIS ONE LINE: raw URL of your addons.json
+  // >>> Raw URL of addons.json
   const CONFIG = { manifest: 'https://raw.githubusercontent.com/WerewuIf/UI-Core/main/addons.json' };
 
   const API = 2;
@@ -38,6 +38,20 @@
   const TAB = Math.random().toString(36).slice(2);
   const warn = (...a) => console.warn('[Core]', ...a);
   const dlog = (...a) => { if (Core.debug) console.log('[Core]', ...a); };
+
+  async function pinned(url) {
+    try {
+      let c; try { c = JSON.parse(localStorage.getItem('core:sha')); } catch (_) {}
+      let sha = c && Date.now() - c.ts < 60000 ? c.sha : null;
+      if (!sha) {
+        const r = await root.fetch('https://api.github.com/repos/WerewuIf/UI-Core/commits/main', { headers: { Accept: 'application/vnd.github.sha' } });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        sha = (await r.text()).trim();
+        try { localStorage.setItem('core:sha', JSON.stringify({ sha, ts: Date.now() })); } catch (_) {}
+      }
+      return url.replace(/(raw\.githubusercontent\.com\/WerewuIf\/UI-Core\/)(?:refs\/heads\/)?main\//, '$1' + sha + '/');
+    } catch (_) { return url; }
+  }
 
   /* ------------------------------------------------------------- utils --- */
   const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -826,7 +840,7 @@
   async function fetchCode(e) {
     const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), 8000);
     try {
-      const res = await root.fetch(e.url, { cache: 'no-cache', signal: ctl.signal });
+      const res = await root.fetch(await pinned(e.url), { cache: 'no-cache', signal: ctl.signal });
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const text = await res.text();
       if (e.sha256 && (await sha256hex(text)) !== String(e.sha256).toLowerCase()) throw new Error('sha256 mismatch \u2014 refusing to run');
@@ -903,7 +917,7 @@
     let cached = null;
     try { cached = JSON.parse(localStorage.getItem('core:manifest') || 'null'); } catch (_) { /* */ }
     const mctl = new AbortController(); setTimeout(() => mctl.abort(), 8000);
-    const refresh = root.fetch(MANIFEST, { cache: 'no-cache', signal: mctl.signal }).then((r) => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+    const refresh = pinned(MANIFEST).then((u) => root.fetch(u, { cache: 'no-cache', signal: mctl.signal })).then((r) => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
       .then((j) => { try { localStorage.setItem('core:manifest', JSON.stringify(j)); } catch (_) { /* */ } return j; });
     // Entry urls may be relative ("addons/x.js"): they resolve against the manifest's own URL,
     // so moving the repo means editing CONFIG.manifest only.
@@ -987,7 +1001,7 @@
           const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), 8000);
           let j;
           try {
-            const r = await root.fetch(MANIFEST, { cache: 'no-cache', signal: ctl.signal });
+            const r = await root.fetch(await pinned(MANIFEST), { cache: 'no-cache', signal: ctl.signal });
             if (!r.ok) throw new Error('HTTP ' + r.status);
             j = await r.json();
           } finally { clearTimeout(timer); }
