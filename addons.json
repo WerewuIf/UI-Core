@@ -4,6 +4,7 @@
     { "id": "gear-presets",       "name": "Gear Presets",    "version": "3.3.1",  "url": "addons/gear-presets.js" },
     { "id": "pet-presets",        "name": "Pet Presets",     "version": "2.9.1",  "url": "addons/pet-presets.js" },
     { "id": "account-switcher",  "name": "Account Switcher","version": "1.2.0",  "url": "addons/account-switcher.js" },
+    { "id": "stat-autobuilder",  "name": "Stat Auto-Builder","version": "18.9.5", "url": "addons/stat-autobuilder.js" },
     { "id": "ui-cleanup",         "name": "UI Cleanup",      "version": "2.4.1",  "url": "addons/ui-cleanup.js" },
     { "id": "battle-restructure", "name": "Battle Page",     "version": "15.10",  "url": "addons/battle.js",
       "match": "^/battle\\.php", "early": true }
