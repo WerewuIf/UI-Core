@@ -2130,8 +2130,73 @@
   // max(FLOOR, gap) * multiplier -- no ratio exists in the real formula. Below
   // FLOOR the term is pinned at its minimum regardless of how negative the gap
   // is, so the warning is just "are you under the floor, and by how much."
-  const DMG_ENGINE = { FLOOR: 30, EQUIP_PER_ATK: 20, ATK_EXP: 0.25 };
+  // v15.13: THE THREE "FLOORED" WARNINGS NOW MIRROR BUILD OPTIMIZER v11.81's buildDamage() (the v15.5 copy was stale).
+  //   - ATK term: your ATK = round(ATK x (1 + class bonus)) + relic ATK, against the monster's DEF minus your relic
+  //     "Enemy Defense reduction". NO penetration is applied to this term (it used to be).
+  //   - Equipment / pet terms: monster eqDef / petDef x (1 - total pen), total = 1 - (1 - armorBase) x (1 - link pen),
+  //     armorBase = min(40%, 1 - (1 - basePen) x (1 - armor pen)). basePen = the mob's observed pen (localStorage
+  //     "veyra_mob_pen", saved by the optimizer) else the level tier from your raw ATK+DEF (ratio >= 0.8 -> 40%, >= 0.6 -> 20%).
+  //     Link pen is scaled by the link's share (share_pct_label, capped 50% / 25%) and "if your attack/defense
+  //     exceeds ..." passives only count while that is true.
+  //   - Pet term also takes the optimizer's Moonveil transfer + saved calibration ("veyra_calibration"), and this
+  //     monster's observed pet DEF ("veyra_mob_observed") when one was saved.
+  // NOT mirrored: Grakthar's flat 30% base pen (needs the mob's gate, which this page doesn't show) and the
+  // link "ATK from gap" passives (the optimizer's L.atkAdd).
+  const DMG_ENGINE = { FLOOR: 30, EQUIP_PER_ATK: 20, ATK_EXP: 0.25, PEN_CAP: 0.4, PEN_MAX: 0.95 };
+  const CLASS_MODS = { hunter: { atk: 0, def: -0.3 }, mage: { atk: 0.25, def: -0.5 } };
   function atkTermValue(gap) { return 1000 * Math.pow(Math.max(DMG_ENGINE.FLOOR, gap), DMG_ENGINE.ATK_EXP); }
+  function readLS(key) { try { return JSON.parse(localStorage.getItem(key) || '{}') || {}; } catch (_) { return {}; } }
+  function currentMonsterName() {
+    const el = document.querySelector('.monster-card .card-title') || document.querySelector('.bm-arena-head .card-title');
+    return el ? el.textContent.replace(/^[^A-Za-z0-9]+/, '').trim() : '';
+  }
+
+  // P = remote stats (atk/def raw, relicATK/relicDEF, classAtk/classDef, relics, equipATK, petATK, pens, moonveilPct)
+  // mob = the monster-stats modal values { atk, def, eqDef, petDef }. Returns the three terms' gaps + the pen breakdown.
+  function computeDamageTerms(P, level, mob, monsterId, monsterName) {
+    const E = DMG_ENGINE, clampPen = (x) => Math.min(E.PEN_MAX, Math.max(0, x || 0));
+    const cal = readLS('veyra_calibration');
+    const obs = monsterId ? readLS('veyra_mob_observed')[String(monsterId)] : null;
+    const obsPen = monsterName ? readLS('veyra_mob_pen')[monsterName] : null;
+    const relics = P.relics || {};
+    const pAtk = Math.round((P.atk || 0) * (1 + (P.classAtk || 0)));
+    const pDef = Math.round((P.def || 0) * (1 + (P.classDef || 0)));
+    const dom = (c) => !c || (c === 'atkDom' ? pAtk > (mob.atk || 0) && pAtk > pDef : pDef > (mob.def || 0) && pDef > pAtk);
+
+    let lEq = 0, lPet = 0, lArmor = 0;
+    (P.pens || []).forEach((p) => {
+      if (!dom(p.cond)) return;
+      const v = p.val * p.factor;
+      if (p.kind === 'eq') lEq += v; else if (p.kind === 'pet') lPet += v; else lArmor += v;
+    });
+    const rawAD = (P.atk || 0) + (P.def || 0);
+    const ratio = level > 1 && rawAD > 0 ? rawAD / (5 * (level - 1)) : 0;
+    const tierPen = ratio >= 0.8 ? 0.4 : ratio >= 0.6 ? 0.2 : 0;
+    const basePen = obsPen && obsPen.pen != null ? Number(obsPen.pen) || 0 : tierPen;
+    const armorPen = clampPen(lArmor);
+    const armorBase = Math.min(E.PEN_CAP, 1 - (1 - basePen) * (1 - armorPen));
+    const totalEqPen = 1 - (1 - armorBase) * (1 - clampPen(lEq));
+    const totalPetPen = 1 - (1 - armorBase) * (1 - clampPen(lPet));
+
+    const gapOf = (value, defEff) => { const gap = value - defEff; return { value, defEff, gap, floored: gap < E.FLOOR, deficit: Math.round(E.FLOOR - gap) }; };
+    const mobDef = Math.max(0, (mob.def || 0) - (relics.enemyDefRed || 0));
+    const atkT = gapOf(pAtk + (P.relicATK || 0), mobDef);
+    const eqT = gapOf(P.equipATK || 0, (mob.eqDef || 0) * (1 - Math.min(E.PEN_MAX, totalEqPen)));
+
+    const petDefUsed = obs && obs.petDef > 0 ? obs.petDef : (mob.petDef || 0);
+    const mvModel = P.moonveilPct > 0 ? P.moonveilPct * (1 - Math.min(E.PEN_MAX, totalPetPen)) : 0;
+    const mvRate = mvModel > 0 ? mvModel : (Number(cal.moonveilRate) > 0 ? Number(cal.moonveilRate) : 0);
+    const moonveil = mvRate > 0 ? Math.floor(mvRate * petDefUsed) : 0;
+    const petDefEff = Math.max(0, petDefUsed * (1 - Math.min(E.PEN_MAX, totalPetPen)) - moonveil);
+    const petT = gapOf((P.petATK || 0) + (Number(cal.petAtkBonus) || 0) + moonveil, petDefEff);
+    petT.rawDef = petDefUsed; petT.moonveil = moonveil; petT.observedDef = !!(obs && obs.petDef > 0);
+    atkT.rawDef = mob.def || 0; eqT.rawDef = mob.eqDef || 0;
+
+    return {
+      atk: atkT, eq: eqT, pet: petT, pAtk, pDef,
+      pen: { basePen, baseSource: obsPen && obsPen.pen != null ? 'observed' : 'level-tier', armorPen, armorBase, linkEq: clampPen(lEq), linkPet: clampPen(lPet), totalEqPen, totalPetPen },
+    };
+  }
   function pctStr(frac) { return ((frac || 0) * 100).toFixed(1) + '%'; }
   function toFrac(v, hasPct) {
     if (isNaN(v) || v === null || v === undefined) return 0;
@@ -2171,20 +2236,80 @@
 
   let playerRemoteStats = null;
   let playerRemoteStatsPromise = null;
-  function fetchPlayerRemoteStats() {
-    if (playerRemoteStats) return Promise.resolve(playerRemoteStats);
-    if (playerRemoteStatsPromise) return playerRemoteStatsPromise;
-    playerRemoteStatsPromise = Core.net.fetchText('/stats.php')
-      .then(html => {
-      const doc = new DOMParser().parseFromString(html, 'text/html');
+
+  // v15.13: same sources as the Build Optimizer. stats.php's #stats-state JSON (core.attack / defense / stamina plus
+  // relic_attack / relic_defense; the v-ids are the fallback), classes.php for your class (Hunter and Mage change
+  // DEF / ATK), relics.php for the relic bonuses (enemy ATK / DEF reduction, relic ATK / DEF).
+  const RELIC_LABELS = ['Attack', 'Defense', 'Lifesteal boost', 'Crit damage resistance', 'Crit rate resistance', 'Enemy Attack reduction', 'Enemy Defense reduction', 'PvE damage', 'Damage against Goblins'];
+  function docText(doc) {
+    const c = doc.body ? doc.body.cloneNode(true) : null;
+    if (!c) return '';
+    c.querySelectorAll('style,script,noscript,template').forEach(n => n.remove());
+    return c.textContent || '';
+  }
+  function parseRelicPower(text) {
+    const t0 = String(text || '');
+    const a = t0.indexOf('Current Relic Power');
+    if (a < 0) return null;
+    const b = t0.indexOf('Completed collections', a);
+    let t = t0.slice(a, b < 0 ? a + 2000 : b);
+    const out = {};
+    RELIC_LABELS.slice().sort((x, y) => y.length - x.length).forEach(lab => {
+      const re = new RegExp(lab.replace(/ /g, '\\s+'), 'i');
+      const m = re.exec(t);
+      if (!m) return;
+      const v = t.slice(m.index + m[0].length).match(/^[\s:]*\+?(-?[0-9]+(?:\.[0-9]+)?)\s*(%?)/);
+      if (v) out[lab] = parseFloat(v[1]);
+      t = t.replace(re, '_'.repeat(lab.length));
+    });
+    const num = k => out[k] || 0;
+    return { atk: num('Attack'), def: num('Defense'), enemyAtkRed: num('Enemy Attack reduction'), enemyDefRed: num('Enemy Defense reduction'), parsed: Object.keys(out).length > 0 };
+  }
+  function readStatsDoc(doc) {
+    let atk = 0, def = 0, stamina = 0, relicATK = 0, relicDEF = 0, ok = false;
+    const st = doc.getElementById('stats-state');
+    if (st) {
+      try {
+        const j = JSON.parse(st.textContent || ''), c = (j && j.core) || {}, u = (j && j.user) || {};
+        atk = parseInt(c.attack != null ? c.attack : u.ATTACK, 10) || 0;
+        def = parseInt(c.defense != null ? c.defense : u.DEFENSE, 10) || 0;
+        stamina = parseInt(c.stamina != null ? c.stamina : u.MAX_STAMINA, 10) || 0;
+        relicATK = parseInt(c.relic_attack, 10) || 0;
+        relicDEF = parseInt(c.relic_defense, 10) || 0;
+        ok = !!(atk && def && stamina);
+      } catch (_) { /* fall through to the v-ids */ }
+    }
+    if (!ok) {
       const num = id => {
         const el = doc.getElementById(id);
         return el ? (parseInt((el.textContent || '').replace(/[^0-9]/g, ''), 10) || 0) : 0;
       };
-      playerRemoteStats = { atk: num('v-attack'), def: num('v-defense'), stamina: num('v-stamina') };
+      atk = num('v-attack'); def = num('v-defense'); stamina = num('v-stamina');
+    }
+    return { atk, def, stamina, relicATK, relicDEF };
+  }
+  function fetchPlayerRemoteStats() {
+    if (playerRemoteStats) return Promise.resolve(playerRemoteStats);
+    if (playerRemoteStatsPromise) return playerRemoteStatsPromise;
+    const parse = html => new DOMParser().parseFromString(html, 'text/html');
+    const none = { atk: 0, def: 0, stamina: 0, relicATK: 0, relicDEF: 0, classAtk: 0, classDef: 0, playerClass: 'Unknown', relics: { atk: 0, def: 0, enemyAtkRed: 0, enemyDefRed: 0, parsed: false } };
+    playerRemoteStatsPromise = Promise.all([
+      Core.net.fetchText('/stats.php'),
+      Core.net.fetchText('/classes.php').catch(() => ''),
+      Core.net.fetchText('/relics.php').catch(() => ''),
+    ]).then(([statsHtml, classHtml, relicHtml]) => {
+      const s = readStatsDoc(parse(statsHtml));
+      const pill = classHtml ? parse(classHtml).querySelector('.section-classes-pill') : null;
+      const cls = pill ? (pill.textContent.trim().replace(/[\s\S]*Your class:\s*/i, '').trim() || 'Unknown') : 'Unknown';
+      const mod = CLASS_MODS[cls.toLowerCase()] || { atk: 0, def: 0 };
+      const r = relicHtml ? parseRelicPower(docText(parse(relicHtml))) : null;
+      const relics = r && r.parsed ? r : none.relics;
+      if (!s.relicATK && relics.atk) s.relicATK = relics.atk;
+      if (!s.relicDEF && relics.def) s.relicDEF = relics.def;
+      playerRemoteStats = Object.assign(s, { playerClass: cls, classAtk: mod.atk, classDef: mod.def, relics });
       return playerRemoteStats;
     })
-      .catch(() => { playerRemoteStats = { atk: 0, def: 0, stamina: 0 }; return playerRemoteStats; });
+      .catch(() => { playerRemoteStats = none; return playerRemoteStats; });
     return playerRemoteStatsPromise;
   }
 
@@ -2442,7 +2567,7 @@
       Core.net.fetchText('/inventory.php').catch(() => null),
       Core.net.fetchText('/pets.php').catch(() => null)
     ]).then(([invHtml, petHtml]) => {
-      const result = { element: null, rates: {}, sources: {}, bonus: { rate: {}, dmg: 0, src: [] }, ratesKnown: false, equipATK: 0, petATK: 0, eqPen: 0, petPen: 0, armorPen: 0 };
+      const result = { element: null, rates: {}, sources: {}, bonus: { rate: {}, dmg: 0, src: [] }, ratesKnown: false, equipATK: 0, petATK: 0, pens: [], moonveilPct: 0 };
       const rates = {};
       const addBonus = (kind, elem, frac, pet, where) => {
         if (!(frac > 0)) return;
@@ -2480,12 +2605,13 @@
       result.petATK = scrapeMainTeamPetATK(petDoc);
       const petElemIndex = indexPetElements(petDoc);
 
-      // Penetration: name -> passiveText for every owned pet, then sum
+      // Penetration: name -> passiveText for every owned pet, then collect
       // eq_pen/pet_pen/armor_pen off pets actually LINKED to the equipped
-      // PvE team (via pet_links_ajax.php), at FULL parsed value -- matches
-      // the build-optimizer script's v11.3 finding that penetration
-      // passives are NOT scaled by link factor (unlike crit/monster-dmg/
-      // elem passives, which are).
+      // PvE team (via pet_links_ajax.php). v15.13: each entry keeps its link
+      // factor and any "attack/defense exceeds" condition, and
+      // computeDamageTerms() combines them the way the build optimizer
+      // (v11.81) does -- the old "pen is NOT scaled by link factor" note
+      // (optimizer v11.3) no longer holds.
       const passiveByName = {};
       petDoc.querySelectorAll('.pet-card').forEach(card => {
         const p = parsePetCardBasic(card);
@@ -2497,6 +2623,11 @@
         if (titleEl && /PvE Attack Team/i.test(titleEl.textContent.trim())) mainSection = sec;
       });
       const mains = mainSection ? Array.from(mainSection.querySelectorAll('.pet-card')).map(parsePetCardBasic).filter(Boolean) : [];
+      // v15.13: Moonveil-style main passive ("transfer X% of the target's pet def"), same regex as the optimizer.
+      mains.forEach(m => {
+        const mv = /transfer\s+(\d[\d.]*)\s*%\s+of\s+the\s+target.?s\s+pet\s+def/i.exec(m.passiveText || '');
+        if (mv) result.moonveilPct += parseFloat(mv[1]) / 100;
+      });
 
       // v15.9: passives on the MAIN team count at full value.
       const passiveIndex = indexPetPassives(petDoc);
@@ -2541,18 +2672,26 @@
                 addBonus('dmg', null, val, l.name, 'link ' + l.link_level);
               }
             }
+            // v15.13: pen passives count at the link's share (share_pct_label, capped 50% / 25%) -- the optimizer's
+            // factor -- not at full value; eq/pet pen with an "attack/defense exceeds" clause carry that condition.
             const text = passiveByName[l.name] || l.effect_text || '';
             const parsed = parsePenetrationFromText(text);
-            if (parsed.eqPen) result.eqPen += parsed.eqPen;
-            if (parsed.petPen) result.petPen += parsed.petPen;
-            if (parsed.armorPen) result.armorPen += parsed.armorPen;
+            const maxShare = Number(l.link_level) === 1 ? 0.5 : 0.25;
+            const lbl = l.share_pct_label;
+            const sp = lbl != null && lbl !== '' ? parseFloat(String(lbl).replace('%', '')) / 100 : NaN;
+            const factor = Math.min(isFinite(sp) ? sp : maxShare, maxShare);
+            const lower = text.toLowerCase();
+            const cond = /attack\s*(?:exceeds|is\s*higher)/.test(lower) ? 'atkDom' : /defense\s*(?:exceeds|is\s*higher)/.test(lower) ? 'defDom' : null;
+            if (parsed.eqPen) result.pens.push({ kind: 'eq', val: parsed.eqPen, factor, cond, pet: l.name });
+            if (parsed.petPen) result.pens.push({ kind: 'pet', val: parsed.petPen, factor, cond, pet: l.name });
+            if (parsed.armorPen) result.pens.push({ kind: 'armor', val: parsed.armorPen, factor, cond: null, pet: l.name });
           });
         });
         return finish();
       });
     }).catch(err => {
       console.error('[BattlePage] fetchPlayerGearPetSummary failed:', err);
-      return { element: null, rates: {}, sources: {}, bonus: { rate: {}, dmg: 0, src: [] }, ratesKnown: false, equipATK: 0, petATK: 0, eqPen: 0, petPen: 0, armorPen: 0 };
+      return { element: null, rates: {}, sources: {}, bonus: { rate: {}, dmg: 0, src: [] }, ratesKnown: false, equipATK: 0, petATK: 0, pens: [], moonveilPct: 0 };
     });
     return playerGearPetPromise;
   }
@@ -2576,43 +2715,44 @@
     }
 
     if (modalStats && remoteStats) {
-      const mobDefEff = (modalStats.def || 0) * (1 - Math.min(0.95, remoteStats.armorPen || 0));
-      const atkGap = (remoteStats.atk || 0) - mobDefEff;
-      if (modalStats.def > 0 && atkGap < DMG_ENGINE.FLOOR) {
-        const deficit = Math.round(DMG_ENGINE.FLOOR - atkGap);
-        const floored = Math.round(atkTermValue(atkGap));
+      const T = computeDamageTerms(remoteStats, playerLevel, modalStats, getMonsterId(), currentMonsterName());
+      const relics = remoteStats.relics || {};
+      const penNote = (total, link) => {
+        const p = T.pen, bits = [`${pctStr(p.basePen)} ${p.baseSource === 'observed' ? 'observed' : 'level-tier'} base`];
+        if (p.armorPen) bits.push(`${pctStr(p.armorPen)} armor`);
+        if (link) bits.push(`${pctStr(link)} link`);
+        return total > 0 ? `, after ${pctStr(total)} penetration (${bits.join(' + ')})` : '';
+      };
+
+      if (modalStats.def > 0 && T.atk.floored) {
+        const floored = Math.round(atkTermValue(T.atk.gap));
+        const mine = [remoteStats.classAtk ? `${pctStr(remoteStats.classAtk)} ${remoteStats.playerClass} bonus` : '', remoteStats.relicATK ? `+${fmt(remoteStats.relicATK)} relic` : ''].filter(Boolean).join(', ');
         warns.push({ color: 'red', icon: '🗡️', title: 'ATK damage term floored',
-                    detail: `Your ATK (${fmt(remoteStats.atk)}) vs this monster's DEF (${fmt(Math.round(mobDefEff))}${remoteStats.armorPen ? `, after your ${pctStr(remoteStats.armorPen)} armor penetration` : ''}) is only a ${fmt(Math.round(atkGap))} gap. Below a ${DMG_ENGINE.FLOOR} gap this damage term is capped at its minimum (${fmt(floored)}) and gets zero benefit from further ATK — you need at least ${fmt(deficit)} more ATK just to start climbing above the floor.` });
+                    detail: `Your ATK (${fmt(Math.round(T.atk.value))}${mine ? `, incl. ${mine}` : ''}) vs this monster's DEF (${fmt(Math.round(T.atk.defEff))}${relics.enemyDefRed ? `, after your -${fmt(relics.enemyDefRed)} relic Enemy DEF reduction` : ''}) is only a ${fmt(Math.round(T.atk.gap))} gap. Below a ${DMG_ENGINE.FLOOR} gap this damage term is capped at its minimum (${fmt(floored)}) and gets zero benefit from further ATK — you need at least ${fmt(T.atk.deficit)} more ATK just to start climbing above the floor. (Penetration does not apply to this term.)` });
       }
 
-      if (typeof modalStats.eqDef === 'number' && modalStats.eqDef > 0) {
-        const eqDefEff = modalStats.eqDef * (1 - Math.min(0.95, remoteStats.eqPen || 0));
-        const eqGap = (remoteStats.equipATK || 0) - eqDefEff;
-        if (eqGap < DMG_ENGINE.FLOOR) {
-          const deficit = Math.round(DMG_ENGINE.FLOOR - eqGap);
-          warns.push({ color: 'red', icon: '🧱', title: 'Equipment damage term floored',
-                      detail: `Your equipped gear ATK total (${fmt(remoteStats.equipATK || 0)}) vs this monster's Equipment Defense (${fmt(Math.round(eqDefEff))}${remoteStats.eqPen ? `, after your ${pctStr(remoteStats.eqPen)} equipment penetration` : ''}) is only a ${fmt(Math.round(eqGap))} gap. This term is floored — you need at least ${fmt(deficit)} more equipped ATK to escape it.` });
-        }
+      if (typeof modalStats.eqDef === 'number' && modalStats.eqDef > 0 && T.eq.floored) {
+        warns.push({ color: 'red', icon: '🧱', title: 'Equipment damage term floored',
+                    detail: `Your equipped gear ATK total (${fmt(Math.round(T.eq.value))}) vs this monster's Equipment Defense (${fmt(Math.round(T.eq.defEff))}${penNote(T.pen.totalEqPen, T.pen.linkEq)}) is only a ${fmt(Math.round(T.eq.gap))} gap. This term is floored — you need at least ${fmt(T.eq.deficit)} more equipped ATK to escape it.` });
       }
 
-      if (typeof modalStats.petDef === 'number' && modalStats.petDef > 0) {
-        const petDefEff = modalStats.petDef * (1 - Math.min(0.95, remoteStats.petPen || 0));
-        const petGap = (remoteStats.petATK || 0) - petDefEff;
-        if (petGap < DMG_ENGINE.FLOOR) {
-          const deficit = Math.round(DMG_ENGINE.FLOOR - petGap);
-          warns.push({ color: 'red', icon: '🐾', title: 'Pet damage term floored',
-                      detail: `Your main pets' ATK total (${fmt(remoteStats.petATK || 0)}) vs this monster's Pet Defense (${fmt(Math.round(petDefEff))}${remoteStats.petPen ? `, after your ${pctStr(remoteStats.petPen)} pet penetration` : ''}) is only a ${fmt(Math.round(petGap))} gap. This term is floored — you need at least ${fmt(deficit)} more pet ATK to escape it.` });
-        }
+      if (T.pet.rawDef > 0 && T.pet.floored) {
+        const mv = T.pet.moonveil ? `, with ${fmt(T.pet.moonveil)} transferred by Moonveil` : '';
+        warns.push({ color: 'red', icon: '🐾', title: 'Pet damage term floored',
+                    detail: `Your main pets' ATK total (${fmt(Math.round(T.pet.value))}${mv}) vs this monster's Pet Defense (${fmt(Math.round(T.pet.defEff))}${penNote(T.pen.totalPetPen, T.pen.linkPet)}${T.pet.observedDef ? ', observed value' : ''}) is only a ${fmt(Math.round(T.pet.gap))} gap. This term is floored — you need at least ${fmt(T.pet.deficit)} more pet ATK to escape it.` });
       }
 
       // Separate concern from the three floored-term checks above: this is
       // damage you TAKE on retaliation, not damage you deal. There's no
       // confirmed retaliation formula in either script, so this stays a
       // rough amount-based heuristic rather than a formula-derived one.
-      if (modalStats.atk > 0 && remoteStats.def > 0 && remoteStats.def < modalStats.atk) {
-        const short = Math.round(modalStats.atk - remoteStats.def);
+      // (v15.13: compared with your effective DEF -- class + relic -- and the monster's relic-reduced ATK.)
+      const defEff = T.pDef + (remoteStats.relicDEF || 0);
+      const mobAtkEff = Math.max(0, (modalStats.atk || 0) - (relics.enemyAtkRed || 0));
+      if (mobAtkEff > 0 && defEff > 0 && defEff < mobAtkEff) {
+        const short = Math.round(mobAtkEff - defEff);
         warns.push({ color: 'yellow', icon: '🛡️', title: 'DEF below monster ATK',
-                    detail: `Monster ATK (${fmt(modalStats.atk)}) exceeds your DEF (${fmt(remoteStats.def)}) by ${fmt(short)} — possible increased damage taken on retaliation. Unlike the damage-dealt checks above, this isn't derived from a confirmed formula.` });
+                    detail: `Monster ATK (${fmt(mobAtkEff)}${relics.enemyAtkRed ? ` after your -${fmt(relics.enemyAtkRed)} relic reduction` : ''}) exceeds your DEF (${fmt(defEff)}) by ${fmt(short)} — possible increased damage taken on retaliation. Unlike the damage-dealt checks above, this isn't derived from a confirmed formula.` });
       }
     }
 
@@ -2681,7 +2821,7 @@
       .then(([remoteStatsBase, gearPet]) => {
       const remoteStats = Object.assign({}, remoteStatsBase, {
         equipATK: gearPet.equipATK, petATK: gearPet.petATK,
-        eqPen: gearPet.eqPen, petPen: gearPet.petPen, armorPen: gearPet.armorPen
+        pens: gearPet.pens, moonveilPct: gearPet.moonveilPct
       });
       renderWarnings(buildWarnings(playerLevel, remoteStats, infoChips, modalStats, divineMult, gearPet.element, gearPet));
       warnRefreshBusy = false;
