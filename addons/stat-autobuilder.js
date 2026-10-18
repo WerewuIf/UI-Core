@@ -1507,7 +1507,6 @@
     const ctl = Core.float.add({
       id: ID,
       title: 'Auto Stat Builder',
-      icon: '📊',
       order: 40,
       width: 460,
       render(el) {
@@ -1516,7 +1515,8 @@
       },
       onHide: hideTip
     });
-    if (ctl) ctl.button.append(els.badge);
+    // Like the userscript's button: just the unspent-points number (Core would otherwise show a placeholder dot).
+    if (ctl) ctl.button.replaceChildren(els.badge);
     els.auto.checked = state.enabled;
     els.pollSeconds.value = state.pollSeconds;
     syncUI();
