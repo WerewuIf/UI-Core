@@ -911,7 +911,7 @@
       await fetchStats();
       syncUI();
       if (state.enabled || readJournal()) await exclusiveRun(false);
-      else setStatus('Idle.');
+      else setStatus('Not running.');
     } catch (e) {
       setStatus('Check failed: ' + e.message);
     } finally {
@@ -928,7 +928,7 @@
   let whatN = null; // the "if I spend at once" box; null = empty = use your real unspent points (not saved)
 
   function setStatus(msg) {
-    if (els.status) els.status.textContent = msg;
+    if (els.status) els.status.textContent = msg === 'Not running.' ? '' : msg; // the Off pill already says it
   }
 
   const isEditing = (el) => document.activeElement === el;
@@ -992,7 +992,7 @@
     (lines[3] || '').split(' · ').filter(Boolean).forEach((m) => {
       marks.appendChild(div('core-pill ' + (m.startsWith('✅') ? 'core-pill-ok' : m.startsWith('❌') ? 'core-pill-error' : 'core-pill-loading'), m));
     });
-    const kids = [div('sb-pv-head', lines[0]), tiles, ratios, marks];
+    const kids = [div('sb-pv-head', 'Plan for ' + lines[0]), tiles, ratios, marks];
     if (lines[4]) kids.push(div('sb-pv-warn', lines[4]));
     el.replaceChildren(...kids);
   }
@@ -1040,7 +1040,9 @@
     els.customKind.value = state.customKind;
     if (!isEditing(els.customVal)) els.customVal.value = (ck === 'pc' ? state.customPet : state.customLevel).toFixed(2);
     els.customVal.title = ck === 'pc' ? 'Pet ratio (ATK+DEF share of all stats) must be MORE than this' : 'Level ratio (ATK+DEF) / ((Level-1)*5) must be at least this';
-    els.customAdd.textContent = state[ck === 'pc' ? 'pet' : 'lvl'] === ck ? 'Update' : '+ Custom';
+    const customOn = state[ck === 'pc' ? 'pet' : 'lvl'] === ck;
+    els.customAdd.textContent = customOn ? '✓' : '+';
+    els.customAdd.title = customOn ? 'Update your custom ratio' : 'Add your own ratio as a target and hold it';
     els.adv.innerHTML = '';
     if (s.level > 1) {
       const keys = visibleKeys();
@@ -1101,14 +1103,18 @@
       els.allocBtn.textContent = 'Allocate ' + fmt(s.points) + ' points';
       els.allocBtn.disabled = s.points < 1 || running;
       els.need.textContent = '';
-      els.autoText.textContent = 'Whenever you have unspent points, reach and keep ' + targetLabels(state) + '.';
+      els.autoText.textContent = 'Spends new points as they arrive to reach and keep ' + targetLabels(state) + '.';
     } else {
       els.info.textContent = sum > 0 ? 'Total: ' + fmt(sum) + ' points' : 'Choose how many points go to each stat';
       els.allocBtn.textContent = sum > 0 ? 'Allocate ' + fmt(sum) + ' points' : 'Allocate';
       els.allocBtn.disabled = sum <= 0 || s.points < sum || running;
       els.need.textContent = sum > 0 && s.points < sum ? 'You have ' + fmt(s.points) + ' unspent, need ' + fmt(sum) + '.' : '';
-      els.autoText.textContent = sum > 0 ? 'Whenever you have ' + fmt(sum) + ' unspent points, allocate them this way.' : '';
+      els.autoText.textContent = sum > 0 ? 'Spends ' + fmt(sum) + ' points your way each time that many are unspent.' : '';
     }
+
+    els.autoPill.textContent = state.enabled ? 'On' : 'Off';
+    els.autoPill.classList.toggle('sb-pill-on', !!state.enabled);
+    if (state.enabled) els.autoText.textContent = (els.autoText.textContent + ' Checks every ' + Math.max(POLL_MIN_SECONDS, state.pollSeconds) + ' s.').trim();
 
     // "If I spend at once": empty box = your real unspent points, planned exactly like the Allocate button.
     if (!(s.level > 1) || (!maintain && sum <= 0)) {
@@ -1249,13 +1255,16 @@
             <button type="button" class="sb-seg-btn" data-mode="target">Target</button>
             <button type="button" class="sb-seg-btn" data-mode="manual">My amounts</button>
           </div>
-          <div class="sb-label" id="sbAdvLabel" style="cursor:help">Targets ⓘ</div>
-          <div id="sbAdv"></div>
-          <div class="sb-customrow" id="sbCustomRow">
-            <select class="sb-cinput sb-csel core-input" id="sbCKind"><option value="level">Level</option><option value="pet">Pet</option></select>
-            <input type="number" class="sb-cinput core-input" id="sbCV" min="0.05" max="0.99" step="0.01">
-            <button type="button" class="sb-mini core-btn core-btn-soft" id="sbCAdd">+ Custom</button>
+          <div class="sb-row between sb-targethead">
+            <div class="sb-label" id="sbAdvLabel" style="cursor:help">Targets ⓘ</div>
+            <div class="sb-customrow" id="sbCustomRow">
+              <span class="sb-muted">Custom</span>
+              <select class="sb-cinput sb-csel core-input" id="sbCKind" title="Which kind of ratio"><option value="level">Level</option><option value="pet">Pet</option></select>
+              <input type="number" class="sb-cinput core-input" id="sbCV" min="0.05" max="0.99" step="0.01">
+              <button type="button" class="sb-mini core-btn core-btn-soft" id="sbCAdd">+</button>
+            </div>
           </div>
+          <div id="sbAdv"></div>
           <div id="sbManualRows">${rows}</div>
           <div id="sbCombat">
             <div class="sb-sublabel">Points for ATK/DEF go to</div>
@@ -1271,8 +1280,8 @@
 
       <div class="sb-col">
         <div class="sb-card">
-          <div class="sb-row between"><span class="sb-label" style="cursor:help" title="Leave empty to use your real unspent points. Uses the same planner as the Allocate button.">If I spend at once</span><input type="number" class="sb-input core-input" id="sbWhatN" min="1" step="1"></div>
           <div class="sb-preview" id="sbWhatOut"></div>
+          <div class="sb-row between sb-whatrow"><span class="sb-label" style="cursor:help" title="Try a different number of points. Leave empty to use your real unspent points. Uses the same planner as the Allocate button.">If I spend at once</span><input type="number" class="sb-input core-input" id="sbWhatN" min="1" step="1"></div>
         </div>
 
         <div class="sb-card">
@@ -1283,11 +1292,11 @@
 
         <div class="sb-card">
           <div class="sb-row between">
-            <span class="sb-strong">Repeat automatically</span>
-            <label class="sb-switch"><input type="checkbox" id="sbAuto"><span class="sb-slider"></span></label>
+            <span class="sb-inline"><span class="sb-strong">Auto-allocate</span><span class="core-pill" id="sbAutoPill">Off</span></span>
+            <label class="sb-switch" title="Keep spending new points for you, in the background"><input type="checkbox" id="sbAuto"><span class="sb-slider"></span></label>
           </div>
           <div class="sb-muted" id="sbAutoText"></div>
-          <div class="sb-status" id="sbStatus">Ready.</div>
+          <div class="sb-status" id="sbStatus">Not running.</div>
         </div>
 
         <details class="sb-card sb-adv">
@@ -1332,6 +1341,7 @@
       need: $('#sbNeed'),
       auto: $('#sbAuto'),
       autoText: $('#sbAutoText'),
+      autoPill: $('#sbAutoPill'),
       status: $('#sbStatus'),
       whatN: $('#sbWhatN'),
       whatOut: $('#sbWhatOut'),
@@ -1387,10 +1397,10 @@
       failStreak = 0;
       saveState();
       if (state.enabled) {
-        setStatus('Auto-allocate on - checking now…');
+        setStatus('Checking now…');
         pollNow();
       } else {
-        setStatus('Auto-allocate off.');
+        setStatus('Not running.');
       }
       syncUI();
     });
@@ -1479,9 +1489,12 @@
 .sb-row{display:flex;align-items:center;gap:8px;font-size:13px;color:#eef3ff}
 .sb-row.between{justify-content:space-between}
 .sb-inline{display:inline-flex;align-items:center;gap:6px}
-.sb-status{font-size:12px;color:#9caad0;line-height:1.4}
+.sb-status{font-size:12px;color:#9caad0;line-height:1.4;background:#0d1322;border:1px solid rgba(255,255,255,.06);border-radius:10px;padding:7px 10px}
+.sb-status:empty{display:none}
+#sbAutoPill.sb-pill-on{color:#cfdcff;border-color:rgba(110,168,255,.4);background:rgba(110,168,255,.12)}
 .sb-preview{display:flex;flex-direction:column;gap:10px;font-variant-numeric:tabular-nums}
 .sb-pv-head{font-size:12px;color:#9caad0}
+.sb-preview:not(:empty) + .sb-whatrow{border-top:1px solid rgba(255,255,255,.06);padding-top:10px}
 .sb-pv-tiles{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
 .sb-pv-tile{background:#0d1322;border:1px solid rgba(255,255,255,.06);border-radius:12px;padding:10px 4px;text-align:center}
 .sb-pv-k{font-size:11px;font-weight:700;color:#9caad0;letter-spacing:.03em}
@@ -1498,10 +1511,10 @@
 .sb-chip .sb-muted{border-bottom:1px dotted #4b6dd0}
 #sbDrawer .sb-input{width:72px}
 #sbDrawer .sb-stepin{width:62px;text-align:center;font-weight:700;font-variant-numeric:tabular-nums}
-#sbDrawer .sb-cinput{width:76px;text-align:center;font-weight:700;font-variant-numeric:tabular-nums}
-#sbDrawer .sb-csel{width:78px;text-align:left}
+#sbDrawer .sb-cinput{width:56px;height:28px;padding:3px 6px;font-size:12px;text-align:center;font-weight:700;font-variant-numeric:tabular-nums}
+#sbDrawer .sb-csel{width:64px;padding:3px 2px;text-align:left}
 #sbDrawer .sb-stepbtn{width:34px;height:34px;padding:0;font-size:18px;line-height:1;box-shadow:none}
-#sbDrawer .sb-mini{flex:1;padding:8px 2px;white-space:nowrap}
+#sbDrawer .sb-mini{width:28px;height:28px;padding:0;font-size:16px;line-height:1;box-shadow:none}
 #sbDrawer .sb-primary{width:100%;padding:11px;font-size:14px}
 .sb-arow{display:flex;align-items:center;justify-content:space-between;gap:8px}
 .sb-aname{display:flex;align-items:baseline;gap:8px;font-size:13px;font-weight:800;color:#eef3ff}
@@ -1522,7 +1535,9 @@
 .sb-pick:hover{transform:translateY(-2px);border-color:rgba(110,168,255,.3);box-shadow:0 8px 20px rgba(0,0,0,.35);background:#141d38}
 .sb-advon{border-color:rgba(110,168,255,.35);background:rgba(110,168,255,.05);box-shadow:inset 3px 0 0 #6ea8ff}
 .sb-advon:hover{border-color:rgba(110,168,255,.35);background:rgba(110,168,255,.05);box-shadow:0 0 0 2px rgba(110,168,255,.45) inset,0 10px 24px rgba(110,168,255,.22)}
-.sb-customrow{display:flex;gap:6px;align-items:center}
+.sb-customrow{display:flex;gap:5px;align-items:center}
+.sb-customrow .sb-muted{font-size:11px;margin-right:1px}
+.sb-targethead{flex-wrap:wrap;gap:6px}
 .sb-tip{position:fixed;z-index:300000;width:min(270px,calc(100vw - 16px));box-sizing:border-box;background:#171e33;border:1px solid rgba(255,255,255,.1);border-radius:12px;box-shadow:0 12px 28px rgba(0,0,0,.45);padding:12px 13px;color:#eef3ff;font:12px/1.4 Arial,sans-serif;pointer-events:none;opacity:0;visibility:hidden;transform:translateY(4px);transition:opacity .12s ease,transform .12s ease,visibility .12s}
 .sb-tip[data-side=above]{transform:translateY(-4px)}
 .sb-tip.on{opacity:1;visibility:visible;transform:none}
@@ -1578,7 +1593,7 @@
     els.pollSeconds.value = state.pollSeconds;
     syncUI();
 
-    setStatus('Ready.');
+    setStatus('Not running.');
     setTimeout(pollStats, 800);
   }
 
