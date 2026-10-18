@@ -3,275 +3,23 @@
  * Runs early (document-start) — addons.json sets "early": true. The only page it reads about you is /stats.php (via the Core.net cache).
  */
 
-//               v15.16: NO MORE inventory.php / pets.php / pet_links_ajax.php. Element (the game's own #elements-pve list), link penetration,
-//                 Moonveil and the Wyvern / Reindeer bonuses are read from stats.php too: one request instead of five, and no scraping of
-//                 pages whose markup can change. Link passives are taken as shown (already scaled by the link share). Gone: about 300 lines.
-//               v15.15 (SLIMMED): stats.php IS NOW THE ONLY SOURCE FOR YOUR NUMBERS. Removed: the classes.php and relics.php fetches and the
-//                 relic-text parser, the v-id / deep-search ATK fallbacks, and the inventory.php / pets.php re-derivation of gear ATK, pet ATK
-//                 and PvE team size (about 145 lines). Class now comes from #class-heading. Warnings are unchanged. (v15.16 then removed the
-//                 remaining inventory.php / pets.php reads too.)
-//               v15.14b: THE GAME'S OWN TOTALS ARE READ FROM stats.php (checked against a real copy of the page). On that page
-//                 ATK/DEF always read fine; the 0 most likely came from the gear / pet ATK that was re-derived by scraping
-//                 inventory.php / pets.php. Now primary: PvE "Equipment ATK", "Pet ATK" (links included), the PvE element, the
-//                 class-adjusted core (pve_attack / pve_defense) and the enemy ATK/DEF relic reductions, all from stats.php;
-//                 the scrape is only the fallback, and any disagreement is logged ("[BattlePage] gear ATK: stats.php says ...").
-//               v15.14 fixes (STATS READ AS 0 + CONCISE ELEMENT WARNING):
-//                 - YOUR ATK / DEF NOW READ FIELD BY FIELD. v15.13 threw away a valid ATK/DEF when stamina was missing from
-//                   stats.php's #stats-state and replaced everything with 0 from the v-ids. Order now: #stats-state (incl. a
-//                   by-name search), [data-value], v-ids; the first non-zero value per field wins; nothing is overwritten by 0.
-//                 - A FAILED READ IS NO LONGER KEPT FOR THE WHOLE PAGE. It retries (at most every 30 s) and falls back to a direct
-//                   fetch if the shared Core.net cache returns an unusable page. The console logs what was read and via which source.
-//                 - EQUIPPED GEAR ATK is read like the Build Optimizer does (.boosted-stat / .label span; then "N ATK"; then the item
-//                   text) -- the v15.13 "N ATK" regex found nothing on bare-number labels. Equipped slots with their own element
-//                   text no longer need a duplicate in the bag. inventory / pets are fetched with ?set=attack / ?team=attack.
-//                 - NO MORE MADE-UP ZEROS: a damage-term warning is hidden when its input (ATK/DEF, equipped gear, PvE team) could
-//                   not be read, and one yellow "Some of your stats could not be read" icon says which.
-//                 - ELEMENT TOOLTIP IS 2-3 LINES: "FIRE 31.2% x2 - WATER 25% = +37.4", then the elemental damage per stamina, or
-//                   (red) "All damage -33%" plus the minimum rate each counter / same element needs. The old long explanation
-//                   (sources, bonuses, formulas) is logged to the console as "[BattlePage] Element ..." when it changes.
-//
-//               v15.9 adds: WYVERN / REINDEER BONUSES ARE NOW AUTO-DETECTED (no more hand-set ELEMENT_BONUS).
-//                 Read from the passive text of your PvE team AND their linked pets:
-//                   - "X% <ELEMENT> Element Rate Increase" (Nullscale Wyvern: VOID) multiplies that
-//                     element's rate by (1 + X%) in the advantage formula. Works for any element name.
-//                   - "X% Extra Elemental Damage ..." (Hellfrost Reindeer) multiplies elemental damage
-//                     by (1 + X%).
-//                 Main-team pets count at full value. A LINKED pet's passive counts at its link share
-//                 (Link 1 = 50%, Link 2 = 25%) -- unless the Links panel's own effect text for that link
-//                 already shows a smaller (i.e. pre-scaled) number, in which case that server number is used.
-//                 PvP-only lines are ignored. The tooltip's "Bonuses" line lists each detected bonus and
-//                 where it came from; the console logs every link passive under "[BattlePage] link passive".
-//                 ELEMENT_BONUS is now only a manual EXTRA on top of the detected values (leave at 0).
-//               v15.8 adds: LINKED PETS NOW COUNT TOWARD YOUR ELEMENT RATE. A pet on your PvE team
-//                 contributes its own element rate in full (e.g. 5%); the pet in its Link 1 slot
-//                 contributes 50% of ITS element rate (2.5%), Link 2 contributes 25% (1.25%). These
-//                 are added into the same per-element totals as gear + main pets, so the
-//                 highest-rate element (and therefore your element / advantage) reflects links too.
-//                 Same-race link bonuses are NOT applied to element (the game says transferred-stat
-//                 boosts don't touch elemental contribution). The tooltip shows a Sources line
-//                 (gear / pets / links) for your element so the total can be sanity-checked against
-//                 the game, and the console logs every link contribution under "[BattlePage] link element".
-//               v15.7 fixes (ELEMENT CHECK REWRITTEN TO MATCH THE GAME'S DAMAGE FORMULA):
-//                 The old isElementDisadvantaged() was wrong in several places. It is replaced by
-//                 computeElementMatchup(), which follows the rules from the Damage Formula panel:
-//                   - Monster has no element  -> whole check skipped (no icon).
-//                   - Your element = your highest-rate element (gear + PvE team). Ties now resolve
-//                     via ELEMENT_TIE_ORDER instead of "whichever key came first".
-//                   - Your strength <= 5%: the monster's rate counts as 0.5% and you can NOT take the
-//                     disadvantage (this includes having no element at all -> green, not red).
-//                   - Counter doubling: if element A counters element B, A's rate is x2. This applies
-//                     to whichever side counters (you, the monster, or neither).
-//                   - Advantage = your adjusted rate - monster's adjusted rate. Below 0 = disadvantage
-//                     (all damage -33%), i.e. red. A lower rate than the monster's is NOT automatically
-//                     fine any more (the old "pRate < mRate -> OK" shortcut was backwards).
-//                   - Elemental damage = (your adj. rate - monster adj. rate) x 1500 x stamina_cost.
-//                     The tooltip shows it per 1 stamina and for a World Breaker hit.
-//                 Suggestions now list the exact minimum rate each counter element / the monster's own
-//                 element needs to reach advantage >= 0 (no longer "any rate").
-//                 ELEMENT_BONUS (Wyvern for Void, Reindeer for elemental damage) defaults to 0 because the
-//                 script can't read pet bonuses; set them by hand near WARN_COUNTERS.
-//               v15.6 adds:
-//                 ELEMENT WARNING ICON (always on when the monster has an element): the first icon on
-//                 the warning rail, with the monster's element as its emoji. GREEN = your current
-//                 element passes the script's elemental check (counters / higher); RED = it fails it (or you have none).
-//                 Hover/tap it for: monster element + rate, your element + rate, the suggested counter
-//                 elements with the minimum rate each needs (and what you have of each), and the
-//                 same-element rate needed. Replaces the old yellow "Elemental disadvantage" icon.
-//                 Verdict = computeElementMatchup() (rewritten in v15.7, see above): green = not
-//                 disadvantaged, red = disadvantaged.
-//                 Yellow "?" icon = monster element couldn't be read yet (opening "View Monster Stats"
-//                 fills it in automatically).
-//                 The monster's element is read from the live stats grid, else from a one-time
-//                 re-fetch of this page.
+// v15.17  Wyvern: the game's own "Void-power multiplier: x1.205" (stats.php, #elements-pve) is used when it is shown, else the
+//         "X% <ELEMENT> Element Rate Increase" passive. Removed the unused manual ELEMENT_BONUS and isElementDisadvantaged();
+//         the old per-version notes below were condensed.
+// v15.16  stats.php is the ONLY page read about you (ATK/DEF, class-adjusted core, relics, PvE gear/pet ATK, element list,
+//         link penetration, Moonveil, Wyvern/Reindeer). No inventory.php / pets.php / pet_links_ajax.php / classes.php / relics.php.
+//         Link passives are used as shown (already scaled by the 50% / 25% link share).
+// v15.14  Fields read one by one (a missing stamina no longer zeroes ATK/DEF); a failed read retries every 30 s; an unreadable
+//         input hides its warning and one yellow icon lists what was not read; the element tooltip is 2-3 lines (details in the console).
+// v15.9   Wyvern / Reindeer bonuses auto-detected from pet passives (PvP-only lines ignored).
+// v15.7   Element check follows the game's Damage Formula panel (computeElementMatchup):
+//           - monster without element: no icon.  Your element = your highest-rate element (ties: ELEMENT_TIE_ORDER).
+//           - strength <= 5%: the monster counts as 0.5% and you cannot take the disadvantage.
+//           - the side that counters the other has its rate x2.  Advantage = your adjusted rate - monster's adjusted rate;
+//             below 0 = disadvantage (all damage -33%, red).  Elemental damage = advantage x 1500 x stamina cost x (1 + Reindeer).
+// v15.6   Always-on element icon: green = OK, red = disadvantage, yellow ? = monster element unknown (open "View Monster Stats").
+// <= v15.5  Battle page layout, side panels (collapsible, state in localStorage), AutoSlash, World Breaker, matchup warnings.
 
-//               v15.3 fixes:
-//                 (1) LEADERBOARD vs ATTACK LOG STILL DIDN'T END EVENLY, AND LEADERBOARD GREW A
-//                     PHANTOM HORIZONTAL SCROLLBAR THAT HID THE NAMES: giving Leaderboard the same
-//                     "overflow-y:auto + max-height" treatment as Log in v15.2 had a side effect
-//                     neither of us caught — per the CSS overflow spec, setting only overflow-y to
-//                     a non-'visible' value forces the OTHER axis (overflow-x) to compute as 'auto'
-//                     too. That gave Leaderboard's body a horizontal scrollbar it never needed, and
-//                     the presence of that scrollable axis let the row's flex children size to
-//                     their preferred (max-content) width instead of being constrained to the
-//                     visible column width — which is what pushed the name off to the right, out of
-//                     view, behind the "DMG" figure. Leaderboard no longer gets a max-height/
-//                     scrollbox at all (the game already paginates it — see the v12.0 note below),
-//                     and Log/Battle Info/Rewards now pin overflow-x:hidden alongside overflow-y:
-//                     auto so this can't recur on any of them. Leaderboard and Log are still made
-//                     to end at the same spot when both are expanded, but now via align-self:stretch
-//                     on just that pair (see .bm-pair-stretch below) rather than by force-capping
-//                     Leaderboard's height — and that stretch is turned off the moment either one is
-//                     collapsed, so collapsing still shrinks down to just its toggle bar instead of
-//                     leaving a tall empty box (same concern the v15.1 INFO-GRID COLLAPSE fix was
-//                     about).
-//                 (2) LEADERBOARD/LOG NAME TRUNCATION HARDENED: belt-and-suspenders on top of (1) —
-//                     .lb-row and its scroll ancestors now pin min-width:0 / overflow-x:hidden
-//                     explicitly rather than relying on the default (which is what let this regress
-//                     in the first place) so a name column collapsing to zero width can't quietly
-//                     happen again.
-//                 (3) ATTACK-TIME FLICKER, THE REMAINING BIT: v15.2 fixed the forced-layout half of
-//                     this; the piece it explicitly left as "separate, pre-existing" — the
-//                     Leaderboard/Attack Log toggle header flashing away and back on every hit — is
-//                     fixed now too. The native game replaces those two panels' innerHTML wholesale
-//                     on every attack, which wipes our toggle-bar wrapper; it was getting rebuilt by
-//                     the shared MutationObserver, but that's on a 50ms debounce shared with every
-//                     other DOM change on the page, so the header was visibly gone for up to 50ms
-//                     after every hit. Leaderboard and Log now each get their own dedicated,
-//                     un-debounced MutationObserver scoped just to that one element, so the toggle
-//                     bar gets rebuilt in the same tick as the native swap instead of waiting in
-//                     line behind the shared debounce.
-//                 (4) AUTOSLASH DELAY MENU OPENED DOWNWARD, OFF THE BOTTOM OF THE SCREEN: it was
-//                     positioned relative to the caret assuming the caret had room below it — true
-//                     back when the attack buttons lived inline in the monster card, no longer true
-//                     now that they live in the v15.0 bar pinned to the bottom of the viewport. The
-//                     menu now opens upward from the caret (falling back to downward only if there
-//                     genuinely isn't room above either), and uses position:fixed + a viewport-
-//                     relative measurement instead of document coordinates so it doesn't drift out
-//                     of place if the page is scrolled while it's open.
-//               v15.2 fixes:
-//                 (1) DAMAGE RANKING REWARDS NOW SCROLLS: it had no capped height at all, so a
-//                     monster with many rank brackets just made the whole column sprawl. It now
-//                     gets the same max-height + scrollbar treatment as Log/Battle Info.
-//                 (2) LEADERBOARD vs ATTACK LOG NO LONGER END UNEVENLY: Leaderboard was
-//                     deliberately left unbounded back in v12.0 (each panel had its own full-width
-//                     row then, so height didn't need to match anything). Now that the wide-screen
-//                     layout pairs it side-by-side with Attack Log in the 2-up grid, it gets the
-//                     same capped height + scrollbar so both panels in a row end at the same spot.
-//                 (3) ATTACK-TIME FLICKER REDUCED: pinTopStatBar()/pinAttackBar() were reading
-//                     .offsetHeight (which forces a synchronous browser layout) on every single
-//                     run() — and run() re-fires on a ~50ms debounce for every DOM mutation,
-//                     including the leaderboard/log/HP-bar rewrites that happen on every hit. During
-//                     AutoSlash that added up to a lot of forced layout work packed into a very
-//                     short window. Both bars now only get measured once, the first time they're
-//                     pinned; a shared remeasureStickyBars() handles keeping them in sync on resize
-//                     instead. (Note: some brief flicker of the Leaderboard/Attack Log toggle
-//                     header on every hit is a separate, pre-existing thing — the native game fully
-//                     replaces those two panels' HTML on every attack, which wipes and then rebuilds
-//                     our collapse-toggle wrapper each time; see the v11.0 note further down.)
-//                 (4) HEAL ROW CENTERED: was right-aligned; centered to match everything else now
-//                     that the pill/bubble background around it is gone (see v15.1).
-//                 (5) LEADERBOARD DAMAGE NUMBERS NO LONGER WRAP: the Leaderboard column got roughly
-//                     half as wide once it moved into the 2-up grid, which was wrapping the damage
-//                     figure/"DMG" label across multiple lines. The player name now truncates with
-//                     an ellipsis instead, so the damage number always stays on one line.
-//               v15.1 fixes:
-//                 (1) BOTTOM BAR NO LONGER SPREAD OUT / FULL-WIDTH: it was left:0/right:0 full
-//                     viewport width with buttons allowed to wrap, which both spaced them out
-//                     more than before AND let the bar's background bleed across the whole bottom
-//                     edge — covering native page controls sitting in the bottom corners. It's now
-//                     a small pill sized to its own content (buttons stay in one tight, non-
-//                     wrapping row, same tight spacing as before), centered via left:50% + a
-//                     transform (not vw-based sizing), so it stays put and the same size whether
-//                     the page is zoomed in or out, and never touches the left/right edges.
-//                 (2) HEAL ROW "BUBBLE" REMOVED: the pill background/border/padding wrapping the
-//                     Heal/potion controls is gone — just the plain right-aligned row now.
-//                 (3) INFO-GRID COLLAPSE BUG FIXED: on the wide-screen 2-up info grid, panels were
-//                     stretching (default grid align-items:stretch) to match the height of
-//                     whichever panel shared their row, so collapsing a panel still left a full-
-//                     height empty box instead of shrinking — same reason the (unrelated, native)
-//                     Monster Debuffs card was showing a big empty gap next to Rewards. Panels now
-//                     size to their own content (align-items:start) instead.
-//               v15.0 fixes:
-//                 (1) STAMINA STAYS VISIBLE WHILE SCROLLED: the game's own top stat bar (Stamina /
-//                   Gold / Gems / Server / Buffs / Level / EXP — the ".gtb-inner" row) is now
-//                   pinned with position:sticky so it stays on screen instead of scrolling away
-//                   once you're down near the attack buttons. Only position/z-index is touched;
-//                   the bar's own markup and whatever script keeps its numbers updated is
-//                   untouched. If a second bar (e.g. an HP/MP row) sits directly underneath it in
-//                   the DOM, that gets pinned too, stacked right below using the first bar's
-//                   measured height — but that row belongs to a DIFFERENT userscript entirely, so
-//                   this script never creates, styles, or duplicates any HP/MP display of its own
-//                   at the top of the page.
-//               (2) ATTACK BUTTONS PINNED TO THE BOTTOM OF THE SCREEN: Slash / AutoSlash / World
-//                   Breaker (whatever ".battle-actions-buttons" ends up containing) now live in a
-//                   fixed bar pinned to the bottom of the viewport instead of inside the monster
-//                   card, so they're always reachable with zero scrolling, however far down the
-//                   page you are. The "⚔️ Attacks" label and the now-empty divider strip it lived
-//                   in are trimmed down rather than left as a dead gap.
-//               (3) LOOT MOVED INTO A REAL 3RD COLUMN ON WIDE SCREENS: Loot used to render as one
-//                   big block below the entire grid, leaving the whole right-hand side of the
-//                   arena empty on wide screens. It's now a genuine grid child, so past ~1400px
-//                   viewport width it becomes a sidebar column next to the monster card instead —
-//                   below that width it still renders exactly as before (a full-width block under
-//                   the grid).
-//               (4) INFO COLUMN TILES 2-UP ON WIDE SCREENS: Leaderboard / Attack Log / Battle Info
-//                   / Damage Ranking Rewards switch from one tall stack of rows to a 2-column grid
-//                   on wide screens, cutting the vertical scroll needed to reach the bottom panels
-//                   roughly in half. (If a monster only has 3 of the 4 panels, the last one spans
-//                   the full width instead of leaving a lopsided single-column gap next to it.)
-//               (5) BIGGER HP/MP BARS: your HP/MP bars and the monster's HP bar are taller and
-//                   allowed more width now that there's more breathing room around them, instead
-//                   of staying thin lines inside a mostly-empty card.
-//               v14.0 fixes:
-//                 (1) HEAL CONTROLS SPLIT OFF THE "YOU" LINE: Heal/potion controls no longer share
-//                     a line with the "YOU" tag. YOU now sits alone, centered, on its own row; Heal
-//                     sits in its own row directly below, aligned to the right.
-//                 (2) MONSTER HP NO LONGER ABBREVIATED: dropped the v13.0 formatCompact()/
-//                     compactMonsterHpLabel() logic that shortened huge HP values (e.g. "2.40T").
-//                     The exact full number is always shown now — see (3) for why that no longer
-//                     causes wrapping problems.
-//                 (3) MONSTER HP BAR IS HORIZONTAL AGAIN: the v11-v13 "big vertical red bar"
-//                     treatment (portrait on the left, HP rotated 90 degrees into a pillar on the
-//                     right) is gone. The monster's HP bar is a full-width horizontal bar directly
-//                     under the portrait again — same orientation the game natively uses, just
-//                     bigger/bolder. This is what actually fixes the label-wrapping problem: a long
-//                     HP string gets a full card-width line to sit on instead of a ~70px vertical
-//                     label column.
-//                 (4) "VIEW MONSTER STATS" -> TOP-LEFT CORNER: relocated off the name/note stack
-//                     into a small pinned badge in the monster card's top-left corner.
-//                 (5) AUTO-DIE COUNTDOWN -> TOP-RIGHT CORNER: the "will Auto die in HH:MM:SS" chip
-//                     moves to a matching pinned badge in the top-right corner, instead of sitting
-//                     inline under the monster name.
-//                 (6) DAMAGE RANKING REWARDS PANEL: if the page has a ".ranking-rewards-panel" (it
-//                     isn't present on every monster), it's now folded into the same collapsible-
-//                     panel system as Leaderboard/Attack Log/Battle Info, plus gets matching
-//                     card/chip styling for its rank brackets and reward items instead of rendering
-//                     as plain unstyled HTML. No-ops harmlessly if the panel doesn't exist on a
-//                     given page.
-//               v13.0 fixes:
-//                 (1) YOU / Heal row + HP / MP bars read as mismatched sizes ("wonky") — gave the
-//                     heal controls one shared pill container and forced the HP/MP bar wrappers to
-//                     the exact same width.
-//                 (2) Boss HP pillar label ragged-wrapping a huge HP value across three lines —
-//                     superseded by fix (3) above (horizontal bar), formatCompact() removed.
-//                 (3) The "Joined" chip rendering as an orphaned box below the whole card —
-//                     relocated up next to the monster name/auto-die chip with matching pill
-//                     styling.
-//                 (4) The class-skill bar leaving a large dead gap with only one or two skills —
-//                     capped skill slots to content-sized, centered chips.
-//                 (5) The left-hand info column tracking the viewport while scrolling — reset any
-//                     sticky positioning back to static.
-//                 (6) "View Monster Stats" rendering as a full-width block — superseded by fix (4)
-//                     above (top-left corner badge).
-//               v12.0 fixes:
-//                 (1) POISON AUTOSLASH DID NOTHING: asSendSlashOnce() queried a *direct*-child
-//                     selector that stopped matching once integrateAutoSlash() wrapped the button.
-//                     Fixed with a descendant selector.
-//                 (2) MONSTER HP <-> YOUR HP/MP SWAPPED: monster HP got the big-bar treatment,
-//                     your HP/MP kept the plain native horizontal bars.
-//                 (3) YOUR DAMAGE RELOCATED: moved into its own row directly under the arena.
-//                 (4) VIEW MONSTER STATS MOVED: under the monster's name/note block.
-//                 (5) LEADERBOARD SCROLL REMOVED: native game already paginates it.
-//                 (6) HEAL ROW INLINE WITH "YOU": superseded by v14.0 fix (1) above.
-//                 (7) AUTO-DIE CHIP STAYS ON MONSTER CARD: superseded by v14.0 fix (5) above.
-//               v11.0 fixes:
-//                 (1) COLLAPSE DIDN'T ACTUALLY HIDE THE ATTACK LOG: bare text nodes have no
-//                     display property, so every collapsible panel's content now lives inside one
-//                     ".bm-panel-body" wrapper that gets hidden as a whole.
-//                 (2) MONSTER ART FIXED AT 340x420 REGARDLESS OF ZOOM/SCREEN: replaced with fluid
-//                     sizing via a single --bm-portrait-w custom property.
-//                 (3) MONSTER STATS: the site's own "View Monster Stats" modal replaced the old
-//                     inline stat-line this script used to rebuild; old merge code kept as a
-//                     harmless no-op for older templates.
-//                 (4) Modest type-scale bump + distinct left-border accent per info panel.
-//               v10.1 adds:
-//                 (6) COLLAPSIBLE SIDE PANELS with per-panel localStorage-persisted state.
-//               v10.0 fixes:
-//                 (1) Monster image bump (superseded by fluid sizing in v11.0).
-//                 (2) Real AUTO caret button; AutoSlash clicks the native Slash button.
-//                 (3) Duplicate World Breaker button guard.
-//                 (4) Info column row order.
-//                 (5) Single shared MutationObserver that never disconnects.
 
 (function () {
   'use strict';
@@ -2253,7 +2001,7 @@
   //   [data-relic-bonus="enemy_attack_flat|enemy_defense_flat"]
   //   PvE Set cards: "Equipment ATK" + "N equipped pieces", "Pet ATK" (links included), the .pet-entry list
   //   #elements-pve: the game's own list of element sources and its strongest combined element
-  //   .pet-entry / .linked-pet passive texts: penetration, Moonveil, element-rate / elemental-damage bonuses. A LINKED pet's
+  //   #elements-pve .active-effect: the stated element multiplier.  .pet-entry / .linked-pet passive texts: penetration, Moonveil, element bonuses. A LINKED pet's
   //   text already shows the value after its link share (50% / 25%); the numbers add up exactly to the page's own pet crit totals.
   // classes.php, relics.php, inventory.php, pets.php and pet_links_ajax.php are no longer read at all.
   function statInt(v) {
@@ -2341,6 +2089,15 @@
         if (pp.armorPen) out.pens.push({ kind: 'armor', val: pp.armorPen, factor: 1, cond: null, pet: lname });
       });
     });
+    // the game states the element-rate multiplier itself ("Void-power multiplier: ×1.205", applied only when that element is
+    // selected). It is the authority; the passive texts above are the fallback (and give the pet name for the tooltip).
+    const pm = new RegExp('(' + ELEMENT_NAME_RE + ')-power\\s*multiplier:\\s*[\\u00D7x]\\s*(\\d+(?:\\.\\d+)?)', 'i')
+      .exec((q('#elements-pve .active-effect') || {}).textContent || '');
+    if (pm && parseFloat(pm[2]) >= 1) {
+      const e = pm[1].toUpperCase(), r = Math.round((parseFloat(pm[2]) - 1) * 1e4) / 1e4, had = out.bonus.src.some(x => x.label === e + ' rate');
+      out.bonus.rate[e] = r;
+      had || out.bonus.src.push({ label: e + ' rate', pct: r, pet: 'stats.php', where: 'multiplier' });
+    }
     return out;
   }
 
@@ -2431,16 +2188,9 @@
   };
 
   // v15.7: rules taken from the game's Damage Formula panel.
-  // Manual EXTRA bonuses, added on top of the auto-detected ones (0.25 = +25%). Leave at 0 --
-  // v15.9 reads "X% <ELEMENT> Element Rate Increase" (Wyvern) and "X% Extra Elemental Damage"
-  // (Reindeer) from your team + linked pets by itself.
-  const ELEMENT_BONUS = { wyvernVoid: 0, reindeer: 0 };
-  // Element-rate multiplier bonus for element e, from detected passives (bonus.rate) + manual override.
-  function elemBonusOf(bonus, e) {
-    const det = (bonus && bonus.rate && e && bonus.rate[e]) || 0;
-    return det + (e === 'VOID' ? ELEMENT_BONUS.wyvernVoid : 0);
-  }
-  function elemDmgBonusOf(bonus) { return ELEMENT_BONUS.reindeer + ((bonus && bonus.dmg) || 0); }
+  // Element-rate bonus (Wyvern: +20.48% on VOID) and elemental-damage bonus (Reindeer), both read from stats.php.
+  function elemBonusOf(bonus, e) { return (bonus && bonus.rate && e && bonus.rate[e]) || 0; }
+  function elemDmgBonusOf(bonus) { return (bonus && bonus.dmg) || 0; }
   // In-game tie order is "predetermined". This is a PLACEHOLDER: confirm the real order.
   const ELEMENT_TIE_ORDER = ['FIRE', 'WATER', 'FROST', 'NATURE', 'THUNDER', 'VOID', 'LIGHT'];
   const ELEMENT_DMG_PER_POINT = 1500;   // per 1% of advantage, per stamina
@@ -2462,12 +2212,6 @@
     const mAdj = mEff * (mStrong ? 2 : 1);
     const adv = pAdj - mAdj;
     return { adv, pAdj, mAdj, pStrong, mStrong, weak, mEff, pBonus, dmgBonus: elemDmgBonusOf(bonus), disadvantaged: !weak && adv < 0 };
-  }
-
-  // Kept under the old name so nothing else that calls it breaks.
-  function isElementDisadvantaged(pElem, pRate, mElem, mRate, bonus) {
-    const mu = computeElementMatchup(pElem, pRate, mElem, mRate, bonus);
-    return mu ? { disadvantaged: mu.disadvantaged, mu } : null;
   }
 
   // v15.9: passive-text parsing for the two element bonuses.
