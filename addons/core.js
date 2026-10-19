@@ -39,18 +39,32 @@
   const warn = (...a) => console.warn('[Core]', ...a);
   const dlog = (...a) => { if (Core.debug) console.log('[Core]', ...a); };
 
-  async function pinned(url) {
+  // Turns a ".../main/..." raw.githubusercontent.com URL into the newest commit's immutable URL, so GitHub's CDN
+  // (cache-control: max-age=300; a ?query does NOT bypass it) cannot answer with an old copy. It costs one GitHub API
+  // call (60 per hour per IP when not logged in), so only a manual "Check for updates" asks for it (fresh = true);
+  // automatic checks keep the plain branch URL (at most ~5 minutes old). If the lookup fails, the plain URL is used and
+  // window.__coreShaError says why, so the update check can report it instead of claiming "up to date".
+  let shaJob = null, shaAt = 0;
+  function latestSha() {
+    if (shaJob && Date.now() - shaAt < 10000) return shaJob;   // one lookup is shared by everything in the same check
+    shaAt = Date.now();
+    const job = root.fetch('https://api.github.com/repos/WerewuIf/UI-Core/commits/main', { headers: { Accept: 'application/vnd.github.sha' }, cache: 'no-cache' })
+      .then(async (r) => {
+        if (!r.ok) throw new Error(r.status === 403 || r.status === 429 ? 'GitHub is rate-limiting update lookups (60 per hour per IP)' : 'GitHub API HTTP ' + r.status);
+        const sha = (await r.text()).trim();
+        if (!/^[0-9a-f]{40}$/.test(sha)) throw new Error('unexpected reply from the GitHub API');
+        return sha;
+      });
+    job.catch(() => { if (shaJob === job) shaJob = null; });   // a failed lookup is never reused
+    return (shaJob = job);
+  }
+  async function pinned(url, fresh) {
+    if (!fresh) return url;
     try {
-      let c; try { c = JSON.parse(localStorage.getItem('core:sha')); } catch (_) {}
-      let sha = c && Date.now() - c.ts < 60000 ? c.sha : null;
-      if (!sha) {
-        const r = await root.fetch('https://api.github.com/repos/WerewuIf/UI-Core/commits/main', { headers: { Accept: 'application/vnd.github.sha' } });
-        if (!r.ok) throw new Error('HTTP ' + r.status);
-        sha = (await r.text()).trim();
-        try { localStorage.setItem('core:sha', JSON.stringify({ sha, ts: Date.now() })); } catch (_) {}
-      }
+      const sha = await latestSha();
+      root.__coreShaError = null;
       return url.replace(/(raw\.githubusercontent\.com\/WerewuIf\/UI-Core\/)(?:refs\/heads\/)?main\//, '$1' + sha + '/');
-    } catch (_) { return url; }
+    } catch (err) { root.__coreShaError = String((err && err.message) || err); return url; }
   }
 
   /* ------------------------------------------------------------- utils --- */
@@ -837,10 +851,10 @@
 
   const sha256hex = async (t) => [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(t)))].map((b) => b.toString(16).padStart(2, '0')).join('');
 
-  async function fetchCode(e) {
+  async function fetchCode(e, fresh) {
     const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), 8000);
     try {
-      const res = await root.fetch(await pinned(e.url), { cache: 'no-cache', signal: ctl.signal });
+      const res = await root.fetch(await pinned(e.url, fresh), { cache: 'no-cache', signal: ctl.signal });
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const text = await res.text();
       if (e.sha256 && (await sha256hex(text)) !== String(e.sha256).toLowerCase()) throw new Error('sha256 mismatch \u2014 refusing to run');
@@ -1001,7 +1015,7 @@
           const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), 8000);
           let j;
           try {
-            const r = await root.fetch(await pinned(MANIFEST), { cache: 'no-cache', signal: ctl.signal });
+            const r = await root.fetch(await pinned(MANIFEST, true), { cache: 'no-cache', signal: ctl.signal });
             if (!r.ok) throw new Error('HTTP ' + r.status);
             j = await r.json();
           } finally { clearTimeout(timer); }
@@ -1016,17 +1030,20 @@
       let failed = 0;
       await Promise.all(list.map(async (e) => {
         try {
-          const rec = readAnyCode(e), t = await fetchCode(e);
+          const rec = readAnyCode(e), t = await fetchCode(e, true);
           if (rec && rec.code && rec.code !== t) rstat(e.id).update = true;   // no saved copy = nothing to update
           writeCode(e, t);
         } catch (_) { failed++; }
       }));
       // Core itself: the bootstrap saves a newer core.js for the next load, same as an addon.
       const boot = root.__coreBoot;
-      if (boot) { try { await boot.check(); } catch (_) { failed++; } }
+      if (boot) { try { await boot.check(true); } catch (_) { failed++; } }
       const ready = [].concat(boot && boot.pending() ? ['Core'] : [], list.filter((e) => rstat(e.id).update).map((e) => e.name || e.id));
       const note = failed ? ' (' + failed + ' could not be checked)' : '';
-      if (ready.length) ui.toast('Update ready: ' + ready.join(', ') + ' \u2014 click here to reload' + note, true, 12000, () => root.location.reload());
+      // If GitHub would not name the newest commit, what was fetched may be a CDN copy up to 5 minutes old: say so.
+      const lag = root.__coreShaError ? ' \u2014 ' + root.__coreShaError + ', so this may be up to 5 minutes behind' : '';
+      if (ready.length) ui.toast('Update ready: ' + ready.join(', ') + ' \u2014 click here to reload' + note + lag, true, 12000, () => root.location.reload());
+      else if (lag) ui.toast('Could not confirm you are up to date' + lag + note, false, 12000);
       else ui.toast('Everything is up to date' + note, !failed);
     } finally { checking = false; float.refresh('addons'); }
   }
@@ -1811,7 +1828,7 @@
 
   /* ------------------------------------------------------------ export --- */
   const Core = {
-    __isCore: true, apiLevel: API, version: '3.12.4', debug: false, tabId: TAB,
+    __isCore: true, apiLevel: API, version: '3.12.5', debug: false, tabId: TAB,
     esc, sleep, debounce, fmt, int, compact, parseNum, parseJson,
     on, off, once, emit,
     state, store, player,
