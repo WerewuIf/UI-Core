@@ -1,5 +1,5 @@
 /* =============================================================================
- * Cube Suite  (Core addon, version 3.2.0)  -  port of the Tampermonkey script "Cube Suite" 2.7.8
+ * Cube Suite  (Core addon, version 3.2.2)  -  port of the Tampermonkey script "Cube Suite" 2.7.8
  *
  * Runs inside Core (addons/core.js): `Core` is in scope, so this file is NOT a userscript.
  * List it in addons.json (see the entry in the notes) or add its raw URL in the Addons panel.
@@ -13,6 +13,9 @@
  * Bug fixes are marked  // FIX:  in the code.
  * v2 review pass (PvP self-detection by id, explicit pick_slot params, single-shot POSTs, PvE/SA network fail-safes,
  * tab-handoff settings reload, guild-check retry, HTML escaping) is marked  // FIX2:
+ * v3.2.1 audit pass (PvE bootstrap/cap/tab/potion fixes, SA assign+retreat failure detection, PvP turn retry,
+ * stale guild-check overlay, panel on-screen clamp) is marked  // FIX:  with (a)-(d) tags.
+ * v3.2.2: looksLikeBlankErrorPage removed (HTTP status only), Fast Run scan every 1 s, potion inv id read from the sidebar drawer.
  * ========================================================================== */
 (async function () {
   'use strict';
@@ -140,7 +143,7 @@
   // │   (including matches joined manually while automation was paused).      │
   // │   SA participated count comes from localStorage — always current.       │
   // │   runLoop uses the normal interval when master is OFF regardless of     │
-  // │   mode; fast-mode 1.5 s polling only fires when actively auto-joining.  │
+  // │   mode; fast-mode 1 s polling only fires when actively auto-joining.  │
   // └─────────────────────────────────────────────────────────────────────────┘
 
   const DUNGEONS_URL      = 'https://demonicscans.org/guild_dungeon.php';
@@ -162,7 +165,7 @@
     { hour: 16, minute: 0, limit: 40, label: 'ffa' },    // from 4PM server time — FFA opens, cap raises to 40
   ];
   const PVP_SCAN_INTERVAL_MS  = 60_000;
-  const PVP_FAST_INTERVAL_MS  = 1_500;
+  const PVP_FAST_INTERVAL_MS  = 1_000;   // Fast Run scan interval
   const PVP_DEBUG             = false;
 
   const PVP_STATE_URL           = 'https://demonicscans.org/pvp_style_state.php';
@@ -373,10 +376,12 @@
   }
 
   let dsGuildCheckTransient = false;
-  async function dsVerifyGuild() {
+  async function dsVerifyGuild(gen = dsMainGeneration) {
     dsGuildCheckTransient = false;
     dsShowBlock('⏳', 'Verifying guild membership…', `Checking ${GUILD_NAME}`);
     const { ok, text } = await fetchText(GUILD_MEMBERS_URL);
+    // FIX: demoted while the request was in flight - the "other tab" overlay must stay, so touch nothing
+    if (gen !== dsMainGeneration) return false;
     if (!ok || !text) {
       dsGuildCheckTransient = true;
       dsShowBlock('⚠️', 'Could not reach guild page', 'Retrying automatically…');
@@ -397,11 +402,19 @@
     return true;
   }
 
-  let dsWakeCancels = [];
-  function dsDisarmScheduleWakeups() { dsWakeCancels.forEach(c => c()); dsWakeCancels = []; }
+  let dsWakeCancels = [], dsWakeKey = '';
+  function dsDisarmScheduleWakeups() { dsWakeCancels.forEach(c => c()); dsWakeCancels = []; dsWakeKey = ''; }
   function dsArmScheduleWakeups() {
-    dsDisarmScheduleWakeups();
     const secs = new Set([...SA_SCHEDULE, ...PVP_SCHEDULE].map(dsScheduleEntrySeconds));
+    // FIX (b): PvE scheduled-cap breakpoints (active profile) wake the loop too, not just SA/PvP ones
+    try {
+      for (const list of Object.values(pveGetProfile().nodeSchedules || {}))
+        for (const e of list || []) if (!e.noTime && Number.isFinite(dsScheduleEntrySeconds(e))) secs.add(dsScheduleEntrySeconds(e));
+    } catch (_) { /* bad profile json: SA/PvP wake-ups still work */ }
+    const key = [...secs].sort((a, b) => a - b).join(',');
+    if (key === dsWakeKey) return;   // nothing changed (called every tick so schedule edits / mode switches re-arm)
+    dsDisarmScheduleWakeups();
+    dsWakeKey = key;
     for (const sec of secs) {
       const hh = String(Math.floor(sec / 3600)).padStart(2, '0');
       const mm = String(Math.floor((sec % 3600) / 60)).padStart(2, '0');
@@ -422,11 +435,11 @@
     saScheduledNukeEnabled   = saLoadScheduledNukeEnabled();
     refreshUI();
     (async () => {
-      let ok = await dsVerifyGuild();
+      let ok = await dsVerifyGuild(gen);
       for (let attempt = 0; !ok && dsGuildCheckTransient && dsTabIsMain && gen === dsMainGeneration; attempt++) {
         await sleep(Math.min(60_000, 5_000 * 2 ** attempt));   // 5s, 10s, 20s, 40s, 60s...
         if (!dsTabIsMain || gen !== dsMainGeneration) return;
-        ok = await dsVerifyGuild();
+        ok = await dsVerifyGuild(gen);
       }
       if (!ok || !dsTabIsMain || gen !== dsMainGeneration) return;
       dsArmScheduleWakeups();
@@ -445,18 +458,6 @@
   function dsInitTabSync() {
     mountUI(); // always mount so the panel works regardless of blocked state
     Core.tab.join(TAB_NAME, { queue: true, keepAlive: true, onMain: dsOnMainTab, onIdle: dsOnIdleTab });
-  }
-
-  function looksLikeBlankErrorPage(status, text, contentType = '') {
-    if (status >= 500) return true;
-    const trimmed = (text || '').trim();
-    if (!trimmed) return true;
-    if (contentType.includes('json')) return false;
-    if (trimmed[0] === '{' || trimmed[0] === '[') {
-      try { JSON.parse(trimmed); return false; } catch { /* fall through */ }
-    }
-    if (trimmed.length < 40 && !/<[a-z]/i.test(trimmed)) return true; // no real markup at all
-    return false;
   }
 
   async function withRetry(fn, attempts = FETCH_RETRY_ATTEMPTS, baseDelay = FETCH_RETRY_BASE_DELAY) {
@@ -617,9 +618,8 @@
           signal: controller.signal,
         });
         const text  = await res.text();
-        const ct    = res.headers.get('content-type') || '';
-        const blank = looksLikeBlankErrorPage(res.status, text, ct);
-        return { res, text, ok: res.ok && !blank, status: res.status, shouldRetry: blank };
+        // FIX: no blank/short-page heuristic - only the HTTP status decides (5xx is retried for GET / idempotent calls)
+        return { res, text, ok: res.ok, status: res.status, shouldRetry: res.status >= 500 };
       } catch (err) {
         return { res: null, text: '', ok: false, status: 0, error: String(err?.message || err), shouldRetry: true };
       } finally {
@@ -1157,7 +1157,7 @@
     const nameEl = slot.querySelector('.name');
     if (!nameEl) return '';
     const t = normText(nameEl.textContent);
-    if (!t || /^slot\s*\d+$/i.test(t) || /^(empty|open|vacant|available)$/i.test(t)) return '';
+    if (!t || /^slot\s*\d+$/i.test(t) || /^(empty|open( slot)?|vacant|available)$/i.test(t)) return '';   // FIX: "Open Slot" placeholder
     return t;
   }
 
@@ -1461,7 +1461,7 @@
           target_key: targetKey,
         });
         pvpInfo(`Node ${nodeId} match #${matchNo}: used ${chosen.name} (cost ${chosen.cost || 0}, had ${tokens}) on ${targetKey}`);
-        return;
+        return true;
       } catch (err) {
         const msg = String(err?.message || err);
         if (attempt < PVP_SKILL_RETRIES && /\b5\d{2}\b/.test(msg)) {
@@ -1469,7 +1469,7 @@
           await sleep(500 * attempt);
         } else {
           pvpWarn(`Node ${nodeId} match #${matchNo}: use_skill (${chosen.name}) failed — ${msg}`);
-          return;
+          return false;   // FIX: caller may retry this turn (bounded)
         }
       }
     }
@@ -1483,6 +1483,7 @@
     pvpInfo(`Node ${nodeId} match #${matchNo}: active battle monitor started`);
 
     let wasMyTurn = false;
+    let turnFails = 0;   // FIX: failed use_skill attempts in the current turn
     let consecutiveErrors = 0;
 
     try {
@@ -1493,6 +1494,8 @@
       }
 
       while (true) {
+        // FIX (c): another tab took over - stop polling / acting (the new main tab restarts its own monitor)
+        if (!dsTabIsMain) { pvpInfo(`Node ${nodeId} match #${matchNo}: this tab is no longer the main tab — stopping monitor`); return; }
         const state = await pvpFetchBattleState(instanceId, nodeId, matchNo);
         if (!state) {
           consecutiveErrors++;
@@ -1537,13 +1540,15 @@
 
         if (isMyTurnNow && !wasMyTurn) {
           if (masterEnabled) {
-            await pvpExecuteFastTurn(instanceId, nodeId, matchNo, me, state);
-            wasMyTurn = true;
+            // FIX: a failed use_skill used to forfeit the whole turn; retry up to 3 times per turn (state is re-checked each poll)
+            const done = await pvpExecuteFastTurn(instanceId, nodeId, matchNo, me, state);
+            if (done !== false || ++turnFails >= 3) wasMyTurn = true;
           } else {
             pvpLog(`Node ${nodeId} match #${matchNo}: my turn but automation paused — waiting`);
           }
         } else if (!isMyTurnNow) {
           wasMyTurn = false;
+          turnFails = 0;
         }
 
         await sleep(PVP_BATTLE_POLL_MS);
@@ -2251,7 +2256,7 @@
   }
 
   async function saAssignTarget(battleId, attackerId, defenderId) {
-    const { data } = await fetchJson(SA_BATTLE_API, {
+    const { data, status } = await fetchJson(SA_BATTLE_API, {
       method:  'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
       body:    new URLSearchParams({
@@ -2260,12 +2265,14 @@
         defender_captain_unit_id: String(defenderId),
       }),
     });
-    if (data && !data.ok && data.message) throw new Error(data.message);
+    // FIX: a network error / 5xx / non-JSON reply (data == null) or {ok:false} used to count as a successful assign
+    if (!data) throw new Error(`no valid reply (status ${status || 'network error'})`);
+    if (data.ok === false || (!data.ok && data.message)) throw new Error(data.message || 'rejected');
     return data;
   }
 
   async function saRetreatCaptain(battleId, captainId) {
-    const { data } = await fetchJson(SA_BATTLE_API, {
+    const { data, status } = await fetchJson(SA_BATTLE_API, {
       method:  'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
       body:    new URLSearchParams({
@@ -2273,6 +2280,9 @@
         captain_unit_id: String(captainId),
       }),
     });
+    // FIX: same as assign - a failed retreat must not be logged / treated as success
+    if (!data) throw new Error(`no valid reply (status ${status || 'network error'})`);
+    if (data.ok === false || (!data.ok && data.message)) throw new Error(data.message || 'rejected');
     return data;
   }
 
@@ -3012,6 +3022,12 @@
       if (pveHasMobState(dgmid)) return pveGetMobState(dgmid);
       return null;
     }
+    // FIX (a): a login / error page that has markup is not a battle page - storing "damage 0, no cap" for it would
+    // persist "no EXP cap" in localStorage. Keep any old state, otherwise store nothing and retry next scan.
+    if (!doc.querySelector('#yourStats, #yourDamageValue, #hpText, .stat-block')) {
+      pveWarn(`Bootstrap: ${name || dgmid} - page did not look like a battle page (login/error?) - not storing state`);
+      return pveHasMobState(dgmid) ? pveGetMobState(dgmid) : null;
+    }
 
     let expCap = null, damage = 0, lootCap = null, monsterMaxHp = null;
     if (doc) {
@@ -3254,10 +3270,20 @@
     return data || { status: 'error', message: text || 'no response body' };
   }
 
+  // FIX: the Battle Consumables sidebar (#battleDrawer .potion-card[data-inv-id]) already carries the inventory id, so read
+  // it from the live page when it is there and remember it (dropped again if using it fails); inventory.php is only the fallback.
+  const pvePotionInvIds = new Map();
+  function pveInvIdFromDrawer(target) {
+    for (const card of document.querySelectorAll('.potion-card[data-inv-id]'))
+      if (normText(card.querySelector('img')?.alt) === target) return card.getAttribute('data-inv-id');
+    return null;
+  }
   async function pveFindPotionInvId(name) {
+    const target = normText(name);
+    const known = pvePotionInvIds.get(target) || pveInvIdFromDrawer(target);
+    if (known) { pvePotionInvIds.set(target, known); return known; }
     const doc = await fetchDoc(PVE_INVENTORY_URL, 'pve potion lookup');
     if (!doc) return null;
-    const target = normText(name);
     for (const slot of doc.querySelectorAll('.slot-box')) {
       const alt = normText(slot.querySelector('img')?.alt);
       if (alt !== target) continue;
@@ -3267,13 +3293,13 @@
                                                            );
       const onclick = btn?.getAttribute('onclick') || '';
       const m = onclick.match(/useItem\(\s*([0-9]+)/i);
-      if (m) return m[1];
+      if (m) { pvePotionInvIds.set(target, m[1]); return m[1]; }
     }
     for (const card of doc.querySelectorAll('.potion-card')) {
       const alt = normText(card.querySelector('img')?.alt);
       if (alt !== target) continue;
       const invId = card.getAttribute('data-inv-id');
-      if (invId) return invId;
+      if (invId) { pvePotionInvIds.set(target, invId); return invId; }
     }
     return null;
   }
@@ -3286,7 +3312,7 @@
       headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
       body: new URLSearchParams({ inv_id: invId }).toString(),
     });
-    if (!used.ok) { pveWarn('Large Stamina Potion request failed - not counting it as used'); return false; }
+    if (!used.ok) { pvePotionInvIds.delete(normText('Large Stamina Potion')); pveWarn('Large Stamina Potion request failed - not counting it as used'); return false; }
     await sleep(100);
     pveInfo('Used a Large Stamina Potion');
     return true;
@@ -3494,11 +3520,13 @@
     let lastDamage = -1;
 
     let potionPending = false;   // FIX2: a potion was just used and no attack has landed since
-    const hasRealCap = typeof effectiveCap === 'number' && effectiveCap > 0;
+    let hpPotionPending = false; // FIX: an HP potion was just used and no attack has landed since
+    let hasRealCap = typeof effectiveCap === 'number' && effectiveCap > 0;
     const mobMaxHp = pveGetMobState(dgmid)?.monsterMaxHp;
-    const capStr = hasRealCap
+    const capText = () => hasRealCap
     ? effectiveCap.toLocaleString()
     : (mobMaxHp ? `${mobMaxHp.toLocaleString()} (mob HP)` : '∞');
+    let capStr = capText();
 
     pveInfo(`${mobName || dgmid}: starting fight — damage ${myDamage.toLocaleString()}/${capStr}`);
 
@@ -3511,6 +3539,27 @@
       if (!masterEnabled) {
         pveInfo(`${mobName || dgmid}: automation paused — stopping mid-fight`);
         return { result: 'paused', staminaAfter: stamina };
+      }
+      // FIX (c): another tab took over - stop instead of attacking in parallel with the new main tab
+      if (!dsTabIsMain) {
+        pveInfo(`${mobName || dgmid}: this tab is no longer the main tab — stopping mid-fight`);
+        return { result: 'paused', staminaAfter: stamina };
+      }
+      // FIX (b): re-read profile + cap before every attack, so a settings edit or schedule breakpoint applies mid-fight
+      {
+        profile = pveGetProfile();
+        const liveCap = pveGetEffectiveCap(profile, mobName, pveGetMobState(dgmid));
+        if (liveCap !== effectiveCap) {
+          effectiveCap = liveCap;
+          hasRealCap = typeof effectiveCap === 'number' && effectiveCap > 0;
+          capStr = capText();
+          pveInfo(`${mobName || dgmid}: cap changed mid-fight — now ${hasRealCap ? capStr : liveCap === 0 ? 'skip' : 'none'}`);
+          if (liveCap === 0) return { result: 'skipped', staminaAfter: stamina };
+          if (hasRealCap && myDamage >= effectiveCap) {
+            pveInfo(`${mobName || dgmid}: already at the new cap (${myDamage.toLocaleString()}/${capStr}) — stopping`);
+            return { result: 'capped', staminaAfter: stamina };
+          }
+        }
       }
       const capRemaining = hasRealCap ? (effectiveCap - myDamage) : null;
       const hpRemaining  = (typeof mobMaxHp === 'number' && mobMaxHp > 0) ? Math.max(0, mobMaxHp - myDamage) : null;
@@ -3549,7 +3598,9 @@
       }
       if (msg.includes('you are dead')) {
         pveWarn(`${mobName || dgmid}: you died`);
-        if (profile.useHpPotion && await pveUseFullHpPotion()) {
+        // FIX: one potion per death - if we die again before any attack lands, stop instead of burning potions in a loop
+        if (profile.useHpPotion && !hpPotionPending && await pveUseFullHpPotion()) {
+          hpPotionPending = true;
           continue;
         }
         return { result: 'player_dead', staminaAfter: stamina };
@@ -3560,6 +3611,7 @@
         return { result: 'error', staminaAfter: stamina };
       }
       potionPending = false;
+      hpPotionPending = false;
       lastDamage = myDamage;
       const reported = result.totaldmgdealt == null ? NaN : Number(result.totaldmgdealt);
       const haveTotal = Number.isFinite(reported);
@@ -3579,6 +3631,18 @@
         return { result: 'killed', staminaAfter: stamina };
       }
     }
+  }
+
+  // FIX (d): Scheduled mode before the first breakpoint fights nothing (by design). Returns "HH:MM" of the first
+  // breakpoint while waiting for it, else null - shown on the node pill and logged once.
+  const pveSchedWaitLogged = new Set();
+  function pveSchedWaitUntil(profile, nodeId) {
+    if (profile.damageMode !== 'scheduled') return null;
+    const sch = profile.nodeSchedules?.[nodeId] || [];
+    const timed = sch.filter(e => !e.noTime), now = saNowSeconds();
+    if (!timed.length || now == null || dsGetActiveScheduleEntry(timed, now, sch.find(e => e.noTime) || null)) return null;
+    const s = Math.min(...timed.map(dsScheduleEntrySeconds));
+    return `${String(Math.floor(s / 3600)).padStart(2, '0')}:${String(Math.floor((s % 3600) / 60)).padStart(2, '0')}`;
   }
 
   async function pveScanNode(instanceId, nodeId, locationId, profile, { fight }) {
@@ -3633,7 +3697,12 @@
     const allClear  = aliveMobs.length === 0 && mobs.length > 0
     ? true          // every mob on page is dead
     : mobs.length === 0; // page has no mobs at all
-    pveNodeStats[nodeId] = { ...(pveNodeStats[nodeId] || {}), mobCount: mobs.length, allClear };
+    const schedWait = pveSchedWaitUntil(profile, nodeId);
+    pveNodeStats[nodeId] = { ...(pveNodeStats[nodeId] || {}), mobCount: mobs.length, allClear, schedWait };
+    if (schedWait && aliveMobs.length && !pveSchedWaitLogged.has(`${nodeId}@${schedWait}`)) {
+      pveSchedWaitLogged.add(`${nodeId}@${schedWait}`);
+      pveInfo(`Node ${nodeId}: Scheduled mode — no breakpoint is active yet, nothing is fought here until ${schedWait} (add a "no time" row to fight earlier)`);
+    }
     refreshUI();
 
     const unseenAll = mobs.filter(m => !pveHasMobState(m.dgmid));
@@ -3658,13 +3727,19 @@
     }
 
     const aliveTargets   = targets.filter(m => !m.isDead);
+    // FIX (a): no stored state + cap would be "none" = the battle page could not be read (bootstrap failed). Unknown is
+    // not "no cap" - don't fight it blind, retry the bootstrap next scan.
+    const capUnknown = m => !pveGetMobState(m.dgmid) && pveGetEffectiveCap(profile, m.name, null) === null;
+    const unknownCap = aliveTargets.filter(capUnknown);
+    if (unknownCap.length) pveWarn(`Node ${nodeId}: cap unknown for ${unknownCap.map(m => m.name || m.dgmid).join(', ')} (battle page unreadable) - not fighting until it loads`);
     const actionable     = aliveTargets.filter(m => {
       const entry = pveGetMobState(m.dgmid);
       const cap   = pveGetEffectiveCap(profile, m.name, entry);
       if (cap === 0) return false;                        // cap=0 = deliberately skipped
+      if (capUnknown(m)) return false;
       return !pveIsMobCapped(m.dgmid, profile, m.name);
     });
-    const fightableAlive = aliveTargets.filter(m =>
+    const fightableAlive = aliveTargets.filter(m => !capUnknown(m) &&
                                                pveGetEffectiveCap(profile, m.name, pveGetMobState(m.dgmid)) !== 0);
     pveNodeStats[nodeId].noActionable = fightableAlive.length > 0 && !actionable.length;
     refreshUI();
@@ -3681,13 +3756,14 @@
 
     let staminaKnown = stamina;
     for (const mob of actionable) {
-      if (pveStaminaWaiting) break;
+      if (pveStaminaWaiting || !dsTabIsMain) break;   // FIX (c): stop when the tab lost main status
       if (pveDeadMobsByNode[nodeId]?.has(mob.dgmid)) {
         pveInfo(`Node ${nodeId}: ${mob.name} already dead — skipping`);
         continue;
       }
       const entry = pveGetMobState(mob.dgmid);
-      const cap = pveGetEffectiveCap(profile, mob.name, entry);
+      const cap = pveGetEffectiveCap(pveGetProfile(), mob.name, entry);   // FIX (b): live value, not the tick-start snapshot
+      if (cap === 0) { pveInfo(`Node ${nodeId}: ${mob.name || mob.dgmid} — skipped (cap is now 0)`); continue; }
       pveInfo(`Node ${nodeId}: joining ${mob.name || mob.dgmid}…`);
       pveNodeStats[nodeId] = { ...(pveNodeStats[nodeId] || {}), attacking: mob.name || mob.dgmid };
       refreshUI();
@@ -3748,6 +3824,7 @@
       const profile = pveGetProfile();
       const available = await pveGetAvailableNodes(instanceId);
       for (const nodeId of PVE_TARGET_NODES) {
+        if (!dsTabIsMain) break;   // FIX (c)
         const isAvailable = available.has(nodeId);
         pveLogNodeLockTransition(nodeId, isAvailable);
         pveNodeStats[nodeId] = { ...(pveNodeStats[nodeId] || {}), locked: !isAvailable, scanning: false };
@@ -3764,7 +3841,7 @@
         pveNodeStats[nodeId] = { ...(pveNodeStats[nodeId] || {}), scanning: true };
         refreshUI();
         try {
-          await pveScanNode(instanceId, nodeId, locationId, profile, { fight: true });
+          await pveScanNode(instanceId, nodeId, locationId, pveGetProfile(), { fight: true });   // FIX: fresh profile per node, not the tick-start snapshot
         } catch (e) {
           pveWarn(`Node ${nodeId}: scan threw — ${e.message}`);
         } finally {
@@ -3867,6 +3944,7 @@
 
   async function tick() {
     try {
+      if (dsTabIsMain) dsArmScheduleWakeups();   // FIX (b): picks up edited PvE schedules / mode switches
       const instanceId = await getActiveCubeInstanceId();
       if (instanceId && instanceId !== currentInstanceId) {
         const s = pvpLoadFastRunState();
@@ -4185,6 +4263,16 @@
     }
   }
 
+  // FIX: keep a saved / dragged position on screen after load and after the window shrinks
+  let dsResizeBound = false;
+  function dsClampPanel(p = uiBox) {
+    if (!p || !p.style.left || innerWidth < 520) return;   // default (right-anchored) and mobile layouts are CSS-placed
+    const l = Math.max(4, Math.min(parseFloat(p.style.left) || 0, innerWidth  - p.offsetWidth  - 4)) + 'px';
+    const t = Math.max(4, Math.min(parseFloat(p.style.top)  || 0, innerHeight - p.offsetHeight - 4)) + 'px';
+    if (l !== p.style.left) p.style.left = l;
+    if (t !== p.style.top)  p.style.top  = t;
+  }
+
   function mountUI() {
     if (document.getElementById('ds-panel')) return;
     injectStyles();
@@ -4198,6 +4286,8 @@
     uiBox = panel;
     wireUI(panel);
     refreshUI();
+    dsClampPanel(panel);
+    if (!dsResizeBound) { dsResizeBound = true; addEventListener('resize', () => dsClampPanel()); }
     renderLog();
     addLog('sys', 'info', 'Dungeon Suite ready.');
   }
@@ -5219,6 +5309,7 @@
         if (r.attacking)     return `<span class="ds-pill ds-pill-joined">${label} · attacking</span>`;
         if (r.scanning)      return `<span class="ds-pill ds-pill-mon">${label} · scanning</span>`;
         if (r.allClear)      return `<span class="ds-pill ds-pill-cleared">${label} · clear</span>`;
+        if (r.schedWait)     return `<span class="ds-pill ds-pill-mon">${label} · waits ${r.schedWait}</span>`;   // FIX (d)
         if (r.noActionable)  return `<span class="ds-pill ds-pill-mon">${label} · capped</span>`;
         return `<span class="ds-pill ds-pill-avail">${label} · active</span>`;
       }).join('');
@@ -5246,7 +5337,8 @@
 
     const pveNodePanelsEl = uiBox.querySelector('#ds-pve-nodepanels');
     if (pveNodePanelsEl && !pveNodePanelsEl.contains(document.activeElement)) {
-      pveNodePanelsEl.innerHTML = pveRenderNodePanelsHTML(pveProfile);
+      const html = pveRenderNodePanelsHTML(pveProfile);   // FIX: don't rebuild identical DOM on every refresh
+      if (pveNodePanelsEl.__html !== html) pveNodePanelsEl.innerHTML = pveNodePanelsEl.__html = html;
     }
 
     uiBox.querySelector('#ds-pve-stam-potion').checked = pveProfile.useStaminaPotion;
@@ -5271,6 +5363,7 @@
     }
 
     uiBox.querySelectorAll('.ds-chip').forEach(btn => btn.classList.toggle('active', btn.dataset.filter === activeLogFilter));
+    dsClampPanel();   // FIX: the panel grows with its content (tabs, node lists) - keep it on screen
   }
 
   function renderLog() {
