@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Core (addon loader)
 // @namespace    https://example.local/
-// @version      4.0.0
+// @version      4.0.1
 // @description  Tiny bootstrap: loads Core from GitHub and keeps it up to date by itself, like the addons.
 // @match        https://demonicscans.org/*
 // @run-at       document-start
@@ -32,18 +32,32 @@
   const K = 'coreboot:code', K_GOOD = 'coreboot:good', K_BAD = 'coreboot:bad';
   const warn = (...a) => console.warn('[Core boot]', ...a);
 
-  async function pinned(url) {
+  // Turns a ".../main/..." raw.githubusercontent.com URL into the newest commit's immutable URL, so GitHub's CDN
+  // (cache-control: max-age=300; a ?query does NOT bypass it) cannot answer with an old copy. It costs one GitHub API
+  // call (60 per hour per IP when not logged in), so only a manual "Check for updates" asks for it (fresh = true);
+  // automatic checks keep the plain branch URL (at most ~5 minutes old). If the lookup fails, the plain URL is used and
+  // window.__coreShaError says why, so the update check can report it instead of claiming "up to date".
+  let shaJob = null, shaAt = 0;
+  function latestSha() {
+    if (shaJob && Date.now() - shaAt < 10000) return shaJob;   // one lookup is shared by everything in the same check
+    shaAt = Date.now();
+    const job = root.fetch('https://api.github.com/repos/WerewuIf/UI-Core/commits/main', { headers: { Accept: 'application/vnd.github.sha' }, cache: 'no-cache' })
+      .then(async (r) => {
+        if (!r.ok) throw new Error(r.status === 403 || r.status === 429 ? 'GitHub is rate-limiting update lookups (60 per hour per IP)' : 'GitHub API HTTP ' + r.status);
+        const sha = (await r.text()).trim();
+        if (!/^[0-9a-f]{40}$/.test(sha)) throw new Error('unexpected reply from the GitHub API');
+        return sha;
+      });
+    job.catch(() => { if (shaJob === job) shaJob = null; });   // a failed lookup is never reused
+    return (shaJob = job);
+  }
+  async function pinned(url, fresh) {
+    if (!fresh) return url;
     try {
-      let c; try { c = JSON.parse(localStorage.getItem('core:sha')); } catch (_) {}
-      let sha = c && Date.now() - c.ts < 60000 ? c.sha : null;
-      if (!sha) {
-        const r = await root.fetch('https://api.github.com/repos/WerewuIf/UI-Core/commits/main', { headers: { Accept: 'application/vnd.github.sha' } });
-        if (!r.ok) throw new Error('HTTP ' + r.status);
-        sha = (await r.text()).trim();
-        try { localStorage.setItem('core:sha', JSON.stringify({ sha, ts: Date.now() })); } catch (_) {}
-      }
+      const sha = await latestSha();
+      root.__coreShaError = null;
       return url.replace(/(raw\.githubusercontent\.com\/WerewuIf\/UI-Core\/)(?:refs\/heads\/)?main\//, '$1' + sha + '/');
-    } catch (_) { return url; }
+    } catch (err) { root.__coreShaError = String((err && err.message) || err); return url; }
   }
 
   const ls = {
@@ -51,10 +65,10 @@
     set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); return true; } catch (_) { return false; } },
   };
 
-  async function fetchText(url) {
+  async function fetchText(url, fresh) {
     const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), 8000);
     try {
-      const res = await root.fetch(await pinned(url), { cache: 'no-cache', signal: ctl.signal });
+      const res = await root.fetch(await pinned(url, fresh), { cache: 'no-cache', signal: ctl.signal });
       if (!res.ok) throw new Error('HTTP ' + res.status);
       return await res.text();
     } finally { clearTimeout(timer); }
@@ -84,8 +98,8 @@
   let toasted = false;
 
   // Fetch the newest core.js; keep it for the NEXT load. Never touches what is running.
-  async function check() {
-    const text = await fetchText(CORE_URL);
+  async function check(fresh) {
+    const text = await fetchText(CORE_URL, fresh);
     if (!parses(text)) { warn('the new core.js does not parse; keeping the old one'); return { changed: false, rejected: true }; }
     const bad = ls.get(K_BAD);
     if (bad && bad.code === text) return { changed: false, rejected: true };   // already known to crash on start
@@ -118,7 +132,7 @@
     }, 4000);
   }
 
-  root.__coreBoot = { version: '4.0.0', url: CORE_URL, check, pending, readyVersion };
+  root.__coreBoot = { version: '4.0.1', url: CORE_URL, check, pending, readyVersion };
 
   const saved = ls.get(K);
   if (saved && saved.code) {
