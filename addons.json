@@ -8,7 +8,7 @@
     { "id": "ui-cleanup",         "name": "UI Cleanup",      "version": "2.4.2",  "url": "addons/ui-cleanup.js" },
     { "id": "battle-restructure", "name": "Battle Page",     "version": "15.18",  "url": "addons/battle.js",
       "match": "^/battle\\.php", "early": true },
-    { "id": "cube-suite",         "name": "Cube Suite",      "version": "3.1.0",  "url": "addons/cube-suite.js",
+    { "id": "cube-suite",         "name": "Cube Suite",      "version": "3.2.2",  "url": "addons/cube-suite.js",
       "match": "^/guild_dungeon_cube\\.php\\?.*instance_id=" }
   ]
 }
