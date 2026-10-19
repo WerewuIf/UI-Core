@@ -19,6 +19,7 @@
  *   Core.pages.{inventory,pets,crystals,stats,pvp,quests,battlePass,dungeons,define}
  *   Core.cookies.withMode · Core.player.id() · Core.state · Core.store · Core.on/once/emit
  *   Core.dom.{watch,when,ready} · Core.ui.{toast,modal,menu,h,btn,css}
+ *   Core.potions.{stamina,hp,use,find}  (one shared, coordinated potion user: sidebar first, inventory as fallback)
  *   Core.me.get() (stamina, gold, gems, level, exp, server clock) · Core.clock (server time zone: weekday, is('mon'), isAfter('14:30'), at(...))
  *   Core.compact(n) -> "3.3B" · Core.parseNum("3.3B") -> 3300000000
  * Full reference with examples: REFERENCE.md in the repo.
@@ -29,7 +30,7 @@
   // >>> Raw URL of addons.json
   const CONFIG = { manifest: 'https://raw.githubusercontent.com/WerewuIf/UI-Core/main/addons.json' };
 
-  const API = 2;
+  const API = 3;   // 3: Core.potions
   if (root.Core && root.Core.__isCore) {
     if (root.Core.apiLevel < API) console.warn('[Core] an older core (api ' + root.Core.apiLevel + ') is already loaded; this script wants ' + API + '.');
     return;
@@ -263,6 +264,7 @@
     // "when a POST hits `when`, forget cached pages matching `drop`"
     function invalidateOn(when, drop, bodyMatch) { rules.push({ when, body: bodyMatch || null, drop: [].concat(drop) }); }
     invalidateOn(/\/inventory_ajax\.php/, [/\/inventory\.php/, /\/pets\.php/]);
+    invalidateOn(/\/use_item\.php|\/user_heal_potion\.php/, /\/inventory\.php/);
     invalidateOn(/\/power_crystals\.php/, /\/power_crystals\.php/);
     invalidateOn(/\/pet_link_action\.php|\/pet_sigil_action\.php/, /\/pets\.php/);
     invalidateOn(/\/adventurers_(accept|finish|giveup|donate)/, /\/adventurers_guild\.php/);
@@ -673,8 +675,8 @@
         placeDock();
       },
       setRank(fn) { rankFn = typeof fn === 'function' ? fn : null; dock.refresh(); },
-      // The buttons now in the row, in on-screen order, LEFT to RIGHT: [{ id, icon, title }]
-      items() { return dockSorted().reverse().map((i) => ({ id: i.id, icon: i.icon, title: i.title })); },
+      // The buttons now in the row, in on-screen order, LEFT to RIGHT: [{ id, icon, title, el }]
+      items() { return dockSorted().reverse().map((i) => ({ id: i.id, icon: i.icon, title: i.title, el: i.el })); },
     };
 
     return { css, h, btn, toast, modal, menu, hoverMenu, dock };
@@ -886,9 +888,12 @@
 
   const updatedToast = (e) => ready.then(() => ui.toast('"' + (e.name || e.id) + '" updated \u2014 click here to reload', true, 12000, () => root.location.reload()));
   // Fetch the newest code in the background. It is saved for the NEXT load; the page keeps running what it has.
-  const inflight = new Set();
+  // FIX: a second ask for the same addon used to be DROPPED while the first was still downloading. That lost the one that
+  // mattered: the load starts a plain check using the OLD saved manifest entry, then the new manifest arrives (version bumped)
+  // and asks again, but that ask was thrown away, so the update only turned up one or two reloads later. It now waits its turn.
+  const inflight = new Set(), queued = new Map();
   function refreshInBackground(e, rec) {
-    if (inflight.has(e.id)) return Promise.resolve();
+    if (inflight.has(e.id)) { queued.set(e.id, e); return Promise.resolve(); }
     inflight.add(e.id);
     const s = rstat(e.id);
     return fetchCode(e).then(async (t) => {
@@ -903,7 +908,11 @@
       const saved = writeCode(e, t, ver);
       if (differs && saved) { s.update = true; updatedToast(e); }
       else if (differs) ready.then(() => ui.toast('"' + (e.name || e.id) + '" has an update, but this site\u2019s browser storage is full, so it could not be saved', false, 12000));
-    }).catch((err) => { warn('background update of "' + e.id + '" failed:', (err && err.message) || err); }).finally(() => inflight.delete(e.id));
+    }).catch((err) => { warn('background update of "' + e.id + '" failed:', (err && err.message) || err); }).finally(() => {
+      inflight.delete(e.id);
+      const q = queued.get(e.id);
+      if (q) { queued.delete(e.id); refreshInBackground(q, readAnyCode(q)); }   // runs with the copy the first one just saved
+    });
   }
   async function prepare(e) {
     const s = rstat(e.id);
@@ -956,7 +965,10 @@
     if (cached) {
       manifestEntries = resolve(cached);
       refresh.then((j) => {
-        if (JSON.stringify(j.addons) !== JSON.stringify(cached.addons)) ready.then(() => ui.toast('Addon list changed \u2014 reload to apply'));
+        // FIX: only a real change to the list (added / removed / renamed / moved / re-matched) says "reload to apply". A version bump
+        // alone used to trigger it too, which sent people to reload before anything had been downloaded.
+        const shape = (a) => JSON.stringify((a || []).map((x) => { const c = Object.assign({}, x); delete c.version; return c; }));
+        if (shape(j.addons) !== shape(cached.addons)) ready.then(() => ui.toast('Addon list changed \u2014 reload to apply'));
         // A newer addon version in the manifest is fetched right now (no waiting for the 10-minute check).
         const off = new Set(cfg.get().off);
         resolve(j).forEach((e) => {
@@ -1079,7 +1091,24 @@
     // not arranged yet: addons that have a button follow the buttons' current on-screen order, then the rest as listed
     const withBtn = ui.dock.items().map((b) => byId.get(b.id)).filter((e) => e && !seen.has(e.id));
     withBtn.forEach((e) => seen.add(e.id));
-    return out.concat(withBtn, es.filter((e) => !seen.has(e.id)));
+    const all = out.concat(withBtn, es.filter((e) => !seen.has(e.id)));
+    // FIX: an addon that is running with NO button has no place in the dock to arrange, so it is listed after every addon that
+    // has one (new or old, arranged or not). Only addons confirmed running without a button move: one that is off, still loading,
+    // or skipped on this page keeps its place.
+    const hasBtn = new Set(ui.dock.items().map((b) => b.id));
+    const bg = (e) => rstat(e.id).state === 'ok' && !hasBtn.has(e.id);
+    return all.filter((e) => !bg(e)).concat(all.filter(bg));
+  }
+  // How a dock button REALLY looks right now, as copies of what is inside it. Most are just an emoji, but some put something live in
+  // their button (the Stat Builder shows its unspent-points badge), which used to be listed as the placeholder "\u2022". Ids are
+  // stripped from the copies so the page never gets a duplicate id.
+  function dockIcon(b) {
+    const kids = [...b.el.childNodes].map((n) => {
+      const c = n.cloneNode(true);
+      if (c.nodeType === 1) [c, ...c.querySelectorAll('[id]')].forEach((x) => x.removeAttribute('id'));
+      return c;
+    });
+    return kids.length ? kids : [b.icon];
   }
   function saveOrder(ids) { cfg.update((c) => { c.order = ids; c.orderV = 2; }); float.refresh('addons'); }
   function nudgeAddon(id, d) {
@@ -1189,7 +1218,7 @@
       const btn = buttons.get(e.id);
       // The icon of this addon's button, so each row says which button it is. No icon = it works in the background.
       const ico = btn
-        ? h('div', { class: 'core-addon-ico', title: 'Button: ' + btn.title }, btn.icon)
+        ? h('div', { class: 'core-addon-ico', title: 'Button: ' + btn.title }, dockIcon(btn))
         : h('div', { class: 'core-addon-ico none', title: s.state === 'ok' ? 'No button: this addon works in the background' : 'No button to show (' + s.state + ')' }, '—');
       const noBtn = !btn && s.state === 'ok' ? ' · no button' : '';
       const grip = h('div', { class: 'core-grip', tabindex: '0', role: 'button', title: 'Drag to rearrange', 'aria-label': 'Rearrange ' + (e.name || e.id) + ': drag, or press Up / Down', 'data-grip': e.id },
@@ -1204,6 +1233,10 @@
           s.from ? h('span', { class: 'core-dim' }, s.from + (s.bytes ? ' · ' + Math.round(s.bytes / 1024) + ' KB' : '')) : null),
         e.source === 'custom' ? ui.btn('🗑', 'danger', () => removeCustom(e.id)) : null,
         grip);
+      if (!btn) {   // nothing to arrange: keep the row's layout, drop the handle
+        grip.style.visibility = 'hidden'; grip.removeAttribute('tabindex'); grip.removeAttribute('role'); grip.setAttribute('aria-hidden', 'true');
+        return row;
+      }
       grip.addEventListener('pointerdown', (ev) => {
         if (ev.pointerType === 'mouse' && ev.button !== 0) return;
         ev.preventDefault();
@@ -1221,7 +1254,7 @@
     // What the dock really looks like right now, left to right, so the arrangement above can be checked at a glance.
     const shown = ui.dock.items();
     const orderHint = h('div', { class: 'core-order' },
-      shown.length ? h('div', { class: 'core-order-btns', title: 'Your buttons, left to right' }, shown.map((b) => h('span', { class: 'core-order-chip', title: b.title }, b.icon))) : null,
+      shown.length ? h('div', { class: 'core-order-btns', title: 'Your buttons, left to right' }, shown.map((b) => h('span', { class: 'core-order-chip', title: b.title }, dockIcon(b)))) : null,
       h('div', { class: 'core-dim' }, 'Drag the bars on the right of a row to rearrange. The top of the list is the left-most button; \u2699\ufe0f stays at the far left.'));
     const url = h('input', { class: 'core-input', placeholder: 'Addon URL (.js)', title: 'e.g. https://raw.githubusercontent.com/you/repo/main/addons/x.js', style: { flex: '1 1 240px', minWidth: '120px' } });
     el.replaceChildren(
@@ -1845,13 +1878,126 @@
     return { join, takeOver, leave, onRole, role: (n) => (joined[n] ? joined[n].role : null), isMain: (n) => !!joined[n] && joined[n].role === 'main' };
   })();
 
+  /* ----------------------------------------------------------- potions --- */
+  // ONE place that uses potions, so several addons / tabs / scripts that all notice "0 stamina" at the same moment burn ONE potion
+  // between them instead of one each.
+  //   Core.potions.stamina(opts?)   use a Large Stamina Potion (opts.item = another potion's name)
+  //   Core.potions.hp(opts?)        use a Full HP Potion (the site's heal request; nothing to look up)
+  //   Core.potions.use(name, opts?) any consumable by its name
+  //   Core.potions.find(name, { fresh })  -> { invId, source: 'sidebar'|'memory'|'inventory' } | null (no potion is used)
+  // All of the use calls resolve (never throw) to { ok, used, shared, source?, reason?, message? }:
+  //   used:true            this call consumed a potion
+  //   shared:true, used:false   somebody else's potion already covers this need (see below), nothing was consumed, ok is true
+  //   ok:false             nothing was used; reason: 'none-available' | 'failed' | 'no-player'
+  // Where the potion comes from: the live page's Battle Consumables sidebar (.potion-card[data-inv-id]) first, then the id remembered
+  // from last time, then inventory.php. A stale id that fails is dropped and inventory.php is tried once.
+  // Coordination, per kind of potion (stamina / hp / the item name):
+  //   - callers that arrive while one is being used simply wait for it and share its result;
+  //   - across tabs a Web Lock serialises the check-then-use, and the time of the last use is kept in localStorage;
+  //   - a use that finished at or after opts.since (when YOU saw the need, ms since epoch) already covers you. Without `since`
+  //     the last opts.settleMs (default 3000) count, which is enough for a loop that reacts a moment after another one did.
+  //   - opts.force = true skips the sharing and always consumes one.
+  const potions = (() => {
+    const norm = (v) => String(v == null ? '' : v).replace(/\s+/g, ' ').trim().toLowerCase();
+    const STAMINA = 'Large Stamina Potion';
+    const memo = new Map();                 // normalised name -> inventory id
+    const flight = new Map();               // kind -> Promise of the use in progress
+    const lastKey = (kind) => 'core:potion:' + player.id() + ':' + kind;
+    const readLast = (kind) => { try { return JSON.parse(localStorage.getItem(lastKey(kind)) || 'null'); } catch (_) { return null; } };
+    const writeLast = (kind) => { try { localStorage.setItem(lastKey(kind), JSON.stringify({ ts: Date.now() })); } catch (_) { /* not shared then; the in-tab sharing still works */ } };
+    const locked = (name, fn) => (navigator.locks && navigator.locks.request ? navigator.locks.request(name, fn) : fn());
+
+    const fromSidebar = (name) => {
+      const t = norm(name);
+      for (const c of document.querySelectorAll('.potion-card[data-inv-id]')) {
+        const img = c.querySelector('img');
+        if (norm(img && img.alt) === t) return c.getAttribute('data-inv-id');
+      }
+      return null;
+    };
+    // A request that hangs must not hold the cross-tab lock (and so every other tab's potions) for ever.
+    const soon = (p, ms, dflt) => Promise.race([p, new Promise((res) => setTimeout(() => res(dflt), ms))]);
+    const TIMEOUT = 15000;
+    const post = (url, params) => soon(net.post(url, params), TIMEOUT, { ok: false, status: 0, text: '', json: null });
+    async function fromInventory(name) {
+      const t = norm(name), doc = await soon(net.fetchDoc('/inventory.php', { force: true }), TIMEOUT, null).catch(() => null);
+      if (!doc) return null;
+      for (const slot of doc.querySelectorAll('.slot-box')) {
+        const img = slot.querySelector('img');
+        if (norm(img && img.alt) !== t) continue;
+        const b = [...slot.querySelectorAll('button')].find((x) => /useItem\(/i.test(x.getAttribute('onclick') || ''));
+        const m = b && /useItem\(\s*([0-9]+)/i.exec(b.getAttribute('onclick') || '');
+        if (m) return m[1];
+      }
+      for (const c of doc.querySelectorAll('.potion-card[data-inv-id]')) {
+        const img = c.querySelector('img');
+        if (norm(img && img.alt) === t) return c.getAttribute('data-inv-id');
+      }
+      return null;
+    }
+    async function find(name, o = {}) {
+      const t = norm(name);
+      if (!o.fresh) {
+        const s = fromSidebar(name); if (s) return { invId: s, source: 'sidebar' };
+        const m = memo.get(t); if (m) return { invId: m, source: 'memory' };
+      }
+      const i = await fromInventory(name);
+      if (i) { memo.set(t, i); return { invId: i, source: 'inventory' }; }
+      return null;
+    }
+
+    const failed = (r) => !r.ok || (r.json && /^(error|fail)/i.test(String(r.json.status || '').trim()));
+    async function consume(name) {
+      const t = norm(name), tried = new Set();
+      let seen = false;
+      for (let pass = 0; pass < 2; pass++) {              // pass 0: sidebar / memory, pass 1: straight from inventory.php
+        const f = await find(name, { fresh: pass === 1 });
+        if (!f || tried.has(f.invId)) break;
+        seen = true; tried.add(f.invId);
+        const r = await post('/use_item.php', { inv_id: f.invId });
+        if (!failed(r)) return { ok: true, used: true, shared: false, source: f.source, invId: f.invId };
+        memo.delete(t);
+      }
+      return { ok: false, used: false, shared: false, reason: seen ? 'failed' : 'none-available' };
+    }
+    async function heal() {
+      const pid = player.id();
+      if (!pid || pid === 'default') return { ok: false, used: false, shared: false, reason: 'no-player' };
+      const r = await post('/user_heal_potion.php', { user_id: pid });
+      const ok = r.ok && !!r.json && String(r.json.status || '').trim() === 'success';
+      return { ok, used: ok, shared: false, reason: ok ? undefined : 'failed', message: r.json && r.json.message };
+    }
+
+    function coordinate(kind, o, act) {
+      const since = o.since != null ? o.since : Date.now() - (o.settleMs != null ? o.settleMs : 3000);
+      if (!o.force && flight.has(kind)) return flight.get(kind).then((r) => (r.ok ? Object.assign({}, r, { used: false, shared: true }) : r));
+      const p = locked('core-potion:' + kind, async () => {
+        const last = readLast(kind);
+        if (!o.force && last && last.ts >= since) return { ok: true, used: false, shared: true, reason: 'covered' };
+        const r = await act();
+        if (r.ok) writeLast(kind);
+        return r;
+      }).catch((err) => ({ ok: false, used: false, shared: false, reason: 'failed', message: String((err && err.message) || err) }))
+        .finally(() => { if (flight.get(kind) === p) flight.delete(kind); });
+      flight.set(kind, p);
+      return p;
+    }
+
+    return {
+      find,
+      use: (name, o = {}) => coordinate('item:' + norm(name), o, () => consume(name)),
+      stamina: (o = {}) => { const n = o.item || STAMINA; return coordinate(o.item ? 'item:' + norm(n) : 'stamina', o, () => consume(n)); },
+      hp: (o = {}) => coordinate('hp', o, heal),
+    };
+  })();
+
   /* ------------------------------------------------------------ export --- */
   const Core = {
-    __isCore: true, apiLevel: API, version: '3.12.5', debug: false, tabId: TAB,
+    __isCore: true, apiLevel: API, version: '3.13.0', debug: false, tabId: TAB,
     esc, sleep, debounce, fmt, int, compact, parseNum, parseJson,
     on, off, once, emit,
     state, store, player,
-    net, pages, dom, cookies, ui, me, clock, csrf, lock, keepAlive, tab,
+    net, pages, dom, cookies, ui, me, clock, csrf, lock, keepAlive, tab, potions,
     module: module_, use, get, status,
     float, addons: { list: entries, add: addCustom, remove: removeCustom, enable: setEnabled, status: rt, reload: startOne },
   };
