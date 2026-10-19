@@ -3,6 +3,8 @@
  * Runs early (document-start) — addons.json sets "early": true. The only page it reads about you is /stats.php (via the Core.net cache).
  */
 
+//               v15.17b: MOONVEIL ON A LINK IS NOW COUNTED (checked on a real stats.php: Yuelun, Link 1, 8.75%). It was main-pet-only, so a Moonveil
+//                 link gave moonveilPct 0 and the pet-term warning ignored the transfer. Main-pet Moonveil is unchanged.
 //               v15.17: WYVERN / REINDEER AMPLIFIERS: the game's own "<Element>-power multiplier: x1.205" line on stats.php is read (it already
 //                 includes link shares); the hand-set ELEMENT_BONUS constant is gone. If an amplifier belongs to an element that is NOT your
 //                 top one (the game only applies it to the selected element), the element tooltip now says so ("VOID +20.5% bonus idle: ...").
@@ -2337,6 +2339,10 @@
         const lname = lv ? lv[2] : 'linked pet';
         const text = Array.from(l.querySelectorAll('.passive-text')).map(p => p.textContent || '').join('\n'), lower = text.toLowerCase();
         addBonus(parseElementPassives(text), lname, 'link ' + (lv ? lv[1] : '?'));
+        // v15.17b: Moonveil can sit on a LINK ("Moonveil Usurpation (PvE link): ... transfer 8.75% of the target's Pet DEF"); the shown
+        // value is already scaled by the link share, like every other link passive on this page. v15.16 only looked at main pets.
+        const mvl = /transfer\s+(\d[\d.]*)\s*%\s+of\s+the\s+target.?s\s+pet\s+def/i.exec(text);
+        if (mvl) out.moonveilPct += parseFloat(mvl[1]) / 100;
         const pp = parsePenetrationFromText(text);
         const cond = /attack\s*(?:exceeds|is\s*higher)/.test(lower) ? 'atkDom' : /defense\s*(?:exceeds|is\s*higher)/.test(lower) ? 'defDom' : null;
         if (pp.eqPen) out.pens.push({ kind: 'eq', val: pp.eqPen, factor: 1, cond, pet: lname });
