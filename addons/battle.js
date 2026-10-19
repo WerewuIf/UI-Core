@@ -3,6 +3,9 @@
  * Runs early (document-start) — addons.json sets "early": true. The only page it reads about you is /stats.php (via the Core.net cache).
  */
 
+//               v15.18: THE ELEMENT TOOLTIP SAYS WHICH ELEMENT IS BEST AGAIN (v15.14 only suggested alternatives when you were at a disadvantage).
+//                 New line: "Best of yours: FIRE (in use) ✓", or "Better: NATURE +12 (now +5), but it must pass FIRE 25%; you have 15%" (the game
+//                 only uses your highest-rate element), plus "Counters x2: FROST 0% · THUNDER 0%" when you don't already counter the monster.
 //               v15.17b: MOONVEIL ON A LINK IS NOW COUNTED (checked on a real stats.php: Yuelun, Link 1, 8.75%). It was main-pet-only, so a Moonveil
 //                 link gave moonveilPct 0 and the pet-term warning ignored the transfer. Main-pet Moonveil is unchanged.
 //               v15.17: WYVERN / REINDEER AMPLIFIERS: the game's own "<Element>-power multiplier: x1.205" line on stats.php is read (it already
@@ -2780,14 +2783,14 @@
     const theirs = `${m.element} ${elemPct(mu.mEff)}${mu.mStrong ? ' \u00D72' : ''}`;
     const lines = [`${mine} \u2212 ${theirs} = ${elemSigned(mu.adv)}`];
 
+    const counters = ELEMENT_TIE_ORDER.filter(e => elemBeats(e, m.element));
     if (mu.disadvantaged) {
       lines.push('All damage \u221233%.');
       const need = (e) => {
         const n = minRateToPass(e, m.element, m.rate, gearPet.bonus);
         return `${e} ${n <= ELEMENT_WEAK_MAX ? 'any' : '\u2265' + elemPct(n)}`;
       };
-      const opts = ELEMENT_TIE_ORDER.filter(e => elemBeats(e, m.element)).concat([m.element]);
-      lines.push('Need (top element): ' + opts.map(need).join(' \u00B7 '));
+      lines.push('Need (top element): ' + counters.concat([m.element]).map(need).join(' \u00B7 '));
     } else if (mu.adv > 0) {
       lines.push(`\u2248 +${elemCompact(elemDmgPerStamina(mu))} elemental dmg per stamina${mu.weak ? ' (\u22645% strength: no penalty)' : ''}`);
     } else if (mu.weak) {
@@ -2795,6 +2798,19 @@
     } else {
       lines.push('No elemental bonus.');
     }
+    // v15.18: WHICH ELEMENT IS BEST. Every element you have (rate > 0), scored as if it were your top one against this monster.
+    // The game only ever uses your highest-rate element, so a better one has to pass it first ("needs > top%").
+    const owned = Object.keys(rates).filter(e => rates[e] > 0);
+    let best = null;
+    owned.forEach((e) => {
+      const x = computeElementMatchup(e, rates[e], m.element, m.rate, gearPet.bonus);
+      if (x && (!best || x.adv > best.adv + 1e-9 || (Math.abs(x.adv - best.adv) < 1e-9 && ELEMENT_TIE_ORDER.indexOf(e) < ELEMENT_TIE_ORDER.indexOf(best.e)))) best = { e, adv: x.adv };
+    });
+    if (best && own) {
+      if (best.e === own.element || best.adv <= mu.adv + 1e-9) lines.push(`Best of yours: ${own.element} (in use) \u2713`);
+      else lines.push(`Better: ${best.e} ${elemSigned(best.adv)} (now ${elemSigned(mu.adv)}), but it must pass ${own.element} ${elemPct(own.rate)}; you have ${elemPct(rates[best.e])}`);
+    }
+    if (!mu.pStrong && !mu.disadvantaged && counters.length) lines.push('Counters \u00D72: ' + counters.map(e => `${e} ${elemPct(rates[e] || 0)}`).join(' \u00B7 '));
     // An amplifier only counts for the element the game actually selects (your strongest one): say so when one sits idle.
     const idle = own && Object.keys(gearPet.bonus.rate || {}).filter(e => e !== own.element && gearPet.bonus.rate[e] > 0 && rates[e] > 0)[0];
     if (idle) lines.push(`${idle} +${elemPct(gearPet.bonus.rate[idle] * 100)} bonus idle: ${idle} ${elemPct(rates[idle])} is below your top ${own.element} ${elemPct(own.rate)}.`);
