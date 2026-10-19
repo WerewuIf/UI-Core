@@ -16,6 +16,8 @@
  * v3.2.1 audit pass (PvE bootstrap/cap/tab/potion fixes, SA assign+retreat failure detection, PvP turn retry,
  * stale guild-check overlay, panel on-screen clamp) is marked  // FIX:  with (a)-(d) tags.
  * v3.2.2: looksLikeBlankErrorPage removed (HTTP status only), Fast Run scan every 1 s, potion inv id read from the sidebar drawer.
+ * v3.3.0: stamina / HP potions go through Core.potions (shared by every script and tab: sidebar first, inventory fallback,
+ * one potion per need). The old local code stays as the fallback when the running Core is older.
  * ========================================================================== */
 (async function () {
   'use strict';
@@ -3305,6 +3307,15 @@
   }
 
   async function pveUseLargeStaminaPotion() {
+    // v3.3.0: Core.potions is the one shared potion user (sidebar first, inventory as fallback, one potion per need across every
+    // script and tab). The code below it is only the fallback for a Core that has not updated yet (Core.apiLevel < 3).
+    if (Core.potions) {
+      const r = await Core.potions.stamina();
+      if (!r.ok) { pveWarn(r.reason === 'none-available' ? 'No Large Stamina Potion available' : 'Large Stamina Potion request failed - not counting it as used'); return false; }
+      if (r.used) { await sleep(100); pveInfo('Used a Large Stamina Potion' + (r.source ? ` (from ${r.source})` : '')); }
+      else pveInfo('A stamina potion was just used by another script/tab - sharing it');
+      return true;
+    }
     const invId = await pveFindPotionInvId('Large Stamina Potion');
     if (!invId) { pveWarn('No Large Stamina Potion available'); return false; }
     const used = await fetchText(PVE_USE_ITEM_URL, {
@@ -3319,6 +3330,13 @@
   }
 
   async function pveUseFullHpPotion() {
+    if (Core.potions) {   // v3.3.0: see pveUseLargeStaminaPotion
+      const r = await Core.potions.hp();
+      if (!r.ok) { pveWarn(r.reason === 'no-player' ? 'Could not resolve player id for heal potion' : `Heal potion failed — ${r.message || 'no response'}`); return false; }
+      if (r.used) { pveInfo(r.message || 'Used a Full HP Potion'); await sleep(100); }
+      else pveInfo('A heal potion was just used by another script/tab - sharing it');
+      return true;
+    }
     const { id: playerId } = await getPlayerInfo();
     if (!playerId) { pveWarn('Could not resolve player id for heal potion'); return false; }
     const { ok, data } = await fetchJson(PVE_HEAL_URL, {
