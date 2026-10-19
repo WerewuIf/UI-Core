@@ -1,14 +1,14 @@
 {
   "addons": [
-    { "id": "crystal-presets",    "name": "Crystal Presets", "version": "1.6.1",  "url": "addons/crystal-presets.js" },
-    { "id": "gear-presets",       "name": "Gear Presets",    "version": "3.3.1",  "url": "addons/gear-presets.js" },
-    { "id": "pet-presets",        "name": "Pet Presets",     "version": "2.9.1",  "url": "addons/pet-presets.js" },
-    { "id": "account-switcher",  "name": "Account Switcher","version": "1.2.0",  "url": "addons/account-switcher.js" },
-    { "id": "stat-autobuilder",  "name": "Stat Auto-Builder","version": "18.9.5", "url": "addons/stat-autobuilder.js" },
-    { "id": "ui-cleanup",         "name": "UI Cleanup",      "version": "2.4.2",  "url": "addons/ui-cleanup.js" },
-    { "id": "battle-restructure", "name": "Battle Page",     "version": "15.18",  "url": "addons/battle.js",
+    { "id": "crystal-presets",    "name": "Crystal Presets", "version": "1.6.1",  "url": "addons/crystal-presets.js",  "button": true },
+    { "id": "gear-presets",       "name": "Gear Presets",    "version": "3.3.1",  "url": "addons/gear-presets.js",     "button": true },
+    { "id": "pet-presets",        "name": "Pet Presets",     "version": "2.9.1",  "url": "addons/pet-presets.js",      "button": true },
+    { "id": "account-switcher",  "name": "Account Switcher","version": "1.2.0",  "url": "addons/account-switcher.js", "button": true },
+    { "id": "stat-autobuilder",  "name": "Stat Auto-Builder","version": "18.9.5", "url": "addons/stat-autobuilder.js", "button": true },
+    { "id": "ui-cleanup",         "name": "UI Cleanup",      "version": "2.4.2",  "url": "addons/ui-cleanup.js",       "button": false },
+    { "id": "battle-restructure", "name": "Battle Page",     "version": "15.19",  "url": "addons/battle.js",           "button": false,
       "match": "^/battle\\.php", "early": true },
-    { "id": "cube-suite",         "name": "Cube Suite",      "version": "3.3.0",  "url": "addons/cube-suite.js",
+    { "id": "cube-suite",         "name": "Cube Suite",      "version": "3.4.0",  "url": "addons/cube-suite.js",       "button": false,
       "match": "^/guild_dungeon_cube\\.php\\?.*instance_id=" }
   ]
 }
