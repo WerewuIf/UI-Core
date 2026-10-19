@@ -4233,11 +4233,28 @@
   // 'alive' = alive-only view, 'dead' = dead-only view, 'all' = both shown.
   // Every refresh, cookie swap and cross-tab sync key below is scoped by this,
   // so an alive tab and a dead tab can never overwrite each other.
+  // The cookies are browser-wide and Core's boot-time recover() puts the user's OWN cookies back before this script runs, so after our
+  // hard refresh they no longer say which view the reloaded page was fetched with (an alive tab then read as 'all', and every soft refresh
+  // after that fetched the dead monsters too). hardRefresh() therefore leaves its mode here for the next load to take (one use, 30 s).
+  const MODE_HANDOFF_KEY = 'wloModeHandoff';
+  function takeModeHandoff() {
+    try {
+      const raw = sessionStorage.getItem(MODE_HANDOFF_KEY);
+      sessionStorage.removeItem(MODE_HANDOFF_KEY);
+      const h = JSON.parse(raw || 'null');
+      if (h && h.url === location.pathname + location.search && Date.now() - h.at < 30000 && ['alive', 'dead', 'all'].indexOf(h.mode) >= 0) return h.mode;
+    } catch (_) { /* no handoff */ }
+    return null;
+  }
   function detectPageMode() {
     const cards = Array.from(document.querySelectorAll('.monster-card'));
     const deadCount = cards.filter((c) => c.dataset.dead === '1').length;
+    const handed = takeModeHandoff();
     if (cards.length && deadCount === cards.length) return 'dead';
     if (deadCount > 0) return 'all';
+    // No dead card on the page: alive-only and show-everything look the same, so use the mode our own reload handed over
+    // ('dead' only fits an empty page: it cannot be right while alive cards are showing).
+    if (handed && (handed !== 'dead' || !cards.length)) return handed;
     const hide = (document.cookie.match(/(?:^|;\s*)hide_dead_monsters=([^;]*)/) || [])[1];
     const only = (document.cookie.match(/(?:^|;\s*)show_dead_bosses_only=([^;]*)/) || [])[1];
     if (!cards.length) {
@@ -5069,8 +5086,16 @@
 
   // Serializes just the cards container's markup (not the whole page) —
   // this is what gets broadcast to other tabs, so the payload stays small.
+  // Does the fetched page show the kind of monsters THIS tab is on? 'alive' = no dead card, 'dead' = only dead cards, 'all' accepts anything.
+  // The cookie swap can still lose a race with the site's own toggle in another tab; such a page is never applied.
+  function pageMatchesMode(doc) {
+    if (PAGE_MODE === 'all') return true;
+    const cards = Array.from(doc.querySelectorAll('.monster-card'));
+    return PAGE_MODE === 'alive' ? !cards.some((c) => c.dataset.dead === '1') : cards.every((c) => c.dataset.dead === '1');
+  }
   function extractCardsContainerHtml(html) {
     const doc = new DOMParser().parseFromString(html, 'text/html');
+    if (!pageMatchesMode(doc)) { const err = new Error('the server sent the wrong monster list for a ' + PAGE_MODE + ' tab'); err.wrongView = true; throw err; }
     const anchor = doc.querySelector('.monster-card') || doc.querySelector('.monster-section-title');
     if (anchor && anchor.parentElement) return anchor.parentElement.innerHTML;
     // A real wave page that simply has no cards right now (e.g. the last
@@ -5107,14 +5132,17 @@
     if (softRefreshInFlight) return;
     softRefreshInFlight = true;
     try {
-      const html = await fetchFreshHtml();
-      const containerHtml = extractCardsContainerHtml(html);
+      let containerHtml = null;
+      for (let attempt = 0; containerHtml === null; attempt++) {
+        try { containerHtml = extractCardsContainerHtml(await fetchFreshHtml()); }
+        catch (err) { if (!err.wrongView || attempt >= 1) throw err; console.warn('[wave-loot] ' + err.message + ' - fetching once more'); }
+      }
       applyContainerHtml(containerHtml);
       broadcastFreshData(containerHtml); // share it so other tabs skip their own fetch
       showWaveToast('Wave data refreshed.', 'success');
     } catch (err) {
       console.warn('[wave-loot] soft refresh failed', err);
-      showWaveToast('Refresh failed — try again.', 'error');
+      showWaveToast(err && err.wrongView ? 'Refresh skipped: got the wrong monster list (' + PAGE_MODE + ' tab).' : 'Refresh failed — try again.', 'error');
     } finally {
       softRefreshInFlight = false;
     }
@@ -5124,6 +5152,7 @@
     // Set THIS tab's mode cookies inside the cross-tab lock, then reload. The
     // request goes out with them; the backup stays in localStorage and the
     // next page load's recover() (shared helper) puts the cookies back.
+    try { sessionStorage.setItem(MODE_HANDOFF_KEY, JSON.stringify({ mode: PAGE_MODE, url: location.pathname + location.search, at: Date.now() })); } catch (_) { /* */ }
     Core.cookies.withMode(PAGE_MODE, () => {
       location.reload();
       return new Promise((resolve) => setTimeout(resolve, 10000)); // release if the reload never happens
