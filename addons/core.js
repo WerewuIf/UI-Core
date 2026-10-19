@@ -20,7 +20,7 @@
  *   Core.cookies.withMode · Core.player.id() · Core.state · Core.store · Core.on/once/emit
  *   Core.dom.{watch,when,ready} · Core.ui.{toast,modal,menu,h,btn,css}
  *   Core.potions.{stamina,hp,use,find}  (one shared, coordinated potion user: sidebar first, inventory as fallback)
- *   Core.me.get() (stamina, gold, gems, level, exp, server clock) · Core.clock (server time zone: weekday, is('mon'), isAfter('14:30'), at(...))
+ *   Core.me.get() (stamina, gold, gems, level, exp, server clock) · Core.me.apply / addExp / fromAttack / ingest / sync (feed it newer numbers) · Core.clock (server time zone: weekday, is('mon'), isAfter('14:30'), at(...))
  *   Core.compact(n) -> "3.3B" · Core.parseNum("3.3B") -> 3300000000
  * Full reference with examples: REFERENCE.md in the repo.
  * ========================================================================== */
@@ -30,7 +30,7 @@
   // >>> Raw URL of addons.json
   const CONFIG = { manifest: 'https://raw.githubusercontent.com/WerewuIf/UI-Core/main/addons.json' };
 
-  const API = 3;   // 3: Core.potions
+  const API = 3;   // 3: Core.potions, Core.me.apply / addExp / fromAttack / ingest / sync
   if (root.Core && root.Core.__isCore) {
     if (root.Core.apiLevel < API) console.warn('[Core] an older core (api ' + root.Core.apiLevel + ') is already loaded; this script wants ' + API + '.');
     return;
@@ -225,9 +225,13 @@
         .then((r) => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.text(); });
       const entry = { ts: Date.now(), href, p: o.via ? o.via(run) : run() };
       cache.set(key, entry);
-      entry.p.catch(() => { if (cache.get(key) === entry) cache.delete(key); });
+      entry.p.then((text) => { textHooks.forEach((fn) => { try { fn(href, text, entry.ts); } catch (e) { warn('onText hook threw', e); } }); }, () => { if (cache.get(key) === entry) cache.delete(key); });
       return entry.p;
     }
+    // Everything fetched for real over the network (never a cache hit) is shown to these listeners: fn(href, text, startedAtMs).
+    // Core.me uses it to learn the player's numbers from any page that was just fetched, so a fresh fetch beats a stale page.
+    const textHooks = [];
+    const onText = (fn) => { textHooks.push(fn); return () => { const i = textHooks.indexOf(fn); if (i >= 0) textHooks.splice(i, 1); }; };
     // A fresh Document per call (parsing is cheap, the network round trip isn't),
     // so one addon mutating its copy can't corrupt another's.
     const fetchDoc = (url, o) => fetchText(url, o).then((html) => new DOMParser().parseFromString(html, 'text/html'));
@@ -284,22 +288,35 @@
       });
     }
 
-    if (root.fetch && !root.__coreFetchHooked) {
+    // The ONE global Core touches: window.fetch, so it can see the SITE's own POSTs (to forget stale cached pages and to learn new
+    // stamina). It is a Proxy, so the function still looks and behaves like the browser's (name, length, toString, `this`), the
+    // request itself is passed through untouched (same headers, referrer, credentials, mode) and the page gets the very same promise back.
+    // Nothing is looked at unless the request is to THIS site AND matches a watch() / invalidateOn() pattern: another userscript's
+    // traffic, third-party calls and everything else never has its URL kept, its body read or an event fired for it.
+    // Honest limit: any wrapper shows up as the "initiator" frame in DevTools' Network tab for every fetch; to avoid even that,
+    // set localStorage['core:nohook'] = '1' (then watch / invalidateOn rules stay silent and Core.me relies on its own fetches).
+    const interested = (href) => rules.some((r) => r.when.test(href)) || watchers.some((w) => w.re.test(href));
+    function observe(input, init, p) {
+      let url = typeof input === 'string' ? input : (input && input.url) || String(input), u;
+      try { u = new URL(url, root.location.href); } catch (_) { return; }
+      if (u.origin !== root.location.origin || !interested(u.href)) return;
+      const method = String((init && init.method) || (input && input.method) || 'GET').toUpperCase();
+      const body = init && typeof init.body === 'string' ? init.body : null;
+      p.then((res) => { try { onResponse(u.href, method, body, res); } catch (e) { warn(e); } }, () => {});
+    }
+    let noHook = false; try { noHook = !!root.localStorage.getItem('core:nohook'); } catch (_) { /* storage blocked: hook as usual */ }
+    if (root.fetch && !root.__coreFetchHooked && !noHook) {
       root.__coreFetchHooked = true;
-      const native = root.fetch.bind(root);
-      root.fetch = function (input, init) {
-        const p = native(input, init);
-        try {
-          const method = String((init && init.method) || (input && input.method) || 'GET').toUpperCase();
-          const url = typeof input === 'string' ? input : (input && input.url) || String(input);
-          const body = init && typeof init.body === 'string' ? init.body : null;
-          p.then((res) => { try { onResponse(url, method, body, res); } catch (e) { warn(e); } }, () => {});
-        } catch (_) { /* never break the page's own fetch */ }
-        return p;
-      };
+      root.fetch = new Proxy(root.fetch, {
+        apply(target, thisArg, args) {
+          const p = Reflect.apply(target, thisArg, args);   // exactly what the page asked for, returned as-is
+          try { observe(args[0], args[1], p); } catch (_) { /* never break anyone's own fetch */ }
+          return p;
+        },
+      });
     }
 
-    return { fetchText, fetchDoc, fetchJson, post, invalidate, invalidateOn, watch, parseJson, get cacheSize() { return cache.size; } };
+    return { fetchText, fetchDoc, fetchJson, post, invalidate, invalidateOn, watch, onText, parseJson, get cacheSize() { return cache.size; } };
   })();
 
   /* ------------------------------------------------------------- pages --- */
@@ -692,6 +709,19 @@
   // Shared by the module system and the addon loader: user addons and disabled ids.
   // order: the ids in the order the user arranged them in the Addons panel, top to bottom = the dock's buttons left to right (orderV 2).
   const cfg = store('addons', { def: { custom: [], off: [], order: [], orderV: 2 }, key: 'core:addons' });
+  // Which addons have a dock button, and what it looks like, remembered across pages. An addon that is SKIPPED on this page never runs
+  // here, so it cannot show its button; without this its place in the list moved from page to page. An addon is known to have a button when
+  //   1. its button is on the dock right now, or
+  //   2. its entry says so: "button": true | false in addons.json (the author knows; this is the only source for an addon Core never ran), or
+  //   3. its button was seen on an earlier page (remembered here, with its icon, title and order).
+  // Anything else is treated as "no button" (listed last) until its button is seen once.
+  const btnMemo = store('addon-btn', { def: {}, key: 'core:addon-btn' });
+  function learnButton(def) {
+    if (!def || !def.id || def.id === 'addons') return;
+    const m = btnMemo.get() || {}, icon = typeof def.icon === 'string' ? def.icon : '', title = def.title || def.id, order = typeof def.order === 'number' ? def.order : 100, c = m[def.id];
+    if (c && c.icon === icon && c.title === title && c.order === order) return;
+    m[def.id] = { icon, title, order }; btnMemo.set(m);
+  }
 
   function matches(def) {
     const t = def.match, p = root.location.pathname + root.location.search;
@@ -815,6 +845,7 @@
         remove() { if (it.modal) { it.modal.close(); it.modal.el.remove(); } ui.dock.remove(def.id); items.delete(def.id); },
       };
       items.set(def.id, it);
+      learnButton(it.def);
       return ctl;
     }
     const call = (id, fn) => { const it = items.get(id); if (it) return it.ctl[fn](); warn('no floating item "' + id + '"'); return null; };
@@ -892,10 +923,12 @@
   // mattered: the load starts a plain check using the OLD saved manifest entry, then the new manifest arrives (version bumped)
   // and asks again, but that ask was thrown away, so the update only turned up one or two reloads later. It now waits its turn.
   const inflight = new Set(), queued = new Map();
+  // An addon that is SKIPPED on this page is refreshed the same way, but quietly: nothing is running it, so there is nothing to reload.
+  // It is saved so that the page it belongs to starts on the newest copy, and the Addons panel shows the saved version.
   function refreshInBackground(e, rec) {
     if (inflight.has(e.id)) { queued.set(e.id, e); return Promise.resolve(); }
     inflight.add(e.id);
-    const s = rstat(e.id);
+    const s = rstat(e.id), quiet = !entryMatches(e);
     return fetchCode(e).then(async (t) => {
       let ver = e.version || '';
       // The manifest names a newer version but the file came back unchanged: GitHub's CDN copy (up to 5 min old) is the usual reason.
@@ -906,6 +939,7 @@
       }
       const differs = s.ran ? codeHash(t) !== s.ran : !!(!rec || t !== rec.code);
       const saved = writeCode(e, t, ver);
+      if (quiet) { if (saved) { s.from = 'cache'; s.bytes = t.length; s.ver = ver; } return; }
       if (differs && saved) { s.update = true; updatedToast(e); }
       else if (differs) ready.then(() => ui.toast('"' + (e.name || e.id) + '" has an update, but this site\u2019s browser storage is full, so it could not be saved', false, 12000));
     }).catch((err) => { warn('background update of "' + e.id + '" failed:', (err && err.message) || err); }).finally(() => {
@@ -967,14 +1001,17 @@
       refresh.then((j) => {
         // FIX: only a real change to the list (added / removed / renamed / moved / re-matched) says "reload to apply". A version bump
         // alone used to trigger it too, which sent people to reload before anything had been downloaded.
-        const shape = (a) => JSON.stringify((a || []).map((x) => { const c = Object.assign({}, x); delete c.version; return c; }));
+        const shape = (a) => JSON.stringify((a || []).map((x) => { const c = Object.assign({}, x); delete c.version; delete c.button; return c; }));
         if (shape(j.addons) !== shape(cached.addons)) ready.then(() => ui.toast('Addon list changed \u2014 reload to apply'));
         // A newer addon version in the manifest is fetched right now (no waiting for the 10-minute check).
         const off = new Set(cfg.get().off);
         resolve(j).forEach((e) => {
           const rec = readAnyCode(e);
-          if (off.has(e.id) || !entryMatches(e)) return;
-          if (rec && rec.code && (rec.url !== e.url || !e.version || rec.ver !== e.version)) refreshInBackground(e, rec);
+          if (off.has(e.id)) return;
+          // running here: refresh on any doubt. Skipped here: only when the manifest names a different version or URL than the saved copy has
+          // (the age-based re-check of skipped addons is keepSkippedFresh).
+          const doubt = rec && rec.code && (rec.url !== e.url || (e.version ? rec.ver !== e.version : entryMatches(e)));
+          if (doubt) refreshInBackground(e, rec);
         });
       }).catch(() => {});
     } else {
@@ -982,9 +1019,28 @@
     }
   }
 
+  // What the Addons panel shows for an addon that is not running on this page: the copy that is saved for the page it belongs to.
+  function noteSaved(e) {
+    const s = rstat(e.id), rec = readAnyCode(e);
+    if (rec && rec.code) { s.from = 'cache'; s.bytes = rec.code.length; s.ver = rec.ver || ''; }
+    else { s.from = 'not saved yet'; s.bytes = 0; }
+  }
+  // Skipped addons are never run or downloaded for nothing, but one that has been saved before is kept current: a new version in the
+  // manifest refreshes it at once, and otherwise it is re-checked at most every 30 minutes. So the page it belongs to starts on the
+  // newest copy instead of toasting "updated" right after it opens.
+  const SKIP_RECHECK = 30 * 60 * 1000;
+  function keepSkippedFresh(list) {
+    const off = new Set(cfg.get().off);
+    list.forEach((e) => {
+      if (off.has(e.id) || entryMatches(e)) return;
+      const rec = readAnyCode(e);
+      if (!rec || !rec.code) return;                          // never used in this browser: nothing to keep current
+      if (rec.url !== e.url || (e.version && rec.ver !== e.version) || Date.now() - (rec.checked || 0) > SKIP_RECHECK) refreshInBackground(e, rec);
+    });
+  }
   async function startOne(e) {
     const s = rstat(e.id);
-    if (!entryMatches(e)) { s.state = 'skipped'; return; }
+    if (!entryMatches(e)) { s.state = 'skipped'; noteSaved(e); return; }
     s.state = 'loading';
     try { exec(e, await prepare(e)); } catch (err) { s.state = 'error'; s.err = String((err && err.message) || err); }
   }
@@ -994,10 +1050,11 @@
     const jobs = list.map((e) => {
       const s = rstat(e.id);
       if (off.has(e.id)) { s.state = 'off'; return null; }
-      if (!entryMatches(e)) { s.state = 'skipped'; return null; }
+      if (!entryMatches(e)) { s.state = 'skipped'; noteSaved(e); return null; }
       s.state = 'loading';
       return prepare(e).catch((err) => { s.state = 'error'; s.err = String((err && err.message) || err); return null; });
     });
+    keepSkippedFresh(list);
     for (let i = 0; i < list.length; i++) {      // fetch in parallel, execute in manifest order
       const code = jobs[i] ? await jobs[i] : null;
       if (code == null) continue;
@@ -1055,8 +1112,19 @@
       const off = new Set(cfg.get().off);
       // Same scope as the automatic check: only enabled addons that apply to THIS page. One that doesn't match
       // here was never downloaded, so it can't be "updated" (it is refreshed on a page where it matches).
-      const list = entries().filter((e) => !off.has(e.id) && entryMatches(e));
+      const all = entries().filter((e) => !off.has(e.id)), list = all.filter(entryMatches);
+      // Addons that belong to other pages are checked too (only if a copy is saved; one never used here is not downloaded for nothing).
+      // They are refreshed quietly: nothing is running them, so they never ask for a reload.
+      const others = all.filter((e) => !entryMatches(e) && (readAnyCode(e) || {}).code);
       let failed = 0, unsaved = 0;
+      const refreshedOthers = [];
+      await Promise.all(others.map(async (e) => {
+        try {
+          const rec = readAnyCode(e), t = await fetchCode(e, true), s = rstat(e.id);
+          if (writeCode(e, t)) { s.from = 'cache'; s.bytes = t.length; s.ver = e.version || ''; if (!rec || rec.code !== t) refreshedOthers.push(e.name || e.id); }
+          else unsaved++;
+        } catch (err) { failed++; warn('update check of "' + e.id + '" failed:', (err && err.message) || err); }
+      }));
       await Promise.all(list.map(async (e) => {
         try {
           const rec = readAnyCode(e), s = rstat(e.id), t = await fetchCode(e, true);
@@ -1070,7 +1138,8 @@
       const boot = root.__coreBoot;
       if (boot) { try { await boot.check(true); } catch (_) { failed++; } }
       const ready = [].concat(boot && boot.pending() ? ['Core'] : [], list.filter((e) => rstat(e.id).update).map((e) => e.name || e.id));
-      const note = (failed ? ' (' + failed + ' could not be checked)' : '') + (unsaved ? ' (' + unsaved + ' could not be saved: this site\u2019s browser storage is full)' : '');
+      const note = (failed ? ' (' + failed + ' could not be checked)' : '') + (unsaved ? ' (' + unsaved + ' could not be saved: this site\u2019s browser storage is full)' : '')
+        + (refreshedOthers.length ? ' \u2014 ' + refreshedOthers.join(', ') + ' refreshed for ' + (refreshedOthers.length > 1 ? 'their own pages' : 'its own page') : '');
       // If GitHub would not name the newest commit, what was fetched may be a CDN copy up to 5 minutes old: say so.
       const lag = root.__coreShaError ? ' \u2014 ' + root.__coreShaError + ', so this may be up to 5 minutes behind' : '';
       if (ready.length) ui.toast('Update ready: ' + ready.join(', ') + ' \u2014 click here to reload' + note + lag, true, 12000, () => root.location.reload());
@@ -1085,19 +1154,26 @@
   // (cfg.orderV = 2). Orders saved by an earlier version (top = nearest the right corner, no orderV) are read back reversed,
   // so nothing moves on screen.
   const savedOrder = () => { const c = cfg.get(), o = Array.isArray(c.order) ? c.order : []; return c.orderV === 2 ? o : o.slice().reverse(); };
+  const declared = (e) => (typeof e.button === 'boolean' ? e.button : null);
+  const buttonMemo = (e) => (btnMemo.get() || {})[e.id] || null;
+  function hasButton(e) {
+    if (ui.dock.items().some((b) => b.id === e.id)) return true;
+    const d = declared(e);
+    return d != null ? d : !!buttonMemo(e);
+  }
   function orderedEntries() {
     const es = entries(), byId = new Map(es.map((e) => [e.id, e]));
     const out = savedOrder().filter((id) => byId.has(id)).map((id) => byId.get(id)), seen = new Set(out.map((e) => e.id));
-    // not arranged yet: addons that have a button follow the buttons' current on-screen order, then the rest as listed
-    const withBtn = ui.dock.items().map((b) => byId.get(b.id)).filter((e) => e && !seen.has(e.id));
-    withBtn.forEach((e) => seen.add(e.id));
-    const all = out.concat(withBtn, es.filter((e) => !seen.has(e.id)));
-    // FIX: an addon that is running with NO button has no place in the dock to arrange, so it is listed after every addon that
-    // has one (new or old, arranged or not). Only addons confirmed running without a button move: one that is off, still loading,
-    // or skipped on this page keeps its place.
-    const hasBtn = new Set(ui.dock.items().map((b) => b.id));
-    const bg = (e) => rstat(e.id).state === 'ok' && !hasBtn.has(e.id);
-    return all.filter((e) => !bg(e)).concat(all.filter(bg));
+    // not arranged yet: addons with a button follow the dock's built-in order (higher `order` = further left = higher in the list),
+    // which every page agrees on because it comes from what was remembered, not from what happens to be running here; then the rest as listed
+    const rest = es.filter((e) => !seen.has(e.id));
+    // Its remembered order; else the "order" the manifest entry gives (the same number the addon passes to Core.float.add); else last among
+    // the button addons until its button has been seen once (so a brand-new button addon never jumps in front of the ones you arranged).
+    const ord = (e) => { const m = buttonMemo(e); return m && typeof m.order === 'number' ? m.order : typeof e.order === 'number' ? e.order : -Infinity; };
+    const all = out.concat(rest.filter(hasButton).sort((a, c) => ord(c) - ord(a)), rest.filter((e) => !hasButton(e)));
+    // An addon with NO button has no place in the dock to arrange, so it is listed after every addon that has one (new or old, arranged or
+    // not), whether it is running, skipped on this page, off or still loading. Only whether it HAS a button decides.
+    return all.filter(hasButton).concat(all.filter((e) => !hasButton(e)));
   }
   // How a dock button REALLY looks right now, as copies of what is inside it. Most are just an emoji, but some put something live in
   // their button (the Stat Builder shows its unspent-points badge), which used to be listed as the placeholder "\u2022". Ids are
@@ -1215,12 +1291,18 @@
       const s = rstat(e.id);
       const cb = h('input', { type: 'checkbox', onchange: (ev) => setEnabled(e.id, ev.target.checked) });
       cb.checked = !c.off.includes(e.id);
-      const btn = buttons.get(e.id);
+      const btn = buttons.get(e.id), mem = buttonMemo(e), has = hasButton(e);
+      // It runs, has no button, and nobody says it should: forget an old memory of one (an addon that dropped its button).
+      if (s.state === 'ok' && !btn && mem && declared(e) !== true && performance.now() > 15000) { const m = btnMemo.get() || {}; delete m[e.id]; btnMemo.set(m); }
       // The icon of this addon's button, so each row says which button it is. No icon = it works in the background.
+      // An addon that is not running here shows the icon it was last seen with (or a plain box when only the author said "button": true),
+      // so skipped rows look like the rest.
       const ico = btn
         ? h('div', { class: 'core-addon-ico', title: 'Button: ' + btn.title }, dockIcon(btn))
-        : h('div', { class: 'core-addon-ico none', title: s.state === 'ok' ? 'No button: this addon works in the background' : 'No button to show (' + s.state + ')' }, '—');
-      const noBtn = !btn && s.state === 'ok' ? ' · no button' : '';
+        : has
+          ? h('div', { class: 'core-addon-ico', title: 'Button' + (mem ? ': ' + mem.title : '') + ' (shown on the pages where this addon runs)' }, (mem && mem.icon) || '◻')
+          : h('div', { class: 'core-addon-ico none', title: s.state === 'ok' || declared(e) === false ? 'No button: this addon works in the background' : 'No button known yet (' + s.state + ')' }, '—');
+      const noBtn = !has && (declared(e) === false || s.state === 'ok') ? ' · no button' : '';
       const grip = h('div', { class: 'core-grip', tabindex: '0', role: 'button', title: 'Drag to rearrange', 'aria-label': 'Rearrange ' + (e.name || e.id) + ': drag, or press Up / Down', 'data-grip': e.id },
         h('i'), h('i'));
       const row = h('div', { class: 'core-addon', 'data-id': e.id }, ico, cb,
@@ -1233,7 +1315,7 @@
           s.from ? h('span', { class: 'core-dim' }, s.from + (s.bytes ? ' · ' + Math.round(s.bytes / 1024) + ' KB' : '')) : null),
         e.source === 'custom' ? ui.btn('🗑', 'danger', () => removeCustom(e.id)) : null,
         grip);
-      if (!btn) {   // nothing to arrange: keep the row's layout, drop the handle
+      if (!has) {   // no button = nothing to arrange: keep the row's layout, drop the handle
         grip.style.visibility = 'hidden'; grip.removeAttribute('tabindex'); grip.removeAttribute('role'); grip.setAttribute('aria-hidden', 'true');
         return row;
       }
@@ -1353,8 +1435,11 @@
       return fb && isFinite(fb.skew) ? { tzoff: fb.tzoff == null ? DEFAULT_TZ : fb.tzoff, skew: fb.skew, known: true } : { tzoff: DEFAULT_TZ, skew: 0, known: false };
     }
 
-    function readBar() {
-      const bar = document.querySelector('.gtb-inner');
+    // doc = the live page (default) or any fetched Document that has the top bar. Only the live page can tell who the player is,
+    // show their avatar, or measure the server clock.
+    function readBar(doc) {
+      const isLive = !doc || doc === document;
+      const bar = (doc || document).querySelector('.gtb-inner');
       if (!bar) return null;
       const out = { pid: player.id() };
       const sp = bar.querySelector('#stamina_span');
@@ -1369,38 +1454,230 @@
       const g = stat(bar, 'gold'); if (g) out.gold = statNum(g);
       const gm = stat(bar, 'gems'); if (gm) out.gems = statNum(gm);
       const lv = bar.querySelector('.gtb-level'); if (lv) out.level = nint(lv.textContent);
-      const who = player.info(); if (who.name) out.name = who.name; if (who.avatar) out.avatar = who.avatar;
+      if (isLive) { const who = player.info(); if (who.name) out.name = who.name; if (who.avatar) out.avatar = who.avatar; }
       const ex = bar.querySelector('.gtb-exp-top');
       if (ex) {
         const spans = ex.querySelectorAll('span'), mm = /([\d,]+)\s*\/\s*([\d,]+)/.exec(spans.length ? spans[spans.length - 1].textContent : ex.textContent);
         const fill = bar.querySelector('.gtb-exp-fill'), w = fill && /([\d.]+)\s*%/.exec(fill.getAttribute('style') || '');
         if (mm) out.exp = { cur: nint(mm[1]), max: nint(mm[2]), pct: w ? parseFloat(w[1]) : (nint(mm[2]) ? Math.round(nint(mm[1]) / nint(mm[2]) * 1000) / 10 : 0) };
       }
-      const st = bar.querySelector('#server_time');
+      const st = isLive && bar.querySelector('#server_time');
       if (st && st.getAttribute('data-epoch')) { if (!srv) srv = measure(st); out.server = Object.assign({}, srv); }
       return out;
     }
 
+    // ---- what is known, and who is newest ----
+    // The bar on the page is only a COPY of the player's numbers, and often an old one: a page can be hours old, a background tab's
+    // timers are throttled, another tab may have used a potion since. So the bar is one witness among several, and every witness is
+    // stamped with WHEN it saw the numbers:
+    //   - the bar changing (the site's own script moved it)        stamped when Core noticed
+    //   - a response or page that was fetched (attack, game_dash)  stamped when that REQUEST STARTED, so it can never beat a change
+    //                                                              seen after it was already on its way
+    //   - another tab's snapshot (core:<pid>:me)                   stamped by that tab
+    // The newest witness wins. When it beats the bar, the bar is rewritten to match (stamina, exp, level); gold and gems are tracked
+    // but never rewritten. A fetched value therefore always beats a stale bar, and a bar the site just changed beats an older fetch.
+    const GROUPS = ['stamina', 'exp', 'level', 'gold', 'gems'];
+    const WRITE = { stamina: true, exp: true, level: true };
+    const known = {};     // group -> { v, at, src }    the best value we have
+    const seenDom = {};   // group -> signature of what the bar showed when Core last looked at it or wrote it (tells the site's change from ours)
+    const gsig = (g, v) => JSON.stringify(g === 'stamina' || g === 'exp' ? [v && v.cur, v && v.max] : v);
+    const fin = (x) => (x != null && x !== '' && isFinite(+x) ? +x : null);
+    const atMap = () => { const m = {}; GROUPS.forEach((g) => { if (known[g]) m[g] = known[g].at; }); return m; };
+    const newestAt = () => Math.max(0, ...GROUPS.map((g) => (known[g] ? known[g].at : 0)));
+    // A page restored from the browser's back/forward cache shows the numbers it had when it was left: unknown age, so it never beats anything.
+    const firstAt = () => (renderedAt() != null ? Date.now() : 0);
+
+    function writeDom(g, v) {
+      const bar = document.querySelector('.gtb-inner');
+      if (!bar || !WRITE[g] || v == null) return;
+      try {
+        if (g === 'stamina') {
+          const sp = bar.querySelector('#stamina_span');
+          if (sp && nint(sp.textContent) !== v.cur) sp.textContent = fmt(v.cur);
+        } else if (g === 'exp') {
+          const top = bar.querySelector('.gtb-exp-top span:last-child'), fill = bar.querySelector('.gtb-exp-fill');
+          if (v.max > 0) {
+            if (top) top.textContent = fmt(v.cur) + ' / ' + fmt(v.max);
+            if (fill) fill.style.width = Math.min(100, v.cur / v.max * 100) + '%';
+          }
+        } else if (g === 'level') {
+          const lv = bar.querySelector('.gtb-level');
+          if (lv && nint(lv.textContent) !== v) lv.textContent = /\d/.test(lv.textContent) ? lv.textContent.replace(/\d[\d,]*/, String(v)) : 'LV ' + v;
+        }
+      } catch (e) { warn('could not update the top bar', e); }
+      const now = readBar();
+      if (now && now[g] != null) seenDom[g] = gsig(g, now[g]);   // remember it as ours, so it is not mistaken for the site's change
+    }
+    // Looks at the bar. A group whose numbers differ from what we last saw there was changed by the site just now: that is the
+    // newest news, unless something fetched is already newer, in which case the bar is put right.
+    function observeDom() {
+      const live = readBar();
+      if (!live) return null;
+      const now = Date.now();
+      GROUPS.forEach((g) => {
+        if (live[g] == null) return;
+        const sig = gsig(g, live[g]);
+        if (seenDom[g] === sig) return;
+        const first = seenDom[g] === undefined, at = first ? firstAt() : now, k = known[g];
+        seenDom[g] = sig;
+        if (!k || at >= k.at) known[g] = { v: live[g], at, src: 'page' };
+        else if (gsig(g, k.v) !== sig) writeDom(g, k.v);
+      });
+      return live;
+    }
+    function merge(g, prev, raw) {
+      if (g === 'stamina') return Object.assign({ cur: 0, max: 0, regen: 0, nextTickAt: 0 }, prev, raw);
+      if (g === 'exp') { const e = Object.assign({ cur: 0, max: 0, pct: 0 }, prev, raw); e.pct = e.max ? Math.round(e.cur / e.max * 1000) / 10 : e.pct; return e; }
+      return raw;
+    }
+    function norm(p) {
+      const out = {};
+      ['stamina', 'exp'].forEach((g) => {
+        const x = p[g]; if (x == null) return;
+        const o = typeof x === 'object' ? x : { cur: x };
+        if (fin(o.cur) == null) return;
+        const v = { cur: fin(o.cur) };
+        ['max', 'regen', 'nextTickAt'].forEach((f) => { if (fin(o[f]) != null) v[f] = fin(o[f]); });
+        out[g] = v;
+      });
+      ['level', 'gold', 'gems'].forEach((g) => { if (fin(p[g]) != null) out[g] = fin(p[g]); });
+      return out;
+    }
+    // true when the value really changed. The same value from a newer witness only refreshes its timestamp.
+    function put(g, raw, at, src) {
+      const k = known[g];
+      if (k && k.at > at) return false;                       // something newer is already known
+      const v = merge(g, k && k.v, raw);
+      if (k && gsig(g, k.v) === gsig(g, v)) { known[g] = { v: k.v, at, src }; return false; }
+      known[g] = { v, at, src };
+      writeDom(g, v);
+      return true;
+    }
+
+    function merged(live) {
+      const sv = live ? null : (saved.get() || {});
+      const out = Object.assign({}, live || Object.assign({ pid: player.id() }, sv));
+      GROUPS.forEach((g) => {
+        const k = known[g];
+        if (k && (live || !(sv.at && sv.at[g] > k.at))) out[g] = k.v;
+      });
+      if (live && live.stamina && out.stamina) out.stamina = Object.assign({}, out.stamina, { regen: live.stamina.regen || out.stamina.regen, nextTickAt: live.stamina.nextTickAt || out.stamina.nextTickAt });
+      return out;
+    }
     // Change detector: ignores the ticking timer/clock so 'me:update' only fires when a real value moved.
     const sigOf = (v) => JSON.stringify([v.stamina && [v.stamina.cur, v.stamina.max, v.stamina.regen], v.gold, v.gems, v.level, v.exp && [v.exp.cur, v.exp.max]]);
     let lastSig = '', lastSave = 0;
+    function publish() {
+      const live = observeDom(), cur = merged(live), now = Date.now();
+      const sig = sigOf(cur), changed = sig !== lastSig;
+      if (cur.pid !== 'default' && (changed || now - lastSave > 30000)) { lastSave = now; saved.set(Object.assign({}, cur, { ts: now, at: atMap() })); }
+      if (changed) { lastSig = sig; emit('me:update', Object.assign({ stale: false, ageMs: 0 }, cur)); }
+      return live;
+    }
     function refresh() {
       const bar = document.querySelector('.gtb-inner');
       if (!bar) return null;
       shortenBar(bar);
-      const live = readBar();
-      if (!live) return null;
-      const sig = sigOf(live), changed = sig !== lastSig;
-      if (live.pid !== 'default' && (changed || Date.now() - lastSave > 30000)) { lastSave = Date.now(); saved.set(Object.assign({}, live, { ts: Date.now() })); }
-      if (changed) { lastSig = sig; emit('me:update', Object.assign({ stale: false, ageMs: 0 }, live)); }
-      return live;
+      return publish();
     }
     function get() {
-      const live = readBar();
-      if (live) return Object.assign({ stale: false, ageMs: 0, ts: Date.now() }, live, { server: live.server || server() });
-      const c = saved.get() || {};
-      return Object.assign({ pid: player.id() }, c, { server: server(), stale: true, ageMs: c.ts ? Date.now() - c.ts : null });
+      const live = observeDom(), out = merged(live), ts = Date.now();
+      if (live) return Object.assign({ stale: false, ageMs: 0, ts }, out, { server: live.server || server(), at: atMap() });
+      const c = saved.get() || {}, newest = Math.max(newestAt(), c.ts || 0), at = Object.assign({}, c.at);
+      GROUPS.forEach((g) => { if (known[g] && known[g].at > (at[g] || 0)) at[g] = known[g].at; });
+      // no top bar here: what this tab was told, or the last snapshot any tab saved
+      return Object.assign(out, { server: server(), stale: !(newestAt() && ts - newestAt() < 60000), ageMs: newest ? ts - newest : null, at });
     }
+
+    // ---- telling Core.me something newer ----
+    // apply({ stamina: 812, exp: { cur, max }, level: 41, gold, gems }, { at?, src? })
+    //   Absolute numbers (never "add 5"). Every field is optional. stamina / exp may be a plain number (keeps the known max) or an object.
+    //   at = when YOU saw these numbers (ms since epoch, default now). Anything already known that is newer is kept. Returns true if a number changed.
+    function apply(patch, o = {}) {
+      if (!patch || typeof patch !== 'object') return false;
+      const at = o.at != null ? o.at : Date.now(), src = o.src || 'api', p = norm(patch);
+      observeDom();                                          // learn what the page itself changed first, so it is not overwritten blindly
+      let changed = false;
+      Object.keys(p).forEach((g) => { if (put(g, p[g], at, src)) changed = true; });
+      if (changed) publish();
+      return changed;
+    }
+    // The one place that turns "I earned this much exp" into the bar: adds to the known exp, rolls over into the next level with the
+    // game's formula, and (on a level-up, which refills stamina) asks the server for the real numbers.
+    // Returns true when it took care of the exp, false when it could not (no exp known yet, e.g. no top bar was ever seen): only then should
+    // a caller do its own bar update.
+    const expRequired = (level) => Math.round(100 + Math.pow(2.5 * (level + 1), 2));
+    function addExp(delta, o = {}) {
+      delta = fin(delta);
+      if (!(delta > 0)) return false;
+      observeDom();
+      const e = known.exp && known.exp.v, l = known.level ? known.level.v : null;
+      if (!e || !(e.max > 0)) return false;
+      let cur = e.cur + delta, max = e.max, level = l;
+      for (let n = 0; cur >= max && n < 1000; n++) {
+        if (level == null) return false;                     // would level up but the level is unknown: do not guess
+        cur -= max; level += 1; max = expRequired(level);
+      }
+      const up = level !== l;
+      const patch = { exp: { cur, max } }; if (level != null) patch.level = level;
+      apply(patch, { at: o.at, src: o.src || 'attack' });
+      if (up) syncSoon();
+      return true;                                           // handled (even if a newer number made apply keep its own): callers must not add it a second time
+    }
+    // Hand it an attack response ({ stamina, xp_delta, ... }) and it does the rest. opts.expDefault = exp to add when the response has none.
+    function fromAttack(d, o = {}) {
+      if (!d || typeof d !== 'object') return false;
+      let changed = false;
+      if (fin(d.stamina) != null && apply({ stamina: fin(d.stamina) }, { at: o.at, src: 'attack' })) changed = true;
+      const xp = d.xp_delta != null ? fin(d.xp_delta) : (o.expDefault != null ? fin(o.expDefault) : null);
+      if (xp != null && addExp(xp, { at: o.at, src: 'attack' })) changed = true;
+      return changed;
+    }
+    // Reads the top bar of a FETCHED page (a Document, or its HTML) and applies it. This is what makes a fresh fetch beat a stale page.
+    function ingest(src, o = {}) {
+      let doc = src;
+      try { if (typeof src === 'string') doc = new DOMParser().parseFromString(src, 'text/html'); } catch (_) { return false; }
+      if (!doc || !doc.querySelector || doc === document) return false;
+      const r = readBar(doc);
+      if (!r) return false;
+      const patch = {}; GROUPS.forEach((g) => { if (r[g] != null) patch[g] = r[g]; });
+      syncedAt = Date.now();
+      return apply(patch, { at: o.at, src: o.src || 'fetch' });
+    }
+    // Fetches a light page that carries the top bar and applies it: the real numbers, right now. Several callers share one request.
+    const SYNC_URL = '/game_dash.php';
+    let syncJob = null, syncedAt = 0, hiddenAt = 0;
+    function sync() {
+      if (syncJob) return syncJob;
+      const before = newestAt();
+      const job = net.fetchText(SYNC_URL, { force: true }).catch(() => null)
+        .then(() => Object.assign(get(), { synced: newestAt() > before }))
+        .finally(() => { if (syncJob === job) syncJob = null; });
+      return (syncJob = job);
+    }
+    const syncSoon = debounce(() => { sync(); }, 600);
+
+    // Pages fetched by Core (and anything handed to ingest) carry numbers: take them.
+    net.onText((href, text, at) => { if (text && /id=["']stamina_span["']/.test(text)) ingest(text, { at, src: 'fetch' }); });
+    // Any attack response says exactly how much stamina is left (a plain number, so taking it can never double-count).
+    // Exp is NOT taken from here: the page's own script already adds it to the bar for its own attacks, and an "add" would count twice.
+    net.watch(/\/damage\.php/, (r) => { if (r.json && fin(r.json.stamina) != null) apply({ stamina: fin(r.json.stamina) }, { src: 'attack' }); }, { method: 'POST' });
+    // After any potion (stamina, hp, ...) the numbers moved and no response says how: ask the server.
+    net.watch(/\/use_item\.php|\/user_heal_potion\.php/, () => syncSoon(), { method: 'POST' });
+    // A tab that was hidden for a while (its timers are throttled) shows old numbers: when it comes back, fetch the real ones.
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'hidden') { hiddenAt = Date.now(); return; }
+      if (hiddenAt && Date.now() - hiddenAt > 60000 && Date.now() - syncedAt > 60000 && document.querySelector('.gtb-inner')) syncSoon();
+    });
+    // Another tab of the same player saved newer numbers: take whatever is newer than what this tab knows.
+    saved.watch((v) => {
+      if (!v || !v.at || (v.pid && v.pid !== player.id())) return;
+      let changed = false;
+      observeDom();
+      GROUPS.forEach((g) => { const t = v.at[g]; if (v[g] != null && t > ((known[g] && known[g].at) || 0) && put(g, v[g], t, 'tab')) changed = true; });
+      if (changed) publish();
+    });
+
     // Stamina now. When the numbers are old (stale snapshot) this adds the hourly regen that must have happened since.
     function staminaEstimate(now = Date.now()) {
       const s = get().stamina;
@@ -1414,7 +1691,7 @@
     function secondsToTick(now = serverNow()) { return 3600 - (Math.floor(now / 1000) + server().tzoff) % 3600; }
     const watch = (cb) => on('me:update', cb);
     dom.watch(refresh);
-    return { get, refresh, staminaEstimate, serverNow, secondsToTick, server, watch };
+    return { get, refresh, staminaEstimate, serverNow, secondsToTick, server, watch, apply, addExp, fromAttack, ingest, sync, expRequired };
   })();
 
   /* ------------------------------------------------------------- clock --- */
@@ -1993,7 +2270,7 @@
 
   /* ------------------------------------------------------------ export --- */
   const Core = {
-    __isCore: true, apiLevel: API, version: '3.13.0', debug: false, tabId: TAB,
+    __isCore: true, apiLevel: API, version: '3.14.1', debug: false, tabId: TAB,
     esc, sleep, debounce, fmt, int, compact, parseNum, parseJson,
     on, off, once, emit,
     state, store, player,
