@@ -1,5 +1,5 @@
 /* =============================================================================
- * Cube Suite  (Core addon, version 3.2.3)  -  port of the Tampermonkey script "Cube Suite" 2.7.8
+ * Cube Suite  (Core addon, version 3.4.0)  -  port of the Tampermonkey script "Cube Suite" 2.7.8
  *
  * Runs inside Core (addons/core.js): `Core` is in scope, so this file is NOT a userscript.
  * List it in addons.json (see the entry in the notes) or add its raw URL in the Addons panel.
@@ -18,6 +18,8 @@
  * v3.2.2: looksLikeBlankErrorPage removed (HTTP status only), Fast Run scan every 1 s, potion inv id read from the sidebar drawer.
  * v3.3.0: stamina / HP potions go through Core.potions (shared by every script and tab: sidebar first, inventory fallback,
  * one potion per need). The old local code stays as the fallback when the running Core is older.
+ * v3.4.0: stamina / exp in the top bar go through Core.me (apply / addExp / ingest), the same code Battle Page uses, and a location page
+ * that was just fetched is handed to Core.me.ingest, so a fresh fetch beats a stale bar. The old local code is the fallback for an older Core.
  * ========================================================================== */
 (async function () {
   'use strict';
@@ -3192,8 +3194,10 @@
 
   async function pveFetchLocationPage(instanceId, locationId) {
     const url = `${PVE_LOCATION_BASE}?instance_id=${instanceId}&location_id=${locationId}`;
+    const fetchedAt = Date.now();
     const doc = await fetchDoc(url, `pve location ${locationId}`);
     if (!doc) return { mobs: [], stamina: null, failed: true, looksValid: false };
+    if (Core.me && Core.me.ingest) Core.me.ingest(doc, { at: fetchedAt });   // v3.4.0: this page was just fetched, so its top bar beats a stale one
 
     const mobs = [];
     const seen = new Set();
@@ -3505,6 +3509,7 @@
   }
 
   function updateStam(staminaValue) {
+    if (Core.me && Core.me.apply) { Core.me.apply({ stamina: staminaValue }, { src: 'attack' }); return; }   // v3.4.0: Core.me owns the bar
     const span = document.getElementById("stamina_span");
     if (!span) return;
     span.textContent = staminaValue.toLocaleString();
@@ -3512,6 +3517,7 @@
 
   function updateExp(xpDelta) {
     if (!xpDelta) return;
+    if (Core.me && Core.me.addExp && Core.me.addExp(xpDelta, { src: 'attack' })) return;   // v3.4.0: Core.me owns the bar (it also rolls over level-ups)
     const expWrap = document.querySelector(".gtb-exp");
     if (!expWrap) return;
     const topText = expWrap.querySelector(".gtb-exp-top span:last-child");
