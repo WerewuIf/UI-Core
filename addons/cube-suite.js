@@ -813,6 +813,7 @@
       const updAfter    = freshFights.some(f => f.liveBtn && f.status !== 'cleared' && !keys.has(`${nodeId}:${f.matchNo}`));
       const freshAllClr = freshFights.length > 0 && freshFights.every(f => f.status === 'cleared');
 
+      const koHold = result === 'captain_dead' && saNodeCaptainsDown(nodeId); // FIX (KO display): still committed to this fight, captains just down
       const stillNuking = mode === 'fastrun'
       && !['already_cleared', 'finished', 'captain_dead', 'error'].includes(result)
       && !targetNowCleared;
@@ -820,7 +821,7 @@
       saNodeStats[nodeId] = {
         ...(saNodeStats[nodeId] || {}),
         total: freshFights.length,
-        activeFightNo: stillNuking ? target.matchNo : 0,
+        activeFightNo: (stillNuking || koHold) ? target.matchNo : 0,
         hasAvailable: updAfter,
         allCleared: freshAllClr,
         justFought: landedHit,
@@ -832,7 +833,8 @@
         saScheduledNukingMatch.set(nodeId, target.matchNo);
       } else {
         saMarkNukeStopped(nodeId);
-        delete saLastBattleState[nodeId];
+        if (result === 'captain_dead') saKeepKoSnapshot(nodeId); // FIX (KO display)
+        else delete saLastBattleState[nodeId];
         if (mode === 'fastrun') {
           if (result === 'fought' && targetNowCleared) finalResult = 'finished';
         } else if (['fought', 'already_fought', 'retreat_pending', 'captain_dead'].includes(result)) {
@@ -2290,7 +2292,7 @@
     return data;
   }
 
-  const SA_HEAL_BACKOFF_MS = 30_000;
+  const SA_HEAL_BACKOFF_MS = 60_000; // FIX: match the 60 s Normal-mode loop (was 30 s)
   const SA_HEAL_REPEAT_MS  = 120_000;
   let saHealInFlight = null, saHealBackoffUntil = 0, saHealLast = null;
   let saHealLogKey = '', saHealLogAt = 0, saHealLogRepeats = 0;
@@ -2342,6 +2344,10 @@
       saHealBackoffUntil = (result.status === 'not_ready' || result.status === 'refused') ? Date.now() + SA_HEAL_BACKOFF_MS : 0;
       saHealLast = result;
       saHealLog(reason, result);
+      if (result.status === 'healed') { // FIX (KO display): the KO snapshots are out of date now
+        for (const nid of Object.keys(saLastBattleState)) if (saNodeCaptainsDown(nid)) delete saLastBattleState[nid];
+        refreshUI();
+      }
       return result;
     })();
     return saHealInFlight;
@@ -2350,6 +2356,20 @@
   const saMyCaptains  = state => (state?.captains || []).filter(
     c => c.side === 'ALLY' && c.is_mine && !c.is_dead && !c.retreat_requested);
   const saLiveEnemies = state => (state?.captains || []).filter(c => c.side === 'ENEMY' && !c.is_dead);
+
+  // FIX (KO display): true while the saved battle snapshot for this node shows every one of OUR captains KO'd.
+  function saNodeCaptainsDown(nodeId) {
+    const mine = (saLastBattleState[nodeId]?.captains || []).filter(c => c.side === 'ALLY' && c.is_mine);
+    return mine.length > 0 && mine.every(c => c.is_dead);
+  }
+  // FIX (KO display): on 'captain_dead' keep the snapshot so the node card / pill can show the KO'd captains.
+  // Engagements are dropped on purpose: saTick() feeds every stored engagement into saGloballyEngagedCaptainIds,
+  // and a stale list would make a freshly healed captain look "engaged elsewhere". If the captains are NOT all
+  // dead (e.g. alive but engaged / retreat_requested) the old behaviour is kept and the snapshot is deleted.
+  function saKeepKoSnapshot(nodeId) {
+    if (saNodeCaptainsDown(nodeId)) saLastBattleState[nodeId] = { ...saLastBattleState[nodeId], engagements: [] };
+    else delete saLastBattleState[nodeId];
+  }
 
   function saGetTargetingCounts(state) {
     const counts = {};
@@ -2770,8 +2790,8 @@
       }
       if (result === 'captain_dead') {
         await saHealDeadCaptains(`node ${nodeId}: captain KO'd`);
-        if (saNodeStats[nodeId]) saNodeStats[nodeId] = { ...saNodeStats[nodeId], activeFightNo: 0, hasAvailable: false };
-        delete saLastBattleState[nodeId];
+        saKeepKoSnapshot(nodeId); // FIX (KO display): keep the KO snapshot first ...
+        if (saNodeStats[nodeId]) saNodeStats[nodeId] = { ...saNodeStats[nodeId], activeFightNo: saNodeCaptainsDown(nodeId) ? matchNo : 0, hasAvailable: false }; // ... and stay on this fight like passive scan does
         refreshUI();
         return 'skipped';
       }
@@ -2815,8 +2835,8 @@
     }
     if (result === 'captain_dead') {
       await saHealDeadCaptains(`node ${nodeId}: captain KO'd`);
-      if (saNodeStats[nodeId]) saNodeStats[nodeId] = { ...saNodeStats[nodeId], activeFightNo: 0, hasAvailable: false };
-      delete saLastBattleState[nodeId];
+      saKeepKoSnapshot(nodeId); // FIX (KO display): keep the KO snapshot first ...
+      if (saNodeStats[nodeId]) saNodeStats[nodeId] = { ...saNodeStats[nodeId], activeFightNo: saNodeCaptainsDown(nodeId) ? matchNo : 0, hasAvailable: false }; // ... and stay on this fight like passive scan does
       refreshUI();
       return 'skipped';
     }
