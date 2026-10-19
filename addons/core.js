@@ -863,7 +863,14 @@
   }
   function readAnyCode(e) { try { return JSON.parse(localStorage.getItem(ck(e.id)) || 'null'); } catch (_) { return null; } }
   function readCode(e) { try { const r = JSON.parse(localStorage.getItem(ck(e.id)) || 'null'); return r && r.url === e.url ? r : null; } catch (_) { return null; } }
-  function writeCode(e, code) { try { localStorage.setItem(ck(e.id), JSON.stringify({ url: e.url, ver: e.version || '', code, ts: Date.now(), checked: Date.now() })); } catch (_) { warn('could not cache "' + e.id + '" (storage full?)'); } }
+  // true when the copy was really saved. (A failed write used to be swallowed: the "updated" toast fired anyway, the reload ran the
+  // old code again, and nothing said why.) `ver` is the label shown in the Addons panel; it is the manifest's version unless told otherwise.
+  function writeCode(e, code, ver) {
+    try { localStorage.setItem(ck(e.id), JSON.stringify({ url: e.url, ver: ver !== undefined ? ver : (e.version || ''), code, ts: Date.now(), checked: Date.now() })); return true; }
+    catch (err) { warn('could not cache "' + e.id + '" (' + ((err && err.name) || 'storage full') + '): the update is NOT saved'); return false; }
+  }
+  // Identifies exactly which text is RUNNING right now (the saved copy can already be newer than that).
+  function codeHash(t) { let h = 2166136261; for (let i = 0; i < t.length; i++) { h ^= t.charCodeAt(i); h = Math.imul(h, 16777619); } return (h >>> 0).toString(16) + ':' + t.length; }
 
   function entries() {
     const byId = new Map();
@@ -884,10 +891,19 @@
     if (inflight.has(e.id)) return Promise.resolve();
     inflight.add(e.id);
     const s = rstat(e.id);
-    return fetchCode(e).then((t) => {
-      if (!rec || t !== rec.code) { s.update = true; updatedToast(e); }
-      writeCode(e, t);
-    }).catch(() => {}).finally(() => inflight.delete(e.id));
+    return fetchCode(e).then(async (t) => {
+      let ver = e.version || '';
+      // The manifest names a newer version but the file came back unchanged: GitHub's CDN copy (up to 5 min old) is the usual reason.
+      // Ask for the newest commit's own URL before believing it, and do not label the old code with the new version meanwhile.
+      if (rec && rec.code === t && e.version && rec.ver !== e.version) {
+        try { t = await fetchCode(e, true); } catch (_) { /* keep t */ }
+        if (rec.code === t && root.__coreShaError) ver = rec.ver;   // could not confirm: stay honest, ask again next load
+      }
+      const differs = s.ran ? codeHash(t) !== s.ran : !!(!rec || t !== rec.code);
+      const saved = writeCode(e, t, ver);
+      if (differs && saved) { s.update = true; updatedToast(e); }
+      else if (differs) ready.then(() => ui.toast('"' + (e.name || e.id) + '" has an update, but this site\u2019s browser storage is full, so it could not be saved', false, 12000));
+    }).catch((err) => { warn('background update of "' + e.id + '" failed:', (err && err.message) || err); }).finally(() => inflight.delete(e.id));
   }
   async function prepare(e) {
     const s = rstat(e.id);
@@ -919,6 +935,7 @@
   }
   function exec(e, code) {
     const s = rstat(e.id);
+    s.ran = codeHash(code);
     try { runCode(code, e); s.state = 'ok'; s.err = null; }
     catch (err) { s.state = 'error'; s.err = String((err && err.message) || err); warn('addon "' + e.id + '" threw', err); }
   }
@@ -1027,24 +1044,26 @@
       // Same scope as the automatic check: only enabled addons that apply to THIS page. One that doesn't match
       // here was never downloaded, so it can't be "updated" (it is refreshed on a page where it matches).
       const list = entries().filter((e) => !off.has(e.id) && entryMatches(e));
-      let failed = 0;
+      let failed = 0, unsaved = 0;
       await Promise.all(list.map(async (e) => {
         try {
-          const rec = readAnyCode(e), t = await fetchCode(e, true);
-          if (rec && rec.code && rec.code !== t) rstat(e.id).update = true;   // no saved copy = nothing to update
-          writeCode(e, t);
-        } catch (_) { failed++; }
+          const rec = readAnyCode(e), s = rstat(e.id), t = await fetchCode(e, true);
+          // "ready" = what is RUNNING differs from the newest file. (Comparing with the saved copy said "up to date" while the page
+          // still ran old code whenever a background refresh had already saved the new file.) No saved copy and nothing running = nothing to update.
+          if (s.ran ? codeHash(t) !== s.ran : !!(rec && rec.code && rec.code !== t)) s.update = true;
+          if (!writeCode(e, t)) unsaved++;
+        } catch (err) { failed++; warn('update check of "' + e.id + '" failed:', (err && err.message) || err); }
       }));
       // Core itself: the bootstrap saves a newer core.js for the next load, same as an addon.
       const boot = root.__coreBoot;
       if (boot) { try { await boot.check(true); } catch (_) { failed++; } }
       const ready = [].concat(boot && boot.pending() ? ['Core'] : [], list.filter((e) => rstat(e.id).update).map((e) => e.name || e.id));
-      const note = failed ? ' (' + failed + ' could not be checked)' : '';
+      const note = (failed ? ' (' + failed + ' could not be checked)' : '') + (unsaved ? ' (' + unsaved + ' could not be saved: this site\u2019s browser storage is full)' : '');
       // If GitHub would not name the newest commit, what was fetched may be a CDN copy up to 5 minutes old: say so.
       const lag = root.__coreShaError ? ' \u2014 ' + root.__coreShaError + ', so this may be up to 5 minutes behind' : '';
       if (ready.length) ui.toast('Update ready: ' + ready.join(', ') + ' \u2014 click here to reload' + note + lag, true, 12000, () => root.location.reload());
       else if (lag) ui.toast('Could not confirm you are up to date' + lag + note, false, 12000);
-      else ui.toast('Everything is up to date' + note, !failed);
+      else ui.toast('Everything is up to date' + note, !failed && !unsaved);
     } finally { checking = false; float.refresh('addons'); }
   }
 
