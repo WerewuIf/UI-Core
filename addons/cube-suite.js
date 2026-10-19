@@ -1,5 +1,5 @@
 /* =============================================================================
- * Cube Suite  (Core addon, version 3.1.0)  -  port of the Tampermonkey script "Cube Suite" 2.7.8
+ * Cube Suite  (Core addon, version 3.2.0)  -  port of the Tampermonkey script "Cube Suite" 2.7.8
  *
  * Runs inside Core (addons/core.js): `Core` is in scope, so this file is NOT a userscript.
  * List it in addons.json (see the entry in the notes) or add its raw URL in the Addons panel.
@@ -7,7 +7,7 @@
  * What moved onto Core's API
  *   Core.clock      server time (schedule switches, PvP cap step at 16:00). Replaces page-scraped data-epoch.
  *   Core.tab        which tab runs the loop (Web Lock, queued) + Core.keepAlive in that tab.
- *   Core.float      the panel is now the cube button in Core's dock (opens in Core's modal).
+ *   (UI)            no dock icon: the panel loads straight onto the page as the old floating, draggable window.
  *   Core.player     player id / name, Core.me exp - no extra dashboard fetch when the sidebar is there.
  *
  * Bug fixes are marked  // FIX:  in the code.
@@ -17,11 +17,9 @@
 (async function () {
   'use strict';
 
-  // Only on the cube dungeon page (the manifest `match` does this too; this keeps a hand-added copy honest).
   if (!/\/guild_dungeon_cube\.php$/.test(location.pathname) || !new URLSearchParams(location.search).get('instance_id')) return;
   if (!window.Core || !window.Core.__isCore) { console.warn('[Cube Suite] Core is not loaded'); return; }
 
-  // Guard against double-injection (this game reloads on navigation).
   const RUN_KEY = '__dungeonCubeSuite_v3';
   if (window[RUN_KEY]) return;
   window[RUN_KEY] = true;
@@ -145,30 +143,15 @@
   // │   mode; fast-mode 1.5 s polling only fires when actively auto-joining.  │
   // └─────────────────────────────────────────────────────────────────────────┘
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // SHARED CONFIG
-  // ═══════════════════════════════════════════════════════════════════════════
-
   const DUNGEONS_URL      = 'https://demonicscans.org/guild_dungeon.php';
   const CUBE_DUNGEON_BASE = 'https://demonicscans.org/guild_dungeon_cube.php';
   const DASH_URL          = 'https://demonicscans.org/game_dash.php';
   const FETCH_TIMEOUT_MS  = 8_000;
   const CUBE_STATE_MAX_STALE_MS = 5 * 60_000;
 
-  // ─── Guild auth ──────────────────────────────────────────────────────────
   const GUILD_NAME        = '[AHAB] Casual Ahab';
   const GUILD_MEMBERS_URL = 'https://demonicscans.org/guild_members.php';
 
-  // ─── PvP config ──────────────────────────────────────────────────────────
-  // PVP_NODE_PRIORITY: nodes are scanned in this order each cycle.
-  // Node 7 (Ring Ward) is always available; Node 8 (Duel Heart) unlocks later.
-  // PVP_SCHEDULE: Normal-mode auto-join limit as a step schedule, same shape
-  // philosophy as SA_SCHEDULE — a sorted array of "at this server time, this
-  // becomes true" entries, walked by the shared dsGetActiveScheduleEntry()
-  // helper (see SHARED: SCHEDULE ENGINE below) instead of one hardcoded hour
-  // constant. Add/edit entries here to add more thresholds later; Fast Run
-  // never reads this (pvpScanFastRunPlayer joins explicitly-assigned match
-  // numbers only, uncapped, regardless of time).
   const PVP_SOURCE            = 'cube';
   const PVP_NODE_URL_BASE     = 'https://demonicscans.org/pvp_style_node.php';
   const PVP_ACTION_URL        = 'https://demonicscans.org/pvp_style_action.php';
@@ -188,18 +171,9 @@
   const PVP_POWER_SLASH_RE      = /power\s*slash/i;
   const PVP_SLASH_RE = /\bslash\b/i;   // token-generating basic attack
 
-  // ─── Tyrant Conclave (Node 9) — guild PvP final boss trial, opt-in only ────────
-  // Unlocks only after every other PvP-style node is cleared. NOT part of
-  // PVP_NODE_PRIORITY on purpose: it must never be touched by normal
-  // auto-join — only when the operator explicitly flips the toggle (after
-  // confirming a warning) does the script join/attack here.
   const PVP_TYRANT_NODE_ID      = 9;
   const PVP_TYRANT_ENABLED_KEY  = 'autocube_pvp_tyrant_enabled_v1';
 
-  // ─── Shadow Army config ───────────────────────────────────────────────────
-  // SA has NO numeric fight cap.  Every available live fight in SA_TARGET_NODES
-  // is joined each cycle.  SA_PARTICIPATED_KEY prevents re-joining the same
-  // fight within the same dungeon instance.
   const SA_SOURCE         = 'game_dash';
   const SA_NODE_URL_BASE  = 'https://demonicscans.org/guild_dungeon_cube_army_enter.php';
   const SA_ACTION_API     = 'https://demonicscans.org/guild_dungeon_cube_army_action.php';
@@ -214,20 +188,6 @@
   const SA_DAMAGE_POLL_MS = 1_200;    // interval between damage confirmation polls
   const SA_DAMAGE_TRIES   = 4;        // max polls waiting for damage to register
 
-  // ─── Scheduled nuke config ────────────────────────────────────────────────
-  // Section→node: Section 1 = N5, Section 2 = N6, Section 3 = N11.
-  // At each hour the script triggers a combat action on that node's match.
-  // NORMAL MODE ONLY — Fast Run's own always-nuke behavior is untouched and
-  // never consults this schedule (see the dsIsFastMode() guards around its
-  // call sites).
-  // `mode` picks WHICH combat strategy fires for that slot — 'fastrun' (nuke:
-  // all idle captains pile on, no retreat, keeps retrying every tick until
-  // the fight is actually cleared) or 'ordinary' (safe DPS: one captain hits
-  // once and retreats, slot is considered handled after that single attempt
-  // regardless of whether the fight fully cleared). This is data, not a
-  // hardcoded call — saRunScheduledNuke dispatches on whatever each entry says,
-  // so mixing strategies across slots (or changing one later) is a one-line
-  // edit here, not a code change.
   const SA_SCHEDULE = [
     { nodeId: 5,  hour: 1, minute: 0, matchNo: 1, mode: 'fastrun' }, // Stage 1, Match 1 (1:00 AM)
     { nodeId: 5,  hour: 2, minute: 0, matchNo: 2, mode: 'fastrun' }, // Stage 1, Match 2 (2:00 AM)
@@ -243,18 +203,6 @@
   const SA_SCHED_NUKE_KEY    = 'autocube_sa_sched_nuke_v1';
   const SA_SCHED_HANDLED_KEY = 'autocube_sa_sched_handled_v1';
 
-  // BUG FIX — match #4's enter_fight kept 400ing because match #3 (same node,
-  // earlier in the sequence) hadn't actually cleared yet — the schedule fires
-  // slots purely off wall-clock time, so a later slot's hour can arrive while
-  // an earlier one is still in progress. Attempting it anyway isn't just a
-  // wasted request: the failed attempt still counted as "due", so
-  // schedOwnedNodes kept reserving that node away from ordinary auto-farm
-  // and the log kept repeating the same rejection every cycle.
-  // Fix: don't treat a slot as "due" at all until the *previous* slot for
-  // that same node (by schedule order) has been marked handled. No
-  // per-slot attempt/backoff bookkeeping needed — a slot simply isn't
-  // eligible until its predecessor finishes, so the node is released back
-  // to ordinary farming and the log goes quiet on its own.
   const SA_SCHED_PREV_KEY = (() => {
     const prevByKey = new Map();
     const lastKeyForNode = new Map();
@@ -275,7 +223,6 @@
   const saGloballyEngagedCaptainIds = new Set(); // Fast Run: captains assigned this tick across all battles
   const saScheduledNukingMatch = new Map(); // nodeId -> matchNo currently being scheduled-nuked (ordinary mode)
 
-  // ─── PvE config ────────────────────────────────────────────────────────────
   const PVE_LOCATION_BASE = 'https://demonicscans.org/guild_dungeon_location.php';
   const PVE_JOIN_URL      = 'https://demonicscans.org/dungeon_join_battle.php';
   const PVE_ATTACK_URL    = 'https://demonicscans.org/damage.php';
@@ -316,9 +263,6 @@
   const PVE_PROFILE_KEY = 'autocube_pve_profiles_v1';        // Normal vs Fast Run settings
   const PVE_MOB_STATE_KEY_PREFIX = 'autocube_pve_mobstate_'; // + instanceId — per-mob damage tracking
 
-  // ─── Storage keys ─────────────────────────────────────────────────────────
-  // PvP join count is NOT stored in localStorage — derived live each scan.
-  // Only SA dedup, fast-run assignment, and panel UI state are persisted.
   const PVP_FAST_RUN_KEY    = 'autocube_fast_run_v2';   // fast-run node/match targets
   const SA_PARTICIPATED_KEY = 'sa_participated_v1';     // {nodeId:matchNo} dedup set per instance
   const MASTER_ENABLED_KEY  = 'ds_suite_master_enabled_v1';
@@ -328,10 +272,6 @@
   const PVE_ATTACK_DMG_KEY_PREFIX = 'autocube_pve_attackdmg_';
   const PVP_ACTIVE_MATCHES_KEY = 'autocube_pvp_active_matches_v1';
   const LOG_SESSION_KEY = 'ds_suite_log_session_v1';
-
-  // ═══════════════════════════════════════════════════════════════════════════
-  // SHARED STATE
-  // ═══════════════════════════════════════════════════════════════════════════
 
   let uiBox             = null;
   let currentInstanceId = null;
@@ -348,7 +288,6 @@
 
   let logStickToBottom = true;
 
-  // ─── PvE state ─────────────────────────────────────────────────────────────
   let pveBusy           = false;
   let pveStaminaWaiting = false;
   const pveLockedNodesLogged    = new Set();
@@ -356,10 +295,6 @@
   const pveDiscoveredMobsByNode = {}; // nodeId -> Map<normalizedName, displayName>, for the mob-picker UI
   const pveSessionVerified = new Set();
 
-
-  // In-memory mirror of localStorage mob-damage tracking. Loaded once per
-  // instance, mutated synchronously, saved on a short delay so a multi-hit
-  // fight doesn't hammer localStorage on every swing.
   let pveMobStateInstanceId = null;
   let pveMobState           = new Map(); // dgmid -> { damage, expCap, name, nodeId }
   let pveMobStateSaveTimer  = 0;
@@ -370,42 +305,18 @@
   let activeTab         = 'pvp';   // 'pvp' | 'sa' | 'log'
   let activeLogFilter   = 'all';   // 'all' | 'pvp' | 'sa'
 
-  // Live PvP join counter — set by node scans, never persisted.
-  // Reflects the real number of matches the player currently occupies,
-  // including matches joined manually outside the script.
-  // Resets to 0 on instance change; shows '?' in the UI until first scan.
-  // Updated by pvpReadOnlyScan even when master toggle is OFF.
   let pvpLiveJoinCount = 0;
   let pvpHasScanned    = false;
   const pvpLockedNodesLogged   = new Set();
   const saLockedNodesLogged    = new Set();
-  // Live cooldown state — updated by node scans, reset on instance change.
-  // pvpCooldownTimeStr holds the HH:MM:SS string read from the last liveTimer
-  // element; pvpGetLiveCooldownStr() subtracts elapsed seconds so the display
-  // ticks down in real time between scans without extra network requests.
-  // Cooldown is tracked per-node — nodeId -> { active, timeStr, fetchedAt, logged }.
-  // Nodes 7, 8, and 9 (Tyrant) each get their own entry so one node's cooldown
-  // can never bleed into another node's pill/status text.
   const pvpCooldownByNode  = {};
   let pvpCountdownInterval = 0;     // shared 1s ticker; runs while ANY node has an active cooldown
 
-  // Tracks matches the script has already force-started this session (leader mode).
-  // Scoped to the running JS context — cleared on page reload, which is fine:
-  // start_trial on an already-live match is a no-op server-side
-  // Only populated when Fast Run + isLeader; never written in Normal mode.
   const pvpStartedMatchKeys = new Set();
-  // Carries instance_id / node_id / match_no into every pvp_style_action POST body.
   let pvpSourceParams = {};
 
-  // `${instanceId}:${nodeId}:${matchNo}` while a fast-run battle monitor is active.
-  // Prevents double-starting a loop for the same match (resume-on-reload + join hooks
-  // can both try to start one in the same tick).
   const pvpActiveBattleLoops = new Set();
 
-  // PVE_KNOWN_MOBS: every mob ever seen in this dungeon, used to seed the cap
-  // picker even for nodes that are still locked — so you can set caps in
-  // advance without typing names manually. Live discovery (pveScanNode) is
-  // always the source of truth once a node unlocks. (more like state update since we are nver going to see new mobs)
   const PVE_KNOWN_MOBS = {
     2:  ['Mireglass Stalker', 'Prismblade Reaver', 'Siege-Root Howler'],
     3:  ['Bastion Iterant', 'Calibration Warden', 'Null Choir Adept', 'Polyhedral Devourer'],
@@ -413,7 +324,6 @@
     12: ['The Polyhedral Apex'],
   };
 
-  // ─── Retry config ──────────────────────────────────────────────────────────
   const FETCH_RETRY_ATTEMPTS   = 3;
   const FETCH_RETRY_BASE_DELAY = 300;
 
@@ -424,14 +334,10 @@
 
   const pveCollapsedNodes = new Set(PVE_TARGET_NODES);
 
-  // tab ownership: Core.tab (exclusive Web Lock, queued). One MAIN tab runs the loop; the others wait and are
-  // promoted automatically the instant the main tab closes. Core.keepAlive runs only in the main tab.
   const TAB_NAME = 'cube-suite';
   let tabBlockerEl = null;
-  let dsFloat      = null;   // Core.float controller for the dock button
   let dsTabIsMain  = false;
 
-  // Shared helpers — used by tab-conflict blocker AND guild check
   function dsSetBlockMsg(icon, title, note) {
     const el = uiBox?.querySelector('.ds-tab-block-msg');
     if (!el) return;
@@ -459,9 +365,6 @@
     tabBlockerEl = null;
   }
 
-  // dsVerifyGuild — one fetch, PID regex, done.
-  // Shows a transient "checking…" state in the panel; leaves a denied message
-  // visible if the player isn't in the guild. Returns true to proceed, false to stop.
   function dsExtractGuildName(doc) {
     const h1 = doc.querySelector('h1.title');
     if (!h1) return '';
@@ -469,8 +372,6 @@
     return result;
   }
 
-  // FIX2: dsGuildCheckTransient distinguishes "could not check" (network / odd page: retry) from "checked and
-  // denied" (stay blocked). One failed request at startup used to leave the script dead until a manual refresh.
   let dsGuildCheckTransient = false;
   async function dsVerifyGuild() {
     dsGuildCheckTransient = false;
@@ -496,9 +397,6 @@
     return true;
   }
 
-  // FIX (switch at time): the loop only ticked every 60 s, so a schedule boundary (a scheduled nuke slot, the PvP
-  // cap stepping 6 -> 40 at 16:00) could be acted on up to a minute late. Core.clock.at() wakes the loop right at
-  // each boundary on the SERVER's clock.
   let dsWakeCancels = [];
   function dsDisarmScheduleWakeups() { dsWakeCancels.forEach(c => c()); dsWakeCancels = []; }
   function dsArmScheduleWakeups() {
@@ -519,8 +417,6 @@
     dsTabIsMain = true;
     const gen = ++dsMainGeneration;
     dsHideTabBlocker();
-    // FIX2: this tab loaded its toggles when the page opened. If the previous main tab changed them since (master
-    // switch, Tyrant, scheduled nuke), a promoted tab would run on stale values. Re-read them on promotion.
     masterEnabled            = dsLoadMasterEnabled();
     pvpTyrantEnabled         = pvpLoadTyrantEnabled();
     saScheduledNukeEnabled   = saLoadScheduledNukeEnabled();
@@ -551,15 +447,10 @@
     Core.tab.join(TAB_NAME, { queue: true, keepAlive: true, onMain: dsOnMainTab, onIdle: dsOnIdleTab });
   }
 
-  // looksLikeBlankErrorPage: the game occasionally returns a near-empty body
-  // with a 500 (or a 200 with no real content) on transient hiccups — a refetch
-  // almost always fixes it, so this isn't a "real" error worth surfacing loudly.
   function looksLikeBlankErrorPage(status, text, contentType = '') {
     if (status >= 500) return true;
     const trimmed = (text || '').trim();
     if (!trimmed) return true;
-    // JSON API responses are legitimately short and have no HTML markup —
-    // don't flag them as "blank" and trigger a pointless retry+delay.
     if (contentType.includes('json')) return false;
     if (trimmed[0] === '{' || trimmed[0] === '[') {
       try { JSON.parse(trimmed); return false; } catch { /* fall through */ }
@@ -568,8 +459,6 @@
     return false;
   }
 
-  // withRetry: runs fn() up to `attempts` times, stopping as soon as a result
-  // doesn't request a retry. fn must return an object with a `shouldRetry` flag.
   async function withRetry(fn, attempts = FETCH_RETRY_ATTEMPTS, baseDelay = FETCH_RETRY_BASE_DELAY) {
     let last;
     for (let i = 0; i < attempts; i++) {
@@ -638,10 +527,6 @@
   let pvpTyrantEnabled = pvpLoadTyrantEnabled();
   let saScheduledNukeEnabled = saLoadScheduledNukeEnabled();
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // SHARED LOGGING
-  // ═══════════════════════════════════════════════════════════════════════════
-
   const MAX_LOG = 300;
   function dsLoadLogFromSession() {
     try {
@@ -653,9 +538,7 @@
   }
   const logLines = dsLoadLogFromSession();
 
-  // ─── Log line HTML — shared by full rebuild (renderLog) and incremental append ───
   function dsEscapeHtml(msg) {
-    // FIX2: also escape quotes - mob / captain names are interpolated into data-* attributes as well as text.
     return String(msg).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
       .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   }
@@ -674,7 +557,6 @@
       `<span style="flex:1;${lvlColor ? `color:${lvlColor}` : ''}">${escaped}</span></div>`;
   }
 
-  // Debounced persistence only — never gates the visible append.
   let logSaveTimer = 0;
   function scheduleLogSave() {
     if (logSaveTimer) return;
@@ -684,9 +566,6 @@
     }, 500);
   }
 
-  // Appends exactly ONE line to the live DOM — no rebuild, no re-parse of
-  // existing lines. Skips the DOM write entirely if the entry doesn't match
-  // the currently active filter chip (still recorded in logLines either way).
   function appendLogLineToDom(entry) {
     if (!uiBox || !uiBox.isConnected) return;
     if (activeLogFilter !== 'all' && entry.source !== activeLogFilter) return;
@@ -695,8 +574,6 @@
     const empty = el.querySelector('.ds-log-empty');
     if (empty) empty.remove();
     el.insertAdjacentHTML('beforeend', dsBuildLogLineHtml(entry));
-    // Bound DOM size independently of logLines' own MAX_LOG trim — cheap and
-    // keeps the log from growing unbounded even under filter mismatches.
     while (el.childElementCount > MAX_LOG) el.removeChild(el.firstChild);
     if (logStickToBottom) el.scrollTop = el.scrollHeight;
   }
@@ -721,26 +598,10 @@
   const pveInfo = msg => { console.info('[PvE]', msg); addLog('pve', 'info', msg); };
   const pveWarn = msg => { console.warn('[PvE]', msg); addLog('pve', 'warn', msg); };
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // SHARED UTILS
-  // ═══════════════════════════════════════════════════════════════════════════
-
-  // sleep: promise-based delay used throughout async flows
   const sleep    = ms => new Promise(r => setTimeout(r, ms));
-  // normText: collapse whitespace + lowercase for robust string comparisons
   const normText = v  => String(v || '').replace(/\s+/g, ' ').trim().toLowerCase();
-  // playerKey: canonical form of a player name used as a dictionary key
   const playerKey = v => normText(v);
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // SHARED FETCH HELPERS
-  // All fetches use same-origin credentials and no-store cache to always see
-  // live server state rather than a cached snapshot.
-  // ═══════════════════════════════════════════════════════════════════════════
-
-  // FIX2: a POST that times out or 500s may ALREADY have been processed by the server. Retrying it blindly sent
-  // attacks / potion uses / heals / assigns twice. Only GETs and POSTs the caller marks `idempotent: true`
-  // (pure reads such as contributors / join_battle, or "join" calls that answer "already joined") are retried.
   async function fetchText(url, options = {}) {
     const { idempotent = false, ...fetchOpts } = options;
     const isRead  = String(fetchOpts.method || 'GET').toUpperCase() === 'GET';
@@ -777,7 +638,6 @@
     return clean;
   }
 
-  // fetchDoc: GETs a URL (with retry) and parses the response as HTML; null on failure.
   async function fetchDoc(url, label = '') {
     pvpLog(`fetchDoc (${label}): ${url}`);
     const { ok, text } = await fetchText(url);
@@ -785,8 +645,6 @@
     return new DOMParser().parseFromString(text, 'text/html');
   }
 
-
-  // fetchJson: like fetchText but also attempts JSON.parse on the body.
   async function fetchJson(url, options = {}) {
     const result = await fetchText(url, options);
     let data = null;
@@ -794,8 +652,6 @@
     return { ...result, data };
   }
 
-  // saParseServerTime: extracts server-local time from any fetched page HTML.
-  // Uses data-epoch (UTC unix seconds) + data-tzoff (local offset seconds).
   function saParseServerTime(html) {
     const epochM = html.match(/data-epoch="(\d+)"/);
     const tzoffM = html.match(/data-tzoff="(-?\d+)"/);
@@ -811,28 +667,10 @@
     };
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // SHARED: SCHEDULE ENGINE
-  // Both SA's nuke schedule and PvP's match-limit schedule are sorted arrays
-  // of { hour, minute, ...payload } entries keyed off the same server clock
-  // (saNowSeconds). They differ in *semantics*, so each gets its own lookup
-  // rather than being forced into one shape:
-  //   - "step" schedules (PvP limit) describe a continuous state: whichever
-  //     entry's time is the most recent one <= now is simply "what's true
-  //     right now" — dsGetActiveScheduleEntry() below.
-  //   - "event" schedules (SA nukes) describe one-shot triggers that fire
-  //     once and get marked handled per dungeon instance — saGetDueScheduledItems.
-  // Both share dsScheduleEntrySeconds() for converting hour/minute → seconds,
-  // so adding a third schedule-driven feature later means writing the lookup
-  // that matches its semantics, not re-deriving time math from scratch.
-  // ═══════════════════════════════════════════════════════════════════════════
   function dsScheduleEntrySeconds(entry) {
     return (entry.hour * 3600) + ((entry.minute ?? 0) * 60);
   }
 
-  // dsGetActiveScheduleEntry: "what state are we in right now" — the entry
-  // with the latest time-of-day that's still <= now. Entries need not be
-  // pre-sorted. Returns `fallback` if now is null or before every entry.
   function dsGetActiveScheduleEntry(schedule, now, fallback = null) {
     if (now == null || !schedule?.length) return fallback;
     let active = fallback;
@@ -856,9 +694,6 @@
     }))
       .filter(e => !handled.has(e.key))
       .filter(e => localSeconds >= dsScheduleEntrySeconds(e))
-    // Same-node sequencing: a slot isn't due until the previous slot for
-    // that node has finished. Prevents attempting e.g. match #4 while
-    // match #3 is still in progress.
       .filter(e => {
       const prevKey = SA_SCHED_PREV_KEY.get(e.key);
       return prevKey == null || handled.has(prevKey);
@@ -872,9 +707,6 @@
     }
   }
 
-  // saRunScheduledNuke: dispatches to whichever combat strategy the schedule
-  // entry says ('fastrun' or 'ordinary') — see SA_SCHEDULE's `mode` field.
-  // Not hardcoded to one strategy: this function just executes what it's told.
   async function saRunScheduledNuke(instanceId, nodeId, matchNo, playerName, playerId, participatedKeys, mode = 'fastrun') {
     const label = mode === 'ordinary' ? 'Scheduled hit' : 'Scheduled nuke';
     saInfo(`${label}: node ${nodeId} match #${matchNo} — scanning…`);
@@ -887,7 +719,6 @@
     const t = saParseServerTime(text);
     if (t) saSetServerTime(t);
     const { activeFightNo, fights } = saParseNodePage(text);
-
 
     const keys = participatedKeys || new Set(saLoadParticipated(instanceId).keys);
     const alreadyNukingThis = saScheduledNukingMatch.get(nodeId) === matchNo;
@@ -925,11 +756,6 @@
       return 'not_live';
     }
 
-    // Resolve the battle_id for THIS match's current live battle. Reuse the
-    // card's battle_id whenever join_battle can still resolve it — that covers
-    // fully engaged, partially engaged (some captains retreated/healed and are
-    // now idle), AND ended (both combat strategies detect non-ACTIVE → 'finished').
-    // Only fall back to enter_fight when there's truly no resolvable battle.
     let battleId = null;
     if (target.battleId > 0) {
       const bs = await saJoinBattle(String(target.battleId)).catch(() => null);
@@ -947,11 +773,6 @@
       saInfo(`${label}: node ${nodeId} match #${matchNo} — battle ${battleId} found — checking for idle captains…`);
     }
 
-    // Always heal before attempting the hit — a captain can be dead but
-    // omitted entirely from the battle state (not shown, not flagged), so
-    // there's no reliable way to detect that case from the response alone.
-    // A heal-all is a no-op if nothing's actually dead, so this is cheap
-    // insurance against a silently-missing captain blocking the scheduled action.
     await saHealDeadCaptains(`pre-attempt, node ${nodeId} match #${matchNo}`);
     await sleep(SA_JOIN_DELAY_MS); // let the heal register server-side before we check idle captains
 
@@ -961,10 +782,6 @@
 
     let result = 'error';
     try {
-      // Dispatch on the schedule entry's `mode` — never hardcoded to one
-      // strategy. 'ordinary' passes alreadyResolved=false so it always runs
-      // the authoritative damage check + a real attempt, same as any other
-      // ordinary hit.
       result = mode === 'ordinary'
         ? await saExecuteOrdinary(battleId, instanceId, nodeId, matchNo, playerName, playerId, false)
       : await saExecuteFastRun(battleId, instanceId, nodeId, matchNo, playerName, playerId);
@@ -981,29 +798,17 @@
       }
       if (result === 'captain_dead') { await saHealDeadCaptains(`node ${nodeId}: captain KO'd`); }
 
-      // Don't trust the pre-attack `fights` snapshot for "did this clear it" —
-      // re-fetch so allCleared/hasAvailable reflect the hit we just landed.
       let freshFights = fights;
       if (landedHit) {
         const refetch = await fetchText(nodeUrl.href).catch(() => null);
         if (refetch?.ok) freshFights = saParseNodePage(refetch.text).fights;
       }
 
-      // Check whether THIS specific target match cleared — not just whether
-      // every match on the node did. A node can carry several scheduled
-      // matches (Node 5/6 have 4 each); freshAllClr alone kept "nuking" a
-      // match that had already finished just because a sibling match was
-      // still open.
       const targetFreshStatus = freshFights.find(f => f.matchNo === target.matchNo)?.status;
       const targetNowCleared  = targetFreshStatus === 'cleared';
       const updAfter    = freshFights.some(f => f.liveBtn && f.status !== 'cleared' && !keys.has(`${nodeId}:${f.matchNo}`));
       const freshAllClr = freshFights.length > 0 && freshFights.every(f => f.status === 'cleared');
 
-      // Fast Run's whole point is captains stay locked in until the fight is
-      // actually cleared — so a 'fastrun' slot keeps re-triggering every tick
-      // until targetNowCleared. Ordinary's whole point is one safe hit then
-      // retreat — it never commits to finishing a fight, so an 'ordinary'
-      // slot is done after a single conclusive attempt, cleared or not.
       const stillNuking = mode === 'fastrun'
       && !['already_cleared', 'finished', 'captain_dead', 'error'].includes(result)
       && !targetNowCleared;
@@ -1023,22 +828,10 @@
         saScheduledNukingMatch.set(nodeId, target.matchNo);
       } else {
         saMarkNukeStopped(nodeId);
-        // No captain is engaged in this match anymore — drop the cached
-        // captain/engagement snapshot right away instead of leaving stale
-        // "generals connected" data displayed until the next scheduled slot
-        // (hours away) or a full reload.
         delete saLastBattleState[nodeId];
         if (mode === 'fastrun') {
-          // saExecuteFastRun doesn't re-check post-hit whether OUR hit just
-          // cleared the match — it always reports 'fought'. Promote it to
-          // 'finished' here so saTick marks this schedule slot handled on
-          // this same tick instead of retrying it next cycle.
           if (result === 'fought' && targetNowCleared) finalResult = 'finished';
         } else if (['fought', 'already_fought', 'retreat_pending', 'captain_dead'].includes(result)) {
-          // Ordinary: any conclusive outcome — landed a hit, already had
-          // damage in, retreat still confirming server-side, or genuinely no
-          // captains available — marks this slot done. It was only ever a
-          // single safe hit, not a commitment to clear the fight.
           finalResult = 'finished';
         }
       }
@@ -1049,17 +842,7 @@
     return finalResult;
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // SHARED: PLAYER INFO
-  // Fetches game_dash.php to extract the current player's display name and
-  // numeric ID.  Both are needed for slot-occupancy detection across pages
-  // where the server may format the name differently (e.g. with guild tag).
-  // ═══════════════════════════════════════════════════════════════════════════
-
   let playerInfoCache = null;
-  // FIX2: numeric id of the logged-in player. The battle page has NO .selfMark and writes the name with the guild tag
-  // ("[AHAB] werewulf"), so name matching alone could not tell whether we already held a slot. Slots carry
-  // data-user-id (battle page) and an avatar file named user_<id>_... (node page) - both are matched on this id.
   let pvpSelfId = '';
 
   async function getPlayerInfo() {
@@ -1070,7 +853,6 @@
 
   async function getPlayerInfoRaw() {
     if (playerInfoCache) return playerInfoCache;
-    // Core.player reads the sidebar that is already on this page: no dashboard fetch needed.
     const who = Core.player.info();
     const sideName = String(who.name || '').replace(/\s+/g, ' ').trim();
     if (sideName && who.id) return (playerInfoCache = { name: sideName, id: String(who.id) });
@@ -1100,13 +882,6 @@
     if (name || id) playerInfoCache = result; // never cache a failed/empty read
     return result;
   }
-
-  // ═══════════════════════════════════════════════════════════════════════════
-  // SHARED: CUBE INSTANCE ID
-  // Fast path: read instance_id from the current page URL (we're already inside).
-  // Slow path: scrape guild_dungeon.php to find the active Polyhedral Crucible
-  // card and extract the id parameter from its enter link.
-  // ═══════════════════════════════════════════════════════════════════════════
 
   function extractCubeInstanceId(html) {
     const doc     = new DOMParser().parseFromString(html, 'text/html');
@@ -1139,14 +914,6 @@
     return extractCubeInstanceId(await res.text());
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // PVP: FAST-RUN STATE (localStorage)
-  // Fast Run mode lets a leader/vice coordinate specific match numbers on each
-  // node.  State is persisted so it survives page reloads within an instance.
-  // On instance change, joinedNodeX flags are cleared but match number targets
-  // are preserved so they don't need to be re-entered.
-  // ═══════════════════════════════════════════════════════════════════════════
-
   function pvpDefaultFastRunState() {
     return {
       isLeader    : false,
@@ -1172,7 +939,6 @@
     else              state.node8Results = { ...(state.node8Results || {}), [key]: { ...(state.node8Results?.[key] || {}), ...patch } };
   }
 
-  // pvpMarkNodeDone now requires matchNo and writes into THAT match's slot only
   function pvpMarkNodeDone(nodeId, matchNo, cleared = false) {
     const s = pvpLoadFastRunState();
     pvpSetMatchResult(s, nodeId, matchNo, { joined: true, ...(cleared ? { cleared: true } : {}) });
@@ -1219,14 +985,6 @@
                   JSON.stringify({ instanceId: String(instanceId), matches }));
   }
 
-
-  // ═══════════════════════════════════════════════════════════════════════════
-  // PVP: SOURCE PARAMS
-  // pvp_style_action.php requires instance_id + node_id + match_no in every
-  // POST body.  pvpSourceParams is updated before each action call so the
-  // params always match the match being acted upon.
-  // ═══════════════════════════════════════════════════════════════════════════
-
   function pvpUpdateSourceParams(params = {}) {
     pvpSourceParams = {};
     for (const [k, v] of Object.entries(params))
@@ -1242,24 +1000,12 @@
     });
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // PVP: AVAILABLE NODES
-  // Reads the cube node table to determine which PvP nodes are currently
-  // accessible.  status-hidden = not yet unlocked (skip).  tableLocked =
-  // temporarily locked (skip).  status-cleared nodes are still scannable.
-  // ═══════════════════════════════════════════════════════════════════════════
-
-  // ─── Shared: parse STATE JSON from cube page HTML text ────────────────────
-  // The node table is JS-rendered so DOMParser never sees <tr data-select-node>.
-  // All node data lives in `const STATE = {...}` embedded in the page source.
   function parseCubeStateFromHtml(html) {
     const marker = 'const STATE = ';
     const idx    = html.indexOf(marker);
     if (idx === -1) return null;
     const start  = html.indexOf('{', idx + marker.length);
     if (start === -1) return null;
-    // Walk character-by-character to find the matching closing brace.
-    // Simple string-state tracking handles nested objects and string literals.
     let depth = 0, i = start, inStr = false, esc = false;
     for (; i < html.length; i++) {
       const c = html[i];
@@ -1273,8 +1019,6 @@
     try { return JSON.parse(html.slice(start, i)); } catch { return null; }
   }
 
-  // getCubeState: when already on the cube page, STATE is live in scope (@grant none).
-  // Otherwise fetch the page and parse STATE from the raw HTML.
   async function getCubeState(instanceId) {
     const now = Date.now();
     const ttl = dsIsFastMode() ? 5_000 : PVP_SCAN_INTERVAL_MS;
@@ -1285,8 +1029,6 @@
     ) return cubeStateCache.data;
 
     const { ok, text } = await fetchText(`${CUBE_DUNGEON_BASE}?instance_id=${instanceId}`);
-    // FIX: a failed fetch used to hand back the cached STATE however old it was, so locked/unlocked nodes could be
-    // acted on from stale data for as long as the site stayed down. Only a recent copy is good enough.
     if (!ok || !text) return (cubeStateCache.data && now - cubeStateCache.at < CUBE_STATE_MAX_STALE_MS) ? cubeStateCache.data : null;
     const _cst = saParseServerTime(text);
     if (_cst) saSetServerTime(_cst);
@@ -1295,12 +1037,6 @@
     return state;
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // PVP: AVAILABLE NODES
-  // Reads STATE.nodes instead of parsing the JS-rendered DOM table.
-  // PVP_NODE_PRIORITY still controls scan order; this just determines which
-  // node IDs the server currently has unlocked.
-  // ═══════════════════════════════════════════════════════════════════════════
   async function pvpGetAvailableNodes(instanceId) {
     const cubeState = await getCubeState(instanceId);
 
@@ -1324,16 +1060,11 @@
     return available;
   }
 
-  // pvpExtractCooldownTimer: reads the liveTimer span text from a fetched node doc.
   function pvpExtractCooldownTimer(doc) {
-    // #liveTimer holds the literal countdown regardless of which sentence wraps
-    // it ("committed to" after a natural match end vs "locked to" after a
-    // manual leave_room) — read it directly instead of matching wording.
     const liveTimerEl = doc.getElementById('liveTimer');
     const spanText = (liveTimerEl?.textContent || '').trim();
     if (/^\d{1,2}:\d{2}(:\d{2})?$/.test(spanText)) return spanText;
 
-    // Fallback only if the span itself is empty/missing for some reason.
     const bodyText = doc.body?.textContent || '';
     const m =
           bodyText.match(/committed to match #\d+ for about\s+([\d:]+)\s+more/i) ||
@@ -1341,7 +1072,6 @@
     return m ? m[1] : '';
   }
 
-  // pvpSetCooldown: called when a scan of `nodeId` detects an active cooldown.
   function pvpSetCooldown(nodeId, timerStr) {
     const entry = pvpCooldownByNode[nodeId] || (pvpCooldownByNode[nodeId] = { active: false, timeStr: '', fetchedAt: 0, logged: false });
     entry.active = true;
@@ -1354,7 +1084,6 @@
     refreshUI();
   }
 
-  // pvpClearCooldown: called after a scan of `nodeId` shows NO cooldown there.
   function pvpClearCooldown(nodeId) {
     const entry = pvpCooldownByNode[nodeId];
     if (!entry || (!entry.active && !entry.logged)) return; // nothing to clear
@@ -1367,14 +1096,10 @@
     refreshUI();
   }
 
-  // pvpWipeCooldown: drops a node's entry entirely — call once a node is
-  // confirmed cleared/locked/irrelevant so no stale timer can resurface.
   function pvpWipeCooldown(nodeId) {
     delete pvpCooldownByNode[nodeId];
   }
 
-  // pvpGetLiveCooldownStr: live countdown for ONE node. '' if that node has
-  // no active cooldown.
   function pvpGetLiveCooldownStr(nodeId) {
     const entry = pvpCooldownByNode[nodeId];
     if (!entry || !entry.active || !entry.timeStr) return '';
@@ -1426,16 +1151,6 @@
     }
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // PVP: SLOT DETECTION
-  // Slots are detected via multiple heuristics because the server varies markup
-  // depending on slot state.  .selfMark is the most reliable occupancy signal —
-  // it's added server-side and doesn't depend on matching display names across
-  // pages (e.g. guild-tagged vs bare name).
-  // ═══════════════════════════════════════════════════════════════════════════
-
-  // pvpReadSlotPlayerName: extracts the player name from a slot, returning ''
-  // for placeholder / empty text so callers can treat '' as "unoccupied".
   function pvpReadSlotPlayerName(slot) {
     const du = (slot.dataset.username || '').trim();
     if (du && du.toLowerCase() !== 'open slot') return du;
@@ -1446,7 +1161,6 @@
     return t;
   }
 
-  // pvpSlotHasRealOccupant: true if the slot is confirmed taken by someone.
   function pvpSlotHasRealOccupant(slot) {
     if (pvpReadSlotPlayerName(slot)) return true;
     const userId = (slot.dataset.userId || '').trim();
@@ -1457,8 +1171,6 @@
     || key !== '';
   }
 
-  // pvpSlotIsSelf: true if this slot (battle page .pSlot or node page .slot) is OURS.
-  // Order: server marker -> user id -> avatar file name -> name (tag-insensitive).
   function pvpSlotIsSelf(el, currentPlayerKey = '') {
     if (el.querySelector('.selfMark')) return true;
     const uid = String(el.dataset.userId || '').trim();
@@ -1479,7 +1191,6 @@
     return false;
   }
 
-  // pvpSlotLooksOpen: true if the slot appears joinable by us.
   function pvpSlotLooksOpen(slot) {
     if (pvpSlotHasRealOccupant(slot)) return false;
     if (slot.dataset.open === '1' || slot.classList.contains('joinable') ||
@@ -1488,8 +1199,6 @@
     const labels = [...slot.querySelectorAll('.empty')].map(el => normText(el.textContent));
     if (labels.some(t => t === 'empty' || /^slot\s*\d+$/i.test(t) ||
                     /^(open|vacant|available)$/i.test(t))) return true;
-    // Occupancy already ruled out by pvpSlotHasRealOccupant above — an <img>
-    // (e.g. an officer-only manage/kick icon) must not veto openness on its own.
     const noName = !slot.querySelector('.name');
     if (noName && slot.querySelector('img')) {
       pvpWarn(`Slot has no occupant but contains <img> — counted as open (would previously have been excluded): ${slot.outerHTML.slice(0, 200)}`);
@@ -1497,7 +1206,6 @@
     return noName;
   }
 
-  // pvpExtractSlotNumber: reads the 1-based slot index used in pick_slot POSTs.
   function pvpExtractSlotNumber(el, fallback) {
     const fromAttr = parseInt(el.dataset.slot || el.getAttribute('data-slot') || '', 10);
     if (fromAttr > 0) return fromAttr;
@@ -1508,8 +1216,6 @@
     return fallback;
   }
 
-  // pvpFindJoinableSlots: returns ally slots that are open and not already ours.
-  // Tries multiple selector patterns since server markup varies by node/match type.
   function pvpFindJoinableSlots(doc, currentPlayerKey = '') {
     const selectors = ['#bottomTeamCard .pSlot', '.slots .pSlot', '.slots .slot', '.pSlot', '.slot'];
     const seen = new Set(), all = [];
@@ -1528,7 +1234,6 @@
     return out;
   }
 
-  // pvpIsPlayerInDoc: true if the current player appears to be in any ally slot.
   function pvpIsPlayerInDoc(doc, currentPlayerKey) {
     if (!currentPlayerKey && !pvpSelfId) return false;
     const selectors = ['#bottomTeamCard .pSlot', '.slots .pSlot', '.slots .slot', '.pSlot', '.slot'];
@@ -1543,17 +1248,9 @@
     return false;
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // PVP: MATCH CARD PARSING & SCORING
-  // ═══════════════════════════════════════════════════════════════════════════
-
-  // pvpHasCooldown: detects the ~2h between-matches cooldown.
-  // When true we still scan to update pvpLiveJoinCount, but skip joining.
   const pvpHasCooldown = (doc = document) =>
   !!(doc.querySelector('.warn'));
 
-  // pvpParseMatchCards: extracts structured data from all .match cards on a node page.
-  // hasSelf=true → current player already occupies a slot in this match.
   function pvpParseMatchCards(doc, currentPlayerKey = '', instanceId = null, nodeId = null) {
     return [...doc.querySelectorAll('.match')].map((card, idx) => {
       const title    = normText(card.querySelector('.matchTitle')?.textContent || '');
@@ -1567,9 +1264,6 @@
       const slotEls      = [...card.querySelectorAll('.slots .slot, .slots .pSlot')];
       const totalSlots   = slotEls.length || 5;
 
-      // Construct directly instead of scraping an <a class="btn">.
-      // Immune to extra officer-only buttons/onclick handlers reordering or
-      // replacing the join link in the card markup.
       const href = (instanceId != null && nodeId != null)
       ? new URL(`pvp_style_battle.php?source=${PVP_SOURCE}&instance_id=${instanceId}&node_id=${nodeId}&match_no=${matchNo}`, location.origin).href
       : null;
@@ -1584,9 +1278,6 @@
     });
   }
 
-  // pvpScoreMatch: higher score = more desirable match to join.
-  // Cleared, in-progress, already-joined, or full matches get -Infinity.
-  // Prefer nearly-full matches (filledSlots high → match starts sooner).
   function pvpScoreMatch(m) {
     if (m.clearedBadge || m.isInProgress || !m.href || m.hasSelf || m.openSlots <= 0)
       return -Infinity;
@@ -1605,11 +1296,6 @@
     return scored[0];
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // PVP: ACTIONS
-  // ═══════════════════════════════════════════════════════════════════════════
-
-  // pvpExtractCsrfToken: tries multiple common CSRF token placements in the DOM.
   function pvpExtractCsrfToken(doc) {
     for (const sel of [
       'meta[name="csrf_token"]', 'meta[name="csrf"]', 'meta[name="csrf-token"]',
@@ -1622,20 +1308,6 @@
     return '';
   }
 
-  // pvpRoomAction: POSTs an action to pvp_style_action.php.
-  // Merges pvpSourceParams (instance_id/node_id/match_no) into the body
-  // automatically so callers only supply the action-specific extras.
-  async function pvpRoomAction(action, extra = {}, tokenDoc = document) {
-    const body = new URLSearchParams({ source: PVP_SOURCE, action });
-    Object.entries(pvpSourceParams || {}).forEach(([k, v]) => body.set(k, String(v)));
-    Object.entries(extra          || {}).forEach(([k, v]) => body.set(k, String(v)));
-    const token = pvpExtractCsrfToken(tokenDoc);
-    if (token) { body.set('csrf', token); body.set('csrf_token', token); }
-    return pvpPostAction(body);
-  }
-
-  // pvpPostAction: single POST to pvp_style_action.php with a timeout. Never retried (actions are not idempotent).
-  // FIX2: these two raw fetches had no timeout, so a hung request stalled the whole join flow (and the tick lock).
   async function pvpPostAction(body) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS * 2);
@@ -1654,13 +1326,8 @@
     } finally { clearTimeout(timer); }
   }
 
-  // pvpTryJoinBattleHref: navigates to a battle page and claims an open slot.
-  // Re-fetches the page just before each pick_slot call to minimise the race
-  // window where another player claims a slot between our scan and our POST.
   async function pvpTryJoinBattleHref(href, currentPlayerKey = '') {
     const u = new URL(href);
-    // FIX2: carry the target match explicitly instead of through the shared pvpSourceParams global, which other
-    // concurrent scans overwrite while we await below - a pick_slot could land on the wrong match / node.
     const tInst = u.searchParams.get('instance_id'), tNode = u.searchParams.get('node_id'), tMatch = u.searchParams.get('match_no');
     pvpUpdateSourceParams({ instance_id: tInst, node_id: tNode, match_no: tMatch });
     const doc = await fetchDoc(href, 'battle page');
@@ -1697,8 +1364,6 @@
         }
         pvpWarn(`pick_slot ${slotNum} failed: ${err}`);
         if (/timed out/i.test(String(err))) {
-          // FIX2: the request may have been applied before we gave up - look before trying another slot,
-          // otherwise a slow reply could end with us moving to (or claiming) a second slot.
           const after = await fetchDoc(href, `verify after timeout (slot ${slotNum})`);
           if (after && pvpIsPlayerInDoc(after, currentPlayerKey)) return { joined: true, alreadyIn: false };
         }
@@ -1707,7 +1372,6 @@
     return { joined: false, alreadyIn: false };
   }
 
-  // pvpTryStartMatch: force-starts a waiting match (leader/vice mode only).
   async function pvpTryStartMatch(href) {
     const u = new URL(href);
     const tInst = u.searchParams.get('instance_id'), tNode = u.searchParams.get('node_id'), tMatch = u.searchParams.get('match_no');
@@ -1718,12 +1382,6 @@
     catch (err) { pvpWarn(`start_trial failed: ${err}`); return false; }
   }
 
-  // pvpRoomActionExplicit: same as pvpRoomAction, but takes instance_id/node_id/
-  // match_no explicitly instead of reading the shared pvpSourceParams global.
-  // The battle monitor runs concurrently with the normal join/scan flow, which
-  // mutates pvpSourceParams for whatever match IT is touching — sharing it here
-  // would risk a use_skill POST landing on the wrong match. Always use this
-  // inside pvpRunFastBattleLoop.
   async function pvpRoomActionExplicit(instanceId, nodeId, matchNo, action, extra = {}, tokenDoc = document) {
     const body = new URLSearchParams({
       source: PVP_SOURCE,
@@ -1738,23 +1396,17 @@
     return pvpPostAction(body);
   }
 
-  // pvpFetchBattleState: GETs pvp_style_state.php for a specific match — the
-  // same endpoint the battle page itself polls, just called cross-page.
   async function pvpFetchBattleState(instanceId, nodeId, matchNo) {
     const url = new URL(PVP_STATE_URL, location.origin);
     url.searchParams.set('source', PVP_SOURCE);
     url.searchParams.set('instance_id', String(instanceId));
     url.searchParams.set('node_id', String(nodeId));
     url.searchParams.set('match_no', String(matchNo));
-    //url.searchParams.set('since_log_id', '0');
     const { ok, data } = await fetchJson(url.href);
     if (!ok || !data?.ok) return null;
     return data;
   }
 
-  // pvpPickAliveEnemyKey: lowest-numbered alive enemy slot key, e.g. "enemy:14:2".
-  // Power Slash one-shots (fast run players must be able to one shot), so target order doesn't matter for efficiency — just
-  // pick someone alive and kill them in turn.
   function pvpPickAliveEnemyKey(state) {
     const enemyMap = state?.teams?.enemy?.players_by_num || {};
     const nums = Object.keys(enemyMap).map(Number).filter(n => !Number.isNaN(n)).sort((a, b) => a - b);
@@ -1765,15 +1417,9 @@
     return '';
   }
 
-  // pvpPickAttackSkills: splits enemy-targeted skills into Power Slash (the
-  // one-shot finisher) and the cheapest alternative — the basic Slash/Attack
-  // that rebuilds tokens when Power Slash isn't affordable yet. Costs are read
-  // live from the server (skill.cost), never hardcoded, so this keeps working
-  // regardless of the actual numbers for a given fight.
   function pvpPickAttackSkills(skills) {
     const attackSkills = (skills || []).filter(s => s && s.target === 'enemy');
     const powerSlash = attackSkills.find(s => PVP_POWER_SLASH_RE.test(s.name || ''));
-    // Prefer an explicit Slash skill over the generic cost-sort fallback.
     const slash = attackSkills.find(
       s => (!powerSlash || s.id !== powerSlash.id)
       && !PVP_POWER_SLASH_RE.test(s.name || '')
@@ -1785,7 +1431,6 @@
     return { powerSlash, fallback };
   }
 
-  // pvpExecuteFastTurn: chooses and submits exactly one action for the current turn.
   async function pvpExecuteFastTurn(instanceId, nodeId, matchNo, me, state) {
     const tokens = parseInt(me.tokens || 0, 10);
     const { powerSlash, fallback } = pvpPickAttackSkills(me.skills);
@@ -1830,12 +1475,6 @@
     }
   }
 
-  // pvpRunFastBattleLoop — active combat monitor for one fast-run match.
-  // Polls state directly instead of waiting on the slow 10s player timer /
-  // battle-AI fallback. Acts on the very first poll that shows it's our turn,
-  // debounced via wasMyTurn so a slightly-delayed server update can't cause a
-  // double action on the same turn. Runs until match.ended, then marks the
-  // node done. Dedup'd via pvpActiveBattleLoops.
   async function pvpRunFastBattleLoop(instanceId, nodeId, matchNo) {
     const loopKey = `${instanceId}:${nodeId}:${matchNo}`;
     if (pvpActiveBattleLoops.has(loopKey)) return;
@@ -1875,14 +1514,7 @@
           const won = (state.match.winner_side || '') === 'ally';
           pvpInfo(`Node ${nodeId} match #${matchNo}: battle ended (${won ? 'won' : 'lost/draw'}) — stopping monitor`);
           pvpClearActiveMatch(instanceId, nodeId, matchNo);
-          // matchNo here is the closure param this specific loop instance is watching,
-          // so it always writes to the correct slot even if node7MatchNo has since changed.
           if (wasFastModeAtStart) pvpMarkNodeDone(nodeId, matchNo, true);
-          // Immediately mark match done in the card list. clearedBadge tracks
-          // the server's .badge.clear ("done/unjoinable"), which fires on a
-          // loss just as much as a win — it is NOT "won". isInProgress must
-          // also drop, or a loss keeps counting as "live" in the breakdown
-          // chips until the next page re-scan.
           if (pvpLastNodeMatches[nodeId]) {
             const mi = pvpLastNodeMatches[nodeId].findIndex(m => m.matchNo === matchNo);
             if (mi !== -1) pvpLastNodeMatches[nodeId][mi] = { ...pvpLastNodeMatches[nodeId][mi], hasSelf: false, clearedBadge: true, isInProgress: false };
@@ -1896,7 +1528,6 @@
         }
 
         if (roomStatus !== 'live') {
-          // Joined, waiting on the leader/vice to start_trial.
           await sleep(PVP_BATTLE_WAIT_POLL_MS);
           continue;
         }
@@ -1924,14 +1555,6 @@
     }
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // PVP: SCAN FUNCTIONS
-  // ═══════════════════════════════════════════════════════════════════════════
-
-  // pvpGetEffectiveMatchLimit: Normal-mode join cap, read from PVP_SCHEDULE via
-  // the shared dsGetActiveScheduleEntry() step-lookup (same engine SA's nuke
-  // schedule builds on) — not a single hardcoded hour/number. Falls back to
-  // the schedule's first entry if the server clock isn't warmed up yet.
   function pvpGetEffectiveScheduleEntry() {
     const now = saNowSeconds();
     return dsGetActiveScheduleEntry(PVP_SCHEDULE, now, PVP_SCHEDULE[0]);
@@ -1940,13 +1563,6 @@
     return pvpGetEffectiveScheduleEntry()?.limit ?? 6;
   }
 
-  // pvpScanAndJoin — Normal Mode.
-  //   Step 1: Scan all available PvP nodes, counting matches where hasSelf===true.
-  //           This live figure becomes pvpLiveJoinCount and is the single source of
-  //           truth for how many matches we're in — including manually joined ones.
-  //   Step 2: If pvpLiveJoinCount < pvpGetEffectiveMatchLimit(), pick and join the
-  //           best open match. pvpLiveJoinCount is incremented optimistically after
-  //           a successful join; the next scan will confirm or correct it.
   async function pvpScanAndJoin(instanceId) {
     const { name: playerName } = await getPlayerInfo();
     if (!playerName) { pvpWarn('Player name unknown; aborting'); return; }
@@ -1979,9 +1595,6 @@
           seenSelfKeys.add(key);
           actualSelfCount++;
           nodeSelfCount++;
-          // Self-heal: re-derive "am I still in this fight" from the live page
-          // every scan and (re)start its monitor. Covers loops killed by a
-          // reload, a master-toggle OFF/ON cycle while a match was still filling
           if (!m.clearedBadge) {
             pvpSaveActiveMatch(instanceId, nodeId, m.matchNo);
             void pvpRunFastBattleLoop(instanceId, nodeId, m.matchNo);
@@ -2033,7 +1646,6 @@
     if (joined) {
       pvpLiveJoinCount++;
       pvpInfo(`Joined match #${bestMatch.matchNo} on Node ${bestNodeId} (${pvpLiveJoinCount}/${effLimit})`);
-      // Immediately flip match card AND pill — don't wait for next scan cycle
       if (pvpLastNodeMatches[bestNodeId]) {
         const mi = pvpLastNodeMatches[bestNodeId].findIndex(m => m.matchNo === bestMatch.matchNo);
         if (mi !== -1) {
@@ -2063,16 +1675,9 @@
       refreshUI();
     }
   }
-  // pvpScanFastRunPlayer — Fast Run Mode (non-leader).
-  // Looks only for the specific match numbers configured in the fast-run state
-  // and joins them, then sets joinedNodeX to stop retrying that node.
   async function pvpScanFastRunPlayer(instanceId) {
     const state = pvpLoadFastRunState();
 
-    // Resume monitoring for matches already joined whose in-memory loop died
-    // (e.g. a page reload) — joinedNodeX survives reloads, the running
-    // while-loop in pvpRunFastBattleLoop does not. Safe to call every tick;
-    // pvpActiveBattleLoops dedups.
     const res7 = pvpGetMatchResult(state, 7, state.node7MatchNo);
     const res8 = pvpGetMatchResult(state, 8, state.node8MatchNo);
     if (state.node7MatchNo > 0 && res7.joined && !res7.cleared) void pvpRunFastBattleLoop(instanceId, 7, state.node7MatchNo);
@@ -2084,10 +1689,6 @@
     if (state.node7MatchNo > 0 && res7.joined) pvpWipeCooldown(7);
     if (state.node8MatchNo > 0 && res8.joined) pvpWipeCooldown(8);
 
-    // Only stop scanning a node once it's CONFIRMED cleared by a real scan —
-    // "joined" alone doesn't mean the node page has been rechecked, so
-    // pvpNodeStats[7]/[8] would otherwise go stale forever once your match
-    // is done, and dsMaybeAutoResetModeOnClear() would never fire.
     const node7Confirmed = !wants7 && !!pvpNodeStats[7]?.allCleared;
     const node8Confirmed = !wants8 && !!pvpNodeStats[8]?.allCleared;
     if (node7Confirmed && node8Confirmed) return; // both nodes confirmed fully cleared
@@ -2101,8 +1702,6 @@
       const matchNo = nodeId === 7 ? state.node7MatchNo : state.node8MatchNo;
       const res     = pvpGetMatchResult(state, nodeId, matchNo);
       try {
-        // Skip only nodes already confirmed cleared — always rescan
-        // otherwise, so stats stay fresh even after our own match is joined.
         if (pvpNodeStats[nodeId]?.allCleared) continue;
         const isAvailable = availableNodes.has(nodeId);
         pvpLogNodeLockTransition(nodeId, isAvailable);
@@ -2148,12 +1747,7 @@
           continue;
         }
         if (target.isInProgress) {
-          //const pvpLiveWithoutUsLogged = new Set();
-          //const stuckKey = `${instanceId}:${nodeId}:${matchNo}`;
-          //if (!pvpLiveWithoutUsLogged.has(stuckKey)) {
-          //pvpLiveWithoutUsLogged.add(stuckKey);
           pvpWarn(`Node ${nodeId} match #${matchNo}: went live without us — assign a different match # to try again`); //dont suppress
-          //}
           pvpNodeStats[nodeId] = { ...(pvpNodeStats[nodeId] || {}), liveWithoutUs: true };
           refreshUI();
           continue;
@@ -2177,7 +1771,6 @@
           pvpNodeStats[nodeId] = { ...(pvpNodeStats[nodeId] || {}), hasSelf: true };
           pvpMarkNodeDone(nodeId, matchNo);
           void pvpRunFastBattleLoop(instanceId, nodeId, matchNo);
-          // No early return — continue processing remaining configured nodes this tick.
         }
 
       } catch (e) {
@@ -2187,9 +1780,6 @@
     }
   }
 
-  // pvpScanViceLeader — Fast Run + Leader flag.
-  // Iterates non-cleared, non-live matches with ≥1 occupant and force-starts them.
-  // pvpStartedMatchKeys prevents double-starting the same match this session.
   async function pvpScanViceLeader(instanceId) {
     const available = await pvpGetAvailableNodes(instanceId);
     for (const nodeId of PVP_NODE_PRIORITY) {
@@ -2233,13 +1823,6 @@
       }
     }
   }
-  // ═══════════════════════════════════════════════════════════════════════════
-  // PVP: TYRANT CONCLAVE (Node 9) — opt-in boss trial
-  // Separate from PVP_NODE_PRIORITY/pvpScanAndJoin/pvpScanFastRunPlayer on
-  // purpose. Runs identically regardless of Normal/Fast Run mode — gated only
-  // by pvpTyrantEnabled. join=false (used from the passive path) updates the
-  // status pill without ever joining or attacking.
-  // ═══════════════════════════════════════════════════════════════════════════
 
   async function pvpGetTyrantStatus(instanceId) {
     const cubeState = await getCubeState(instanceId);
@@ -2274,8 +1857,6 @@
     const doc = await fetchDoc(nodeUrl.href, 'node 9 (Tyrant Conclave)');
     if (!doc) return;
 
-    // Parse cards FIRST, regardless of cooldown — same as node 7/8 — so
-    // hasSelf reflects reality even while committed/on cooldown.
     const inNodeCooldown = pvpHasCooldown(doc);
     if (inNodeCooldown) pvpSetCooldown(PVP_TYRANT_NODE_ID, pvpExtractCooldownTimer(doc));
     else                pvpClearCooldown(PVP_TYRANT_NODE_ID);
@@ -2294,13 +1875,11 @@
 
     if (inNodeCooldown) {
       pvpInfo('Tyrant Conclave: committed to a match — skipping join this cycle');
-      // Still resume the monitor if we're actually in the match.
       const ourCard = cards.find(m => m.hasSelf && !m.clearedBadge);
       if (ourCard) void pvpRunFastBattleLoop(instanceId, PVP_TYRANT_NODE_ID, ourCard.matchNo);
       return;
     }
 
-    // Resume the battle monitor if we're already inside a match (e.g. reload).
     const ourCard = cards.find(m => m.hasSelf && !m.clearedBadge);
     if (ourCard) { void pvpRunFastBattleLoop(instanceId, PVP_TYRANT_NODE_ID, ourCard.matchNo); return; }
 
@@ -2321,15 +1900,6 @@
       void pvpRunFastBattleLoop(instanceId, PVP_TYRANT_NODE_ID, best.matchNo);
     }
   }
-
-  // ═══════════════════════════════════════════════════════════════════════════
-  // PVP: PASSIVE SCAN (read-only)
-  // Runs when master toggle is OFF.  Scans node pages and counts hasSelf slots
-  // to keep pvpLiveJoinCount accurate for display — NO join or start actions
-  // are taken.  Uses the pvpBusy guard so it cannot race with pvpTick.
-  // This is what lets the UI show the correct join count (including manually
-  // joined matches) even while automation is paused.
-  // ═══════════════════════════════════════════════════════════════════════════
 
   async function pvpReadOnlyScan(instanceId) {
     if (pvpBusy) return;
@@ -2388,18 +1958,10 @@
     finally { pvpBusy = false; }
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // PVP: MAIN TICK
-  // Dispatches to the correct scan function based on current mode + leader flag.
-  // ═══════════════════════════════════════════════════════════════════════════
-
   async function pvpTick(instanceId) {
     if (pvpBusy) return;
     pvpBusy = true;
     try {
-      // Reload survival: resume any normal-mode battle monitors killed by a page refresh.
-      // Fast Run already handles this inside pvpScanFastRunPlayer via its own state.
-      // pvpActiveBattleLoops deduplicates so calling twice per reload is safe.
       if (!dsIsFastMode()) {
         for (const { nodeId, matchNo } of pvpLoadActiveMatches(instanceId)) {
           void pvpRunFastBattleLoop(instanceId, nodeId, matchNo);
@@ -2415,19 +1977,10 @@
       } else {
         await pvpScanAndJoin(instanceId);
       }
-      // Independent of Normal/Fast Run — gated only by its own toggle.
       await pvpScanTyrantNode(instanceId);
     } catch (err) { pvpWarn(`Tick error: ${err.message}`); }
     finally { pvpBusy = false; pvpHasScanned = true; }
   }
-
-  // ═══════════════════════════════════════════════════════════════════════════
-  // SHADOW ARMY: STORAGE
-  // SA uses localStorage ONLY for dedup — preventing re-joining the same fight
-  // within the same dungeon instance.  There is NO numeric fight cap.
-  // The participated key set is scoped by instance ID; loading for a different
-  // instance automatically returns an empty set, so old data never bleeds across.
-  // ═══════════════════════════════════════════════════════════════════════════
 
   function saLoadAllParticipated() {
     try {
@@ -2451,7 +2004,6 @@
     dsSafeSetItem(SA_PARTICIPATED_KEY, JSON.stringify(all));
   }
 
-  // saMarkParticipated: records participation in nodeId:matchNo this instance.
   function saMarkParticipated(instanceId, nodeId, matchNo) {
     const data = saLoadParticipated(instanceId);
     const key  = `${nodeId}:${matchNo}`;
@@ -2459,14 +2011,9 @@
     refreshUI();
   }
 
-  // saGetParticipatedCount: number of fights participated in this instance (display only).
   function saGetParticipatedCount(instanceId) {
     return saLoadParticipated(instanceId).keys.length;
   }
-
-  // ═══════════════════════════════════════════════════════════════════════════
-  // SHADOW ARMY: NODE AVAILABILITY
-  // ═══════════════════════════════════════════════════════════════════════════
 
   async function saGetAvailableArmyNodes(instanceId) {
     const cubeState = await getCubeState(instanceId);
@@ -2491,14 +2038,6 @@
     }
     return available;
   }
-  // ═══════════════════════════════════════════════════════════════════════════
-  // SHADOW ARMY: PASSIVE SCAN (read-only)
-  // Runs when master toggle is OFF.  Walks all SA target nodes, checks
-  // attackers_preview + contributors API for any fights we've participated in,
-  // and updates SA_PARTICIPATED_KEY so the UI count stays accurate.
-  // NO combat actions are taken (no enter_fight, no assign_target, no retreat).
-  // Uses the saBusy guard so it cannot race with saTick.
-  // ═══════════════════════════════════════════════════════════════════════════
   async function saReadOnlyScan(instanceId) {
     if (saBusy) return;
     saBusy = true;
@@ -2527,9 +2066,6 @@
 
         const { activeFightNo, fights } = saParseNodePage(text);
 
-        // join_battle is a pure state read (not enter_fight), so this is safe to call
-        // even when we haven't committed to anything — it's what lets idle generals
-        // show up here instead of only appearing once we're actually engaged.
         const captainTarget = activeFightNo > 0
         ? fights.find(f => f.matchNo === activeFightNo)
         : fights.find(f => f.liveBtn && f.status !== 'cleared');
@@ -2548,7 +2084,6 @@
         for (const fight of fights) {
           const pKey = `${nodeId}:${fight.matchNo}`;
           if (participatedKeys.has(pKey)) continue;
-          // Free check first — no HTTP cost
           const quickDmg = saGetOwnDamageFromCard(fight, playerName, playerId);
           if (quickDmg > 0) {
             saInfo(`Passive SA: node ${nodeId} fight #${fight.matchNo} — ${quickDmg} dmg in card data`);
@@ -2557,7 +2092,6 @@
             changed = true;
             continue;
           }
-          // API check only for fights that have actually started
           const hasStarted = fight.battleId > 0 || fight.status === 'cleared';
           if (!hasStarted) continue;
           const apiDmg = await saGetOwnDamage(instanceId, nodeId, fight.matchNo, playerName, playerId);
@@ -2588,19 +2122,10 @@
     } catch (err) { saWarn(`Passive SA scan error: ${err.message}`); }
     finally { saBusy = false; refreshUI(); }
   }
-  // ═══════════════════════════════════════════════════════════════════════════
-  // SHADOW ARMY: NODE PAGE PARSING
-  // Army node pages embed fight data as inline JS variables rather than in the
-  // DOM directly, so we parse raw HTML text with regex, then cross-reference
-  // the parsed DOM for live-flag detection.
-  // ═══════════════════════════════════════════════════════════════════════════
 
-  // saParseCommittedFightNo: reads `let activeMatchNo = N` from inline JS.
-  // > 0 means we're committed to that specific fight and must continue it.
   function saParseCommittedFightNo(html) {
     const m1 = html.match(/let\s+activeMatchNo\s*=\s*(\d+)\s*;/i);
     if (m1) return Number(m1[1]);
-    // Fallback: read the rendered #activeFightValue element
     const m2 = html.match(/id="activeFightValue"[^>]*>\s*([^<]+)\s*</i);
     if (m2) {
       const t = m2[1].trim();
@@ -2611,10 +2136,7 @@
     return 0;
   }
 
-  // saExtractFightCardsJson: reads `let fightCards = [...]` from inline JS.
   function saExtractFightCardsJson(html) {
-    // FIX: was a lazy /\[[\s\S]*?\]\s*;/ - it stops at the FIRST "];", so any card text containing one cut the JSON
-    // short and the whole node silently parsed as "no fights". Walk the brackets instead (string-aware).
     const m = /let\s+fightCards\s*=\s*\[/i.exec(html);
     if (!m) return [];
     const start = m.index + m[0].length - 1;
@@ -2631,17 +2153,7 @@
     try { return JSON.parse(html.slice(start, end)); } catch { return []; }
   }
 
-  // saParseFightLiveFlag: checks if the #fightGrid entry for a match has a
-  // data-enter-match button, meaning the fight is live and joinable right now.
-  function saParseFightLiveFlag(doc, matchNo) {
-    const fightEl = doc.querySelector(`#fightGrid .fight[data-match-no="${matchNo}"]`);
-    if (!fightEl) return false;
-    return !!fightEl.querySelector('.fight-actions [data-enter-match]');
-  }
-
-  // saParseNodePage: top-level parser; returns { activeFightNo, fights[] }.
   function saParseNodePage(html) {
-    const doc           = new DOMParser().parseFromString(html, 'text/html');
     const activeFightNo = saParseCommittedFightNo(html);
     const rawCards      = saExtractFightCardsJson(html);
     const fights = rawCards.map((card, idx) => {
@@ -2655,13 +2167,6 @@
     return { activeFightNo, fights };
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // SHADOW ARMY: DAMAGE HELPERS
-  // Damage checks detect whether we've already contributed to a fight.
-  // Two levels: fast (inline card data, no HTTP) and authoritative (API call).
-  // ═══════════════════════════════════════════════════════════════════════════
-
-  // saGetOwnDamageFromCard: quick check from inline attackers_preview data.
   function saGetOwnDamageFromCard(fight, playerName, playerId) {
     const preview = fight.attackersPreview || [];
     const myId    = String(playerId || '');
@@ -2677,7 +2182,6 @@
     return 0;
   }
 
-  // saGetOwnDamage: authoritative check via the contributors API.
   async function saGetOwnDamage(instanceId, nodeId, matchNo, playerName, playerId) {
     try {
       const { data } = await fetchJson(SA_ACTION_API, {
@@ -2689,8 +2193,6 @@
           node_id: String(nodeId), match_no: String(matchNo),
         }),
       });
-      // FIX2: a failed / refused lookup used to read as "0 damage", which made Ordinary mode assign captains into a
-      // fight we had already hit (and made saWaitForDamage confirm a hit that never landed). null = unknown.
       if (!data || data.ok === false) return null;
       const attackers =
             Array.isArray(data?.board?.attackers) ? data.board.attackers :
@@ -2710,9 +2212,6 @@
     } catch { return null; }
   }
 
-  // saWaitForDamage: polls until damage exceeds baseline (confirming our hit
-  // registered server-side).  Returns baseline if tries are exhausted — the
-  // damage will still appear on the next manual refresh.
   async function saWaitForDamage(instanceId, nodeId, matchNo, playerName, playerId, baseline) {
     for (let i = 0; i < SA_DAMAGE_TRIES; i++) {
       const dmg = await saGetOwnDamage(instanceId, nodeId, matchNo, playerName, playerId);
@@ -2722,11 +2221,6 @@
     return baseline;
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // SHADOW ARMY: BATTLE ACTIONS
-  // ═══════════════════════════════════════════════════════════════════════════
-
-  // saEnterFight: commits to a fight and returns the battle_id string, or null.
   async function saEnterFight(instanceId, nodeId, matchNo) {
     const { data, text } = await fetchJson(SA_ACTION_API, {
       method:  'POST',
@@ -2740,13 +2234,11 @@
     if (data?.ok === false) { saWarn(`enter_fight rejected: ${data?.message || ''}`); return null; }
     const direct = data?.battle_id || data?.data?.battle_id;
     if (direct) return String(direct);
-    // Some responses encode the battle_id in a redirect URL
     const redirect = String(data?.redirect || data?.url || data?.location || text || '');
     const m = redirect.match(/battle_id=(\d+)/i);
     return m ? m[1] : null;
   }
 
-  // saJoinBattle: fetches the full battle state (captains, engagements, status).
   async function saJoinBattle(battleId) {
     const { data } = await fetchJson(SA_BATTLE_API, {
       idempotent: true,   // FIX2: join_battle only reads state
@@ -2758,8 +2250,6 @@
     return data.state || data;
   }
 
-  // saAssignTarget: pairs an ally captain against an enemy captain.
-  // Throws on server rejection so callers can log and skip gracefully.
   async function saAssignTarget(battleId, attackerId, defenderId) {
     const { data } = await fetchJson(SA_BATTLE_API, {
       method:  'POST',
@@ -2774,7 +2264,6 @@
     return data;
   }
 
-  // saRetreatCaptain: pulls a captain out of combat (Ordinary mode only).
   async function saRetreatCaptain(battleId, captainId) {
     const { data } = await fetchJson(SA_BATTLE_API, {
       method:  'POST',
@@ -2787,16 +2276,6 @@
     return data;
   }
 
-  // ── Heal-all ──────────────────────────────────────────────────────────────
-  // POST action=heal_all_units to shadow_army.php. The server answers with a redirect back to
-  // shadow_army.php?msg=<text>&ok=<0|1>; fetch follows it, so the final res.url carries the result, e.g.
-  //   ...?msg=No+units+are+ready+to+heal+yet.&ok=0
-  // FIX: the old code logged "Heal-all sent" for ANY HTTP 200 (so a refusal read as success), every
-  // captain_dead path fired its own POST, and each call site wrote its own line before the function wrote two more:
-  // one heal produced 3-4 lines saying the same thing. Now:
-  //   - one request at a time (concurrent callers share the in-flight one),
-  //   - a refusal ("no units ready") backs off instead of re-POSTing on every tick,
-  //   - ONE log line per attempt (reason + what the server said); an identical reply is counted, not repeated.
   const SA_HEAL_BACKOFF_MS = 30_000;
   const SA_HEAL_REPEAT_MS  = 120_000;
   let saHealInFlight = null, saHealBackoffUntil = 0, saHealLast = null;
@@ -2831,7 +2310,6 @@
     if (r.status === 'error') saWarn(line); else saInfo(line);
   }
 
-  // opts.force: skip the back-off (the manual button).
   async function saHealDeadCaptains(reason = "Captain(s) KO'd", opts = {}) {
     if (saHealInFlight) return saHealInFlight;
     if (!opts.force && Date.now() < saHealBackoffUntil && saHealLast) return saHealLast;
@@ -2855,18 +2333,10 @@
     return saHealInFlight;
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // SHADOW ARMY: CAPTAIN HELPERS
-  // ═══════════════════════════════════════════════════════════════════════════
-
-  // saMyCaptains: ally captains we own that are alive and available to assign.
   const saMyCaptains  = state => (state?.captains || []).filter(
     c => c.side === 'ALLY' && c.is_mine && !c.is_dead && !c.retreat_requested);
-  // saLiveEnemies: enemy captains still active in this battle.
   const saLiveEnemies = state => (state?.captains || []).filter(c => c.side === 'ENEMY' && !c.is_dead);
 
-  // saGetTargetingCounts: maps enemy captain ID → number of allies currently targeting it.
-  // Used to spread DPS evenly rather than stacking on one enemy.
   function saGetTargetingCounts(state) {
     const counts = {};
     for (const eng of (state?.engagements || [])) {
@@ -2876,7 +2346,6 @@
     return counts;
   }
 
-  // saPickLeastTargeted: selects the enemy with the fewest allied attackers.
   function saPickLeastTargeted(enemies, counts) {
     if (!enemies.length) return null;
     const min  = Math.min(...enemies.map(e => counts[Number(e.id)] || 0));
@@ -2884,13 +2353,11 @@
     return tied[Math.floor(Math.random() * tied.length)];
   }
 
-  // saGetEngagedMineCaptains: "mine" captains currently assigned to a target (still in combat).
   function saGetEngagedMineCaptains(state) {
     const mine = saMyCaptains(state);
     const engagedIds = new Set((state?.engagements || []).map(e => Number(e.attacker_captain_unit_id)));
     return mine.filter(c => engagedIds.has(Number(c.id)));
   }
-  // saGetIdleMineCaptains: "mine" captains with no current engagement — free to assign.
   function saGetIdleMineCaptains(state) {
     const mine = saMyCaptains(state);
     const engagedIds = new Set((state?.engagements || []).map(e => Number(e.attacker_captain_unit_id)));
@@ -2900,21 +2367,6 @@
                       );
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // SHADOW ARMY: COMBAT MODES
-  // ═══════════════════════════════════════════════════════════════════════════
-
-  // saExecuteOrdinary — "safe DPS" mode.
-  // Order of checks, each one a hard gate before the next:
-  //   1. Stuck-captain recovery — always checked first, regardless of damage/dedup state.
-  //   2. Authoritative damage check — queries the server directly for THIS fight. If we've
-  //      already dealt any damage here, we do not assign again, no matter what the
-  //      localStorage dedup flag says. This is the real safety net: it catches drift between
-  //      localStorage and reality (interrupted writes, manual plays, etc.) and prevents a
-  //      second assign_target on a fight we already hit — that's a double-hit on the boss,
-  //      which is the kind of thing that gets a guild's contribution flagged.
-  //   3. localStorage flag — fast-path only, used purely to skip the assign step when nothing
-  //      engaged AND no damage found AND we already believe it's done.
   async function saExecuteOrdinary(battleId, instanceId, nodeId, matchNo, playerName, playerId, alreadyResolved) {
     const state = await saJoinBattle(battleId);
     if (!state) { saWarn('join_battle returned null'); return 'error'; }
@@ -2923,7 +2375,6 @@
     saLastBattleState[nodeId] = { captains: state.captains || [], engagements: state.engagements || [], matchNo, matchEnded: matchEndedNow };
     if (matchEndedNow) { saWarn(`Battle not ACTIVE (${battleStatus})`); return 'finished'; }
 
-    // 1. Recover a captain left stuck engaged from an interrupted retreat.
     const engaged = saGetEngagedMineCaptains(state);
     if (engaged.length) {
       let allRetreated = true;
@@ -2948,7 +2399,6 @@
       }
       return allRetreated ? 'fought' : 'retreat_pending';
     }
-    // 2. Authoritative damage check — ALWAYS run before assigning.
     const baseDmg = await saGetOwnDamage(instanceId, nodeId, matchNo, playerName, playerId);
     if (baseDmg == null) {   // FIX2: can't prove we haven't already hit this fight - retry next tick instead of guessing
       saWarn('Ordinary: contributors lookup failed - not assigning blind, will retry next tick');
@@ -2958,7 +2408,6 @@
       saInfo(`Ordinary: already dealt ${baseDmg} damage in this fight (confirmed live) — skipping assign`);
       return 'already_fought';
     }
-    // 3. localStorage fast-path.
     if (alreadyResolved) return 'fought';
     await sleep(SA_JOIN_DELAY_MS);
     const allMine = (state?.captains || []).filter(c => c.side === 'ALLY' && c.is_mine);
@@ -2979,8 +2428,6 @@
       return 'captain_dead';
     }
 
-    // Pick ONE captain to do all the work. Try mine[0] first; if it can't land even
-    // a single assignment (dead/invalid/rejected), fall back to the next candidate.
     let captain = null;
     let assignedCount = 0;
 
@@ -2993,8 +2440,6 @@
       const enemies = saLiveEnemies(liveState);
       if (!enemies.length) { saInfo('Ordinary: no live enemies remaining'); return 'skipped'; }
 
-      // Re-check after the await above — another node's parallel task may have
-      // claimed this captain while we were waiting on join_battle.
       const stillUsable = saMyCaptains(liveState).some(c => Number(c.id) === Number(candidate.id))
       && !saGloballyEngagedCaptainIds.has(Number(candidate.id));
       if (!stillUsable) {
@@ -3002,9 +2447,6 @@
         continue;
       }
 
-      // Reserve SYNCHRONOUSLY, before the first await inside this candidate's
-      // assign loop. No other Promise.all task can interleave between this line
-      // and the next — that's what makes the claim race-proof while staying parallel.
       saGloballyEngagedCaptainIds.add(Number(candidate.id));
 
       let landedFirst = false;
@@ -3042,9 +2484,6 @@
     catch (e) { saWarn(`retreat_captain failed: ${e.message} — captain left engaged, will retry next cycle`); }
     if (retreated) saGloballyEngagedCaptainIds.delete(Number(captain.id));
     if (retreated && saLastBattleState[nodeId]) {
-      // Drop this captain's engagement from the cached state right away —
-      // otherwise the captain card keeps showing "→ enemy" until whatever
-      // future scan happens to re-fetch this specific battle.
       saLastBattleState[nodeId] = {
         ...saLastBattleState[nodeId],
         engagements: (saLastBattleState[nodeId].engagements || [])
@@ -3058,7 +2497,6 @@
     if (gained > 0) saInfo(`Confirmed +${gained} damage (captain ${captain.id} hit ${assignedCount} enem${assignedCount === 1 ? 'y' : 'ies'})`);
     else            saInfo(`Damage not yet visible — will register on next server tick`);
 
-    // One lightweight state read instead of saScanNode doing a full node-page refetch.
     const postHitState = await saJoinBattle(battleId).catch(() => null);
     const postHitStatus = postHitState?.battle?.status || postHitState?.status;
     const matchEnded = !!postHitStatus && postHitStatus !== 'ACTIVE';
@@ -3067,17 +2505,10 @@
     return retreated ? 'fought' : 'retreat_pending';
   }
 
-  // saExecuteFastRun — "nuke" mode.
-  // Assigns generals so no stay idle.
-  // No retreat, ever — captains stay engaged until the battle ends or the
-  // next ordinary-mode run.
   async function saExecuteFastRun(battleId, instanceId, nodeId, matchNo, playerName, playerId) {
     const state = await saJoinBattle(battleId);
     if (!state) { saWarn('Fast Run: join_battle returned null'); return 'error'; }
 
-    // Seed global set from real server state — handles mid-loop interruption recovery.
-    // A captain engaged in THIS battle is globally committed regardless of whether
-    // we assigned them this tick or in a previous interrupted session.
     for (const eng of (state?.engagements || [])) {
       saGloballyEngagedCaptainIds.add(Number(eng.attacker_captain_unit_id));
     }
@@ -3106,17 +2537,12 @@
     if (!enemies.length) { saInfo('Fast Run: no live enemies remaining'); return 'finished'; }
     if (!idle.length)    { saInfo('Fast Run: no free captains — holding'); return 'no_captains'; }
 
-    // Reserve ALL idle captains synchronously, right now — before any await.
-    // This is what makes parallel node scanning race-proof: no other Promise.all
-    // task can interleave between this line and the previous one.
     const reserved = idle.map(c => Number(c.id));
     reserved.forEach(id => saGloballyEngagedCaptainIds.add(id));
 
     await sleep(SA_JOIN_DELAY_MS);
 
     const liveCounts = Object.assign({}, saGetTargetingCounts(state));
-    // liveCounts is updated locally after each assignment so the next captain
-    // always picks the true least-targeted at that moment without a server round-trip.
 
     saInfo(`Fast Run: assigning ${idle.length} captain(s) → ${enemies.length} alive enem(y/ies) (least-targeted, random tie-break)…`);
 
@@ -3154,13 +2580,6 @@
     return 'error';
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // SHADOW ARMY: NODE SCANNER
-  // Scans one SA node for live fights, checks participation dedup, and runs
-  // combat.  Returns: 'fought' | 'participated' | 'skipped' | 'error'
-  // ═══════════════════════════════════════════════════════════════════════════
-
-  // ═══════════════════════════════════════════════════════════════════════════
   async function saScanNode(instanceId, nodeId, playerName, playerId, participatedKeys, excludeMatchNos = null) {
     saInfo(`Node ${nodeId}: scanning…`);
     saNodeStats[nodeId] = { ...(saNodeStats[nodeId] || {}), scanning: true, justFought: false };
@@ -3182,8 +2601,6 @@
     const { activeFightNo, fights } = saParseNodePage(text);
     const fastMode = dsIsFastMode();
 
-    // Preliminary stats — removes "scanning…" from the UI immediately after the page
-    // fetch so the batch dedup API calls below don't keep nodes visually stuck.
     saNodeStats[nodeId] = {
       total: fights.length,
       activeFightNo,
@@ -3191,7 +2608,6 @@
       hasAvailable: fights.some(f => f.liveBtn && f.status !== 'cleared' && !participatedKeys.has(`${nodeId}:${f.matchNo}`)),
     };
 
-    // Batch check — informational only...
     for (const fight of fights) {
       const pKey = `${nodeId}:${fight.matchNo}`;
       if (participatedKeys.has(pKey)) continue;
@@ -3222,14 +2638,6 @@
     if (allCleared && saLastBattleState[nodeId]) delete saLastBattleState[nodeId];
     refreshUI();
 
-    //if (!fastMode && saScheduledNukeEnabled && masterEnabled && saLastServerTime) {
-    //  const _nowSec = saNowSeconds();
-    // if (saGetDueScheduledItems(_nowSec, instanceId).some(item => item.nodeId === nodeId)) {
-    //   saInfo(`Node ${nodeId}: scheduled nuke owns this node — skipping ordinary combat`); //not really helpful block
-    //   return 'sched_owned';
-    //  }
-    //}
-
     const exclude = excludeMatchNos || new Set();
     let target = null;
     if (activeFightNo > 0 && !exclude.has(activeFightNo)) {
@@ -3244,14 +2652,9 @@
       if (activeFightNo > 0 && exclude.has(activeFightNo)) {
         saInfo(`Node ${nodeId}: fight #${activeFightNo} reserved for scheduled nuke — looking for another live fight`);
       }
-      // Prefer a live fight we haven't participated in yet, skipping anything
-      // reserved for the scheduled nuke — this is what stops ordinary mode
-      // from grabbing (and retreating!) the captain the nuke deliberately
-      // left engaged.
       const liveFights = fights.filter(f => f.liveBtn && f.status !== 'cleared' && !exclude.has(f.matchNo));
       target = liveFights.find(f => !participatedKeys.has(`${nodeId}:${f.matchNo}`)) || liveFights[0] || null;
     }
-
 
     if (!target) {
       saInfo(`Node ${nodeId}: no live fights`);
@@ -3274,17 +2677,12 @@
     const { matchNo, battleId: cardBattleId } = target;
     const pKey = `${nodeId}:${matchNo}`;
 
-    // Check the live battle room, not the node page, to see whether one of our
-    // own captains is still engaged there.
     let battleState = null;
     if (cardBattleId > 0) {
       battleState = await saJoinBattle(String(cardBattleId)).catch(() => null);
     }
     const stillCommitted = !!battleState && saGetEngagedMineCaptains(battleState).length > 0;
 
-    // Seed display state immediately from this fetch — restores captain assignments
-    // on reload without waiting for saExecuteFastRun (which may return 'holding'/'no_captains').
-    // saExecuteFastRun will overwrite with a fresher fetch if it proceeds.
     if (battleState?.captains?.length) {
       saLastBattleState[nodeId] = {
         captains: battleState.captains,
@@ -3293,8 +2691,6 @@
       };
     }
 
-    // Ordinary mode trusts the dedup flag UNLESS the live battle state still
-    // shows one of our captains engaged in this fight.
     if (!fastMode && participatedKeys.has(pKey) && !stillCommitted) {
       saInfo(`Node ${nodeId} fight #${matchNo}: already participated`);
       return 'participated';
@@ -3318,7 +2714,6 @@
       }
     }
 
-    // Reflect "actively fighting" immediately — don't wait for the next scan.
     if (saNodeStats[nodeId]) saNodeStats[nodeId] = { ...saNodeStats[nodeId], activeFightNo: matchNo };
     refreshUI();
 
@@ -3332,8 +2727,6 @@
         saMarkParticipated(instanceId, nodeId, matchNo); // informational only — fast mode never gates on this
         participatedKeys.add(pKey);
         const updAfter = fights.some(f => f.liveBtn && f.status !== 'cleared' && !participatedKeys.has(`${nodeId}:${f.matchNo}`));
-        // No retreat in Fast Run — captains stay engaged, so stay "in fight" until
-        // a future scan's server-side activeMatchNo says the fight actually ended.
         if (saNodeStats[nodeId]) saNodeStats[nodeId] = { ...saNodeStats[nodeId], activeFightNo: matchNo, hasAvailable: updAfter };
         saInfo(`Node ${nodeId} fight #${matchNo}: nuke assignment sent ✓`);
         refreshUI();
@@ -3351,7 +2744,6 @@
         refreshUI();
         return 'error';
       }
-      // Battle genuinely ended server-side — clear the optimistic flag AND the cached captain/engagement snapshot
       if (result === 'finished') {
         const matchEnded = saLastBattleState[nodeId]?.matchNo === matchNo && !!saLastBattleState[nodeId]?.matchEnded;
         const updAfter = fights.some(f => f.liveBtn && f.status !== 'cleared' && f.matchNo !== matchNo && !participatedKeys.has(`${nodeId}:${f.matchNo}`));
@@ -3430,22 +2822,11 @@
     return 'error';
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // SHADOW ARMY: MAIN TICK
-  // Iterates all SA_TARGET_NODES and scans each for live fights.
-  // NO numeric fight cap — every available fight is joined every cycle.
-  // SA_PARTICIPATED_KEY dedup prevents re-joining the same fight.
-  // ═══════════════════════════════════════════════════════════════════════════
-
-
   async function saTick(instanceId, opts = {}) {
     const { immediate = false } = opts;
     if (saBusy) { saWarn('SA tick skipped — already running'); return; }
     saBusy = true;
     saGloballyEngagedCaptainIds.clear();
-    // Re-seed from each node's last known engagement snapshot — a nuke
-    // captain never retreats, so a node that isn't rescanned this tick
-    // must not "disappear" from the busy set.
     for (const state of Object.values(saLastBattleState)) {
       for (const eng of (state?.engagements || [])) {
         saGloballyEngagedCaptainIds.add(Number(eng.attacker_captain_unit_id));
@@ -3459,11 +2840,8 @@
       const available = await saGetAvailableArmyNodes(instanceId);
       saInfo(`Available SA nodes: [${[...available].join(', ')}]`);
 
-
       if (immediate) saInfo('First tick — running recovery sweep across all SA nodes');
 
-      // FIX: ONE time reading per tick. Before, the "which nodes does the schedule own" check and the "what is due"
-      // check read the clock separately, so a slot that became due between them was scanned by BOTH paths.
       const tickSeconds = saNowSeconds();
       const schedOwnedNodes = new Set();
       if (saScheduledNukeEnabled && masterEnabled && !dsIsFastMode() && tickSeconds != null) {
@@ -3503,11 +2881,6 @@
       }
       saAllClearedForNow = saComputeAllCleared();
 
-      // ── Scheduled nuke check ─────────────────────────────────────────────
-      // Runs after regular SA scanning.
-      // Combat strategy per slot comes from SA_SCHEDULE's `mode` field (see
-      // saGetDueScheduledItems / saRunScheduledNuke) — not hardcoded here.
-      // Fast Run mode (the dsIsFastMode() toggle) never runs this at all.
       if (saScheduledNukeEnabled && masterEnabled && !dsIsFastMode() && tickSeconds != null) {
         const liveSeconds = tickSeconds;
         const due = saGetDueScheduledItems(liveSeconds, instanceId);
@@ -3516,10 +2889,6 @@
           for (const item of due) {
             if (item !== due[0]) await sleep(SA_NODE_GAP_MS);
             const result = await saRunScheduledNuke(instanceId, item.nodeId, item.matchNo, playerName, playerId, participatedKeys, item.mode);
-            // Mark handled only on a terminal result. Everything else (still
-            // nuking, not yet live, a transient error, dead captains) just
-            // retries next tick — the same-node sequencing gate above is what
-            // keeps a stuck slot from starving the rest of the node.
             if (['already_cleared', 'finished'].includes(result)) {
               saMarkSchedHandled(instanceId, item.key);
             }
@@ -3537,13 +2906,6 @@
     return SA_TARGET_NODES.every(nid => !!saNodeStats[nid] && saNodeStats[nid].allCleared);
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // PVE: PROFILES
-  // PvE rides the SAME shared Normal/Fast toggle PvP and SA already use, but
-  // keeps independent settings per mode — separate damage-cap config and
-  // separate per-node mob selection, since the whole point is letting Fast
-  // Run target different mobs than Normal does.
-  // ═══════════════════════════════════════════════════════════════════════════
   function pveDefaultProfile(mode = 'normal') {
     return {
       damageMode: 'monster',
@@ -3554,12 +2916,6 @@
       staminaPotionExpCap: mode === 'fast' ? 100 : 93.5,
       useHpPotion: false,
       selectedMobsByNode: {},
-      // 'scheduled' damage mode is NORMAL-PROFILE ONLY (see pveGetEffectiveCap
-      // and the mode dropdown in the UI, which hides this option in Fast Run).
-      // Per node, a free-form list of time breakpoints the user builds in the
-      // UI: nodeId -> [{ hour, minute, mode: 'exp'|'fixed'|'monster'|'loot'|'skip', fixedCap? }].
-      // No node (including the boss, node 12) is special-cased in code — every
-      // node gets the same empty default and behaves however the user configures it.
       nodeSchedules: mode === 'normal' ? {} : undefined,
     };
   }
@@ -3615,14 +2971,6 @@
     pveInfo(`Copied PvE settings from ${other === 'fast' ? 'Fast Run' : 'Normal'} mode (kept current damage mode: ${keepDamageMode})`);
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // PVE: PER-MOB DAMAGE STATE
-  // One battle.php fetch bootstraps {damage, expCap} for a dgmid the FIRST
-  // time we touch it. After that, damage updates purely from the attack
-  // response's totaldmgdealt — no further network calls for that mob, ever.
-  // Persisted to localStorage so a reload doesn't re-trigger hundreds of
-  // lookups for mobs the script already knows about.
-  // ═══════════════════════════════════════════════════════════════════════════
   function pveMobStateStorageKey(instanceId) { return PVE_MOB_STATE_KEY_PREFIX + instanceId; }
 
   function pveLoadMobStateForInstance(instanceId) {
@@ -3654,8 +3002,6 @@
     pveSaveMobStateSoon();
   }
 
-  // The ONLY function that fetches battle.php for discovery. Skipped entirely
-  // for any dgmid already in pveMobState — that's the whole performance win.
   async function pveBootstrapMobState(instanceId, dgmid, name, nodeId, force = false) {
     if (!force && pveHasMobState(dgmid)) return pveGetMobState(dgmid);
     const doc = await fetchDoc(
@@ -3680,9 +3026,6 @@
       if (dmgTxt) damage = Number(dmgTxt.replace(/[^\d]/g, '')) || 0;
       lootCap = pveParseLootRequirements(doc);
 
-      // Monster's total HP — display-only stand-in for "∞" when a mob has no
-      // real per-player cap. #yourStats carries it directly; text fallback
-      // in case that attribute is ever missing.
       const maxHpAttr = doc.querySelector('#yourStats')?.getAttribute('data-maxhp');
       if (maxHpAttr) monsterMaxHp = Number(maxHpAttr) || null;
       if (!monsterMaxHp) {
@@ -3703,8 +3046,6 @@
     return entry;
   }
 
-  // saPruneOldParticipatedKeys: drops participation records for any instance
-  // not in the last N we've seen — mirrors pvePruneOldMobStateKeys.
   function saPruneOldParticipatedKeys(keepInstanceIds) {
     const keep = new Set(keepInstanceIds.map(String));
     const all = saLoadAllParticipated();
@@ -3731,9 +3072,6 @@
     if (toRemove.length) pveInfo(`Pruned ${toRemove.length} stale attack-dmg cache(s) from old dungeon instance(s)`);
   }
 
-  // pveParseLootRequirements: reads the "🎁 Possible Loot" panel and returns the
-  // highest "DMG req" figure across ALL listed loot (locked or unlocked) — i.e.
-  // the damage needed to have unlocked every possible drop, including the rarest.
   function pveParseLootRequirements(doc) {
     let maxReq = 0;
     for (const chip of doc.querySelectorAll('.loot-card .chip')) {
@@ -3745,31 +3083,12 @@
     return maxReq > 0 ? maxReq : null;
   }
 
-  // Pure, synchronous, zero network. null = no cap (fight to death).
-  // 'scheduled' mode (Normal profile only): each node carries its own free-form
-  // list of time breakpoints; whichever breakpoint's time is the latest one
-  // <= now (via the same dsGetActiveScheduleEntry step-lookup PvP/SA use)
-  // picks WHICH of the other four modes applies from that point on. Nothing
-  // node-specific is hardcoded here — a node with no breakpoints configured
-  // simply isn't fought under this mode (cap 0 = skip), same semantics as an
-  // unconfigured monster in 'monster' mode.
   function pveGetEffectiveCap(profile, name, mobEntry) {
     if (profile.damageMode === 'scheduled') {
       const nodeId   = mobEntry?.nodeId;
       const schedule = profile.nodeSchedules?.[nodeId];
       if (!schedule?.length) return 0; // no breakpoints configured — skip, don't guess
 
-      // A row can be flagged noTime instead of carrying an hour/minute — same
-      // breakpoint object, same UI (mode/fixed cap/monster caps), just no
-      // clock. It's excluded from the timed lookup below and used as the
-      // fallback for BOTH: (a) before the earliest timed breakpoint fires
-      // today, and (b) right after script load when the server clock isn't
-      // warmed up yet (dsGetActiveScheduleEntry also falls back here on
-      // now == null). Previously this fell back to schedule[0], which is
-      // array/add-order, not time-order — whichever breakpoint you happened
-      // to click "+ Add" for first would silently win regardless of its
-      // actual time. At most one noTime row should exist per node; the
-      // checkbox handler enforces that by clearing any others.
       const timed         = schedule.filter(e => !e.noTime);
       const fallbackEntry = schedule.find(e => e.noTime) || null;
 
@@ -3777,25 +3096,12 @@
       const entry = dsGetActiveScheduleEntry(timed, now, fallbackEntry);
 
       if (!entry) {
-        // Nothing timed applies yet AND no noTime row was configured to
-        // cover the gap. Skip — fight nothing — rather than guessing any
-        // mode on the operator's behalf. This gap is either the sliver
-        // before the day's earliest breakpoint or the moment right after
-        // script load before the server clock is warmed up; either way
-        // it's unconfigured territory, and "do nothing until configured"
-        // is the only default that can't cause an unwanted attack. (If the
-        // operator explicitly sets a noTime or timed row's mode to 'loot'
-        // or 'exp' themselves, that's a deliberate choice and is honored
-        // normally below — this only guards the unconfigured gap.)
         return 0;
       }
       if (entry.mode === 'skip') return 0;
       if (entry.mode === 'fixed')   return entry.fixedCap > 0 ? entry.fixedCap : null;
       if (entry.mode === 'loot')    return mobEntry?.lootCap ?? null;
       if (entry.mode === 'monster') {
-        // Per-entry table if this breakpoint has been seeded/edited; falls
-        // back to the shared global table for entries saved before per-entry
-        // monster caps existed (so old profiles don't silently zero out).
         const table = entry.monsterCaps || profile.monsterCaps;
         const v = table[normText(name)];
         return typeof v === 'number' ? v : 0;
@@ -3821,7 +3127,6 @@
     return entry.damage >= cap;
   }
 
-  // Small parallel-batch helper for the one-time bootstrap pass.
   async function pveRunWithLimit(items, limit, worker) {
     let i = 0;
     const runners = Array(Math.min(limit, items.length)).fill(0).map(async () => {
@@ -3833,11 +3138,6 @@
     await Promise.all(runners);
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // PVE: AVAILABLE NODES
-  // Mirrors saGetAvailableArmyNodes exactly — same STATE fields, same
-  // hidden/locked check — just filtered to the fixed PvE/Boss node IDs.
-  // ═══════════════════════════════════════════════════════════════════════════
   async function pveGetAvailableNodes(instanceId) {
     const cubeState = await getCubeState(instanceId);
     if (!cubeState?.nodes?.length) {
@@ -3855,8 +3155,6 @@
     return available;
   }
 
-  // FIX2: the cube STATE carries each node's real location id (node.linked_location_id); the hardcoded table only
-  // matches one instance layout. Prefer the live value, fall back to the table.
   function pveLocationIdFor(nodeId) {
     const nodes = cubeStateCache?.data?.nodes;
     const n = Array.isArray(nodes) ? nodes.find(x => Number(x.id) === Number(nodeId)) : null;
@@ -3874,13 +3172,9 @@
     }
   }
 
-  // ONE fetch returns every alive mob plus current stamina. This used to get
-  // re-fetched once per kill; now it's called exactly once per node-visit.
   async function pveFetchLocationPage(instanceId, locationId) {
     const url = `${PVE_LOCATION_BASE}?instance_id=${instanceId}&location_id=${locationId}`;
     const doc = await fetchDoc(url, `pve location ${locationId}`);
-    // FIX2: a failed fetch used to come back as "no mobs" -> allClear -> the node was skipped as "confirmed clear" for
-    // the rest of the session (and could flip Fast Run back to Normal). Callers must see the failure.
     if (!doc) return { mobs: [], stamina: null, failed: true, looksValid: false };
 
     const mobs = [];
@@ -3895,15 +3189,11 @@
       if (seen.has(dgmid)) continue;
       seen.add(dgmid);
 
-      // Walk up to the monster's flex container
       const container = link.closest('.mon') || link.closest('div[style*="flex"]') || link.parentElement?.parentElement;
 
-      // Flag dead monsters rather than skipping — we still want them in the picker
-      // so caps can be set/read, and so the location can be fully bootstrapped.
       const isDead = [...(container?.querySelectorAll('.pill') || [])]
       .some(p => normText(p.textContent) === 'dead');
 
-      // Name is a text node inside the bold div, after the pill-row child element
       let name = '';
       const nameDiv = container?.querySelector('div[style*="font-weight:700"]');
 
@@ -3924,7 +3214,6 @@
     }
     const staminaTxt = doc.querySelector('#stamina_span')?.textContent || '';
     const stamina = parseInt(staminaTxt.replace(/[^\d]/g, ''), 10);
-    // looksValid: the real location page always carries the stamina readout; an error / login page does not.
     return { mobs, stamina: Number.isFinite(stamina) ? stamina : null, failed: false, looksValid: !!doc.querySelector('#stamina_span') };
   }
 
@@ -3932,16 +3221,12 @@
     const hasKey   = Object.prototype.hasOwnProperty.call(profile.selectedMobsByNode, nodeId);
     const selected = profile.selectedMobsByNode[nodeId];
     if (!hasKey) {
-      // Node has never been configured (no scan has populated it yet).
-      // exp/fixed/loot: default to "fight everything" so you don't have to touch anything.
-      // monster: default to "fight nothing" until caps are configured.
       return profile.damageMode === 'monster' ? [] : mobs;
     }
     const set = new Set(selected || []);
     return mobs.filter(m => set.has(normText(m.name)));
   }
 
-  // ─── PvE: join / attack ─────────────────────────────────────────────────
   async function pveJoinMonster(instanceId, dgmid) {
     const body = new URLSearchParams({ dgmid: String(dgmid), instance_id: String(instanceId) });
     const { ok, text } = await fetchText(PVE_JOIN_URL, {
@@ -3969,13 +3254,10 @@
     return data || { status: 'error', message: text || 'no response body' };
   }
 
-  // ─── PvE: potions (fetch-only — no DOM dependency, since this script
-  // lives on the cube page, not the location/inventory pages) ─────────────
   async function pveFindPotionInvId(name) {
     const doc = await fetchDoc(PVE_INVENTORY_URL, 'pve potion lookup');
     if (!doc) return null;
     const target = normText(name);
-    // 1) Normal inventory cards with onclick="useItem(...)"
     for (const slot of doc.querySelectorAll('.slot-box')) {
       const alt = normText(slot.querySelector('img')?.alt);
       if (alt !== target) continue;
@@ -3987,7 +3269,6 @@
       const m = onclick.match(/useItem\(\s*([0-9]+)/i);
       if (m) return m[1];
     }
-    // 2) Battle drawer cards with data-inv-id / data-item-id
     for (const card of doc.querySelectorAll('.potion-card')) {
       const alt = normText(card.querySelector('img')?.alt);
       if (alt !== target) continue;
@@ -4005,7 +3286,6 @@
       headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
       body: new URLSearchParams({ inv_id: invId }).toString(),
     });
-    // FIX2: used to report success whatever the server said
     if (!used.ok) { pveWarn('Large Stamina Potion request failed - not counting it as used'); return false; }
     await sleep(100);
     pveInfo('Used a Large Stamina Potion');
@@ -4029,16 +3309,11 @@
     return true;
   }
 
-  // skip auto stamina potions right before a level-up, since leveling refills
-  // stamina for free and a potion bought moments before that is wasted.
   function getExpPercent() {
     const e = Core.me.get().exp;   // last values seen if the top bar is not on screen
     return e && e.max ? (e.cur / e.max) * 100 : 0;
   }
 
-  // ─── PvE: attack selection ───────────────────────────────────────────────
-  // Starts at the user's preferred attack and walks DOWN to cheaper ones
-  // until it finds one the known stamina figure can afford.
   function pveDowngradeAttack(attackId, staminaAvailable) {
     const ordered  = [...PVE_ATTACKS].sort((a, b) => b.stamina - a.stamina);
     const idx      = ordered.findIndex(a => a.id === attackId);
@@ -4069,7 +3344,6 @@
     }
   }
 
-  // Appends one observed hit to this monster type's history for this attack id.
   function pveRecordAttackDamage(instanceId, monsterName, attackId, dmg) {
     if (!(dmg > 0)) return;
     const key  = normText(monsterName) || '__unknown__';
@@ -4081,11 +3355,6 @@
     pveSaveAttackDamageHistory(instanceId, map);
   }
 
-  // median -> drop anything > 1.5x median (crit/anomaly outliers) -> average
-  // the bottom 60% of what's left. Biased low on purpose: better to think a
-  // hit does less than it does (worst case: one extra small swing) than to
-  // assume more and repeatedly undershoot the kill — that costs MORE hits,
-  // which directly fights the speed goal.
   function pveConservativeEstimate(hist) {
     if (!hist || !hist.length) return null;
     const sorted0 = [...hist].sort((a, b) => a - b);
@@ -4103,22 +3372,6 @@
     return pveConservativeEstimate(hist);
   }
 
-  // ─── PvE: attack-selection models ────────────────────────────────────────
-  // Fast Run  → pvePickAttackFast       — minimise hits-to-cap, speed first.
-  // Normal    → pvePickAttackConservative  — minimise wasted/overshot stamina,
-  //              judging safety by each attack's WORST observed hit (crits
-  //              included), not its average.
-  // Both share the no-cap fallback below: with no real cap, "hits to close
-  // remaining" doesn't apply, and since damage scales linearly with
-  // stamina_cost, damage-per-stamina is roughly constant across tiers —
-  // maximising a noisy *learned* rate here is degenerate (this is what caused
-  // fights to get stuck doing nothing but Slash on uncapped bosses). Simplest
-  // correct fix: just throw the configured preferred attack.
-  // Last resort — no real cap AND no known monster max HP. There's genuinely
-  // no signal to size against here, so: if we've hit this monster before (even
-  // without knowing its total HP), reuse the biggest attack we have real
-  // numbers for instead of resetting to the seed attack every single hit.
-  // Otherwise throw the seed attack once, purely to generate a first data point.
   function pvePickAttackBlindFallback(instanceId, monsterName, preferredId, staminaAvailable) {
     const key   = normText(monsterName) || '__unknown__';
     const hist  = pveLoadAttackDamageHistory(instanceId)[key] || {};
@@ -4127,7 +3380,6 @@
     return pveDowngradeAttack(preferredId, staminaAvailable);
   }
 
-  // pvePickAttackFast — Fast Run. Minimises hit count to close `remaining`.
   function pvePickAttackFast(instanceId, monsterName, preferredId, staminaAvailable, remaining) {
     const fallback = pveDowngradeAttack(preferredId, staminaAvailable);
     if (typeof remaining !== 'number' || remaining <= 0)
@@ -4167,7 +3419,6 @@
     return best ?? fallback;
   }
 
-  // pvePickAttackConservative — Normal mode.conservative for stamina
   function pvePickAttackConservative(instanceId, monsterName, preferredId, staminaAvailable, remaining) {
     const fallback = pveDowngradeAttack(preferredId, staminaAvailable);
     if (typeof remaining !== 'number' || remaining <= 0) return pvePickAttackBlindFallback(instanceId, monsterName, preferredId, staminaAvailable);
@@ -4175,7 +3426,6 @@
     const histKey = normText(monsterName) || '__unknown__';
     const monsterHist = pveLoadAttackDamageHistory(instanceId)[histKey] || {};
 
-    // Real per-attack ceilings — worst logged hit for THIS monster, per attack.
     const withCeil = PVE_ATTACKS
     .filter(a => a.stamina <= staminaAvailable)
     .map(a => {
@@ -4184,11 +3434,6 @@
       return { ...a, ceil, proven: ceil != null };
     });
 
-    // Worst-case per-stamina rate seen so far on this monster, from whichever
-    // attacks we DO have data for. Used only to extend a safety ceiling to
-    // attacks we haven't swung yet — this is what lets Ultimate/Legendary get
-    // a shot once Power/Slash have proven a rate that would keep them under
-    // `remaining`, instead of being permanently locked below `preferredId`.
     const provenRates = withCeil
     .filter(a => a.proven && a.stamina > 0)
     .map(a => a.ceil / a.stamina);
@@ -4198,26 +3443,17 @@
                                       a.proven ? a : { ...a, ceil: worstRate != null ? worstRate * a.stamina : null, proven: false }
                                      );
 
-    // Biggest attack (proven or estimated) that still fits under what's left —
-    // this is the "pick Ultimate at 150m/200m" step.
     const fits = withEstimate
     .filter(a => a.ceil != null && a.ceil <= remaining)
     .sort((a, b) => b.stamina - a.stamina);
     if (fits.length) return fits[0];
 
-    // Nothing fits anymore (we're in the last stretch and every known number
-    // would overshoot) — minimize the overshoot by taking the smallest attack
-    // we actually have a number for.
     const anyKnown = withEstimate.filter(a => a.ceil != null).sort((a, b) => a.stamina - b.stamina);
     if (anyKnown.length) return anyKnown[0];
 
-    // No data at all yet on this monster — bootstrap with the configured
-    // starting attack (same as before).
     return fallback;
   }
 
-  // Dispatcher — pveFightMonster calls this and doesn't need to know which
-  // model is active.
   function pvePickAttack(instanceId, monsterName, preferredId, staminaAvailable, remaining, damageModel) {
     return damageModel === 'fast'
       ? pvePickAttackFast(instanceId, monsterName, preferredId, staminaAvailable, remaining)
@@ -4252,11 +3488,6 @@
     fill.style.width = percent.toFixed(2) + "%";
   }
 
-  // ─── PvE: fight one monster to death/cap/stamina-out ────────────────────
-  // Returns: 'killed' | 'capped' | 'no_stamina' | 'player_dead' | 'error'.
-  // Death detection : keep attacking until the server's cumulative damage total stops climbing (no separate"is it dead" flag exists in the response).
-  // No network calls beyond the attack POST itself — damage and stamina both
-  // come back in the attack response.
   async function pveFightMonster(instanceId, dgmid, mobName, profile, knownStamina, effectiveCap, baselineDamage) {
     let stamina = knownStamina ?? Infinity;
     let myDamage = baselineDamage;
@@ -4283,8 +3514,6 @@
       }
       const capRemaining = hasRealCap ? (effectiveCap - myDamage) : null;
       const hpRemaining  = (typeof mobMaxHp === 'number' && mobMaxHp > 0) ? Math.max(0, mobMaxHp - myDamage) : null;
-      // Whichever bound is tighter wins. A fixed cap of 9999999999 isn't a real
-      // constraint, so mob HP takes over. A sane real cap still wins if smaller.
       const remaining = [capRemaining, hpRemaining]
       .filter(v => typeof v === 'number')
       .sort((a, b) => a - b)[0] ?? null;
@@ -4310,8 +3539,6 @@
       }
       const msg = normText(result.message);
       if (msg.includes('not enough stamina')) {
-        // FIX2: if that came straight after a "successful" potion the potion gave nothing - stop instead of looping
-        // inventory-fetch -> potion -> attack -> "not enough stamina" against the server forever.
         if (potionPending) { pveWarn(`${mobName || dgmid}: stamina potion did not restore stamina - stopping`); return { result: 'no_stamina', staminaAfter: 0 }; }
         stamina = atk.stamina - 1;
         continue;
@@ -4329,14 +3556,11 @@
       }
       if (result.status !== 'success') {
         pveWarn(`${mobName || dgmid}: unexpected response — ${result.message || 'no message'}`);
-        // FIX2: the hit may have landed even though we never saw the reply (timeout) - force a live re-read of this mob
         pveSessionVerified.delete(dgmid);
         return { result: 'error', staminaAfter: stamina };
       }
       potionPending = false;
       lastDamage = myDamage;
-      // FIX2: a success reply without a numeric totaldmgdealt used to become 0 -> stored damage reset to 0 and a
-      // negative hit recorded in the damage history. Keep the last known total and skip the writes.
       const reported = result.totaldmgdealt == null ? NaN : Number(result.totaldmgdealt);
       const haveTotal = Number.isFinite(reported);
       myDamage = haveTotal ? reported : lastDamage;
@@ -4357,11 +3581,6 @@
     }
   }
 
-  // ─── PvE: main tick / passive scan ───────────────────────────────────────
-  // Phase 1 (parallel bootstrap mobs) and Phase 2
-  // (pure-local capped filter) run in BOTH modes — that's what keeps the
-  // clear/active pill accurate even when master is OFF. Phase 3 (actually
-  // joining/attacking) only runs when `fight` is true.
   async function pveScanNode(instanceId, nodeId, locationId, profile, { fight }) {
     if (pveNodeStats[nodeId]?.attacking) {
       pveNodeStats[nodeId] = { ...pveNodeStats[nodeId], attacking: null };
@@ -4376,9 +3595,6 @@
     const discovered = pveDiscoveredMobsByNode[nodeId] || (pveDiscoveredMobsByNode[nodeId] = new Map());
     mobs.forEach(m => { if (m.name) discovered.set(normText(m.name), m.name); });
 
-    // auto-add every mob seen at this node to its selection
-    // the moment it's discovered (checked, 0 cap = skipped). Nothing ever gets
-    // farmed with no limit just because you hadn't ticked it yet.
     {
       const persisted = pveLoadDiscovered();
       const everSeen  = new Set(persisted[nodeId] || []);
@@ -4399,14 +3615,8 @@
 
     const targets = pveFilterSelectedMobs(mobs, nodeId, profile);
 
-    // Track which mobs are currently dead so the picker can mark them.
-    // Live per-scan, never persisted — a dead mob today may respawn next cycle.
-    // Per-individual: only THIS dgmid is dead, siblings with the same name are untouched.
     pveDeadMobsByNode[nodeId] = new Set(mobs.filter(m => m.isDead).map(m => m.dgmid));
 
-    // Per-name, for the picker's skull icon only: a name shows dead only once
-    // EVERY individual sharing that name is dead — one dead copy shouldn't
-    // gray out a type that still has live spawns.
     const nameGroups = new Map(); // name -> { total, dead }
     for (const m of mobs) {
       const key = normText(m.name);
@@ -4419,10 +3629,6 @@
       [...nameGroups.entries()].filter(([, g]) => g.dead === g.total).map(([k]) => k)
     );
 
-    // allClear = no ALIVE mobs remain. Dead mobs on the page don't count — the
-    // location is not truly "cleared" from the script's perspective until nothing
-    // is alive. This prevents a boss that's been killed from wrongly showing as clear
-    // while other mobs are still up, and also lets dead mobs be bootstrapped below.
     const aliveMobs = mobs.filter(m => !m.isDead);
     const allClear  = aliveMobs.length === 0 && mobs.length > 0
     ? true          // every mob on page is dead
@@ -4430,10 +3636,6 @@
     pveNodeStats[nodeId] = { ...(pveNodeStats[nodeId] || {}), mobCount: mobs.length, allClear };
     refreshUI();
 
-    // Phase 1: bootstrap ALL mobs (alive AND dead) not yet in pveMobState.
-    // Must run before the allClear early-return so dead mobs still get their
-    // battle.php data — that's what makes them show up in the picker with
-    // accurate damage figures after being killed.
     const unseenAll = mobs.filter(m => !pveHasMobState(m.dgmid));
     if (unseenAll.length) {
       await pveRunWithLimit(unseenAll, PVE_BOOTSTRAP_CONCURRENCY,
@@ -4444,8 +3646,6 @@
 
     if (!targets.length) { pveNodeStats[nodeId].noActionable = true; return; }
 
-    // Phase 1b: re-verify live damage once per session for targets with stored damage.
-    // Catches external hits (manual play, other sessions) that localStorage doesn't know about.
     const toVerify = targets.filter(
       m => pveHasMobState(m.dgmid) &&
       !pveSessionVerified.has(m.dgmid) &&
@@ -4457,7 +3657,6 @@
       toVerify.forEach(m => pveSessionVerified.add(m.dgmid));
     }
 
-    // Phase 2: pure-local filter — dead mobs and capped mobs both excluded from fighting.
     const aliveTargets   = targets.filter(m => !m.isDead);
     const actionable     = aliveTargets.filter(m => {
       const entry = pveGetMobState(m.dgmid);
@@ -4465,7 +3664,6 @@
       if (cap === 0) return false;                        // cap=0 = deliberately skipped
       return !pveIsMobCapped(m.dgmid, profile, m.name);
     });
-    // Only count non-skipped alive mobs toward noActionable
     const fightableAlive = aliveTargets.filter(m =>
                                                pveGetEffectiveCap(profile, m.name, pveGetMobState(m.dgmid)) !== 0);
     pveNodeStats[nodeId].noActionable = fightableAlive.length > 0 && !actionable.length;
@@ -4473,7 +3671,6 @@
 
     if (!actionable.length || !fight) return;
 
-    // Log why any alive target was excluded from this fight pass
     for (const mob of aliveTargets) {
       if (actionable.some(a => a.dgmid === mob.dgmid)) continue;
       const entry = pveGetMobState(mob.dgmid);
@@ -4485,8 +3682,6 @@
     let staminaKnown = stamina;
     for (const mob of actionable) {
       if (pveStaminaWaiting) break;
-      // Skip anything killed since the location-page snapshot (another player nuked it
-      // between our fetch and this loop iteration — common in fast-run guild clears).
       if (pveDeadMobsByNode[nodeId]?.has(mob.dgmid)) {
         pveInfo(`Node ${nodeId}: ${mob.name} already dead — skipping`);
         continue;
@@ -4522,8 +3717,6 @@
         deadSet.add(mob.dgmid);
       }
       if (result === 'killed' || result === 'capped') {
-        // Re-check live state instead of waiting for the next pveScanNode() pass —
-        // pveIsMobCapped reads the damage value pveFightMonster just wrote.
         const stillActionable = actionable.filter(m => {
           if (pveDeadMobsByNode[nodeId]?.has(m.dgmid)) return false;
           return !pveIsMobCapped(m.dgmid, profile, m.name);
@@ -4630,9 +3823,6 @@
     if (toRemove.length) pveInfo(`Pruned ${toRemove.length} stale mob-state cache(s) from old dungeon instance(s)`);
   }
 
-  // ─── Safe storage wrapper ───────────────────────────────────────────────
-  // A full origin quota must never throw up into game logic — log once and
-  // keep running instead of aborting whatever function was mid-flight.
   function dsSafeSetItem(key, value) {
     try {
       localStorage.setItem(key, value);
@@ -4648,7 +3838,6 @@
     }
   }
 
-  //dungeon helpers
   function dsIsDungeonFullyCleared() {
     if (!currentInstanceId) return false;
     const pvpDone = PVP_NODE_PRIORITY.every(nodeId => {
@@ -4676,35 +3865,16 @@
     refreshUI();
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // MAIN LOOP
-  // tick() resolves the instance ID, mounts the UI, then dispatches based on
-  // masterEnabled:
-  //   ON  → pvpTick + saTick in parallel (active join/fight)
-  //   OFF → pvpReadOnlyScan only (passive monitoring, no actions)
-  // runLoop() uses fast interval only when masterEnabled AND fast mode are both
-  // active — passive monitoring always runs at the normal interval.
-  // ═══════════════════════════════════════════════════════════════════════════
-
   async function tick() {
     try {
       const instanceId = await getActiveCubeInstanceId();
       if (instanceId && instanceId !== currentInstanceId) {
-        // currentInstanceId can't tell "first load of this page" apart from
-        // "real instance change" — a real instance change is a full URL nav,
-        // which restarts this whole script and resets currentInstanceId back
-        // to null regardless. isNew has to be derived from something that
-        // survives a reload: the persisted lastInstanceId, not the in-memory var.
         const s = pvpLoadFastRunState();
         const seen = Array.isArray(s.seenInstanceIds) ? s.seenInstanceIds : [];
-        // Only "new" if it differs from the last one we touched AND we haven't
-        // already initialized for this exact instance before (e.g. hopping back
-        // to an already-cleared dungeon to claim loot is NOT new).
         const isNew = !!s.lastInstanceId && s.lastInstanceId !== instanceId && !seen.includes(instanceId);
         const nextSeen = seen.includes(instanceId) ? seen : [...seen, instanceId].slice(-5);
 
         currentInstanceId = instanceId;
-        // Reset live PvP counter — repopulates on first scan of the new instance
         pvpLiveJoinCount     = 0;
         pvpHasScanned        = false;
         for (const k of Object.keys(pvpCooldownByNode)) delete pvpCooldownByNode[k];
@@ -4717,7 +3887,6 @@
         pvpLockedNodesLogged.clear();
         saLockedNodesLogged.clear();
         pvpActiveBattleLoops.clear();
-        //pvpLiveWithoutUsLogged.clear();
         saScheduledNukingMatch.clear();
         pveLockedNodesLogged.clear();
         pveSessionVerified.clear();
@@ -4740,11 +3909,6 @@
         saPruneOldParticipatedKeys(nextSeen);
         if (isNew) {
           if (pvpTyrantEnabled) { pvpTyrantEnabled = false; pvpSaveTyrantEnabled(false); }
-          // Mode is no longer touched here — resetting on a NEW instance stomped on
-          // Fast Run setups configured before the first tick landed causing to use normal mode joining for fast run. Instead
-          // dsMaybeAutoResetModeOnClear() flips Fast Run -> Normal the moment the
-          // PREVIOUS dungeon is detected fully cleared, so by the time we get here
-          // the mode is already whatever it should be.
           addLog('sys', 'info', `Instance changed to #${instanceId}`);
           pvpSaveFastRunState({ ...s, node7Results: {}, node8Results: {}, lastInstanceId: instanceId, seenInstanceIds: nextSeen });
         } else {
@@ -4758,11 +3922,9 @@
       refreshUI();
       if (!instanceId) return;
 
-      // Pre-warm before parallel dispatch so PvP/SA/PvE share one fetch rather than racing.
       await getCubeState(instanceId);
 
       if (!masterEnabled) {
-        // Passive mode — monitor only, no join/fight actions taken.
         await Promise.all([
           pvpReadOnlyScan(instanceId),
           saReadOnlyScan(instanceId),
@@ -4772,7 +3934,6 @@
         return;
       }
 
-      // Active mode below
       const isFirstSaTick = !saFirstTickDone;
       saFirstTickDone = true;
 
@@ -4791,8 +3952,6 @@
   async function runLoop() {
     if (!dsTabIsMain) return; // idle tab: Core.tab will promote us when the main tab goes away
     if (runLoopInFlight) {
-      // A tick is already running — flag it so it reschedules immediately once
-      // done, instead of starting a second overlapping run right now.
       runLoopRestartRequested = true;
       return;
     }
@@ -4809,342 +3968,22 @@
     runLoopTimer = setTimeout(runLoop, delay);
   }
 
-  // dsRestartLoop: cancels any pending scheduled tick and runs one right now.
-  // Call this whenever a setting changes that affects whether/how fast automation
-  // should act (master toggle, mode switch) — otherwise the change only takes
-  // effect after whatever interval was already in flight finishes (up to 60s).
   function dsRestartLoop() {
     if (runLoopInFlight) { runLoopRestartRequested = true; return; }
     if (runLoopTimer) { clearTimeout(runLoopTimer); runLoopTimer = 0; }
     void runLoop();
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // UI: STYLES
-  // ═══════════════════════════════════════════════════════════════════════════
-
   function injectStyles() {
     if (document.getElementById('ds-suite-style')) return;
     const style = document.createElement('style');
     style.id = 'ds-suite-style';
-    style.textContent = `
-      .ds-panel, .ds-panel * { box-sizing: border-box; }
-      .ds-panel {
-        position: fixed !important;
-        top: 80px; right: 16px; width: 490px;
-        background: #15161a; border: 1px solid #2a2c34; border-radius: 12px;
-        box-shadow: 0 12px 32px rgba(0,0,0,.45);
-        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-        font-size: 13px; color: #e4e4e7; z-index: 2147483000; user-select: none; overflow: hidden;
-      }
-      .ds-panel.ds-collapsed .ds-body { display: none; }
-      .ds-header {
-        display: flex; align-items: center; gap: 8px;
-        padding: 10px 8px 10px 12px; background: #1c1d23; cursor: move;
-        border-bottom: 1px solid #2a2c34;
-      }
-      .ds-panel.ds-collapsed .ds-header { border-bottom: none; }
-      .ds-dot { width: 7px; height: 7px; border-radius: 50%; background: #4b4d57; flex-shrink: 0; transition: background .15s; }
-      .ds-dot.on { background: #22c55e; box-shadow: 0 0 6px rgba(34,197,94,.6); }
-      .ds-dot.monitoring { background: #f59e0b; box-shadow: 0 0 6px rgba(245,158,11,.5); }
-      .ds-title { font-weight: 600; font-size: 13px; flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-      .ds-inst { font-weight: 400; color: #8b8d98; font-size: 11px; }
-      .ds-iconbtn {
-        background: transparent; border: none; color: #8b8d98; cursor: pointer;
-        width: 22px; height: 22px; border-radius: 6px; display: flex; align-items: center; justify-content: center;
-        flex-shrink: 0; padding: 0; font-size: 12px; line-height: 1;
-      }
-      .ds-iconbtn:hover { background: #2a2c34; color: #e4e4e7; }
-      .ds-pve-sched-syncbtn { background: transparent; border: 1px solid #2a2c34; color: #8b8d98; cursor: pointer;
-        border-radius: 5px; padding: 2px 7px; font-size: 10px; line-height: 1.5; white-space: nowrap; flex-shrink: 0; }
-      .ds-pve-sched-syncbtn:hover { background: #2a2c34; color: #e4e4e7; }
-      .ds-chevron { transition: transform .15s; }
-      .ds-panel.ds-collapsed .ds-chevron { transform: rotate(-90deg); }
-      .ds-switch { position: relative; display: inline-block; width: 30px; height: 17px; flex-shrink: 0; cursor: pointer; }
-      .ds-switch input { opacity: 0; width: 0; height: 0; position: absolute; }
-      .ds-slider { position: absolute; inset: 0; background: #33343d; border-radius: 17px; transition: .15s; }
-      .ds-slider::before { content: ''; position: absolute; width: 13px; height: 13px; left: 2px; top: 2px; background: #e4e4e7; border-radius: 50%; transition: .15s; }
-      .ds-switch input:checked + .ds-slider { background: #6366f1; }
-      .ds-switch input:checked + .ds-slider::before { transform: translateX(13px); }
-      .ds-switch.sm { width: 26px; height: 15px; }
-      .ds-switch.sm .ds-slider::before { width: 11px; height: 11px; }
-      .ds-switch.sm input:checked + .ds-slider::before { transform: translateX(11px); }
-      .ds-body { padding: 12px; max-height: calc(100vh - 100px); overflow-y: auto; }
-      .ds-shared-mode-row { margin-bottom: 12px; }
-      .ds-shared-mode-row .ds-field-label { margin-bottom: 6px; }
-      .ds-shared-tag { font-weight: 400; color: #71727d; font-size: 10.5px; }
-      .ds-tabs { display: flex; gap: 2px; margin-bottom: 12px; background: #1c1d23; border-radius: 8px; padding: 3px; }
-      .ds-tab { flex: 1; background: transparent; border: none; color: #8b8d98; font-size: 12px; font-weight: 600;
-        padding: 7px 0; border-radius: 6px; cursor: pointer; transition: .15s; }
-      .ds-tab.active { background: #2a2c34; color: #e4e4e7; }
-      .ds-tab:hover:not(.active) { color: #c4c5cc; }
-      .ds-tabpanel { display: none; }
-      .ds-tabpanel.active { display: block; }
-      .ds-segmented { display: flex; gap: 6px; margin-bottom: 10px; }
-      .ds-seg-btn { flex: 1; background: #1c1d23; border: 1px solid #2a2c34; color: #c4c5cc; font-size: 12px;
-        padding: 6px 0; border-radius: 7px; cursor: pointer; font-weight: 500; transition: .15s; }
-      .ds-seg-btn.active { background: rgba(99,102,241,.15); border-color: #6366f1; color: #a5a6f6; }
-      .ds-seg-btn:hover:not(.active) { border-color: #3a3c46; }
-      .ds-seg-btn:disabled { opacity: .5; cursor: default; }
-      .ds-status { font-size: 12px; color: #c4c5cc; margin: 0 0 10px; }
-      .ds-note { font-size: 11px; color: #71727d; line-height: 1.5; margin: 0; }
-      .ds-fields-row { display: flex; gap: 10px; margin-bottom: 10px; }
-      .ds-field { flex: 1; min-width: 0; }
-      .ds-field-label { font-size: 11px; font-weight: 600; color: #c4c5cc; margin-bottom: 4px; }
-      .ds-input { width: 100%; background: #1c1d23; border: 1px solid #2a2c34; color: #e4e4e7; border-radius: 6px;
-        padding: 5px 7px; font-size: 12px; }
-      .ds-input:focus { outline: none; border-color: #6366f1; }
-      .ds-input[type="time"] { color-scheme: dark; }
-      .ds-time-picker { display:inline-flex; align-items:stretch; flex-shrink:0; height:26px;
-        border:1px solid #2a2c34; border-radius:6px; overflow:hidden; background:#1c1d23; }
-      .ds-time-picker input.ds-pve-sched-h,
-      .ds-time-picker input.ds-pve-sched-m { border:none; background:transparent; color:#e4e4e7;
-        font-size:13px; font-variant-numeric:tabular-nums; width:22px; padding:0 3px; text-align:center; }
-      .ds-time-picker input.ds-pve-sched-h:focus,
-      .ds-time-picker input.ds-pve-sched-m:focus { outline:none; background:rgba(99,102,241,.16); }
-      .ds-time-picker-colon { display:flex; align-items:center; padding:0 1px; color:#71727d; font-size:13px; }
-      .ds-time-picker-ampm { flex-shrink:0; border:none; border-left:1px solid #2a2c34;
-        background:transparent; color:#8b8d98; font-size:10px; font-weight:700; padding:0 7px;
-        cursor:pointer; letter-spacing:.02em; }
-      .ds-time-picker-ampm:hover { background:#232430; color:#c4c5cc; }
-      .ds-time-picker-notime-chip { border:1px dashed #3a3c46 !important; color:#8b8d98; }
-      .ds-time-picker-notime-chip:hover { border-color:#6366f1 !important; color:#a5a6f6; }
-      .ds-pve-sched-row { margin:8px 0; padding:8px; background:#16171c; border:1px solid #2a2c34; border-radius:7px; }
-      .ds-pve-sched-row.notime { background:#141518; }
-      .ds-pve-sched-row-top { display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
-      .ds-field-status { font-size: 11px; color: #71727d; margin-top: 4px; }
-      .ds-field-status.done { color: #22c55e; }
-      .ds-toggle-row { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #c4c5cc; }
-      .ds-divider { height: 1px; background: #2a2c34; margin: 12px 0; }
-      .ds-pve-node-block { border: 1px solid #2a2c34; border-radius: 7px; padding: 6px 8px; margin-bottom: 6px; }
-      .ds-pve-node-header { display:flex; align-items:center; gap:6px; cursor:pointer; user-select:none; }
-      .ds-pve-node-header:hover .ds-pve-hdr-label { color: #e4e4e7; }
-      .ds-pve-hdr-label { flex:1; font-size:11px; font-weight:600; color:#c4c5cc; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-      .ds-pve-mob-row { display:flex; align-items:center; justify-content:space-between; gap:6px; font-size:11px; color:#c4c5cc; padding:2px 0; }
-      .ds-pve-mob-row label { display:flex; align-items:center; gap:6px; flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; cursor:pointer; }
-      .ds-pve-cap-input { width:126px; flex-shrink:0; padding:3px 5px !important; }
-      .ds-log-header { display: flex; align-items: center; gap: 6px; padding: 0 0 8px; }
-      .ds-log-header .ds-field-label { margin: 0; flex: 1; }
-      .ds-log-filters { display: flex; gap: 4px; }
-      .ds-chip { background: #1c1d23; border: 1px solid #2a2c34; color: #8b8d98; font-size: 10px; font-weight: 600;
-        padding: 3px 8px; border-radius: 5px; cursor: pointer; }
-      .ds-chip.active { background: rgba(99,102,241,.15); border-color: #6366f1; color: #a5a6f6; }
-      .ds-log { background: #0f1013; border: 1px solid #2a2c34; border-radius: 8px; padding: 8px;
-        height: 140px; overflow-y: auto;
-        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-        font-size: 10.5px; line-height: 1.6; }
-      .ds-log-line { color: #c4c5cc; margin-bottom: 1px; white-space: pre-wrap; word-break: break-word; }
-      .ds-log-time { color: #52535c; margin-right: 4px; }
-      .ds-log-src { font-weight: 700; margin-right: 3px; }
-      .ds-log-line[data-source="pvp"] .ds-log-src { color: #7eb8f0; }
-      .ds-log-line[data-source="sa"]  .ds-log-src { color: #c49afa; }
-      .ds-log-line[data-source="pve"] .ds-log-src { color: #8fd19e; }
-      .ds-log-line[data-source="sys"] .ds-log-src { color: #71727d; }
-      .ds-log-line[data-level="warn"]  { color: #f0b429; }
-      .ds-log-line[data-level="error"] { color: #ff6b6b; }
-      .ds-log-empty { color: #52535c; font-size: 11px; padding: 4px 2px; }
-      .ds-log.ds-log-full { height: calc(100vh - 400px); min-height: 230px; }
-      .ds-pills { display: flex; flex-wrap: wrap; gap: 4px; margin: 4px 0 8px; align-items: center; }
-      .ds-pill { display: inline-flex; align-items: center; font-size: 10px; font-weight: 700;
-        padding: 2px 7px; border-radius: 20px; white-space: nowrap; letter-spacing: 0.02em; line-height: 1.5; }
-      .ds-pill-cd     { background: rgba(245,158,11,.12); color: #f59e0b; border: 1px solid rgba(245,158,11,.3); }
-      .ds-pill-locked { background: rgba(30,30,40,.4);    color: #52535c; border: 1px solid #2a2c34; }
-      .ds-pill-mon    { background: rgba(245,158,11,.08); color: #d97706; border: 1px solid rgba(245,158,11,.2); }
-      .ds-pill-node   { background: transparent; color: #52535c; border: 1px solid #33343d; font-size: 9.5px; padding: 1px 5px; }
-      .ds-pill-avail   { background: rgba(34,197,94,.12);  color: #4ade80; border: 1px solid rgba(34,197,94,.3); }   /* green: available to join */
-      .ds-pill-joined  { background: rgba(59,130,246,.12); color: #60a5fa; border: 1px solid rgba(59,130,246,.3); }  /* blue: currently joined/active */
-      .ds-pill-cleared { background: rgba(139,92,246,.12); color: #a78bfa; border: 1px solid rgba(139,92,246,.3); }  /* violet: node cleared, X/Y joined */
-       .ds-pills:empty { display: none; margin: 0; }
-
-      .ds-sa-node-card { border:1px solid #2a2c34; border-radius:7px; padding:8px 10px; margin-bottom:5px; }
-      .ds-sa-node-hdr  { display:flex; align-items:center; gap:6px; }
-      .ds-sa-node-label{ flex:1; font-size:11px; font-weight:600; color:#c4c5cc; }
-      .ds-sa-cap-list  { margin-top:6px; padding-top:6px; border-top:1px solid #1c1d23; }
-      .ds-sa-cap-row   { display:flex; align-items:center; gap:5px; padding:2px 0; font-size:11px; color:#c4c5cc; }
-      .ds-sa-cap-icon  { flex-shrink:0; width:14px; text-align:center; color:#60a5fa; }
-      .ds-sa-cap-name  { flex:0 0 auto; max-width:100px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-      .ds-sa-cap-arrow { color:#52535c; flex-shrink:0; }
-      .ds-sa-cap-target{ color:#a5a6f6; flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-      .ds-pvp-match-card{ border:1px solid #2a2c34; border-radius:7px; padding:8px 10px; margin-top:8px; }
-
-      .ds-linkbtn {
-        background: none;
-        border: none;
-        padding: 0;
-        margin: 0;
-        color: #60a5fa;
-        text-decoration: underline;
-        cursor: pointer;
-        font: inherit;
-        font-weight: 600;
-      }
-      .ds-linkbtn:hover { color: #93c5fd; }
-
-      .ds-ffa-popover {
-        position: fixed;
-        z-index: 2147483001;
-        width: 320px;
-        background: #15161a;
-        border: 1px solid #2a2c34;
-        border-radius: 12px;
-        box-shadow: 0 12px 32px rgba(0,0,0,.45);
-        padding: 10px;
-        color: #e4e4e7;
-      }
-
-      .ds-ffa-head {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        margin-bottom: 8px;
-      }
-
-      .ds-ffa-title {
-        font-size: 13px;
-        font-weight: 700;
-      }
-
-      .ds-ffa-close {
-        background: transparent;
-        border: none;
-        color: #8b8d98;
-        font-size: 18px;
-        cursor: pointer;
-        line-height: 1;
-      }
-
-      .ds-ffa-timeline {
-        position: relative;
-        padding-left: 34px;
-        --row-h: 30px;
-      }
-
-      .ds-ffa-rail {
-        position: absolute;
-        left: 15px;
-        top: 14px;
-        bottom: 14px;
-        width: 2px;
-        background: #2a2c34;
-      }
-
-      .ds-ffa-fill {
-        position: absolute;
-        left: 15px;
-        top: 14px;
-        width: 2px;
-        height: calc(var(--ffa-progress) * var(--row-h));
-        background: #60a5fa;
-      }
-
-      .ds-ffa-marker {
-        position: absolute;
-        left: 9px;
-        top: calc(14px + (var(--ffa-progress) * var(--row-h)) - 7px);
-        width: 14px;
-        height: 14px;
-        border-radius: 50%;
-        background: #60a5fa;
-        box-shadow: 0 0 0 4px rgba(96,165,250,.12);
-      }
-
-      .ds-ffa-row {
-        display: grid;
-        grid-template-columns: 76px 1fr auto;
-        gap: 8px;
-        align-items: center;
-        min-height: var(--row-h);
-        font-size: 12px;
-        position: relative;
-      }
-
-      .ds-ffa-row::before {
-        content: '';
-        position: absolute;
-        left: -22px;
-        top: 10px;
-        width: 8px;
-        height: 8px;
-        border-radius: 50%;
-        background: #52535c;
-      }
-
-      .ds-ffa-row.cleared::before { background: #52535c; }
-
-      .ds-ffa-row.future::before { background: #33343d; }
-
-      .ds-ffa-time { color: #c4c5cc; }
-      .ds-ffa-node { color: #8b8d98; }
-      .ds-ffa-status {
-        font-size: 10px;
-        text-transform: uppercase;
-        letter-spacing: .04em;
-        color: #8b8d98;
-      }
-      .ds-ffa-row.cleared .ds-ffa-status { color: #71727d; }
-      .ds-ffa-row.next .ds-ffa-status { color: #60a5fa; }
-
-      .ds-ffa-row.before::before { background: #3f4655; }
-      .ds-ffa-row.after::before  { background: #3f4655; }
-
-      .ds-ffa-row.before .ds-ffa-status,
-      .ds-ffa-row.after .ds-ffa-status {
-        color: #8b8d98;
-      }
-      .ds-ffa-row.before .ds-ffa-node,
-      .ds-ffa-row.after .ds-ffa-node {
-        color: #c4c5cc;
-      }
-
-      .ds-ffa-row.before { opacity: 0.72; }
-      .ds-ffa-row.after  { opacity: 0.58; }
-      .ds-ffa-row.future { opacity: 0.55; }
-
-      .ds-ffa-row.before, .ds-ffa-row.after {
-        grid-template-columns: 110px 1fr auto;
-      }
-      .ds-ffa-row.before .ds-ffa-time,
-      .ds-ffa-row.after .ds-ffa-time {
-        white-space: nowrap;
-      }
-
-
-      .ds-panel.ds-tab-blocked .ds-body > *:not(.ds-tab-block-msg) { display: none !important; }
-      .ds-panel.ds-tab-blocked .ds-tab-block-msg { display: flex !important; }
-      .ds-tab-block-msg {
-        display: none;
-        flex-direction: column;
-        align-items: center;
-        justify-content: center;
-        text-align: center;
-        padding: 28px 16px;
-        gap: 10px;
-        min-height: 120px;
-      }
-      .ds-tbl-icon  { font-size: 22px; }
-      .ds-tbl-title { font-weight: 700; font-size: 13px; color: #e4e4e7; }
-      .ds-tbl-note  { font-size: 11px; color: #8b8d98; line-height: 1.65; }
-      .ds-body { -webkit-overflow-scrolling: touch; transform: translateZ(0); }
-      @media (max-width: 520px) {
-        .ds-panel {
-          width: calc(100vw - 16px) !important;
-          right: 8px !important;
-          left: 8px !important;
-          top: auto !important;
-          bottom: 8px !important;
-        }
-        .ds-body { max-height: calc(72vh - 48px); }
-
+    style.textContent = `.ds-panel, .ds-panel * { box-sizing: border-box; }.ds-panel { position: fixed !important; top: 80px; right: 16px; width: 490px; background: #15161a; border: 1px solid #2a2c34; border-radius: 12px; box-shadow: 0 12px 32px rgba(0,0,0,.45); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; font-size: 13px; color: #e4e4e7; z-index: 2147483000; user-select: none; overflow: hidden; }.ds-panel.ds-collapsed .ds-body { display: none; }.ds-header { display: flex; align-items: center; gap: 8px; padding: 10px 8px 10px 12px; background: #1c1d23; cursor: move; border-bottom: 1px solid #2a2c34; }.ds-panel.ds-collapsed .ds-header { border-bottom: none; }.ds-dot { width: 7px; height: 7px; border-radius: 50%; background: #4b4d57; flex-shrink: 0; transition: background .15s; }.ds-dot.on { background: #22c55e; box-shadow: 0 0 6px rgba(34,197,94,.6); }.ds-dot.monitoring { background: #f59e0b; box-shadow: 0 0 6px rgba(245,158,11,.5); }.ds-title { font-weight: 600; font-size: 13px; flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }.ds-inst { font-weight: 400; color: #8b8d98; font-size: 11px; }.ds-iconbtn { background: transparent; border: none; color: #8b8d98; cursor: pointer; width: 22px; height: 22px; border-radius: 6px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; padding: 0; font-size: 12px; line-height: 1; }.ds-iconbtn:hover { background: #2a2c34; color: #e4e4e7; }.ds-pve-sched-syncbtn { background: transparent; border: 1px solid #2a2c34; color: #8b8d98; cursor: pointer; border-radius: 5px; padding: 2px 7px; font-size: 10px; line-height: 1.5; white-space: nowrap; flex-shrink: 0; }.ds-pve-sched-syncbtn:hover { background: #2a2c34; color: #e4e4e7; }.ds-chevron { transition: transform .15s; }.ds-panel.ds-collapsed .ds-chevron { transform: rotate(-90deg); }.ds-switch { position: relative; display: inline-block; width: 30px; height: 17px; flex-shrink: 0; cursor: pointer; }.ds-switch input { opacity: 0; width: 0; height: 0; position: absolute; }.ds-slider { position: absolute; inset: 0; background: #33343d; border-radius: 17px; transition: .15s; }.ds-slider::before { content: ''; position: absolute; width: 13px; height: 13px; left: 2px; top: 2px; background: #e4e4e7; border-radius: 50%; transition: .15s; }.ds-switch input:checked + .ds-slider { background: #6366f1; }.ds-switch input:checked + .ds-slider::before { transform: translateX(13px); }.ds-switch.sm { width: 26px; height: 15px; }.ds-switch.sm .ds-slider::before { width: 11px; height: 11px; }.ds-switch.sm input:checked + .ds-slider::before { transform: translateX(11px); }.ds-body { padding: 12px; max-height: calc(100vh - 100px); overflow-y: auto; }.ds-shared-mode-row { margin-bottom: 12px; }.ds-shared-mode-row .ds-field-label { margin-bottom: 6px; }.ds-shared-tag { font-weight: 400; color: #71727d; font-size: 10.5px; }.ds-tabs { display: flex; gap: 2px; margin-bottom: 12px; background: #1c1d23; border-radius: 8px; padding: 3px; }.ds-tab { flex: 1; background: transparent; border: none; color: #8b8d98; font-size: 12px; font-weight: 600; padding: 7px 0; border-radius: 6px; cursor: pointer; transition: .15s; }.ds-tab.active { background: #2a2c34; color: #e4e4e7; }.ds-tab:hover:not(.active) { color: #c4c5cc; }.ds-tabpanel { display: none; }.ds-tabpanel.active { display: block; }.ds-segmented { display: flex; gap: 6px; margin-bottom: 10px; }.ds-seg-btn { flex: 1; background: #1c1d23; border: 1px solid #2a2c34; color: #c4c5cc; font-size: 12px; padding: 6px 0; border-radius: 7px; cursor: pointer; font-weight: 500; transition: .15s; }.ds-seg-btn.active { background: rgba(99,102,241,.15); border-color: #6366f1; color: #a5a6f6; }.ds-seg-btn:hover:not(.active) { border-color: #3a3c46; }.ds-seg-btn:disabled { opacity: .5; cursor: default; }.ds-status { font-size: 12px; color: #c4c5cc; margin: 0 0 10px; }.ds-note { font-size: 11px; color: #71727d; line-height: 1.5; margin: 0; }.ds-fields-row { display: flex; gap: 10px; margin-bottom: 10px; }.ds-field { flex: 1; min-width: 0; }.ds-field-label { font-size: 11px; font-weight: 600; color: #c4c5cc; margin-bottom: 4px; }.ds-input { width: 100%; background: #1c1d23; border: 1px solid #2a2c34; color: #e4e4e7; border-radius: 6px; padding: 5px 7px; font-size: 12px; }.ds-input:focus { outline: none; border-color: #6366f1; }.ds-input[type="time"] { color-scheme: dark; }.ds-time-picker { display:inline-flex; align-items:stretch; flex-shrink:0; height:26px; border:1px solid #2a2c34; border-radius:6px; overflow:hidden; background:#1c1d23; }.ds-time-picker input.ds-pve-sched-h, .ds-time-picker input.ds-pve-sched-m { border:none; background:transparent; color:#e4e4e7; font-size:13px; font-variant-numeric:tabular-nums; width:22px; padding:0 3px; text-align:center; }.ds-time-picker input.ds-pve-sched-h:focus, .ds-time-picker input.ds-pve-sched-m:focus { outline:none; background:rgba(99,102,241,.16); }.ds-time-picker-colon { display:flex; align-items:center; padding:0 1px; color:#71727d; font-size:13px; }.ds-time-picker-ampm { flex-shrink:0; border:none; border-left:1px solid #2a2c34; background:transparent; color:#8b8d98; font-size:10px; font-weight:700; padding:0 7px; cursor:pointer; letter-spacing:.02em; }.ds-time-picker-ampm:hover { background:#232430; color:#c4c5cc; }.ds-time-picker-notime-chip { border:1px dashed #3a3c46 !important; color:#8b8d98; }.ds-time-picker-notime-chip:hover { border-color:#6366f1 !important; color:#a5a6f6; }.ds-pve-sched-row { margin:8px 0; padding:8px; background:#16171c; border:1px solid #2a2c34; border-radius:7px; }.ds-pve-sched-row.notime { background:#141518; }.ds-pve-sched-row-top { display:flex; align-items:center; gap:6px; flex-wrap:wrap; }.ds-field-status { font-size: 11px; color: #71727d; margin-top: 4px; }.ds-field-status.done { color: #22c55e; }.ds-toggle-row { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #c4c5cc; }.ds-divider { height: 1px; background: #2a2c34; margin: 12px 0; }.ds-pve-node-block { border: 1px solid #2a2c34; border-radius: 7px; padding: 6px 8px; margin-bottom: 6px; }.ds-pve-node-header { display:flex; align-items:center; gap:6px; cursor:pointer; user-select:none; }.ds-pve-node-header:hover .ds-pve-hdr-label { color: #e4e4e7; }.ds-pve-hdr-label { flex:1; font-size:11px; font-weight:600; color:#c4c5cc; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }.ds-pve-mob-row { display:flex; align-items:center; justify-content:space-between; gap:6px; font-size:11px; color:#c4c5cc; padding:2px 0; }.ds-pve-mob-row label { display:flex; align-items:center; gap:6px; flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; cursor:pointer; }.ds-pve-cap-input { width:126px; flex-shrink:0; padding:3px 5px !important; }.ds-log-header { display: flex; align-items: center; gap: 6px; padding: 0 0 8px; }.ds-log-header .ds-field-label { margin: 0; flex: 1; }.ds-log-filters { display: flex; gap: 4px; }.ds-chip { background: #1c1d23; border: 1px solid #2a2c34; color: #8b8d98; font-size: 10px; font-weight: 600; padding: 3px 8px; border-radius: 5px; cursor: pointer; }.ds-chip.active { background: rgba(99,102,241,.15); border-color: #6366f1; color: #a5a6f6; }.ds-log { background: #0f1013; border: 1px solid #2a2c34; border-radius: 8px; padding: 8px; height: 140px; overflow-y: auto; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 10.5px; line-height: 1.6; }.ds-log-line { color: #c4c5cc; margin-bottom: 1px; white-space: pre-wrap; word-break: break-word; }.ds-log-time { color: #52535c; margin-right: 4px; }.ds-log-src { font-weight: 700; margin-right: 3px; }.ds-log-line[data-source="pvp"] .ds-log-src { color: #7eb8f0; }.ds-log-line[data-source="sa"] .ds-log-src { color: #c49afa; }.ds-log-line[data-source="pve"] .ds-log-src { color: #8fd19e; }.ds-log-line[data-source="sys"] .ds-log-src { color: #71727d; }.ds-log-line[data-level="warn"] { color: #f0b429; }.ds-log-line[data-level="error"] { color: #ff6b6b; }.ds-log-empty { color: #52535c; font-size: 11px; padding: 4px 2px; }.ds-log.ds-log-full { height: calc(100vh - 400px); min-height: 230px; }.ds-pills { display: flex; flex-wrap: wrap; gap: 4px; margin: 4px 0 8px; align-items: center; }.ds-pill { display: inline-flex; align-items: center; font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 20px; white-space: nowrap; letter-spacing: 0.02em; line-height: 1.5; }.ds-pill-cd { background: rgba(245,158,11,.12); color: #f59e0b; border: 1px solid rgba(245,158,11,.3); }.ds-pill-locked { background: rgba(30,30,40,.4); color: #52535c; border: 1px solid #2a2c34; }.ds-pill-mon { background: rgba(245,158,11,.08); color: #d97706; border: 1px solid rgba(245,158,11,.2); }.ds-pill-node { background: transparent; color: #52535c; border: 1px solid #33343d; font-size: 9.5px; padding: 1px 5px; }.ds-pill-avail { background: rgba(34,197,94,.12); color: #4ade80; border: 1px solid rgba(34,197,94,.3); }/* green: available to join */ .ds-pill-joined { background: rgba(59,130,246,.12); color: #60a5fa; border: 1px solid rgba(59,130,246,.3); }/* blue: currently joined/active */ .ds-pill-cleared { background: rgba(139,92,246,.12); color: #a78bfa; border: 1px solid rgba(139,92,246,.3); }/* violet: node cleared, X/Y joined */ .ds-pills:empty { display: none; margin: 0; }.ds-sa-node-card { border:1px solid #2a2c34; border-radius:7px; padding:8px 10px; margin-bottom:5px; }.ds-sa-node-hdr { display:flex; align-items:center; gap:6px; }.ds-sa-node-label { flex:1; font-size:11px; font-weight:600; color:#c4c5cc; }.ds-sa-cap-list { margin-top:6px; padding-top:6px; border-top:1px solid #1c1d23; }.ds-sa-cap-row { display:flex; align-items:center; gap:5px; padding:2px 0; font-size:11px; color:#c4c5cc; }.ds-sa-cap-icon { flex-shrink:0; width:14px; text-align:center; color:#60a5fa; }.ds-sa-cap-name { flex:0 0 auto; max-width:100px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.ds-sa-cap-arrow { color:#52535c; flex-shrink:0; }.ds-sa-cap-target { color:#a5a6f6; flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.ds-pvp-match-card { border:1px solid #2a2c34; border-radius:7px; padding:8px 10px; margin-top:8px; }.ds-linkbtn { background: none; border: none; padding: 0; margin: 0; color: #60a5fa; text-decoration: underline; cursor: pointer; font: inherit; font-weight: 600; }.ds-linkbtn:hover { color: #93c5fd; }.ds-ffa-popover { position: fixed; z-index: 2147483001; width: 320px; background: #15161a; border: 1px solid #2a2c34; border-radius: 12px; box-shadow: 0 12px 32px rgba(0,0,0,.45); padding: 10px; color: #e4e4e7; }.ds-ffa-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }.ds-ffa-title { font-size: 13px; font-weight: 700; }.ds-ffa-close { background: transparent; border: none; color: #8b8d98; font-size: 18px; cursor: pointer; line-height: 1; }.ds-ffa-timeline { position: relative; padding-left: 34px; --row-h: 30px; }.ds-ffa-rail { position: absolute; left: 15px; top: 14px; bottom: 14px; width: 2px; background: #2a2c34; }.ds-ffa-fill { position: absolute; left: 15px; top: 14px; width: 2px; height: calc(var(--ffa-progress) * var(--row-h)); background: #60a5fa; }.ds-ffa-marker { position: absolute; left: 9px; top: calc(14px + (var(--ffa-progress) * var(--row-h)) - 7px); width: 14px; height: 14px; border-radius: 50%; background: #60a5fa; box-shadow: 0 0 0 4px rgba(96,165,250,.12); }.ds-ffa-row { display: grid; grid-template-columns: 76px 1fr auto; gap: 8px; align-items: center; min-height: var(--row-h); font-size: 12px; position: relative; }.ds-ffa-row::before { content: ''; position: absolute; left: -22px; top: 10px; width: 8px; height: 8px; border-radius: 50%; background: #52535c; }.ds-ffa-row.cleared::before { background: #52535c; }.ds-ffa-row.future::before { background: #33343d; }.ds-ffa-time { color: #c4c5cc; }.ds-ffa-node { color: #8b8d98; }.ds-ffa-status { font-size: 10px; text-transform: uppercase; letter-spacing: .04em; color: #8b8d98; }.ds-ffa-row.cleared .ds-ffa-status { color: #71727d; }.ds-ffa-row.next .ds-ffa-status { color: #60a5fa; }.ds-ffa-row.before::before { background: #3f4655; }.ds-ffa-row.after::before { background: #3f4655; }.ds-ffa-row.before .ds-ffa-status, .ds-ffa-row.after .ds-ffa-status { color: #8b8d98; }.ds-ffa-row.before .ds-ffa-node, .ds-ffa-row.after .ds-ffa-node { color: #c4c5cc; }.ds-ffa-row.before { opacity: 0.72; }.ds-ffa-row.after { opacity: 0.58; }.ds-ffa-row.future { opacity: 0.55; }.ds-ffa-row.before, .ds-ffa-row.after { grid-template-columns: 110px 1fr auto; }.ds-ffa-row.before .ds-ffa-time, .ds-ffa-row.after .ds-ffa-time { white-space: nowrap; }.ds-panel.ds-tab-blocked .ds-body > *:not(.ds-tab-block-msg) { display: none !important; }.ds-panel.ds-tab-blocked .ds-tab-block-msg { display: flex !important; }.ds-tab-block-msg { display: none; flex-direction: column; align-items: center; justify-content: center; text-align: center; padding: 28px 16px; gap: 10px; min-height: 120px; }.ds-tbl-icon { font-size: 22px; }.ds-tbl-title { font-weight: 700; font-size: 13px; color: #e4e4e7; }.ds-tbl-note { font-size: 11px; color: #8b8d98; line-height: 1.65; }.ds-body { -webkit-overflow-scrolling: touch; transform: translateZ(0); }
+      @media (max-width: 520px) {.ds-panel { width: calc(100vw - 16px) !important; right: 8px !important; left: 8px !important; top: auto !important; bottom: 8px !important; }.ds-body { max-height: calc(72vh - 48px); }
       }
     `;
     document.head.appendChild(style);
   }
-
-  // ═══════════════════════════════════════════════════════════════════════════
-  // UI: DRAGGING
-  // ═══════════════════════════════════════════════════════════════════════════
-
-  //schedule
 
   let ffaPopupEl = null;
   let saLastServerTimeAt = 0;
@@ -5157,10 +3996,6 @@
   }
 
   function saNowSeconds() {
-    // FIX: server time-of-day from Core.clock (offset measured once from the top bar, already on the server's
-    // time zone). The old value came from whichever fetched page was parsed last: it was null after an instance
-    // change until some page happened to be fetched (so the schedule silently never ran), and it drifted by the
-    // fetch time. The scraped value below is only a fallback for a page without the top bar.
     try { if (Core.clock.known) return Core.clock.parts().secOfDay; } catch (_) { /* fall through */ }
     if (saLastServerTime) {
       const elapsed = Math.floor((Date.now() - saLastServerTimeAt) / 1000);
@@ -5184,15 +4019,10 @@
     const lastItem  = SA_SCHEDULE[SA_SCHEDULE.length - 1];
     const lastKey   = `${lastItem.nodeId}:h${lastItem.hour}:m${lastItem.minute ?? 0}`;
 
-    // Every real gap between slots is exactly 1hr now, so extend that same
-    // "1 progress unit = 1hr" rule one hour before the first slot too — the
-    // marker ramps linearly into Match 1 instead of sitting flat at 0 all
-    // night and then teleporting the moment 1AM hits.
     const preAnchor = times[0] - 3600;
     if (now < preAnchor) return 0;
     if (now < times[0])  return (now - preAnchor) / 3600;
 
-    // 1..N = between / on nodes
     for (let i = 1; i < times.length; i++) {
       if (now < times[i]) {
         const prev = times[i - 1];
@@ -5200,7 +4030,6 @@
         return i + frac;
       }
     }
-    // N+1 = after the last node, but only once the last one is actually handled
     return handledKeys.has(lastKey) ? times.length + 1 : times.length;
   }
 
@@ -5221,12 +4050,6 @@
     ffaPopupEl = null;
     document.removeEventListener('mousedown', onFfaOutsideClick, true);
     window.removeEventListener('keydown', onFfaEscKey, true);
-  }
-
-  function getFfaRowLabel(item, idx) {
-    if (item.nodeId === 11) return 'Final';
-    const matchNo = (item.nodeId === 5 ? idx + 1 : idx - 3);
-    return `Match ${matchNo}`;
   }
 
   function onFfaOutsideClick(e) {
@@ -5251,8 +4074,6 @@
     el.style.top = `${rect.bottom + 8}px`;
 
     const st = getFfaState(currentInstanceId);
-    const firstItem = SA_SCHEDULE[0];
-    const lastItem  = SA_SCHEDULE[SA_SCHEDULE.length - 1];
 
     const rowsHtml = !st
     ? `<p style="--ffa-progress:${st ? st.progress : 0};">Server time not yet known — wait for first SA scan.</p>`
@@ -5328,12 +4149,6 @@
     window.addEventListener('keydown', onFfaEscKey, true);
   }
 
-
-  //pve helper
-  // ─── PvE: on-demand single-node verification ─────────────────────────────
-  // Fired after a UI edit (mob checkbox / cap input) so the pill reflects a
-  // real scan result instead of an optimistic guess. Read-only (fight:false)
-  // — never joins/attacks. Skipped/retried if a real tick already owns pveBusy.
   const pveNodeVerifyTimers = {}; // nodeId -> setTimeout handle
 
   function pveVerifyNodeSoon(nodeId, delay = 500) {
@@ -5370,187 +4185,16 @@
     }
   }
 
-
-  // ═══════════════════════════════════════════════════════════════════════════
-  // UI: MOUNT / WIRE / REFRESH
-  // ═══════════════════════════════════════════════════════════════════════════
-
   function mountUI() {
     if (document.getElementById('ds-panel')) return;
     injectStyles();
     const panel = document.createElement('div');
     panel.id = 'ds-panel';
     panel.className = 'ds-panel ds-tab-blocked';
-    panel.innerHTML = `
-      <div class="ds-header">
-        <span class="ds-dot" id="ds-dot"></span>
-        <span class="ds-title">Dungeon Suite <span class="ds-inst" id="ds-inst"></span></span>
-        <label class="ds-switch" title="Enable / disable automation">
-          <input type="checkbox" id="ds-master-toggle">
-          <span class="ds-slider"></span>
-        </label>
-        <button class="ds-iconbtn ds-chevron" id="ds-collapse-btn" type="button" title="Collapse">▾</button>
-      </div>
-      <div class="ds-body">
-        <div class="ds-tab-block-msg">
-          <div class="ds-tbl-icon">⏳</div>
-          <div class="ds-tbl-title">Starting…</div>
-          <div class="ds-tbl-note">Checking tab status…</div>
-        </div>
-        <div class="ds-shared-mode-row">
-          <div class="ds-field-label">Mode <span class="ds-shared-tag">— Made by werewulf</span></div>
-          <div class="ds-segmented">
-            <button class="ds-seg-btn" data-mode="normal" type="button">Normal</button>
-            <button class="ds-seg-btn" data-mode="fast"   type="button">Fast Run</button>
-          </div>
-        </div>
-        <div class="ds-tabs">
-          <button class="ds-tab" data-tab="pvp" type="button">PvP</button>
-          <button class="ds-tab" data-tab="sa"  type="button">SA</button>
-          <button class="ds-tab" data-tab="pve" type="button">PvE</button>
-          <button class="ds-tab" data-tab="log" type="button">Log</button>
-        </div>
-        <div class="ds-tabpanel" data-tab="pvp">
-          <p class="ds-status" id="ds-status-pvp"></p>
-          <div class="ds-pills" id="ds-pvp-pills"></div>
-          <div id="ds-pvp-normal">
-            <p class="ds-note" title="Auto-join cap: 6 matches before 4PM server time, 40 after FFA opens at 4PM. Tyrant Conclave (Node 9) is a separate opt-in node and never counts toward or is limited by this cap.">Scans nodes every ${Math.round(PVP_SCAN_INTERVAL_MS / 1000)}s. Auto-join cap: 6 before 4PM, 40 after (FFA). Monitoring continues when paused.</p>
-            <div id="ds-pvp-match-list"></div>
-          </div>
-          <div id="ds-pvp-fast" style="display:none;">
-            <div class="ds-fields-row">
-              <div class="ds-field">
-                <div class="ds-field-label">Node 7 · Ring Ward</div>
-                <input class="ds-input" data-node="7" type="number" min="0" max="20" value="0">
-                <div class="ds-field-status" data-node="7">—</div>
-              </div>
-              <div class="ds-field">
-                <div class="ds-field-label">Node 8 · Duel Heart</div>
-                <input class="ds-input" data-node="8" type="number" min="0" max="20" value="0">
-                <div class="ds-field-status" data-node="8">—</div>
-              </div>
-            </div>
-            <p class="ds-note" style="margin-bottom:10px;">0 = skip node. Polls every ${(PVP_FAST_INTERVAL_MS / 1000).toFixed(1)}s when active.</p>
-            <div class="ds-toggle-row">
-              <label class="ds-switch sm"><input type="checkbox" id="ds-leader-toggle"><span class="ds-slider"></span></label>
-              <span>Leader / Vice — starts any match with at least 1 player inside instantly</span>
-            </div>
-          </div>
-          <div class="ds-toggle-row" style="margin:10px 0 0;" title="Tyrant Conclave is a separate opt-in node — it is never counted toward, or limited by, the Node 7/8 join cap above (6 before 4PM, 40 after FFA).">
-            <label class="ds-switch sm"><input type="checkbox" id="ds-tyrant-toggle"><span class="ds-slider"></span></label>
-            <span>Tyrant Conclave (N9) Final PVP Boss</span>
-          </div>
-        </div>
-        <div class="ds-tabpanel" data-tab="sa">
-          <p class="ds-status" id="ds-status-sa"></p>
-          <div class="ds-pills" id="ds-sa-pills"></div>
-          <div id="ds-sa-node-list" style="margin-bottom:8px;"></div>
-          <button class="ds-seg-btn" id="ds-sa-heal-all" type="button" style="width:100%;margin-bottom:8px;">Heal All Units</button>
-          <p class="ds-note" id="ds-sa-note"></p>
-          <div id="ds-sa-sched-wrap">
-            <div class="ds-divider"></div>
-            <div class="ds-toggle-row">
-              <label class="ds-switch sm"><input type="checkbox" id="ds-sa-sched-nuke"><span class="ds-slider"></span></label>
-              <span title="Also nukes any overdue fights still uncleared that are past ffa">
-                Scheduled clear — joins &amp; nukes each battle at
-                <button class="ds-linkbtn" id="ds-ffa-help" type="button">FFA</button>
-              </span>
-            </div>
-          </div>
-        </div>
-
-        <div class="ds-tabpanel" data-tab="pve">
-          <p class="ds-status" id="ds-status-pve"></p>
-          <div class="ds-pills" id="ds-pve-pills"></div>
-
-          <div class="ds-fields-row">
-            <div class="ds-field">
-              <div class="ds-field-label">Stop condition</div>
-              <select class="ds-input" id="ds-pve-mode">
-                <option value="exp">EXP cap</option>
-                <option value="fixed">Fixed cap (all mobs)</option>
-                <option value="monster">Per-mob caps</option>
-                <option value="loot">Full loot unlock</option>
-                <option value="scheduled" id="ds-pve-mode-scheduled-opt">Scheduled (per-node, time-based)</option>
-              </select>
-            </div>
-            <div class="ds-field">
-              <div class="ds-field-label">Damage Model</div>
-              <select class="ds-input" id="ds-pve-damage-model" title="Change the Damage Model that will be used for PVE.">
-                <option value="eco" title="Stamina conservative: Biggest attack that still fits under remaining cap.">Eco</option>
-                <option value="fast" title="Fewest Hits: Prioritizes fewest amount of hits to close the remaining cap.">Fast</option>
-              </select>
-            </div>
-          </div>
-          <p class="ds-note" id="ds-pve-mode-note" style="margin:-4px 0 8px;"></p>
-
-          <div class="ds-fields-row" id="ds-pve-fixedcap-row" style="display:none;">
-            <div class="ds-field">
-              <div class="ds-field-label">Fixed cap</div>
-              <input class="ds-input" id="ds-pve-fixedcap" type="number" min="0" step="1000" placeholder="0 = no limit">
-            </div>
-          </div>
-
-          <div class="ds-fields-row">
-            <div class="ds-toggle-row" style="flex:1;">
-              <label class="ds-switch sm"><input type="checkbox" id="ds-pve-stam-potion"><span class="ds-slider"></span></label>
-              <span>Auto stamina potion</span>
-            </div>
-            <div class="ds-toggle-row" style="flex:1;">
-              <label class="ds-switch sm"><input type="checkbox" id="ds-pve-hp-potion"><span class="ds-slider"></span></label>
-              <span>Auto HP potion</span>
-            </div>
-          </div>
-
-          <div style="display:flex; gap:8px; margin:8px 0; align-items:center;">
-            <div id="ds-pve-stamcap-wrap" style="flex:1; display:none; justify-content:flex-start;">
-              <div id="ds-pve-stamcap-row" style="display:flex;align-items:center;gap:5px;font-size:11px;color:#8b8d98;white-space:nowrap;">
-                <span>Skip LSP ≥</span>
-                <input class="ds-input" id="ds-pve-stamcap" type="number" min="0" max="100" step="0.5"
-                       style="width:56px;padding:3px 5px;font-size:11px;">
-                <span>% EXP</span>
-              </div>
-            </div>
-            <div style="flex:1;">
-              <button class="ds-seg-btn" id="ds-pve-copy-other" type="button" style="width:100%;padding:6px 14px;"> Copy from <span id="ds-pve-copy-other-label"></span></button>
-            </div>
-          </div>
-
-          <div id="ds-pve-nodepanels"></div>
-
-          <p class="ds-note" style="margin-top:6px;">Normal &amp; Fast Run keep separate profiles and mob selections.</p>
-        </div>
-
-        <div class="ds-tabpanel" data-tab="log">
-          <div class="ds-log-header" style="margin-bottom:6px;">
-            <div class="ds-log-filters">
-              <button class="ds-chip" data-filter="all" type="button">All</button>
-              <button class="ds-chip" data-filter="pvp" type="button">PvP</button>
-              <button class="ds-chip" data-filter="sa"  type="button">SA</button>
-              <button class="ds-chip" data-filter="pve" type="button">PvE</button>
-              <button class="ds-chip" data-filter="sys" type="button">Sys</button>
-            </div>
-          </div>
-          <div class="ds-log ds-log-full" id="ds-log"></div>
-        </div>
-      </div>
-    `;
-    // The panel stays attached (hidden) in a holder so document.getElementById / refreshUI keep working while the
-    // modal is closed; opening the Cube button moves it into Core's modal, closing moves it back.
-    const holder = document.createElement('div');
-    holder.id = 'cube-suite-holder';
-    holder.style.display = 'none';
-    holder.appendChild(panel);
-    document.documentElement.appendChild(holder);
-    Core.ui.css('cube-suite-float',
-      '.core-float-pane .ds-panel{position:static !important;width:100% !important;max-width:none;border:0;border-radius:12px;box-shadow:none;z-index:auto}'
-      + '.core-float-pane .ds-header{cursor:default}'
-      + '.core-float-pane #ds-collapse-btn{display:none}');
-    dsFloat = Core.float.add({
-      id: 'cube-suite', title: 'Cube Suite', icon: '🧊', order: 60, width: 560,
-      render(el) { el.replaceChildren(panel); refreshUI(); renderLog(); },
-      onHide() { holder.appendChild(panel); },
-    });
+    panel.innerHTML = ` <div class="ds-header"> <span class="ds-dot" id="ds-dot"></span> <span class="ds-title">Dungeon Suite <span class="ds-inst" id="ds-inst"></span></span> <label class="ds-switch" title="Enable / disable automation"> <input type="checkbox" id="ds-master-toggle"> <span class="ds-slider"></span> </label> <button class="ds-iconbtn ds-chevron" id="ds-collapse-btn" type="button" title="Collapse">▾</button> </div> <div class="ds-body"> <div class="ds-tab-block-msg"> <div class="ds-tbl-icon">⏳</div> <div class="ds-tbl-title">Starting…</div> <div class="ds-tbl-note">Checking tab status…</div> </div> <div class="ds-shared-mode-row"> <div class="ds-field-label">Mode <span class="ds-shared-tag">— Made by werewulf</span></div> <div class="ds-segmented"> <button class="ds-seg-btn" data-mode="normal" type="button">Normal</button> <button class="ds-seg-btn" data-mode="fast"   type="button">Fast Run</button> </div> </div> <div class="ds-tabs"> <button class="ds-tab" data-tab="pvp" type="button">PvP</button> <button class="ds-tab" data-tab="sa"  type="button">SA</button> <button class="ds-tab" data-tab="pve" type="button">PvE</button> <button class="ds-tab" data-tab="log" type="button">Log</button> </div> <div class="ds-tabpanel" data-tab="pvp"> <p class="ds-status" id="ds-status-pvp"></p> <div class="ds-pills" id="ds-pvp-pills"></div> <div id="ds-pvp-normal"> <p class="ds-note" title="Auto-join cap: 6 matches before 4PM server time, 40 after FFA opens at 4PM. Tyrant Conclave (Node 9) is a separate opt-in node and never counts toward or is limited by this cap.">Scans nodes every ${Math.round(PVP_SCAN_INTERVAL_MS / 1000)}s. Auto-join cap: 6 before 4PM, 40 after (FFA). Monitoring continues when paused.</p> <div id="ds-pvp-match-list"></div> </div> <div id="ds-pvp-fast" style="display:none;"> <div class="ds-fields-row"> <div class="ds-field"> <div class="ds-field-label">Node 7 · Ring Ward</div> <input class="ds-input" data-node="7" type="number" min="0" max="20" value="0"> <div class="ds-field-status" data-node="7">—</div> </div> <div class="ds-field"> <div class="ds-field-label">Node 8 · Duel Heart</div> <input class="ds-input" data-node="8" type="number" min="0" max="20" value="0"> <div class="ds-field-status" data-node="8">—</div> </div> </div> <p class="ds-note" style="margin-bottom:10px;">0 = skip node. Polls every ${(PVP_FAST_INTERVAL_MS / 1000).toFixed(1)}s when active.</p> <div class="ds-toggle-row"> <label class="ds-switch sm"><input type="checkbox" id="ds-leader-toggle"><span class="ds-slider"></span></label> <span>Leader / Vice — starts any match with at least 1 player inside instantly</span> </div> </div> <div class="ds-toggle-row" style="margin:10px 0 0;" title="Tyrant Conclave is a separate opt-in node — it is never counted toward, or limited by, the Node 7/8 join cap above (6 before 4PM, 40 after FFA)."> <label class="ds-switch sm"><input type="checkbox" id="ds-tyrant-toggle"><span class="ds-slider"></span></label> <span>Tyrant Conclave (N9) Final PVP Boss</span> </div> </div> <div class="ds-tabpanel" data-tab="sa"> <p class="ds-status" id="ds-status-sa"></p> <div class="ds-pills" id="ds-sa-pills"></div> <div id="ds-sa-node-list" style="margin-bottom:8px;"></div> <button class="ds-seg-btn" id="ds-sa-heal-all" type="button" style="width:100%;margin-bottom:8px;">Heal All Units</button> <p class="ds-note" id="ds-sa-note"></p> <div id="ds-sa-sched-wrap"> <div class="ds-divider"></div> <div class="ds-toggle-row"> <label class="ds-switch sm"><input type="checkbox" id="ds-sa-sched-nuke"><span class="ds-slider"></span></label> <span title="Also nukes any overdue fights still uncleared that are past ffa"> Scheduled clear — joins &amp; nukes each battle at <button class="ds-linkbtn" id="ds-ffa-help" type="button">FFA</button> </span> </div> </div> </div> <div class="ds-tabpanel" data-tab="pve"> <p class="ds-status" id="ds-status-pve"></p> <div class="ds-pills" id="ds-pve-pills"></div> <div class="ds-fields-row"> <div class="ds-field"> <div class="ds-field-label">Stop condition</div> <select class="ds-input" id="ds-pve-mode"> <option value="exp">EXP cap</option> <option value="fixed">Fixed cap (all mobs)</option> <option value="monster">Per-mob caps</option> <option value="loot">Full loot unlock</option> <option value="scheduled" id="ds-pve-mode-scheduled-opt">Scheduled (per-node, time-based)</option> </select> </div> <div class="ds-field"> <div class="ds-field-label">Damage Model</div> <select class="ds-input" id="ds-pve-damage-model" title="Change the Damage Model that will be used for PVE."> <option value="eco" title="Stamina conservative: Biggest attack that still fits under remaining cap.">Eco</option> <option value="fast" title="Fewest Hits: Prioritizes fewest amount of hits to close the remaining cap.">Fast</option> </select> </div> </div> <p class="ds-note" id="ds-pve-mode-note" style="margin:-4px 0 8px;"></p> <div class="ds-fields-row" id="ds-pve-fixedcap-row" style="display:none;"> <div class="ds-field"> <div class="ds-field-label">Fixed cap</div> <input class="ds-input" id="ds-pve-fixedcap" type="number" min="0" step="1000" placeholder="0 = no limit"> </div> </div> <div class="ds-fields-row"> <div class="ds-toggle-row" style="flex:1;"> <label class="ds-switch sm"><input type="checkbox" id="ds-pve-stam-potion"><span class="ds-slider"></span></label> <span>Auto stamina potion</span> </div> <div class="ds-toggle-row" style="flex:1;"> <label class="ds-switch sm"><input type="checkbox" id="ds-pve-hp-potion"><span class="ds-slider"></span></label> <span>Auto HP potion</span> </div> </div> <div style="display:flex; gap:8px; margin:8px 0; align-items:center;"> <div id="ds-pve-stamcap-wrap" style="flex:1; display:none; justify-content:flex-start;"> <div id="ds-pve-stamcap-row" style="display:flex;align-items:center;gap:5px;font-size:11px;color:#8b8d98;white-space:nowrap;"> <span>Skip LSP ≥</span> <input class="ds-input" id="ds-pve-stamcap" type="number" min="0" max="100" step="0.5" style="width:56px;padding:3px 5px;font-size:11px;"> <span>% EXP</span> </div> </div> <div style="flex:1;"> <button class="ds-seg-btn" id="ds-pve-copy-other" type="button" style="width:100%;padding:6px 14px;"> Copy from <span id="ds-pve-copy-other-label"></span></button> </div> </div> <div id="ds-pve-nodepanels"></div> <p class="ds-note" style="margin-top:6px;">Normal &amp; Fast Run keep separate profiles and mob selections.</p> </div> <div class="ds-tabpanel" data-tab="log"> <div class="ds-log-header" style="margin-bottom:6px;"> <div class="ds-log-filters"> <button class="ds-chip" data-filter="all" type="button">All</button> <button class="ds-chip" data-filter="pvp" type="button">PvP</button> <button class="ds-chip" data-filter="sa"  type="button">SA</button> <button class="ds-chip" data-filter="pve" type="button">PvE</button> <button class="ds-chip" data-filter="sys" type="button">Sys</button> </div> </div> <div class="ds-log ds-log-full" id="ds-log"></div> </div> </div> `;
+    document.documentElement.appendChild(panel);
+    const pos = dsLoadPos();
+    if (innerWidth >= 520 && pos?.left && pos?.top) Object.assign(panel.style, { left: pos.left, top: pos.top, right: 'auto' });
     uiBox = panel;
     wireUI(panel);
     refreshUI();
@@ -5559,6 +4203,22 @@
   }
 
   function wireUI(panel) {
+    const hdr = panel.querySelector('.ds-header');
+    let from = null;
+    hdr.style.touchAction = 'none';
+    hdr.onpointerdown = e => {
+      if (e.target.closest('.ds-switch, .ds-iconbtn')) return;
+      const r = panel.getBoundingClientRect();
+      from = { x: e.clientX - r.left, y: e.clientY - r.top };
+      hdr.setPointerCapture(e.pointerId);
+    };
+    hdr.onpointermove = e => {
+      if (!from) return;
+      const left = Math.max(4, Math.min(e.clientX - from.x, innerWidth - panel.offsetWidth - 4));
+      const top  = Math.max(4, Math.min(e.clientY - from.y, innerHeight - panel.offsetHeight - 4));
+      Object.assign(panel.style, { left: left + 'px', top: top + 'px', right: 'auto' });
+    };
+    hdr.onpointerup = () => { if (from) { from = null; dsSavePos({ left: panel.style.left, top: panel.style.top }); } };
 
     panel.querySelector('#ds-master-toggle').addEventListener('change', e => {
       masterEnabled = e.target.checked;
@@ -5663,8 +4323,6 @@
       logStickToBottom = logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 32;
     });
 
-    // Delegated — the mob rows below are rendered dynamically per node.
-
     panel.querySelector('#ds-pve-nodepanels').addEventListener('change', e => {
       const cb = e.target.closest('[data-pve-mob-node]');
       if (cb) {
@@ -5699,10 +4357,6 @@
     });
 
     panel.querySelector('#ds-pve-nodepanels').addEventListener('click', e => {
-      // Check the clock icon FIRST — it's nested inside .ds-pve-node-header,
-      // which itself carries data-node-toggle, so closest() on the toggle
-      // selector would otherwise match it too and collapse the node instead
-      // of opening the popup.
       const schedOpenBtn = e.target.closest('.ds-pve-sched-open');
       if (schedOpenBtn) {
         const nodeId = Number(schedOpenBtn.dataset.schedOpenNode);
@@ -5755,21 +4409,8 @@
                                                btn.addEventListener('click', () => { activeLogFilter = btn.dataset.filter; renderLog(); refreshUI(); }));
   }
 
-  // pveRenderScheduleRowsHTML: one node's 'scheduled' mode breakpoint editor.
-  // Purely a UI shell over profile.nodeSchedules[nodeId] — each row is
-  // "at [time] use [mode]", with a fixed-cap field that only appears when
-  // that row's mode is 'fixed'. No node-specific behavior lives here; it's
-  // whatever the user builds via the add/delete/edit handlers below. Content
-  // renders inside a floating popup (openPveSchedPopup), not inline in the
-  // node block — keeps the mob list uncluttered and matches the FFA popup's
-  // "small icon → floating editor" pattern already used for SA scheduling.
   const PVE_SCHED_MODE_LABELS = { exp: 'EXP cap', fixed: 'Fixed cap', monster: 'Per-mob', loot: 'Loot unlock', skip: 'Skip' };
 
-  // pveHour24ToParts / pveHour12ToHour24: display conversion only — every
-  // entry is still stored as a 0–23 hour internally (dsScheduleEntrySeconds
-  // and the rest of the timed-lookup logic never change), these just
-  // translate at the render/commit boundary so the UI can show a familiar
-  // 12-hour clock with an AM/PM toggle.
   function pveHour24ToParts(hour24) {
     const h = ((hour24 % 24) + 24) % 24;
     return { h12: (h % 12) || 12, ampm: h < 12 ? 'AM' : 'PM' };
@@ -5781,26 +4422,12 @@
   }
 
   function pveRenderScheduleRowsHTML(nodeId, schedule) {
-    // Only needed for rows in 'monster' mode, but cheap enough to build once
-    // up front rather than re-deriving it per row. Filtered down to mobs
-    // that are actually checked in the main panel's mob list for this node
-    // — a mob you've unchecked there has no business getting its own
-    // per-mob cap row inside a breakpoint either. hasKey false (node never
-    // scanned/configured yet) means nothing's been unchecked, so show all.
     const profile       = pveGetProfile();
     const hasSelKey     = Object.prototype.hasOwnProperty.call(profile.selectedMobsByNode, nodeId);
     const selectedMobs  = new Set(profile.selectedMobsByNode[nodeId] || []);
     const mobEntries = pveGetNodeMobEntries(nodeId)
     .filter(([key]) => !hasSelKey || selectedMobs.has(key));
 
-    // Display order only — NOT the stored array order. A row's real position
-    // in nodeSchedules[nodeId] (idx) is what every input targets, so
-    // edit/delete/sync keep working regardless of display order; this just
-    // controls what the operator sees. The noTime row (if any) is pinned
-    // first since it's the fallback for "before anything timed applies";
-    // timed rows are sorted by actual clock time rather than add-order —
-    // add-order is what caused the original bug (schedule[0] winning by
-    // accident of click-order, not by being the earliest time).
     const indexed    = (schedule || []).map((entry, idx) => ({ entry, idx }));
     const noTimeItem = indexed.find(x => x.entry.noTime) || null;
     const timedItems = indexed.filter(x => !x.entry.noTime)
@@ -5818,10 +4445,6 @@
                    value="${entry.fixedCap ?? 0}" placeholder="cap"
                    style="flex:1 1 92px;min-width:60px;">`
       : '';
-      // Per-entry mob caps, shown inline when this breakpoint is 'monster'.
-      // Seeded from the global table the moment the row is switched to this
-      // mode (see pveHandleSchedRowChange) — editing here never touches the
-      // shared profile.monsterCaps table used by standalone Per-mob mode.
       const monsterCapsHtml = entry.mode === 'monster'
       ? `<div class="ds-pve-sched-mobcaps" style="margin-top:6px;padding:6px;background:#0f1013;border:1px solid #2a2c34;border-radius:5px;">
             <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:5px;">
@@ -5842,16 +4465,6 @@
           </div>`
       : '';
 
-      // "No time" is no longer a separate concept the operator toggles —
-      // it's just what a row with its time cleared IS. A timed row shows
-      // two plain zero-padded text boxes (hour/minute, 12-hour + AM/PM
-      // toggle) — not a native <input type="time"> (whose scroll-to-spin
-      // wraps 12→1 forever and ignores preventDefault) and not a native
-      // <select> (whose open dropdown is an unstyled full-size OS list
-      // that swallows the page). A plain text box has neither problem.
-      // Typing 2 digits auto-advances hour → minute. The "×" clears the
-      // row into the fallback, and the resulting "No time" chip restores
-      // whatever hour/minute it last held when clicked again.
       const { h12, ampm } = pveHour24ToParts(entry.hour ?? 0);
 
       const timeControlsHtml = isNoTime
@@ -5892,10 +4505,6 @@
     </div>`;
   }
 
-  // ─── PvE schedule popup — floating editor opened via the clock icon next
-  // to each node's collapse chevron. Lives in document.body (outside the
-  // panel, same as the FFA popup), so it carries its own change/click
-  // listeners rather than relying on the panel's #ds-pve-nodepanels delegation.
   let pveSchedPopupEl     = null;
   let pveSchedPopupNodeId = null;
   let pveSchedPopupAnchor = null;
@@ -5912,9 +4521,6 @@
       ${pveRenderScheduleRowsHTML(nodeId, schedule)}`;
   }
 
-  // pvePositionPopover: shared placement math (below anchor, flips above if
-  // it would overflow the viewport) — identical logic to openFfaPopup's,
-  // factored out so both popups position themselves the same way.
   function pvePositionPopover(el, anchor) {
     const rect = anchor.getBoundingClientRect();
     const MARGIN = 8;
@@ -5945,9 +4551,6 @@
   }
   function onPveSchedEscKey(e) { if (e.key === 'Escape') closePveSchedPopup(); }
 
-  // pveRefreshSchedPopup: re-renders the open popup's body in place (row
-  // count changes on add/delete) and re-attaches its close button + repositions,
-  // since height can change. No-op if the popup isn't open for this node.
   function pveRefreshSchedPopup(nodeId) {
     if (!pveSchedPopupEl || pveSchedPopupNodeId !== nodeId) return;
     pveSchedPopupEl.innerHTML = pveRenderSchedPopupBody(nodeId);
@@ -5955,8 +4558,6 @@
     if (pveSchedPopupAnchor?.isConnected) pvePositionPopover(pveSchedPopupEl, pveSchedPopupAnchor);
   }
 
-  // Shared row-edit handlers — used only by the popup's own listeners
-  // (it lives outside #ds-pve-nodepanels so the panel's delegation can't see it).
   function pveHandleSchedRowChange(e, nodeId) {
     const schedH = e.target.closest('.ds-pve-sched-h');
     const schedM = e.target.closest('.ds-pve-sched-m');
@@ -5967,11 +4568,6 @@
       const mEl    = wrap.querySelector('.ds-pve-sched-m');
       const ampmEl = wrap.querySelector('.ds-time-picker-ampm');
       const ampm   = ampmEl?.dataset.ampm === 'PM' ? 'PM' : 'AM';
-      // Clamp + re-pad on commit (blur/Enter triggers 'change' for text
-      // inputs) so "9" becomes "09" and out-of-range typing (e.g. "87")
-      // snaps back into a real hour/minute instead of being stored as-is.
-      // The box shows a 12-hour hour (1–12); convert to the 0–23 hour the
-      // rest of the schedule logic (dsScheduleEntrySeconds etc.) expects.
       const h12 = Math.min(12, Math.max(1, parseInt(hEl.value, 10) || 12));
       const m   = Math.min(59, Math.max(0, parseInt(mEl.value, 10) || 0));
       hEl.value = String(h12).padStart(2, '0');
@@ -5991,11 +4587,6 @@
         const list = (p.nodeSchedules || (p.nodeSchedules = {}))[nodeId] || (p.nodeSchedules[nodeId] = []);
         if (!list[idx]) return;
         list[idx].mode = schedMode.value;
-        // Seed this breakpoint's own mob-cap table from the current global
-        // table the first time it's switched to 'monster' — a one-time copy,
-        // not a live link, so later edits here or in standalone Per-mob mode
-        // stay independent. Only seeds once; re-selecting 'monster' later
-        // (after editing away) keeps whatever was already there.
         if (schedMode.value === 'monster' && !list[idx].monsterCaps) {
           list[idx].monsterCaps = { ...p.monsterCaps };
         }
@@ -6037,9 +4628,6 @@
       pveUpdateProfile(p => {
         const list = (p.nodeSchedules || (p.nodeSchedules = {}))[nodeId] || (p.nodeSchedules[nodeId] = []);
         if (!list[idx]) return;
-        // Only one noTime/fallback row per node — otherwise which one "wins"
-        // the pre-schedule gap is ambiguous. Clear the flag off any other
-        // row silently rather than rejecting the click.
         list.forEach((e2, i2) => { if (i2 !== idx) e2.noTime = false; });
         list[idx].noTime = true;
       }, { resetActionableNodeId: nodeId });
@@ -6058,10 +4646,6 @@
       pveRefreshSchedPopup(nodeId); // swaps the chip back to hour/minute selects
       return;
     }
-    // AM/PM toggle — flips the button's own label/dataset immediately (so a
-    // same-tick hour/minute edit reads the new value) and recomputes the
-    // stored 0–23 hour from whatever the hour box currently shows on screen,
-    // same source-of-truth pveHandleSchedRowChange uses on blur.
     const ampmBtn = e.target.closest('.ds-time-picker-ampm');
     if (ampmBtn) {
       const idx = Number(ampmBtn.dataset.schedIdx);
@@ -6133,20 +4717,12 @@
     el.querySelector('.ds-ffa-close')?.addEventListener('click', closePveSchedPopup);
     el.addEventListener('change', e => pveHandleSchedRowChange(e, nodeId));
     el.addEventListener('click',  e => pveHandleSchedRowClick(e, nodeId));
-    // Hour/minute are plain text boxes, not a native <input type="time">
-    // or <select> — so there's no browser-native popup or scroll-to-spin
-    // behavior to fight in the first place. This listener only strips
-    // non-digits as you type and auto-advances hour → minute after 2 digits.
     el.addEventListener('input', e => pveHandleSchedRowInput(e));
 
     document.addEventListener('mousedown', onPveSchedOutsideClick, true);
     window.addEventListener('keydown', onPveSchedEscKey, true);
   }
 
-  // pveHandleSchedRowInput: live-filters the hour/minute boxes to digits
-  // only and jumps focus to the next box once 2 digits are in — mimics the
-  // segment-advance feel of a native time input without any of its baggage.
-  // Clamping/padding/state-commit happens separately on 'change' (blur).
   function pveHandleSchedRowInput(e) {
     const el = e.target;
     const isH = el.classList.contains('ds-pve-sched-h');
@@ -6164,25 +4740,18 @@
     }
   }
 
-  // pveGetNodeMobEntries: every mob known for a node — built-in roster,
-  // live discovery, and bootstrapped state, merged and sorted. Shared by
-  // the standalone Per-mob-caps panel and the schedule popup's per-entry
-  // mob-cap editor so both always show the same mob list for a node.
   function pveGetNodeMobEntries(nodeId) {
     const discoveredMap = pveDiscoveredMobsByNode[nodeId] || new Map();
     const mobMap = new Map();
 
-    // Seed from built-in roster.
     for (const name of (PVE_KNOWN_MOBS[nodeId] || [])) {
       mobMap.set(normText(name), name);
     }
 
-    // Merge live discovery.
     for (const [key, name] of discoveredMap) {
       mobMap.set(key, name);
     }
 
-    // Merge bootstrapped state.
     for (const entry of pveMobState.values()) {
       if (Number(entry.nodeId) !== nodeId || !entry.name) continue;
       mobMap.set(normText(entry.name), entry.name);
@@ -6237,10 +4806,6 @@
       const countTag   = entries.length ? ` · ${entries.length} monster type${entries.length === 1 ? '' : 's'}` : '';
       const chevron    = isCollapsed ? '▸' : '▾';
 
-      // 'scheduled' mode is Normal-profile only — the dropdown option itself
-      // is hidden in Fast Run, so this is just a defensive guard, not the
-      // primary gate. Editing itself happens in a floating popup opened by
-      // this clock icon (openPveSchedPopup), not inline in the node block.
       const showSchedule = profile.damageMode === 'scheduled' && !dsIsFastMode();
       const schedCount   = (profile.nodeSchedules?.[nodeId] || []).length;
       const schedBtnHtml = showSchedule
@@ -6387,7 +4952,6 @@
         statusCol  = '#71727d';
       }
 
-      // Fast-run target/assignment for this node
       let assignHtml = '';
       if (fastMode) {
         const matchNo = nodeId === 7 ? fastState.node7MatchNo : fastState.node8MatchNo;
@@ -6404,7 +4968,6 @@
         assignHtml = `<div style="margin-top:5px;padding-top:5px;border-top:1px solid #1e1f25;font-size:10px;">${tag}</div>`;
       }
 
-      // Live match breakdown — total count + per-state counts
       let breakdownHtml = '';
       if (matches?.length) {
         let cleared = 0, joined = 0, live = 0, available = 0, full = 0;
@@ -6438,27 +5001,16 @@
     }).join('');
   }
 
-  function dsUpdateDockBadge() {
-    const b = dsFloat && dsFloat.button;
-    if (!b) return;
-    const txt = !dsTabIsMain ? '🧊 ⏸' : masterEnabled ? '🧊 ●' : '🧊';
-    if (b.textContent !== txt) b.textContent = txt;
-    const tip = !dsTabIsMain ? 'Cube Suite - another tab is running it' : masterEnabled ? 'Cube Suite - automation ON' : 'Cube Suite - paused (monitoring)';
-    if (b.title !== tip) b.title = tip;
-  }
-
   function refreshUI() {
-    dsUpdateDockBadge();
     if (!uiBox || !uiBox.isConnected) return;
     const fastMode = dsIsFastMode();
     const pvpState = pvpLoadFastRunState();
     const iid      = currentInstanceId;
     const saCount  = iid ? saGetParticipatedCount(iid) : 0;
 
-    uiBox.classList.remove('ds-collapsed');   // collapsing is gone: the panel is a modal now, a stored collapsed=true would show an empty body
+    uiBox.classList.toggle('ds-collapsed', collapsed);
     uiBox.querySelector('#ds-master-toggle').checked = masterEnabled;
 
-    // Dot: green = active, amber = monitoring (paused), dark = no instance
     const dot = uiBox.querySelector('#ds-dot');
     dot.classList.toggle('on',         masterEnabled && !!iid);
     dot.classList.toggle('monitoring', !masterEnabled && !!iid);
@@ -6470,7 +5022,6 @@
     uiBox.querySelectorAll('.ds-tab').forEach(btn => btn.classList.toggle('active', btn.dataset.tab === activeTab));
     uiBox.querySelectorAll('.ds-tabpanel').forEach(p => p.classList.toggle('active', p.dataset.tab === activeTab));
 
-    // PvP panel
     uiBox.querySelector('#ds-pvp-normal').style.display = fastMode ? 'none' : 'block';
     uiBox.querySelector('#ds-pvp-fast').style.display   = fastMode ? 'block' : 'none';
 
@@ -6503,15 +5054,10 @@
         ? `Fast Run${monTag} — ${role} — ✓ all targets cleared`
       : `Fast Run${monTag} — ${role} — ${parts.length ? parts.join(' · ') : 'not assigned'}`;
     }
-    // PvP cooldown/status pill — ticks live via pvpStartCountdownDisplay interval
     const pvpPillsEl = uiBox.querySelector('#ds-pvp-pills');
     if (pvpPillsEl) {
-      //const cdPill = cdStr ? `<span class="ds-pill ds-pill-cd">🔒 ${cdStr}</span>` : '';
 
       const nodePills = iid ? PVP_NODE_PRIORITY.map(nodeId => {
-        // Fast run: real server lock status takes priority (matches Normal
-        // mode's ordering) — otherwise an actually-locked node and a merely
-        // unassigned node both rendered as the same gray "locked" pill.
         if (fastMode) {
           const isLocked = pvpLockedNodesLogged.has(nodeId);
           if (isLocked) return `<span class="ds-pill ds-pill-locked">N${nodeId} · locked</span>`;
@@ -6521,7 +5067,6 @@
           if (res.cleared) return `<span class="ds-pill ds-pill-cleared">N${nodeId} · cleared</span>`;
           if (res.joined)  return `<span class="ds-pill ds-pill-joined">N${nodeId} · joined</span>`;
           if (!matchNo)     return `<span class="ds-pill ds-pill-locked">N${nodeId} · not assigned</span>`;
-          // Assigned but not yet joined — fall through to live scan data
           const stats = pvpNodeStats[nodeId];
           if (!stats)              return `<span class="ds-pill ds-pill-mon">N${nodeId} · waiting</span>`;
           if (stats.allCleared)    return `<span class="ds-pill ds-pill-cleared">N${nodeId} · cleared</span>`;
@@ -6534,7 +5079,6 @@
           if (stats.hasOpen)       return `<span class="ds-pill ds-pill-avail">N${nodeId} · available</span>`;
           return `<span class="ds-pill ds-pill-mon">N${nodeId} · waiting</span>`;
         }
-        // Normal mode: live node stats
         const isLocked = pvpLockedNodesLogged.has(nodeId);
         if (isLocked) return `<span class="ds-pill ds-pill-locked">N${nodeId} · locked</span>`;
         const stats = pvpNodeStats[nodeId];
@@ -6578,7 +5122,6 @@
       }
     }
 
-    //schedule
     const saSchedNukeEl = uiBox.querySelector('#ds-sa-sched-nuke');
     if (saSchedNukeEl) saSchedNukeEl.checked = saScheduledNukeEnabled;
 
@@ -6588,7 +5131,6 @@
     uiBox.querySelector('#ds-leader-toggle').checked = pvpState.isLeader;
     uiBox.querySelector('#ds-tyrant-toggle').checked = pvpTyrantEnabled;
 
-    // SA panel — mode-aware description
     const saStatusEl = uiBox.querySelector('#ds-status-sa');
     const saMode = fastMode ? 'Fast Run (nuke)' : 'Ordinary (retreat)';
     saStatusEl.textContent = iid
@@ -6597,7 +5139,6 @@
     : `${saMode}${monTag} — ${saCount} fight(s) participated this instance`
     : `${saMode} — no active instance`;
 
-    // SA node status pills — locked / monitoring / available + per-node fight count
     const saPillsEl = uiBox.querySelector('#ds-sa-pills');
     if (saPillsEl) {
       if (iid) {
@@ -6617,9 +5158,6 @@
           if (stats.scanning)
             return `<span class="ds-pill ds-pill-mon">N${nodeId} · scanning…</span>`;
           if (stats.allCleared) {
-            // Check this BEFORE activeFightNo/hasAvailable — the server sometimes keeps
-            // reporting a stale non-zero activeMatchNo for a fight that's already cleared,
-            // which would otherwise mask a genuinely-cleared node forever (until reload).
             const countTag = stats.total > 0 ? ` · ${fought}/${stats.total} done` : '';
             return `<span class="ds-pill ds-pill-cleared">N${nodeId}${countTag}</span>`;
           }
@@ -6629,9 +5167,6 @@
           }
           if (stats.hasAvailable)
             return `<span class="ds-pill ds-pill-avail">N${nodeId} · available</span>`;
-          // Not all cleared, nothing currently available — we've done our share or fights
-          // haven't gone live yet. Show count without a total so nobody infers open slots
-          // by subtraction (e.g. "2 done" not "2/4 done").
           if (stats.justFought) {
             if (stats.total > 0 && fought >= stats.total)
               return `<span class="ds-pill ds-pill-cleared">N${nodeId} · all done</span>`;
@@ -6748,10 +5283,6 @@
     : `<div class="ds-log-empty">No activity yet.</div>`;
     if (logStickToBottom) el.scrollTop = el.scrollHeight;
   }
-
-  // ═══════════════════════════════════════════════════════════════════════════
-  // INIT
-  // ════════════════════════════════════════════════════════════════════════ ═══
 
   function init() {
     pvpSyncSourceParamsFromLocation();
