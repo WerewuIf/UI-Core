@@ -1,5 +1,5 @@
 /* =============================================================================
- * Cube Suite  (Core addon, version 3.2.2)  -  port of the Tampermonkey script "Cube Suite" 2.7.8
+ * Cube Suite  (Core addon, version 3.2.3)  -  port of the Tampermonkey script "Cube Suite" 2.7.8
  *
  * Runs inside Core (addons/core.js): `Core` is in scope, so this file is NOT a userscript.
  * List it in addons.json (see the entry in the notes) or add its raw URL in the Addons panel.
@@ -4164,10 +4164,9 @@
       ...SA_SCHEDULE.map((item, idx) => {
         const key = `${item.nodeId}:h${item.hour}:m${item.minute ?? 0}`;
         const rowPos = idx + 1;
-        const modeTag = item.mode === 'ordinary' ? ' · Hit' : ' · Nuke';
         const label = item.nodeId === 11
-        ? `Node 11 · Final${modeTag}`
-        : `Node ${item.nodeId} · Match ${item.nodeId === 5 ? idx + 1 : idx - 3}${modeTag}`;
+        ? `Node 11 · Final`   // FIX: no " · Nuke" / " · Hit" suffix
+        : `Node ${item.nodeId} · Match ${item.nodeId === 5 ? idx + 1 : idx - 3}`;
 
         const isDone = st.handledKeys.has(key);
         const isNext = !isDone && !st.tomorrow && rowPos === Math.ceil(st.progress);
