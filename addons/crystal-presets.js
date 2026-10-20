@@ -1472,23 +1472,30 @@
     onHide() { if (pcpHome && pcpPanel) pcpHome.appendChild(pcpPanel); },
   });
 
-  // Public API for other addons (the Automator switches crystals per boss). Read it with Core.get('crystal-presets').
-  //   list()                 -> [{ id, name }]
-  //   apply(id, { silent })  -> Promise<{ ok, message }>   re-equips the crystals; silent skips the confirm() dialog
+  // ---- Public API for other addons ---------------------------------------------------------------------------------------
+  // Offered through Core capabilities (see guides/CAPABILITIES.md). The SAME contract for every preset addon (gear, crystal, pet):
+  //   Core.call('preset.crystal.list')                          -> [{ id, name }]   (cheap and synchronous: Core.cap('preset.crystal.list')())
+  //   Core.call('preset.crystal.apply', id, { silent, target }) -> Promise<{ ok, message }>   re-equips the crystals; never asks for confirmation
+  //   apply never throws: a problem comes back as { ok: false, message }.
+  // The older way keeps working: Core.get('crystal-presets').list() / .apply(id, opts) is the same object.
+  const crystalApi = {
+    list: () => loadPresets().map((p) => ({ id: p.id, name: p.name })),
+    async apply(id, o) {
+      const p = loadPresets().find((x) => String(x.id) === String(id));
+      if (!p) return { ok: false, message: 'preset not found' };
+      lastSay = null;
+      try { await restorePreset(p, Object.assign({}, o, { silent: true })); }
+      catch (e) { return { ok: false, message: 'failed: ' + ((e && e.message) || e) }; }
+      const s = lastSay;
+      return s ? { ok: s.ok !== false, message: s.msg } : { ok: false, message: 'no result' };
+    },
+  };
   Core.module({
     id: 'crystal-presets', name: 'Crystal Presets',
-    init() {
-      return {
-        list: () => loadPresets().map((p) => ({ id: p.id, name: p.name })),
-        async apply(id, o) {
-          const p = loadPresets().find((x) => String(x.id) === String(id));
-          if (!p) return { ok: false, message: 'preset not found' };
-          lastSay = null;
-          await restorePreset(p, Object.assign({ silent: true }, o));
-          const s = lastSay;
-          return s ? { ok: s.ok !== false, message: s.msg } : { ok: false, message: 'no result' };
-        },
-      };
+    provides: {
+      'preset.crystal.list':  { fn: crystalApi.list,  doc: 'saved crystal presets', returns: '[{ id, name }]' },
+      'preset.crystal.apply': { fn: crystalApi.apply, doc: 'equip a crystal preset (no confirm dialog)', args: '(id)', returns: 'Promise<{ ok, message }>' },
     },
+    init() { return crystalApi; },
   });
 })();
