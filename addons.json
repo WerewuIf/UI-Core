@@ -5,8 +5,8 @@
     { "id": "pet-presets",        "name": "Pet Presets",     "version": "2.9.1",  "url": "addons/pet-presets.js",      "button": true },
     { "id": "account-switcher",  "name": "Account Switcher","version": "1.2.0",  "url": "addons/account-switcher.js", "button": true },
     { "id": "stat-autobuilder",  "name": "Stat Auto-Builder","version": "18.9.5", "url": "addons/stat-autobuilder.js", "button": true },
-    { "id": "ui-cleanup",         "name": "UI Cleanup",      "version": "2.4.2",  "url": "addons/ui-cleanup.js",       "button": false },
-    { "id": "battle-restructure", "name": "Battle Page",     "version": "15.19",  "url": "addons/battle.js",           "button": false,
+    { "id": "ui-cleanup",         "name": "UI Cleanup",      "version": "2.5.0",  "url": "addons/ui-cleanup.js",       "button": false },
+    { "id": "battle-restructure", "name": "Battle Page",     "version": "15.20",  "url": "addons/battle.js",           "button": false,
       "match": "^/battle\\.php", "early": true },
     { "id": "cube-suite",         "name": "Cube Suite",      "version": "3.4.0",  "url": "addons/cube-suite.js",       "button": false,
       "match": "^/guild_dungeon_cube\\.php\\?.*instance_id=" }
