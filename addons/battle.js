@@ -3,6 +3,9 @@
  * Runs early (document-start) — addons.json sets "early": true. The only page it reads about you is /stats.php (via the Core.net cache).
  */
 
+//               v15.20: (1) THE DEAD-MONSTER XP DRAWER REMEMBERS OPEN / CLOSED (localStorage 'bpLootXpOpen'). It used to snap shut on every click
+//                 elsewhere and on every page load; now it stays however you left it. (2) ATTACK BUTTONS READ "Power Slash (10)" INSTEAD OF
+//                 "Power Slash (10 STAMINA)": you know it's stamina. Only the text node is edited, so the game's click handlers are untouched.
 //               v15.18: THE ELEMENT TOOLTIP SAYS WHICH ELEMENT IS BEST AGAIN (v15.14 only suggested alternatives when you were at a disadvantage).
 //                 New line: "Best of yours: FIRE (in use) ✓", or "Better: NATURE +12 (now +5), but it must pass FIRE 25%; you have 15%" (the game
 //                 only uses your highest-rate element), plus "Counters x2: FROST 0% · THUNDER 0%" when you don't already counter the monster.
@@ -2928,6 +2931,14 @@
     return m ? parseInt(m[1], 10) : null;
   }
 
+  const LOOT_XP_OPEN_KEY = 'bpLootXpOpen';
+  function loadLootXpOpen() {
+    try { return localStorage.getItem(LOOT_XP_OPEN_KEY) === '1'; } catch (_) { return false; }
+  }
+  function saveLootXpOpen(open) {
+    try { localStorage.setItem(LOOT_XP_OPEN_KEY, open ? '1' : '0'); } catch (_) {}
+  }
+
   function ensureLootXpDrawer() {
     const lootBtn = document.getElementById('loot-button');
     const panel = lootBtn && lootBtn.closest('.bm-slain-actions');
@@ -2981,18 +2992,17 @@
         ? '<span class="bm-loot-xp-caret">&#9662;</span>'  // ▾ open -> click to drop back down
       : '<span class="bm-loot-xp-caret">&#9652;</span>'; // ▴ closed -> click to slide up
     }
-    setXpTriggerOpen(false);
+    // v15.20: start from the remembered state, and only the trigger changes it
+    // (the old click-outside-to-close handler is gone: it made "remember" moot).
+    setXpTriggerOpen(loadLootXpOpen());
 
     trigger.addEventListener('click', (e) => {
       e.preventDefault();
       e.stopPropagation();
-      setXpTriggerOpen(!wrap.classList.contains('bm-loot-xp-open'));
+      const next = !wrap.classList.contains('bm-loot-xp-open');
+      setXpTriggerOpen(next);
+      saveLootXpOpen(next);
     });
-
-    document.addEventListener('click', (e) => {
-      if (wrap.contains(e.target)) return;
-      setXpTriggerOpen(false);
-    }, true);
 
     return { wrap, panel, lootBtn, text };
   }
@@ -4284,6 +4294,27 @@
   // asSendSlashOnce) since it no longer runs applyAttackSuccess itself.
   // =====================================================================
 
+  // v15.20: "Power Slash (10 STAMINA)" -> "Power Slash (10)". Edits text nodes only,
+  // so the game's own button elements and handlers are untouched, and a node is only
+  // rewritten when it still matches, so the MutationObserver can't loop on it.
+  const STAMINA_LABEL_RE = /\(\s*([\d.,]+\s*[KkMm]?)\s*(?:stamina|stam)\.?\s*\)/i;
+  const STAMINA_BARE_RE = /^\s*([\d.,]+\s*[KkMm]?)\s*stamina\.?\s*$/i;
+  function shortenAttackLabels() {
+    document.querySelectorAll('button.attack-btn, .skill-slot .skill-cost, .battle-actions-buttons button').forEach(el => {
+      const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+      let n;
+      while ((n = walker.nextNode())) {
+        const t = n.nodeValue;
+        if (STAMINA_LABEL_RE.test(t)) {
+          n.nodeValue = t.replace(STAMINA_LABEL_RE, (_, x) => '(' + x.replace(/\s+/g, '') + ')');
+        } else if (n.parentNode !== el && STAMINA_BARE_RE.test(t)) {
+          // label split into its own child, e.g. <span>10 STAMINA</span> -> "(10)"
+          n.nodeValue = t.replace(STAMINA_BARE_RE, (_, x) => '(' + x.replace(/\s+/g, '') + ')');
+        }
+      }
+    });
+  }
+
   function run() {
     injectStyles();
     pinTopStatBar();
@@ -4316,6 +4347,7 @@
     wrapPageColumn();
     integrateAutoSlash();
     injectWorldBreakerButton();
+    shortenAttackLabels();
     syncAttackButtonSizing();
     pinAttackBar();
     alignBottomBarToMonster();
