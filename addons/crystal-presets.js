@@ -139,7 +139,8 @@
     el.onclick = hideRunToast;
     if (holdMs) runToastTimer = setTimeout(hideRunToast, holdMs);
   }
-  const say = (msg, ok = true) => showRunToast(msg, ok, ok ? 10000 : 20000);
+  let lastSay = null;   // last message shown, so apply() below can report ok / failed to other addons
+  const say = (msg, ok = true) => { lastSay = { msg, ok }; showRunToast(msg, ok, ok ? 10000 : 20000); };
 
   function escapeHtmlLocal(str) {
     return String(str ?? '')
@@ -401,9 +402,9 @@
     notify('Saved preset "' + preset.name + '".', true);
   }
 
-  async function restorePreset(preset) {
+  async function restorePreset(preset, opts) {
     if (presetOpBusy) { if (runPresetId === preset.id) requestCancel(); else say('Please wait for the current action to finish.', false); return; }
-    if (!confirm('Restore preset "' + preset.name + '"? This re-equips crystals to match the saved layout.')) return;
+    if (!(opts && opts.silent) && !confirm('Restore preset "' + preset.name + '"? This re-equips crystals to match the saved layout.')) return;
 
     presetOpBusy = true; cancelRun = false; runPresetId = preset.id; syncRunButtons();
 
@@ -1469,5 +1470,25 @@
     render(el) { el.replaceChildren(pcpPanel); },
     onShow() { renderPresetList(); },
     onHide() { if (pcpHome && pcpPanel) pcpHome.appendChild(pcpPanel); },
+  });
+
+  // Public API for other addons (the Automator switches crystals per boss). Read it with Core.get('crystal-presets').
+  //   list()                 -> [{ id, name }]
+  //   apply(id, { silent })  -> Promise<{ ok, message }>   re-equips the crystals; silent skips the confirm() dialog
+  Core.module({
+    id: 'crystal-presets', name: 'Crystal Presets',
+    init() {
+      return {
+        list: () => loadPresets().map((p) => ({ id: p.id, name: p.name })),
+        async apply(id, o) {
+          const p = loadPresets().find((x) => String(x.id) === String(id));
+          if (!p) return { ok: false, message: 'preset not found' };
+          lastSay = null;
+          await restorePreset(p, Object.assign({ silent: true }, o));
+          const s = lastSay;
+          return s ? { ok: s.ok !== false, message: s.msg } : { ok: false, message: 'no result' };
+        },
+      };
+    },
   });
 })();
