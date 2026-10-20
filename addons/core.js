@@ -31,7 +31,7 @@
   // >>> Raw URL of addons.json
   const CONFIG = { manifest: 'https://raw.githubusercontent.com/WerewuIf/UI-Core/main/addons.json' };
 
-  const API = 4;   // 4: Core.auth.  3: Core.potions, Core.me.apply / addExp / fromAttack / ingest / sync
+  const API = 5;   // 5: capabilities (Core.call / cap / caps / has / when, `provides`).  4: Core.auth.  3: Core.potions, Core.me.apply / addExp / fromAttack / ingest / sync
   if (root.Core && root.Core.__isCore) {
     if (root.Core.apiLevel < API) console.warn('[Core] an older core (api ' + root.Core.apiLevel + ') is already loaded; this script wants ' + API + '.');
     return;
@@ -701,7 +701,9 @@
   })();
 
   /* ----------------------------------------------------------- modules --- */
-  // Core.module({ id, match, deps, early, float, init(Core) })   (optional: plain-script addons don't need it)
+  // Core.module({ id, match, deps, early, float, provides, init(Core, ctx) })   (optional: plain-script addons don't need it)
+  //   provides  named functions other addons can call WITHOUT knowing who offers them (see the capabilities block below):
+  //             { 'preset.gear.list': fn, 'preset.gear.apply': { fn, doc, args, returns } }   or   (api, ctx) => ({ ... })
   //   match  RegExp (tested on path+query) | string | string[] | fn(location); default: everywhere
   //   deps   module ids that must be READY before init (hard dependency)
   //   early  run at load time instead of waiting for DOMContentLoaded
@@ -751,6 +753,7 @@
         Promise.resolve().then(() => d.init(Core, ctxFor(d))).then(
           (api) => {
             m.api = api || {}; m.state = 'ready'; dlog('ready', d.id);
+            try { flushCaps(d, m); } catch (e) { warn('module "' + d.id + '" could not register its capabilities', e); }
             if (d.float) float.add(Object.assign({ id: d.id, title: d.name || d.id, icon: d.icon, api: m.api }, typeof d.float === 'function' ? { render: d.float } : d.float));
           },
           (err) => { m.state = 'failed'; warn('module "' + d.id + '" failed in init', err); }
@@ -783,11 +786,66 @@
       store: (ns, o) => store(d.id + ':' + ns, o),
       float: (def) => float.add(Object.assign({ id: d.id, title: d.name || d.id, icon: d.icon }, def)),
       log: (...a) => console.log('[' + d.id + ']', ...a),
+      provide: (name, fn, meta) => provideCap(d.id, name, fn, meta),
     };
   }
   function status() {
     const rows = [...mods.entries()].map(([id, m]) => ({ id, state: m.state, deps: ((m.def && m.def.deps) || []).join(', ') }));
     console.table(rows); return rows;
+  }
+
+  /* ------------------------------------------------------ capabilities --- */
+  // Addons publish NAMED FUNCTIONS; any other addon calls them by name and never needs to know who offers them.
+  // Core only keeps the table: it never interprets a name, so it knows nothing about gear, crystals or pets.
+  //   offer   Core.module({ id, provides: { 'preset.crystal.list': fn, 'preset.crystal.apply': { fn, doc, args, returns } }, init })
+  //           (or provides: (api, ctx) => ({ ... }) to reuse the module's own api, or ctx.provide(name, fn, meta) inside init)
+  //   use     Core.call('preset.crystal.apply', id, opts)  -> Promise (rejects with err.code === 'NO_CAP' if nobody offers it)
+  //           Core.cap(name) -> the function itself or null (for cheap, synchronous reads)       Core.has(name) -> boolean
+  //           Core.caps(prefix?) -> [{ cap, by, doc, args, returns }] sorted by name              Core.when(name, { timeout }) -> Promise<boolean>
+  //           Core.on('caps:changed', ({ by, added }) => ...)   an addon loaded late: refresh your lists
+  // Names: lowercase dotted, at least two parts, e.g. 'preset.gear.apply'.  First provider of a name wins; a duplicate is ignored with a warning.
+  // A module offers its capabilities only once its init succeeded, so a skipped, disabled or failed addon offers nothing.
+  const capReg = new Map();   // name -> { fn, by, doc, args, returns }
+  const CAP_NAME = /^[a-z][a-z0-9-]*(\.[a-z0-9-]+)+$/;
+  function addCap(by, name, spec) {
+    if (typeof name !== 'string' || !CAP_NAME.test(name)) { warn('"' + by + '" offers a capability with an invalid name "' + name + '" (use lowercase dotted, e.g. preset.gear.apply)'); return null; }
+    const o = typeof spec === 'function' ? { fn: spec } : spec;
+    if (!o || typeof o.fn !== 'function') { warn('"' + by + '" capability "' + name + '" is not a function'); return null; }
+    const have = capReg.get(name);
+    if (have) { warn('capability "' + name + '" is already provided by "' + have.by + '"; ignoring the one from "' + by + '"'); return null; }
+    capReg.set(name, { fn: o.fn, by, doc: o.doc || '', args: o.args || '', returns: o.returns || '' });
+    return name;
+  }
+  function announceCaps(by, added) { if (added.length) dispatch('caps:changed', { by, added }); }
+  function flushCaps(d, m) {
+    let t = d.provides;
+    if (typeof t === 'function') t = t(m.api, ctxFor(d));
+    const added = [];
+    if (t && typeof t === 'object') for (const [name, spec] of Object.entries(t)) { const n = addCap(d.id, name, spec); if (n) added.push(n); }
+    for (const q of (m.queue || []).splice(0)) { const n = addCap(d.id, q.name, q.spec); if (n) added.push(n); }
+    announceCaps(d.id, added);
+  }
+  function provideCap(id, name, fn, meta) {
+    const m = slot(id), spec = Object.assign({}, meta, { fn });
+    if (m.state === 'ready') { announceCaps(id, [addCap(id, name, spec)].filter(Boolean)); return; }   // offered after init: register now
+    (m.queue || (m.queue = [])).push({ name, spec });                                                  // offered during init: kept until init succeeds
+  }
+  const caps = (prefix) => [...capReg.entries()].filter(([n]) => !prefix || n.startsWith(prefix)).sort((a, b) => (a[0] < b[0] ? -1 : 1)).map(([n, c]) => ({ cap: n, by: c.by, doc: c.doc, args: c.args, returns: c.returns }));
+  const has = (name) => capReg.has(name);
+  const cap = (name) => { const c = capReg.get(name); return c ? c.fn : null; };
+  async function call(name, ...args) {
+    const c = capReg.get(name);
+    if (!c) { const e = new Error('no addon offers "' + name + '"'); e.code = 'NO_CAP'; e.cap = name; throw e; }
+    try { return await c.fn(...args); }
+    catch (e) { warn('capability "' + name + '" (' + c.by + ') threw', e); throw e; }
+  }
+  function when(name, o) {
+    if (capReg.has(name)) return Promise.resolve(true);
+    const ms = o && typeof o.timeout === 'number' ? o.timeout : 10000;
+    return new Promise((res) => {
+      let un = null; const t = setTimeout(() => { if (un) un(); res(false); }, ms);
+      un = on('caps:changed', () => { if (capReg.has(name)) { clearTimeout(t); un(); res(true); } });
+    });
   }
 
   ready.then(() => { domReady = true; pump(); });
@@ -2432,12 +2490,13 @@
 
   /* ------------------------------------------------------------ export --- */
   const Core = {
-    __isCore: true, apiLevel: API, version: '3.15.0', debug: false, tabId: TAB,
+    __isCore: true, apiLevel: API, version: '3.16.0', debug: false, tabId: TAB,
     esc, sleep, debounce, fmt, int, compact, parseNum, parseJson,
     on, off, once, emit,
     state, store, player,
     net, pages, dom, cookies, ui, me, clock, csrf, lock, keepAlive, tab, potions, auth,
     module: module_, use, get, status,
+    caps, has, cap, call, when,
     float, addons: { list: entries, add: addCustom, remove: removeCustom, enable: setEnabled, status: rt, reload: startOne },
   };
   root.Core = Core;
