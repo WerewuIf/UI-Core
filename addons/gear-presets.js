@@ -362,7 +362,8 @@
     el.onclick = hideRunToast;
     if (holdMs) runToastTimer = setTimeout(hideRunToast, holdMs);
   }
-  const say = (msg, ok = true) => showRunToast(msg, ok, ok ? 10000 : 20000);
+  let lastSay = null;   // last message shown, so apply() below can report ok / failed to other addons
+  const say = (msg, ok = true) => { lastSay = { msg, ok }; showRunToast(msg, ok, ok ? 10000 : 20000); };
 
   function escapeHtml(str) {
     return String(str ?? '')
@@ -1155,6 +1156,26 @@
     render(el) { el.replaceChildren(gpPanel); },
     onShow() { renderPresetList(); },
     onHide() { if (gpHome && gpPanel) gpHome.appendChild(gpPanel); },
+  });
+
+  // Public API for other addons (the Automator switches gear per boss). Read it with Core.get('gear-presets').
+  //   list()                      -> [{ id, name }]
+  //   apply(id, { set?: 'attack' }) -> Promise<{ ok, message }>   equips the preset on that set; never asks for confirmation
+  Core.module({
+    id: 'gear-presets', name: 'Gear Presets',
+    init() {
+      return {
+        list: () => loadPresets().map((p) => ({ id: p.id, name: p.name })),
+        async apply(id, o) {
+          const p = loadPresets().find((x) => String(x.id) === String(id));
+          if (!p) return { ok: false, message: 'preset not found' };
+          lastSay = null;
+          await restorePresetToSet(p, (o && o.set) || 'attack');
+          const s = lastSay;
+          return s ? { ok: s.ok !== false, message: s.msg } : { ok: false, message: 'no result' };
+        },
+      };
+    },
   });
 
 })();
