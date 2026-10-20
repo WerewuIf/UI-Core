@@ -3,6 +3,11 @@
  * Cookie helper + 3 toast copies removed (Core.cookies / Core.ui.toast); quest/battle-pass/PvP polls share Core.net cache.
  * Page scoping: v2.3 loads this addon on EVERY page (addons.json has no "match" for it any more) so MODULE 0 / 0b can put the Home
  * button and the keep-alive pin in the top bar everywhere. Modules 1-5 each check their own page and return at once on any other.
+ * v2.5.0: (1) Guild dungeon location: each monster's Fight button sits on the ATK / DEF / EXP row, right-aligned (Module 2).
+ *         (2) Main page tracker: polls every domain wave (gate 5, waves 9-17) instead of four; settings modal restyled (switches, two-column
+ *             grid, sticky header/footer); per-boss thresholds grouped by wave in a fixed-height scrolling box; the Gates dropdown is capped
+ *             at 380px and scrolls (Module 4). Boss names come from the wave pages, none are hardcoded for the new waves.
+ *         (3) Wave pages: Options > Compact Cards = small cards, HP as 422M / 500M, ATK / DEF / players as chips (Module 5).
  */
 
 /* =====================================================================
@@ -966,6 +971,12 @@
       .mon .statrow { gap: 4px !important; margin-top: 6px !important; }
       .mon .statpill { padding: 2px 5px !important; font-size: 10px !important; }
       .mon .muted[style*="margin-top:20px"] { margin-top: 8px !important; margin-bottom: 0 !important; }
+      /* v2.5: the Fight button rides on the ATK / DEF / EXP row, pushed to the right edge */
+      .mon .statrow[data-fight-moved="1"] { display: flex !important; flex-wrap: wrap; align-items: center; }
+      .mon .statrow[data-fight-moved="1"] > a.btn {
+        margin-left: auto !important; padding: 3px 10px !important; font-size: 11px !important;
+        line-height: 1.4; white-space: nowrap; flex: 0 0 auto;
+      }
 
       /* --- dungeon list page: merged title/tags/back bar --- */
       #dungeon-list-header-bar {
@@ -1152,6 +1163,24 @@
   }
 
   // ---------- location-page-only helpers ----------
+
+  // v2.5: moves each monster card's "⚔️ Fight" button up onto the same row as its
+  // ATK / DEF / EXP-per-damage pills (right-aligned) and drops the now-empty wrapper
+  // row under it, so the card is one row shorter. Idempotent per card.
+  function moveFightButtonsIntoStatRow() {
+    document.querySelectorAll('.mon').forEach(card => {
+      const row = card.querySelector('.statrow');
+      if (!row || row.dataset.fightMoved === '1') return;
+      const btn = card.querySelector('a.btn[href*="battle.php"]');
+      if (!btn || row.contains(btn)) return;
+      const oldWrap = btn.parentElement;
+      row.appendChild(btn);
+      row.dataset.fightMoved = '1';
+      if (oldWrap && oldWrap !== row && !oldWrap.querySelector('a, button, input') && !oldWrap.textContent.trim()) {
+        oldWrap.style.display = 'none';
+      }
+    });
+  }
 
   // Removes the banner panel, but relocates the Total/Left pills + Loot All
   // button into a slim toolbar right under the monster-list panel heading
@@ -1646,6 +1675,7 @@
       cleanupLocationLootPanel();
       compactPartyIntoLeaderboard();
       styleLeaderboardPanelCompact();
+      moveFightButtonsIntoStatRow();
     }
 
     compactEverything(onInstance);
@@ -1864,18 +1894,39 @@
      LIVE DATA — merged from the old Reminders Tracker
      ===================================================================== */
 
-  const SOURCE_WAVES = [
-    { label: 'G1W3', url: 'https://demonicscans.org/active_wave.php?gate=3&wave=8', settingKey: 'waveGate3W8' },
-    { label: 'G2W1', url: 'https://demonicscans.org/active_wave.php?gate=5&wave=9', settingKey: 'waveGate5W9' },
-    { label: 'G2W2-1', url: 'https://demonicscans.org/active_wave.php?gate=5&wave=10', settingKey: 'waveGate5W10' },
-    { label: 'G2W2-2', url: 'https://demonicscans.org/active_wave.php?gate=5&wave=11', settingKey: 'waveGate5W11' }
+  // v2.5: one entry per wave page the tracker polls. Each wave page lists every boss on it
+  // (heralds, sovereigns and their later phases), so a new wave only needs its gate + wave
+  // number here: boss names are read live from the page, nothing is hardcoded per boss.
+  // `label` and `settingKey` of the first four are kept as they were so saved settings still match.
+  // Waves 5/12 - 5/17 are the extra domain waves.
+  const WAVE_SOURCE_DEFS = [
+    { label: 'G1W3',   gate: 3, wave: 8,  name: 'Generals' },
+    { label: 'G2W1',   gate: 5, wave: 9,  name: 'Poseidon' },
+    { label: 'G2W2-1', gate: 5, wave: 10, name: 'Hermes' },
+    { label: 'G2W2-2', gate: 5, wave: 11, name: 'Artemis' },
+    { label: 'G5W12',  gate: 5, wave: 12 },
+    { label: 'G5W13',  gate: 5, wave: 13 },
+    { label: 'G5W14',  gate: 5, wave: 14 },
+    { label: 'G5W15',  gate: 5, wave: 15 },
+    { label: 'G5W16',  gate: 5, wave: 16 },
+    { label: 'G5W17',  gate: 5, wave: 17 }
   ];
-  const WAVE_GROUP_LABELS = {
-    'G1W3': 'Generals',
-    'G2W1': 'Poseidon',
-    'G2W2-1': 'Hermes',
-    'G2W2-2': 'Artemis'
-  };
+  const SOURCE_WAVES = WAVE_SOURCE_DEFS.map((d) => ({
+    label: d.label,
+    gate: d.gate,
+    wave: d.wave,
+    url: `https://demonicscans.org/active_wave.php?gate=${d.gate}&wave=${d.wave}`,
+    settingKey: `waveGate${d.gate}W${d.wave}`
+  }));
+  const WAVE_GROUP_LABELS = {};
+  WAVE_SOURCE_DEFS.forEach((d) => { if (d.name) WAVE_GROUP_LABELS[d.label] = d.name; });
+
+  // Heading for a wave group: the fixed name when there is one, else "Gate 5 · Wave 12".
+  function waveGroupHeading(label) {
+    if (WAVE_GROUP_LABELS[label]) return WAVE_GROUP_LABELS[label];
+    const src = SOURCE_WAVES.find((x) => x.label === label);
+    return src ? `Gate ${src.gate} \u00B7 Wave ${src.wave}` : label;
+  }
 
   // Groups by source label, preserving SOURCE_WAVES order so sections
   // always appear in gate/wave progression regardless of fetch order.
@@ -1938,10 +1989,7 @@
   const DEFAULT_DAMAGE_THRESHOLDS = {
     swarm: SWARM_HIT_THRESHOLD,        // gribs (Shadowbridge swarm)
     // wave bosses — each group configurable individually
-    waveGate3W8: 3000000000,           // Generals
-    waveGate5W9: 3000000000,           // Poseidon
-    waveGate5W10: 3000000000,          // Hermes
-    waveGate5W11: 3000000000,          // Artemis
+    ...Object.fromEntries(SOURCE_WAVES.map((x) => [x.settingKey, 3000000000])), // every wave group starts at 3B
     // dungeon bosses — each configurable individually
     dungeonBossEasy: 3000000000,       // Grixkar
     dungeonBossHard: 3000000000,       // khaal
@@ -1972,7 +2020,7 @@
 
   const STORAGE_KEY = 'verya_reminders'; // kept from the old Reminders Tracker for backward-compat
   const DEFAULT_TRACK_SETTINGS = {
-    waveGate3W8: true, waveGate5W9: true, waveGate5W10: true, waveGate5W11: true,
+    ...Object.fromEntries(SOURCE_WAVES.map((x) => [x.settingKey, true])),
     quests: true, battlePassQuests: true, pvp: true,
     dungeonEasyBoss: true, dungeonHardBoss: true, dungeonCrucibleBoss: true, dungeonEasySwarm: true
   };
@@ -1993,10 +2041,7 @@
   function normalizeTrackSettings(raw) {
     const s = raw && typeof raw === 'object' ? raw : {};
     return {
-      waveGate3W8: s.waveGate3W8 !== false,
-      waveGate5W9: s.waveGate5W9 !== false,
-      waveGate5W10: s.waveGate5W10 !== false,
-      waveGate5W11: s.waveGate5W11 !== false,
+      ...Object.fromEntries(SOURCE_WAVES.map((x) => [x.settingKey, s[x.settingKey] !== false])),
       quests: s.quests !== false,
       battlePassQuests: s.battlePassQuests !== false,
       pvp: s.pvp !== false,
@@ -2788,6 +2833,7 @@
     return panel;
   }
 
+  const LIVE_PANEL_MAX_PX = 380; // keep in step with .dc-live-panel max-height in the CSS
   function openPanel(tile) {
     const panel = tile.querySelector(':scope > .dc-live-panel');
     if (!panel) return;
@@ -2826,14 +2872,14 @@
       // Genuinely near the bottom of the page (not just a short viewport)
       // with more usable room above than below.
       panel.classList.add('dc-panel-up');
-      panel.style.maxHeight = Math.max(120, spaceAboveViewport) + 'px';
+      panel.style.maxHeight = `min(${Math.max(120, spaceAboveViewport)}px, ${LIVE_PANEL_MAX_PX}px)`;
     } else {
       // Opening down. If the panel is simply taller than the viewport
       // itself, cap it to one viewport's worth and let it scroll
       // internally instead of growing indefinitely.
       const viewportCap = window.innerHeight - EDGE_SAFETY_PX * 2;
       if (panelRect.height > viewportCap) {
-        panel.style.maxHeight = Math.max(120, viewportCap) + 'px';
+        panel.style.maxHeight = `min(${Math.max(120, viewportCap)}px, ${LIVE_PANEL_MAX_PX}px)`;
       }
     }
   }
@@ -2920,7 +2966,7 @@
     .filter(([, list]) => list.length)
     .map(([label, list]) => {
       const rows = sortWaveRows(list);
-      const heading = WAVE_GROUP_LABELS[label] || label;
+      const heading = waveGroupHeading(label);
       return `
           <div class="dc-live-subtitle">${escapeHtml(heading)}</div>
           ${rows.map((b) => {
@@ -2940,12 +2986,34 @@
     `;
   }
 
+  // Detected boss base names for one wave group, e.g. "Triton, Poseidon" (for labels only).
+  function detectedWaveNames(label) {
+    const names = [];
+    live.waves.forEach((b) => {
+      if (b.sourceLabel !== label) return;
+      const n = bossBaseName(b.name);
+      if (n && !names.includes(n)) names.push(n);
+    });
+    return names;
+  }
+
+  // One toggle per tracked wave, built from SOURCE_WAVES so a new wave needs no markup change.
+  function renderWaveToggles(modal) {
+    const box = modal.querySelector('.dc-live-wave-toggles');
+    if (!box) return;
+    box.innerHTML = SOURCE_WAVES.map((src) => {
+      const names = detectedWaveNames(src.label);
+      const hint = names.length ? `<span class="dc-live-check-hint">${escapeHtml(names.join(', '))}</span>` : '';
+      return `<label class="dc-live-check dc-live-check-wave"><input type="checkbox" data-k="${escapeAttr(src.settingKey)}"><span class="dc-live-check-text"><span>${escapeHtml(waveGroupHeading(src.label))}</span>${hint}</span></label>`;
+    }).join('');
+  }
+
   function renderWaveThresholdRows(modal) {
     const container = modal.querySelector('.dc-live-wave-thresholds');
     if (!container) return;
 
-    // Dedupe by normalized name — one editable row per actual monster,
-    // not one per sighting/source.
+    // Dedupe by normalized name: one editable row per actual monster,
+    // not one per sighting/source. Rows are grouped under their wave.
     const seen = new Map();
     live.waves.forEach((b) => {
       const key = normalizeWaveBossKey(b.name);
@@ -2958,17 +3026,27 @@
       return;
     }
 
-    container.innerHTML = Array.from(seen.entries()).map(([key, b]) => {
-      const source = SOURCE_WAVES.find((s) => s.label === b.sourceLabel);
+    const rowHtml = ([key, b]) => {
+      const source = SOURCE_WAVES.find((x) => x.label === b.sourceLabel);
       const fallback = source ? (live.damageThresholds[source.settingKey] ?? DEFAULT_DAMAGE_THRESHOLDS[source.settingKey]) : 0;
       return `<label class="dc-live-threshold">
-        <span>${escapeHtml(b.name)}</span>
+        <span title="${escapeAttr(b.name)}">${escapeHtml(b.name)}</span>
         <span class="dc-live-threshold-input-wrap">
           <input type="text" inputmode="numeric" data-t-name="${escapeAttr(key)}" data-t-fallback="${fallback}" placeholder="${fallback}">
           <span class="dc-live-threshold-preview"></span>
         </span>
       </label>`;
+    };
+
+    const entries = Array.from(seen.entries());
+    const html = SOURCE_WAVES.map((src) => {
+      const mine = entries.filter(([, b]) => b.sourceLabel === src.label);
+      if (!mine.length) return '';
+      return `<div class="dc-live-wave-group-label">${escapeHtml(waveGroupHeading(src.label))}</div>${mine.map(rowHtml).join('')}`;
     }).join('');
+    // anything from a source no longer in SOURCE_WAVES still gets a row
+    const orphan = entries.filter(([, b]) => !SOURCE_WAVES.some((x) => x.label === b.sourceLabel));
+    container.innerHTML = html + orphan.map(rowHtml).join('');
   }
 
 
@@ -3229,21 +3307,24 @@
           <button type="button" class="dc-live-advanced-toggle">Advanced ▸</button>
 
           <div class="dc-live-basic-body">
-            <div class="dc-live-modal-desc">Uncheck to not show unread indicator.</div>
-            <label class="dc-live-check"><input type="checkbox" data-k="waveGate3W8"> Generals</label>
-            <label class="dc-live-check"><input type="checkbox" data-k="waveGate5W9"> Poseidon</label>
-            <label class="dc-live-check"><input type="checkbox" data-k="waveGate5W10">Hermes</label>
-            <label class="dc-live-check"><input type="checkbox" data-k="waveGate5W11">Artemis</label>
-            <label class="dc-live-check"><input type="checkbox" data-k="quests"> Adventurer quests</label>
-            <label class="dc-live-check"><input type="checkbox" data-k="battlePassQuests"> Battle Pass quests</label>
-            <label class="dc-live-check"><input type="checkbox" data-k="pvp"> PvP tokens</label>
-            <label class="dc-live-check"><input type="checkbox" data-k="dungeonEasyBoss"> Shadowbridge</label>
-            <label class="dc-live-check"><input type="checkbox" data-k="dungeonHardBoss">Castle of the F.P</label>
-            <label class="dc-live-check"><input type="checkbox" data-k="dungeonCrucibleBoss"> Polyhedral Crucible</label>
-            <label class="dc-live-check"><input type="checkbox" data-k="dungeonEasySwarm"> Gribbles (Shadowbridge)</label>
-            <hr>
-            <label class="dc-live-check"><input type="checkbox" data-k="showDamage"> Show damage on spawned bosses</label>
-            <label class="dc-live-check"><input type="checkbox" data-k="hideGemOffer"> Hide gem offer banner</label>
+            <div class="dc-live-modal-desc">Untick a tracker to keep it out of the unread badge. It still shows in the dropdown.</div>
+            <div class="dc-live-section-label">Wave bosses</div>
+            <div class="dc-live-wave-toggles"><!-- built from SOURCE_WAVES --></div>
+            <div class="dc-live-section-label">Other trackers</div>
+            <div class="dc-live-check-grid">
+              <label class="dc-live-check"><input type="checkbox" data-k="quests"><span class="dc-live-check-text"><span>Adventurer quests</span></span></label>
+              <label class="dc-live-check"><input type="checkbox" data-k="battlePassQuests"><span class="dc-live-check-text"><span>Battle Pass quests</span></span></label>
+              <label class="dc-live-check"><input type="checkbox" data-k="pvp"><span class="dc-live-check-text"><span>PvP tokens</span></span></label>
+              <label class="dc-live-check"><input type="checkbox" data-k="dungeonEasyBoss"><span class="dc-live-check-text"><span>Shadowbridge</span></span></label>
+              <label class="dc-live-check"><input type="checkbox" data-k="dungeonHardBoss"><span class="dc-live-check-text"><span>Castle of the F.P</span></span></label>
+              <label class="dc-live-check"><input type="checkbox" data-k="dungeonCrucibleBoss"><span class="dc-live-check-text"><span>Polyhedral Crucible</span></span></label>
+              <label class="dc-live-check"><input type="checkbox" data-k="dungeonEasySwarm"><span class="dc-live-check-text"><span>Gribbles (Shadowbridge)</span></span></label>
+            </div>
+            <div class="dc-live-section-label">Display</div>
+            <div class="dc-live-check-grid dc-live-check-grid-1">
+              <label class="dc-live-check"><input type="checkbox" data-k="showDamage"><span class="dc-live-check-text"><span>Show damage on spawned bosses</span></span></label>
+              <label class="dc-live-check"><input type="checkbox" data-k="hideGemOffer"><span class="dc-live-check-text"><span>Hide gem offer banner</span></span></label>
+            </div>
           </div>
 
           <div class="dc-live-advanced-body" hidden>
@@ -3290,6 +3371,7 @@
     }
 
     function sync() {
+      renderWaveToggles(modal); // must run first: it creates the wave checkboxes the loop below fills in
       modal.querySelectorAll('input[data-k]').forEach((inp) => {
         const k = inp.dataset.k;
         if (k === 'showDamage') inp.checked = live.showDamage !== false;
@@ -3706,7 +3788,12 @@
         padding: 10px; display: none; flex-direction: column; gap: 6px;
         text-align: left;
         overflow-y: auto;
+        /* v2.5: the Gates list now holds a lot of bosses. Stay at this height and scroll the rest. */
+        max-height: min(380px, 62vh);
+        scrollbar-width: thin; scrollbar-color: #3a3e63 transparent;
       }
+      .dc-live-panel::-webkit-scrollbar { width: 6px; }
+      .dc-live-panel::-webkit-scrollbar-thumb { background: #3a3e63; border-radius: 3px; }
       .dc-live-panel.dc-open { display: flex; }
       .dc-live-panel.dc-panel-flip { left: auto; right: 0; }
       .dc-live-panel.dc-panel-up { top: auto; bottom: calc(100% + 8px); }
@@ -3765,31 +3852,81 @@
       }
       .dc-live-settings-btn:hover { border-color: #3d3f5c; }
       .dc-live-modal {
-        position: fixed; inset: 0; z-index: 10080; background: rgba(0,0,0,.6);
+        position: fixed; inset: 0; z-index: 10080; background: rgba(6,8,16,.68);
+        backdrop-filter: blur(2px);
         display: none; align-items: center; justify-content: center; padding: 14px;
       }
       .dc-live-modal.open { display: flex; }
       .dc-live-modal-card {
-        width: min(340px, 92vw); background: #171a2a; border: 1px solid #2b2d44;
-        border-radius: 12px; box-shadow: 0 14px 34px rgba(0,0,0,.55); overflow: hidden;
+        width: min(440px, 94vw); max-height: min(86vh, 680px);
+        display: flex; flex-direction: column;
+        background: #171a2a; border: 1px solid #2b2d44;
+        border-radius: 14px; box-shadow: 0 18px 44px rgba(0,0,0,.6); overflow: hidden;
       }
       .dc-live-modal-head {
-        display: flex; align-items: center; justify-content: space-between;
-        padding: 10px 12px; border-bottom: 1px solid #2b2d44; background: #141728;
+        display: flex; align-items: center; justify-content: space-between; flex: 0 0 auto;
+        padding: 12px 14px; border-bottom: 1px solid #2b2d44; background: #141728;
       }
-      .dc-live-modal-title { font-size: 13px; font-weight: 800; color: #ffd369; }
+      .dc-live-modal-title { font-size: 14px; font-weight: 800; color: #ffd369; letter-spacing: .01em; }
       .dc-live-modal-head button, .dc-live-modal-actions button {
         border: 1px solid #2b2d44; background: #23263b; color: #e6e9ff;
-        border-radius: 8px; padding: 5px 9px; font-size: 12px; cursor: pointer;
+        border-radius: 8px; padding: 6px 12px; font-size: 12px; cursor: pointer;
+        transition: background .15s ease, border-color .15s ease;
       }
-      .dc-live-modal-body { padding: 12px; display: flex; flex-direction: column; gap: 8px; }
-      .dc-live-modal-desc { font-size: 11px; color: #8a90ad; margin-bottom: 4px; }
-      .dc-live-check { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #e6e9ff; }
+      .dc-live-modal-head button:hover, .dc-live-modal-actions button:hover { background: #2c3050; border-color: #3d4170; }
+      .dc-live-modal-actions .dc-live-modal-save {
+        background: #3347c9; border-color: #4a5de0; color: #fff; font-weight: 700; padding: 6px 18px;
+      }
+      .dc-live-modal-actions .dc-live-modal-save:hover { background: #4156dd; }
+      .dc-live-modal-body {
+        padding: 14px; display: flex; flex-direction: column; gap: 10px;
+        flex: 1 1 auto; min-height: 0; overflow-y: auto;
+        scrollbar-width: thin; scrollbar-color: #3a3e63 transparent;
+      }
+      .dc-live-modal-desc { font-size: 11px; line-height: 1.4; color: #8a90ad; margin-bottom: 2px; }
+      .dc-live-section-label {
+        font-size: 10px; font-weight: 800; color: #7a80a3; text-transform: uppercase; letter-spacing: .06em;
+        margin: 8px 0 -2px; padding-bottom: 4px; border-bottom: 1px solid #23263b;
+      }
+      .dc-live-section-label:first-of-type { margin-top: 2px; }
+      .dc-live-wave-toggles, .dc-live-check-grid {
+        display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px;
+      }
+      .dc-live-check-grid-1 { grid-template-columns: minmax(0, 1fr); }
+      .dc-live-check {
+        display: flex; align-items: center; gap: 9px; min-width: 0;
+        font-size: 12px; color: #e6e9ff; cursor: pointer;
+        padding: 7px 9px; border-radius: 9px; background: #1b1e31; border: 1px solid #252842;
+        transition: border-color .15s ease, background .15s ease;
+      }
+      .dc-live-check:hover { border-color: #3a3f68; background: #1f2338; }
+      .dc-live-check-text { display: flex; flex-direction: column; min-width: 0; line-height: 1.25; }
+      .dc-live-check-text > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .dc-live-check-hint { font-size: 10px; color: #7a80a3; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      /* checkboxes drawn as small switches */
+      .dc-live-check input[type="checkbox"] {
+        -webkit-appearance: none; appearance: none; flex: 0 0 auto;
+        width: 28px; height: 16px; margin: 0; border-radius: 999px; position: relative;
+        background: #2b2f4a; border: 1px solid #3a3f68; cursor: pointer;
+        transition: background .15s ease, border-color .15s ease;
+      }
+      .dc-live-check input[type="checkbox"]::after {
+        content: ''; position: absolute; top: 1px; left: 1px; width: 12px; height: 12px; border-radius: 50%;
+        background: #aab0d4; transition: transform .15s ease, background .15s ease;
+      }
+      .dc-live-check input[type="checkbox"]:checked { background: #2f6b4f; border-color: #3fae7e; }
+      .dc-live-check input[type="checkbox"]:checked::after { transform: translateX(12px); background: #7cffb8; }
       .dc-live-modal-body hr { border: none; border-top: 1px solid #2b2d44; margin: 4px 0; width: 100%; }
-      .dc-live-advanced-toggle { align-self: flex-start; background: transparent !important; border: none !important; color: #8aa2ff !important; padding: 0 !important; font-size: 12px !important; }
+      .dc-live-advanced-toggle { align-self: flex-start; background: transparent !important; border: none !important; color: #8aa2ff !important; padding: 0 !important; font-size: 12px !important; cursor: pointer; }
+      .dc-live-advanced-toggle:hover { text-decoration: underline; }
       .dc-live-advanced-body { display: flex; flex-direction: column; gap: 8px; }
       .dc-live-advanced-body[hidden] { display: none; }
-      .dc-live-threshold-group-label { font-size: 10px; font-weight: 700; color: #6b7089; text-transform: uppercase; letter-spacing: .03em; margin: 6px 0 -2px; }
+      .dc-live-basic-body { display: flex; flex-direction: column; gap: 10px; }
+      .dc-live-basic-body[hidden] { display: none; }
+      .dc-live-threshold-group-label {
+        font-size: 10px; font-weight: 800; color: #7a80a3; text-transform: uppercase; letter-spacing: .06em;
+        margin: 8px 0 -2px; padding-bottom: 4px; border-bottom: 1px solid #23263b;
+      }
       .dc-live-threshold {
         display: flex; align-items: center; justify-content: space-between; gap: 8px;
         font-size: 12px; color: #e6e9ff;
@@ -3799,9 +3936,10 @@
       .dc-live-threshold-input-wrap { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
       .dc-live-threshold input {
         width: 108px; background: #12141f; border: 1px solid #2B2D44; border-radius: 6px;
-        color: #e6e9ff; padding: 3px 6px; font-size: 12px; text-align: right;
+        color: #e6e9ff; padding: 4px 7px; font-size: 12px; text-align: right;
         font-variant-numeric: tabular-nums;
       }
+      .dc-live-threshold input:focus { outline: none; border-color: #4a5de0; box-shadow: 0 0 0 2px rgba(74,93,224,.25); }
       .dc-live-threshold > span:first-child {
         min-width: 0;
         overflow: hidden;
@@ -3809,14 +3947,28 @@
         text-overflow: ellipsis;
       }
       .dc-live-threshold-preview {
-        min-width: 30px; text-align: left; color: #7cffb8; font-size: 11px; font-weight: 700;
+        min-width: 34px; text-align: left; color: #7cffb8; font-size: 11px; font-weight: 700;
         font-variant-numeric: tabular-nums;
       }
 
-      .dc-live-wave-thresholds { display: flex; flex-direction: column; gap: 8px; }
+      /* The per-boss list grows with every wave tracked, so it is a fixed-height box that scrolls. */
+      .dc-live-wave-thresholds {
+        display: flex; flex-direction: column; gap: 8px;
+        max-height: 260px; overflow-y: auto; padding: 8px 10px 8px 8px;
+        background: #12141f; border: 1px solid #23263b; border-radius: 10px;
+        scrollbar-width: thin; scrollbar-color: #3a3e63 transparent;
+      }
+      .dc-live-wave-group-label {
+        position: sticky; top: -8px; z-index: 1; margin: 0 -2px;
+        font-size: 10px; font-weight: 800; color: #ffd369; text-transform: uppercase; letter-spacing: .05em;
+        background: #12141f; padding: 4px 2px 2px;
+      }
       .dc-live-threshold-group { color: #6b7089; font-weight: 400; font-size: 10px; }
 
-      .dc-live-modal-actions { display: flex; justify-content: flex-end; gap: 8px; padding: 0 12px 12px; }
+      .dc-live-modal-actions {
+        display: flex; justify-content: flex-end; gap: 8px; flex: 0 0 auto;
+        padding: 10px 14px; border-top: 1px solid #2b2d44; background: #141728;
+      }
 
       /* Fires earlier than the 480px breakpoint below, since the fixed
          250px category columns overflow well before phones get that
@@ -4551,6 +4703,46 @@
       .wlo-loot-panel-meta { font-size: 10.5px; color: #ffd369; margin-top: 2px; }
       .wlo-loot-panel-desc { font-size: 10.5px; color: #8a90ad; margin-top: 2px; line-height: 1.3; }
 
+      /* ---- v2.5: COMPACT CARDS option (Options > Compact Cards) ---- */
+      .wlo-cstats { display: none; }
+      html.wlo-compact .monster-card .monster-stats { display: none !important; }
+      html.wlo-compact .monster-card .wlo-cstats { display: block !important; margin-top: 6px; text-align: left; }
+      .wlo-compact-grid {
+        display: grid !important;
+        grid-template-columns: repeat(auto-fill, minmax(168px, 1fr)) !important;
+        gap: 10px !important; align-items: start !important; justify-content: stretch !important;
+      }
+      .wlo-compact-grid > :not(.monster-card) { grid-column: 1 / -1 !important; }
+      .wlo-compact-grid > .monster-card {
+        width: auto !important; max-width: none !important; min-width: 0 !important; margin: 0 !important;
+        padding: 8px !important; box-sizing: border-box !important;
+      }
+      html.wlo-compact .monster-card .monster-img {
+        width: 100% !important; height: 96px !important; max-height: 96px !important; object-fit: cover !important;
+        border-radius: 8px !important;
+      }
+      html.wlo-compact .monster-card h3 {
+        font-size: 12.5px !important; line-height: 1.25 !important; margin: 6px 0 4px !important;
+        overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      }
+      html.wlo-compact .monster-card .monster-select-row { margin: 2px 0 !important; }
+      html.wlo-compact .monster-card .pickWrap, html.wlo-compact .monster-card .pickWrap span { font-size: 11px !important; }
+      html.wlo-compact .monster-card .hp-bar { height: 6px !important; margin: 4px 0 0 !important; }
+      html.wlo-compact .monster-card .join-btn, html.wlo-compact .monster-card a .btn {
+        width: 100% !important; padding: 5px 8px !important; font-size: 11.5px !important; margin-top: 6px !important;
+      }
+      .wlo-cs-hp { display: flex; align-items: baseline; justify-content: space-between; gap: 6px; font-size: 12px; font-weight: 700; color: #e6e9ff; font-variant-numeric: tabular-nums; }
+      .wlo-cs-hp .wlo-cs-pct { font-size: 10.5px; font-weight: 600; color: #8a90ad; }
+      .wlo-cs-chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+      .wlo-cs-chip {
+        display: inline-flex; align-items: center; gap: 3px; padding: 1px 6px; border-radius: 999px;
+        font-size: 10.5px; font-weight: 700; color: #cdd4ff; background: #1b1e31; border: 1px solid #2b2d44;
+        font-variant-numeric: tabular-nums; white-space: nowrap;
+      }
+      .wlo-cs-chip.atk { color: #ffb4a8; border-color: rgba(255,120,100,.35); }
+      .wlo-cs-chip.def { color: #a9c6ff; border-color: rgba(110,160,255,.35); }
+      .wlo-cs-chip.grp { color: #b8f0cf; border-color: rgba(120,220,170,.35); }
+
       #wlo-toolbar {
         box-sizing: border-box;
         display: flex; flex-wrap: wrap; align-items: center; justify-content: center;
@@ -4732,7 +4924,7 @@
   // without a visible flash), then reverts to let the real CSS state
   // take back over.
   function shouldUseSidePanel(wrap, strip) {
-    if (isAlwaysSidePanelEnabled()) return true;
+    if (isAlwaysSidePanelEnabled() || isCompactCardsEnabled()) return true;
     strip.style.setProperty('display', 'flex', 'important');
     strip.style.visibility = 'hidden';
     const imgHeight = wrap.getBoundingClientRect().height;
@@ -4920,8 +5112,8 @@
     indicator.textContent = `🎁 ${items.length}`;
     wrap.appendChild(indicator);
 
-    // "Always Vertical Panel" skips the measurement dance entirely.
-    if (isAlwaysSidePanelEnabled()) {
+    // "Always Vertical Panel" (and Compact Cards, whose art is too small for the strip) skips the measurement dance entirely.
+    if (isAlwaysSidePanelEnabled() || isCompactCardsEnabled()) {
       switchToSidePanel(wrap, strip, items, indicator, userDmg);
       return;
     }
@@ -5001,6 +5193,69 @@
   function isAlwaysSidePanelEnabled() { return localStorage.getItem(ALWAYS_SIDE_PANEL_KEY) === '1'; }
   function setAlwaysSidePanelEnabled(v) {
     localStorage.setItem(ALWAYS_SIDE_PANEL_KEY, v ? '1' : '0');
+  }
+
+  // ---------- compact cards (v2.5) ----------
+
+  const COMPACT_KEY = 'wloCompactCards';
+  function isCompactCardsEnabled() { return localStorage.getItem(COMPACT_KEY) === '1'; }
+  function setCompactCardsEnabled(v) {
+    localStorage.setItem(COMPACT_KEY, v ? '1' : '0');
+    applyCompactCards();
+    rebuildLootDisplays(); // the art is smaller now, so loot chips re-pick strip vs side panel
+  }
+
+  // Builds the short stat block ("421M / 500M", chips for ATK / DEF / players) from the card's
+  // own bulky .monster-stats block. The original stays in the DOM (hidden by CSS) and is re-read
+  // whenever its text changes, so a soft refresh or HP tick keeps this in sync.
+  function buildCompactStats(card) {
+    const stats = card.querySelector(':scope > .monster-stats');
+    if (!stats) return;
+    const sig = clean(stats.textContent);
+    let box = card.querySelector(':scope > .wlo-cstats');
+    if (box && box.dataset.sig === sig) return;
+    if (!box) {
+      box = document.createElement('div');
+      box.className = 'wlo-cstats';
+      stats.after(box);
+    }
+    box.dataset.sig = sig;
+
+    const hpText = clean(stats.querySelector('.stat-row .stat-icon.hp')?.closest('.stat-row')?.querySelector('.stat-value')?.textContent);
+    const hpM = hpText.replace(/,/g, '').match(/([\d.]+)\s*\/\s*([\d.]+)/);
+    const pctM = (card.querySelector('.hp-fill')?.style.width || '').match(/([\d.]+)%/);
+    const num = (re, el) => { const m = clean(el?.textContent).replace(/,/g, '').match(re); return m ? Number(m[1]) : null; };
+    const atk = num(/([\d.]+)/, stats.querySelector('.atk-chip'));
+    const def = num(/([\d.]+)/, stats.querySelector('.def-chip'));
+    const partyRaw = clean(stats.querySelector('.party-chip')?.textContent).replace(/,/g, '');
+    const partyM = partyRaw.match(/([\d.]+)\s*\/\s*([\d.]+)/);
+
+    let html = '';
+    if (hpM) {
+      const cur = Number(hpM[1]), max = Number(hpM[2]);
+      const pct = pctM ? Math.round(Number(pctM[1])) + '%' : (max ? Math.round(cur / max * 100) + '%' : '');
+      html += `<div class="wlo-cs-hp" title="${escapeHtml(hpText)} HP"><span>\u2764\uFE0F ${formatShort(cur)} / ${formatShort(max)}</span><span class="wlo-cs-pct">${pct}</span></div>`;
+    }
+    let chips = '';
+    if (atk !== null) chips += `<span class="wlo-cs-chip atk" title="Monster ATK">\u2694 ${formatShort(atk)}</span>`;
+    if (def !== null) chips += `<span class="wlo-cs-chip def" title="Monster DEF">\uD83D\uDEE1 ${formatShort(def)}</span>`;
+    if (partyM) chips += `<span class="wlo-cs-chip grp" title="Players joined">\uD83D\uDC65 ${formatShort(Number(partyM[1]))}/${formatShort(Number(partyM[2]))}</span>`;
+    // any chip we don't know (not ATK / DEF / players) is kept as plain text
+    stats.querySelectorAll('.mini-chip').forEach((c) => {
+      if (c.matches('.atk-chip, .def-chip, .party-chip')) return;
+      const t = clean(c.textContent);
+      if (t) chips += `<span class="wlo-cs-chip">${escapeHtml(t)}</span>`;
+    });
+    if (chips) html += `<div class="wlo-cs-chips">${chips}</div>`;
+    box.innerHTML = html;
+  }
+
+  function applyCompactCards() {
+    const on = isCompactCardsEnabled();
+    document.documentElement.classList.toggle('wlo-compact', on);
+    const container = getCardsContainer();
+    if (container) container.classList.toggle('wlo-compact-grid', on);
+    if (on) document.querySelectorAll('.monster-card').forEach(buildCompactStats);
   }
 
   // ---------- group-by-type state ----------
@@ -5782,16 +6037,17 @@
 
     const optionsDd = buildDropdown({ id: 'wlo-options-dd', buttonLabel: 'Options ▾', searchable: false });
     inner.insertBefore(optionsDd, hpSelect);
-    optionsDd.querySelector('.wlo-dd-actions')?.remove(); // no bulk-clear needed for 3 independent toggles
+    optionsDd.querySelector('.wlo-dd-actions')?.remove(); // no bulk-clear needed for independent toggles
     optionsDd.querySelector('.wlo-dd-list').innerHTML = `
       <label class="wlo-dd-item"><input type="checkbox" id="wlo-hide-toggle"><span>Hide Loot</span></label>
       <label class="wlo-dd-item"><input type="checkbox" id="wlo-side-panel-toggle"><span>Always Vertical Panel</span></label>
       <label class="wlo-dd-item"><input type="checkbox" id="wlo-group-toggle"><span>Group by Type</span></label>
       <label class="wlo-dd-item"><input type="checkbox" id="wlo-expdmg-sort"><span>Sort by Highest EXP/DMG</span></label>
+      <label class="wlo-dd-item"><input type="checkbox" id="wlo-compact-toggle"><span>Compact Cards</span></label>
     `;
 
     function updateOptionsLabel() {
-      const count = [isHideAllEnabled(), isAlwaysSidePanelEnabled(), isGroupByTypeEnabled(), isExpDmgSortHighestEnabled()].filter(Boolean).length;
+      const count = [isHideAllEnabled(), isAlwaysSidePanelEnabled(), isGroupByTypeEnabled(), isExpDmgSortHighestEnabled(), isCompactCardsEnabled()].filter(Boolean).length;
       optionsDd.querySelector('.wlo-dd-btn').textContent = count > 0 ? `Options (${count}) ▾` : 'Options ▾';
     }
 
@@ -5815,6 +6071,10 @@
     const sortBox = optionsDd.querySelector('#wlo-expdmg-sort');
     sortBox.checked = isExpDmgSortHighestEnabled();
     sortBox.addEventListener('change', () => { setExpDmgSortHighestEnabled(sortBox.checked); updateOptionsLabel(); });
+
+    const compactBox = optionsDd.querySelector('#wlo-compact-toggle');
+    compactBox.checked = isCompactCardsEnabled();
+    compactBox.addEventListener('change', () => { setCompactCardsEnabled(compactBox.checked); updateOptionsLabel(); });
 
     updateOptionsLabel();
 
@@ -5950,6 +6210,7 @@
     });
 
     applyGrouping();
+    applyCompactCards();
     updateMetIndicators();
     if (anyNew) applyFilters();
 
