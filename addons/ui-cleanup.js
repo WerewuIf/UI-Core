@@ -3,6 +3,8 @@
  * Cookie helper + 3 toast copies removed (Core.cookies / Core.ui.toast); quest/battle-pass/PvP polls share Core.net cache.
  * Page scoping: v2.3 loads this addon on EVERY page (addons.json has no "match" for it any more) so MODULE 0 / 0b can put the Home
  * button and the keep-alive pin in the top bar everywhere. Modules 1-5 each check their own page and return at once on any other.
+ * v2.5.1: Live Tracker settings: General / Advanced tabs; Advanced redesigned (a card per wave and dungeon group, a "Wave default" row per wave,
+ *         type 3b / 500m / 1.5k or the full number, per-row reset, blank boss = use its wave default, bad input blocks Save).
  * v2.5.0: (1) Guild dungeon location: each monster's Fight button sits on the ATK / DEF / EXP row, right-aligned (Module 2).
  *         (2) Main page tracker: polls every domain wave (gate 5, waves 9-17) instead of four; settings modal restyled (switches, two-column
  *             grid, sticky header/footer); per-boss thresholds grouped by wave in a fixed-height scrolling box; the Gates dropdown is capped
@@ -3008,45 +3010,79 @@
     }).join('');
   }
 
-  function renderWaveThresholdRows(modal) {
-    const container = modal.querySelector('.dc-live-wave-thresholds');
-    if (!container) return;
+  // ---- Advanced view: damage thresholds ----
+  const THRESHOLD_UNITS = { k: 1e3, m: 1e6, b: 1e9, t: 1e12 };
+  // "3b" / "2.5M" / "3,000,000,000" -> number, NaN when it isn't one.
+  function parseThreshold(str) {
+    const m = String(str).replace(/[,\s]/g, '').match(/^(\d*\.?\d+)([kmbt])?$/i);
+    return m ? Math.round(Number(m[1]) * (THRESHOLD_UNITS[(m[2] || '').toLowerCase()] || 1)) : NaN;
+  }
+  const fullNumber = (n) => Number(n).toLocaleString('en-US');
 
-    // Dedupe by normalized name: one editable row per actual monster,
-    // not one per sighting/source. Rows are grouped under their wave.
+  function thresholdRow(label, attrs, def, cls) {
+    return `<label class="dc-th-row ${cls || ''}"><span class="dc-th-name" title="${escapeAttr(label)}">${escapeHtml(label)}</span>
+      <span class="dc-th-field"><input type="text" inputmode="decimal" autocomplete="off" spellcheck="false" ${attrs} data-def="${def}" placeholder="${def ? fullNumber(def) : ''}"><span class="dc-th-chip"></span><button type="button" class="dc-th-reset" title="Reset to default" tabindex="-1">↺</button></span></label>`;
+  }
+
+  // Refreshes one row: "3B" chip, red when unparsable, reset button when it differs from its default.
+  // A blank boss row means "use the wave default" (chip dimmed, shows that default).
+  function updateThresholdRow(inp) {
+    const row = inp.closest('.dc-th-row');
+    const chip = row.querySelector('.dc-th-chip');
+    const blank = inp.value.trim() === '';
+    const n = parseThreshold(inp.value);
+    const isBoss = inp.dataset.tName !== undefined;
+    let def = Number(inp.dataset.def);
+    if (inp.dataset.grp) {
+      const g = inp.closest('.dc-th').querySelector(`input[data-t="${inp.dataset.grp}"]`);
+      const gv = g ? parseThreshold(g.value) : NaN;
+      if (Number.isFinite(gv)) def = gv;
+      if (isBoss) inp.placeholder = fullNumber(def);
+    }
+    const bad = !blank && !Number.isFinite(n);
+    row.classList.toggle('bad', bad);
+    row.classList.toggle('dirty', isBoss ? !blank : (Number.isFinite(n) && n !== def));
+    chip.classList.toggle('auto', blank);
+    chip.textContent = bad ? '?' : blank ? (def ? formatBigNumber(def) : '') : formatBigNumber(n);
+  }
+
+  function renderThresholds(modal) {
+    const box = modal.querySelector('.dc-th');
+    if (!box) return;
+    const T = live.damageThresholds;
+
+    // wave bosses: one row per distinct monster (not per sighting), grouped under their wave
     const seen = new Map();
     live.waves.forEach((b) => {
-      const key = normalizeWaveBossKey(b.name);
-      if (!key || seen.has(key)) return;
-      seen.set(key, b);
+      const k = normalizeWaveBossKey(b.name);
+      if (k && !seen.has(k)) seen.set(k, b);
     });
-
-    if (!seen.size) {
-      container.innerHTML = '<div class="dc-live-empty">No wave bosses detected yet — reopen this after the next refresh.</div>';
-      return;
-    }
-
-    const rowHtml = ([key, b]) => {
-      const source = SOURCE_WAVES.find((x) => x.label === b.sourceLabel);
-      const fallback = source ? (live.damageThresholds[source.settingKey] ?? DEFAULT_DAMAGE_THRESHOLDS[source.settingKey]) : 0;
-      return `<label class="dc-live-threshold">
-        <span title="${escapeAttr(b.name)}">${escapeHtml(b.name)}</span>
-        <span class="dc-live-threshold-input-wrap">
-          <input type="text" inputmode="numeric" data-t-name="${escapeAttr(key)}" data-t-fallback="${fallback}" placeholder="${fallback}">
-          <span class="dc-live-threshold-preview"></span>
-        </span>
-      </label>`;
-    };
-
     const entries = Array.from(seen.entries());
-    const html = SOURCE_WAVES.map((src) => {
+    const group = (title, count, rows) => `<details class="dc-th-group" open><summary><span>${escapeHtml(title)}</span><span class="dc-th-count">${count}</span></summary>${rows}</details>`;
+    const bossRow = ([key, b], src) => thresholdRow(b.name, `data-t-name="${escapeAttr(key)}"${src ? ` data-grp="${escapeAttr(src.settingKey)}"` : ''}`, src ? T[src.settingKey] : 0);
+
+    const waves = SOURCE_WAVES.map((src) => {
       const mine = entries.filter(([, b]) => b.sourceLabel === src.label);
-      if (!mine.length) return '';
-      return `<div class="dc-live-wave-group-label">${escapeHtml(waveGroupHeading(src.label))}</div>${mine.map(rowHtml).join('')}`;
+      const rows = thresholdRow('Wave default', `data-t="${escapeAttr(src.settingKey)}"`, DEFAULT_DAMAGE_THRESHOLDS[src.settingKey], 'dc-th-default') + mine.map((e) => bossRow(e, src)).join('');
+      return group(waveGroupHeading(src.label), mine.length ? `${mine.length} boss${mine.length > 1 ? 'es' : ''}` : 'none seen yet', rows);
     }).join('');
-    // anything from a source no longer in SOURCE_WAVES still gets a row
     const orphan = entries.filter(([, b]) => !SOURCE_WAVES.some((x) => x.label === b.sourceLabel));
-    container.innerHTML = html + orphan.map(rowHtml).join('');
+    const orphanHtml = orphan.length ? group('Other waves', String(orphan.length), orphan.map((e) => bossRow(e, null)).join('')) : '';
+
+    const flat = (title, items) => group(title, '', items.map(([label, key]) => thresholdRow(label, `data-t="${key}"`, DEFAULT_DAMAGE_THRESHOLDS[key])).join(''));
+    box.innerHTML = `
+      <div class="dc-th-title">Wave bosses</div>${waves}${orphanHtml}
+      <div class="dc-th-title">Dungeon bosses</div>
+      ${flat('Guild dungeons', [['Grixkar (Shadowbridge)', 'dungeonBossEasy'], ['khaal (Castle)', 'dungeonBossHard'], ['The Apex (Crucible)', 'dungeonBossCrucible']])}
+      <div class="dc-th-title">Other</div>
+      ${flat('Minis & swarm', [['HD minis (all 4)', 'dungeonMini'], ['Gribbles', 'swarm']])}`;
+
+    box.querySelectorAll('input[data-t]').forEach((inp) => { inp.value = fullNumber(T[inp.dataset.t] ?? DEFAULT_DAMAGE_THRESHOLDS[inp.dataset.t]); });
+    box.querySelectorAll('input[data-t-name]').forEach((inp) => {
+      const v = T.waveNames && T.waveNames[inp.dataset.tName];
+      inp.value = Number.isFinite(v) ? fullNumber(v) : '';
+    });
+    box.querySelectorAll('input').forEach(updateThresholdRow);
   }
 
 
@@ -3303,9 +3339,11 @@
           <div class="dc-live-modal-title">Live Tracker Settings</div>
           <button type="button" class="dc-live-modal-close">Close</button>
         </div>
+        <div class="dc-live-tabs">
+          <button type="button" class="dc-live-tab on" data-tab="basic">General</button>
+          <button type="button" class="dc-live-tab" data-tab="advanced">Advanced</button>
+        </div>
         <div class="dc-live-modal-body">
-          <button type="button" class="dc-live-advanced-toggle">Advanced ▸</button>
-
           <div class="dc-live-basic-body">
             <div class="dc-live-modal-desc">Untick a tracker to keep it out of the unread badge. It still shows in the dropdown.</div>
             <div class="dc-live-section-label">Wave bosses</div>
@@ -3328,19 +3366,8 @@
           </div>
 
           <div class="dc-live-advanced-body" hidden>
-            <div class="dc-live-modal-desc">Auto-clear the unread badge once your damage on that target crosses these totals. Type the full number — the preview on the right updates live.</div>
-
-            <div class="dc-live-threshold-group-label">Wave Bosses (Gates)</div>
-            <div class="dc-live-wave-thresholds"><!-- populated live from currently-detected bosses --></div>
-
-            <div class="dc-live-threshold-group-label">Dungeon Bosses</div>
-            <label class="dc-live-threshold"><span>Grixkar (Shadowbridge)</span><span class="dc-live-threshold-input-wrap"><input type="text" inputmode="numeric" data-t="dungeonBossEasy" placeholder="3000000000"><span class="dc-live-threshold-preview"></span></span></label>
-            <label class="dc-live-threshold"><span>khaal (Castle)</span><span class="dc-live-threshold-input-wrap"><input type="text" inputmode="numeric" data-t="dungeonBossHard" placeholder="3000000000"><span class="dc-live-threshold-preview"></span></span></label>
-            <label class="dc-live-threshold"><span>The Apex (Crucible)</span><span class="dc-live-threshold-input-wrap"><input type="text" inputmode="numeric" data-t="dungeonBossCrucible" placeholder="500000000"><span class="dc-live-threshold-preview"></span></span></label>
-
-            <div class="dc-live-threshold-group-label">Other</div>
-            <label class="dc-live-threshold"><span>HD minis (all 4)</span><span class="dc-live-threshold-input-wrap"><input type="text" inputmode="numeric" data-t="dungeonMini" placeholder="2000000000"><span class="dc-live-threshold-preview"></span></span></label>
-            <label class="dc-live-threshold"><span>Gribbles</span><span class="dc-live-threshold-input-wrap"><input type="text" inputmode="numeric" data-t="swarm" placeholder="1000000"><span class="dc-live-threshold-preview"></span></span></label>
+            <div class="dc-live-modal-desc">A badge clears once your damage on that target reaches its threshold. Type <b>3b</b>, <b>500m</b>, <b>1.5k</b> or the full number. A blank boss uses its wave default; <b>↺</b> resets a row.</div>
+            <div class="dc-th"><!-- built by renderThresholds --></div>
           </div>
         </div>
         <div class="dc-live-modal-actions">
@@ -3351,24 +3378,23 @@
     document.body.appendChild(modal);
 
 
+    function setTab(name) {
+      modal.querySelectorAll('.dc-live-tab').forEach((t) => t.classList.toggle('on', t.dataset.tab === name));
+      modal.querySelector('.dc-live-basic-body').toggleAttribute('hidden', name !== 'basic');
+      modal.querySelector('.dc-live-advanced-body').toggleAttribute('hidden', name !== 'advanced');
+    }
+
     btn.addEventListener('click', () => {
       sync();
-      modal.querySelector('.dc-live-advanced-body').setAttribute('hidden', '');
-      modal.querySelector('.dc-live-basic-body').removeAttribute('hidden');
-      modal.querySelector('.dc-live-advanced-toggle').textContent = 'Advanced ▸';
+      setTab('basic');
       modal.classList.add('open');
     });
     modal.querySelector('.dc-live-modal-close').addEventListener('click', () => modal.classList.remove('open'));
     modal.addEventListener('click', (e) => { if (e.target === modal) modal.classList.remove('open'); });
-
-
-
-    function updateThresholdPreview(inp) {
-      const preview = inp.nextElementSibling;
-      if (!preview || !preview.classList.contains('dc-live-threshold-preview')) return;
-      const digits = inp.value.replace(/[^\d]/g, '');
-      preview.textContent = digits ? formatBigNumber(digits) : '';
-    }
+    modal.querySelector('.dc-live-tabs').addEventListener('click', (e) => {
+      const t = e.target.closest('.dc-live-tab');
+      if (t) setTab(t.dataset.tab);
+    });
 
     function sync() {
       renderWaveToggles(modal); // must run first: it creates the wave checkboxes the loop below fills in
@@ -3378,61 +3404,36 @@
         else if (k === 'hideGemOffer') inp.checked = live.hideGemOffer !== false;
         else inp.checked = !!live.trackSettings[k];
       });
-      renderWaveThresholdRows(modal);
-      modal.querySelectorAll('input[data-t]').forEach((inp) => {
-        const key = inp.dataset.t;
-        const raw = live.damageThresholds[key] ?? DEFAULT_DAMAGE_THRESHOLDS[key];
-        inp.value = String(raw);
-        updateThresholdPreview(inp);
-      });
-      modal.querySelectorAll('input[data-t-name]').forEach((inp) => {
-        const key = inp.dataset.tName;
-        const fallback = Number(inp.dataset.tFallback) || 0;
-        const raw = (live.damageThresholds.waveNames && live.damageThresholds.waveNames[key] !== undefined)
-        ? live.damageThresholds.waveNames[key]
-        : fallback;
-        inp.value = String(raw);
-        updateThresholdPreview(inp);
-      });
+      renderThresholds(modal);
     }
 
-    modal.querySelectorAll('input[data-t]').forEach((inp) => {
-      inp.addEventListener('input', () => {
-        const cursorFromEnd = inp.value.length - inp.selectionStart;
-        inp.value = inp.value.replace(/[^\d]/g, '');
-        const pos = Math.max(0, inp.value.length - cursorFromEnd);
-        inp.setSelectionRange(pos, pos);
-        updateThresholdPreview(inp);
-      });
-    });
-
-    modal.querySelector('.dc-live-wave-thresholds').addEventListener('input', (e) => {
-      const inp = e.target.closest('input[data-t-name]');
+    // threshold rows are rebuilt on every open, so listen on the container
+    const th = modal.querySelector('.dc-th');
+    th.addEventListener('input', (e) => {
+      const inp = e.target.closest('input');
       if (!inp) return;
-      const cursorFromEnd = inp.value.length - inp.selectionStart;
-      inp.value = inp.value.replace(/[^\d]/g, '');
-      const pos = Math.max(0, inp.value.length - cursorFromEnd);
-      inp.setSelectionRange(pos, pos);
-      updateThresholdPreview(inp);
+      updateThresholdRow(inp);
+      // a wave default changed: its bosses' "default" placeholder/chip follows
+      if (inp.dataset.t) th.querySelectorAll(`input[data-grp="${inp.dataset.t}"]`).forEach(updateThresholdRow);
     });
-
-    modal.querySelector('.dc-live-advanced-toggle').addEventListener('click', (e) => {
-      const btn = e.currentTarget;
-      const basicBody = modal.querySelector('.dc-live-basic-body');
-      const advBody = modal.querySelector('.dc-live-advanced-body');
-      const goingAdvanced = advBody.hasAttribute('hidden');
-      if (goingAdvanced) {
-        basicBody.setAttribute('hidden', '');
-        advBody.removeAttribute('hidden');
-        btn.textContent = '← Back';
-      } else {
-        advBody.setAttribute('hidden', '');
-        basicBody.removeAttribute('hidden');
-        btn.textContent = 'Advanced ▸';
-      }
+    th.addEventListener('focusout', (e) => { // tidy "3b" -> "3,000,000,000"
+      const inp = e.target.closest('input');
+      const n = inp ? parseThreshold(inp.value) : NaN;
+      if (Number.isFinite(n)) { inp.value = fullNumber(n); updateThresholdRow(inp); }
+    });
+    th.addEventListener('click', (e) => {
+      const rb = e.target.closest('.dc-th-reset');
+      if (!rb) return;
+      e.preventDefault();
+      const inp = rb.closest('.dc-th-row').querySelector('input');
+      inp.value = inp.dataset.tName !== undefined ? '' : fullNumber(inp.dataset.def);
+      inp.dispatchEvent(new Event('input', { bubbles: true }));
     });
 
     modal.querySelector('.dc-live-modal-save').addEventListener('click', () => {
+      const badInp = th.querySelector('.dc-th-row.bad input');
+      if (badInp) { setTab('advanced'); badInp.focus(); return; } // don't silently drop a typo
+
       const next = {};
       modal.querySelectorAll('input[data-k]').forEach((inp) => {
         if (inp.dataset.k === 'showDamage') live.showDamage = inp.checked;
@@ -3442,19 +3443,16 @@
       live.trackSettings = normalizeTrackSettings(next);
 
       const nextThresholds = { ...live.damageThresholds };
-      modal.querySelectorAll('input[data-t]').forEach((inp) => {
-        const key = inp.dataset.t;
-        const digits = inp.value.replace(/[^\d]/g, '');
-        const parsed = Number(digits);
-        if (digits && Number.isFinite(parsed) && parsed >= 0) nextThresholds[key] = parsed;
+      th.querySelectorAll('input[data-t]').forEach((inp) => {
+        const n = parseThreshold(inp.value);
+        if (Number.isFinite(n)) nextThresholds[inp.dataset.t] = n;
       });
-
+      // blank boss row = no override (falls back to its wave default); bosses not shown here keep theirs
       const nextWaveNames = { ...(live.damageThresholds.waveNames || {}) };
-      modal.querySelectorAll('input[data-t-name]').forEach((inp) => {
-        const key = inp.dataset.tName;
-        const digits = inp.value.replace(/[^\d]/g, '');
-        const parsed = Number(digits);
-        if (digits && Number.isFinite(parsed) && parsed >= 0) nextWaveNames[key] = parsed;
+      th.querySelectorAll('input[data-t-name]').forEach((inp) => {
+        const n = parseThreshold(inp.value);
+        if (Number.isFinite(n)) nextWaveNames[inp.dataset.tName] = n;
+        else delete nextWaveNames[inp.dataset.tName];
       });
       nextThresholds.waveNames = nextWaveNames;
 
@@ -3917,53 +3915,46 @@
       .dc-live-check input[type="checkbox"]:checked { background: #2f6b4f; border-color: #3fae7e; }
       .dc-live-check input[type="checkbox"]:checked::after { transform: translateX(12px); background: #7cffb8; }
       .dc-live-modal-body hr { border: none; border-top: 1px solid #2b2d44; margin: 4px 0; width: 100%; }
-      .dc-live-advanced-toggle { align-self: flex-start; background: transparent !important; border: none !important; color: #8aa2ff !important; padding: 0 !important; font-size: 12px !important; cursor: pointer; }
-      .dc-live-advanced-toggle:hover { text-decoration: underline; }
-      .dc-live-advanced-body { display: flex; flex-direction: column; gap: 8px; }
-      .dc-live-advanced-body[hidden] { display: none; }
-      .dc-live-basic-body { display: flex; flex-direction: column; gap: 10px; }
-      .dc-live-basic-body[hidden] { display: none; }
-      .dc-live-threshold-group-label {
-        font-size: 10px; font-weight: 800; color: #7a80a3; text-transform: uppercase; letter-spacing: .06em;
-        margin: 8px 0 -2px; padding-bottom: 4px; border-bottom: 1px solid #23263b;
-      }
-      .dc-live-threshold {
-        display: flex; align-items: center; justify-content: space-between; gap: 8px;
-        font-size: 12px; color: #e6e9ff;
-        padding-bottom: 6px; border-bottom: 1px solid #1c1e2c;
-      }
-      .dc-live-threshold:last-child { border-bottom: none; padding-bottom: 0; }
-      .dc-live-threshold-input-wrap { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
-      .dc-live-threshold input {
-        width: 108px; background: #12141f; border: 1px solid #2B2D44; border-radius: 6px;
-        color: #e6e9ff; padding: 4px 7px; font-size: 12px; text-align: right;
-        font-variant-numeric: tabular-nums;
-      }
-      .dc-live-threshold input:focus { outline: none; border-color: #4a5de0; box-shadow: 0 0 0 2px rgba(74,93,224,.25); }
-      .dc-live-threshold > span:first-child {
-        min-width: 0;
-        overflow: hidden;
-        white-space: nowrap;
-        text-overflow: ellipsis;
-      }
-      .dc-live-threshold-preview {
-        min-width: 34px; text-align: left; color: #7cffb8; font-size: 11px; font-weight: 700;
-        font-variant-numeric: tabular-nums;
-      }
+      .dc-live-tabs { display: flex; gap: 4px; flex: 0 0 auto; margin: 10px 14px 0; padding: 3px; background: #12141f; border: 1px solid #23263b; border-radius: 10px; }
+      .dc-live-tab { flex: 1; border: none !important; background: transparent !important; color: #8a90ad !important; border-radius: 7px !important; padding: 6px 0 !important; font-size: 12px !important; font-weight: 700 !important; cursor: pointer; }
+      .dc-live-tab:hover { color: #e6e9ff !important; }
+      .dc-live-tab.on { background: #2a2f55 !important; color: #ffd369 !important; }
+      .dc-live-advanced-body, .dc-live-basic-body { display: flex; flex-direction: column; gap: 10px; }
+      .dc-live-advanced-body[hidden], .dc-live-basic-body[hidden] { display: none; }
+      .dc-live-modal-desc b { color: #c9ceee; font-weight: 700; }
 
-      /* The per-boss list grows with every wave tracked, so it is a fixed-height box that scrolls. */
-      .dc-live-wave-thresholds {
-        display: flex; flex-direction: column; gap: 8px;
-        max-height: 260px; overflow-y: auto; padding: 8px 10px 8px 8px;
-        background: #12141f; border: 1px solid #23263b; border-radius: 10px;
-        scrollbar-width: thin; scrollbar-color: #3a3e63 transparent;
+      /* Advanced: one card per wave / dungeon group, rows inside, the modal body does the scrolling */
+      .dc-th { display: flex; flex-direction: column; gap: 8px; }
+      .dc-th-title { font-size: 10px; font-weight: 800; color: #7a80a3; text-transform: uppercase; letter-spacing: .06em; margin-top: 6px; }
+      .dc-th-group { background: #1b1e31; border: 1px solid #252842; border-radius: 10px; overflow: hidden; }
+      .dc-th-group > summary {
+        display: flex; align-items: center; gap: 8px; padding: 8px 10px; cursor: pointer; list-style: none;
+        font-size: 12px; font-weight: 700; color: #ffd369; user-select: none;
       }
-      .dc-live-wave-group-label {
-        position: sticky; top: -8px; z-index: 1; margin: 0 -2px;
-        font-size: 10px; font-weight: 800; color: #ffd369; text-transform: uppercase; letter-spacing: .05em;
-        background: #12141f; padding: 4px 2px 2px;
+      .dc-th-group > summary::-webkit-details-marker { display: none; }
+      .dc-th-group > summary::before { content: '▸'; color: #7a80a3; font-size: 10px; transition: transform .15s ease; }
+      .dc-th-group[open] > summary::before { transform: rotate(90deg); }
+      .dc-th-group > summary > span:first-child { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+      .dc-th-count { font-size: 10px; font-weight: 400; color: #6b7089; }
+      .dc-th-row {
+        display: flex; align-items: center; justify-content: space-between; gap: 8px;
+        padding: 6px 10px; border-top: 1px solid #23263b; font-size: 12px; color: #e6e9ff;
       }
-      .dc-live-threshold-group { color: #6b7089; font-weight: 400; font-size: 10px; }
+      .dc-th-default .dc-th-name { color: #aab0d4; font-style: italic; }
+      .dc-th-name { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+      .dc-th-field { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; }
+      .dc-th-field input {
+        width: 118px; background: #12141f; border: 1px solid #2b2d44; border-radius: 6px; color: #e6e9ff;
+        padding: 4px 7px; font-size: 12px; text-align: right; font-variant-numeric: tabular-nums;
+      }
+      .dc-th-field input::placeholder { color: #5a5f80; }
+      .dc-th-field input:focus { outline: none; border-color: #4a5de0; box-shadow: 0 0 0 2px rgba(74,93,224,.25); }
+      .dc-th-chip { min-width: 40px; color: #7cffb8; font-size: 11px; font-weight: 700; font-variant-numeric: tabular-nums; }
+      .dc-th-chip.auto { color: #6b7089; font-weight: 400; }
+      .dc-th-row.bad input { border-color: #ff6b6b; }
+      .dc-th-row.bad .dc-th-chip { color: #ff6b6b; }
+      .dc-th-reset { border: none !important; background: transparent !important; color: #8aa2ff !important; padding: 0 !important; width: 14px; font-size: 13px !important; cursor: pointer; }
+      .dc-th-row:not(.dirty) .dc-th-reset { visibility: hidden; }
 
       .dc-live-modal-actions {
         display: flex; justify-content: flex-end; gap: 8px; flex: 0 0 auto;
