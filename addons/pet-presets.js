@@ -326,6 +326,7 @@
     const issues = ok ? failed.map((s) => s.label + ' — ' + s.err).concat(extra) : [];
     if (issues.length > 1) console.warn('[Pet Presets] ' + summary, issues);
     const msg = issues.length ? summary.replace(/\.$/, '') + ' — ' + issues[0] + (issues.length > 1 ? ` (+${issues.length - 1} more, see console)` : '') : summary;
+    lastRun = { ok: !!ok && !issues.length, message: msg };
     showRunToast(msg, ok && !issues.length, ok && !issues.length ? 10000 : 20000);
   }
 
@@ -1301,6 +1302,7 @@
    * ===================================================================== */
 
   let presetBusy = false;
+  let lastRun = null;   // the last result finishRun reported, so apply() below can hand it to other addons
   let activeApplyPreset = null;
   let menuMountedFor = null;
 
@@ -1852,6 +1854,7 @@
         const d = stepRun.done, n = stepRun.total;
         cancelRun = false;
         showRunToast(`Cancelled "${preset.name}" — ${TEAM_LABELS[targetTeam]} may be part-way` + (n ? ` (${d}/${n} steps done).` : '.'), true, 12000);
+        lastRun = { ok: false, message: 'cancelled' };
         dropDocCache(); dropLinkIndex();
         try { if (isPetsPage()) await smartRefreshTeamSections(getUrlTeam()); else scheduleAugment(); } catch (_) { /* the page just shows the old state */ }
       } else finishRun('Stopped: ' + (err?.message || 'action failed'), false, []);
@@ -3626,4 +3629,33 @@ function openLinkChooser(mainInvId, level, info) {
       if (touched) scheduleAugment();
     }).observe(document.body, { childList: true, subtree: true });
   }
+
+  // ---- Public API for other addons ---------------------------------------------------------------------------------------
+  // Offered through Core capabilities (see guides/CAPABILITIES.md). The SAME contract for every preset addon (gear, crystal, pet):
+  //   Core.call('preset.pet.list')                          -> [{ id, name }]   (cheap and synchronous: Core.cap('preset.pet.list')())
+  //   Core.call('preset.pet.apply', id, { silent, target }) -> Promise<{ ok, message }>   applies the saved team; never asks for confirmation. target = which team: 'attack' (default, PvE), 'pvp_attack' or 'defense'
+  //   apply never throws: a problem comes back as { ok: false, message }.
+  // The older way keeps working: Core.get('pet-presets').list() / .apply(id, opts) is the same object.
+  const petApi = {
+    list: () => loadPresets().map((x) => ({ id: x.id, name: x.name })),
+    async apply(id, o) {
+      const preset = loadPresets().find((x) => String(x.id) === String(id));
+      if (!preset) return { ok: false, message: 'preset not found' };
+      const team = (o && (o.target || o.team)) || 'attack';
+      if (!TEAM_KEYS.includes(team)) return { ok: false, message: 'unknown team "' + team + '" (use ' + TEAM_KEYS.join(', ') + ')' };
+      if (presetBusy) return { ok: false, message: 'busy with another preset action' };
+      lastRun = null;
+      try { await restorePresetToTeam(preset, team); }
+      catch (e) { return { ok: false, message: 'failed: ' + ((e && e.message) || e) }; }
+      return lastRun || { ok: false, message: 'no result' };
+    },
+  };
+  Core.module({
+    id: 'pet-presets', name: 'Pet Presets',
+    provides: {
+      'preset.pet.list':  { fn: petApi.list,  doc: 'saved pet team presets', returns: '[{ id, name }]' },
+      'preset.pet.apply': { fn: petApi.apply, doc: 'apply a pet team preset (no confirm dialog)', args: "(id, { target? = 'attack' | 'pvp_attack' | 'defense' })", returns: 'Promise<{ ok, message }>' },
+    },
+    init() { return petApi; },
+  });
 })();
