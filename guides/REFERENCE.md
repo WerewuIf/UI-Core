@@ -45,6 +45,7 @@ addons/
   pet-presets.js      🐾 Pet team presets: slots, links, sigils, elemental orb, Equipped badge
   ui-cleanup.js       layout tidy + reminders on guild/home/battle pages (page-matched)
   battle.js           battle page restructure + AutoSlash (page-matched, early)
+  automator.js        🤖 Automator (bosses, dungeons, duels, loot). Finds gear/crystal/pet presets through Core capabilities
 examples/addon-template.js   annotated starter for new addons
 README.md             BASIC end-user guide (install, use, troubleshoot). Keep it basic
 REFERENCE.md          this guide
@@ -53,6 +54,8 @@ REFERENCE.md          this guide
 Versions: Core **3.8.1** (`version:` in `core.js`; ⚙️ shows "Core v3.8.1"), bootstrap **4.0.1**, crystal 1.5.1, gear 3.2.2, pet **2.8.0**, ui-cleanup 2.2.0, battle 15.10.
 
 Core **3.14.1** / Battle **15.19** / Cube Suite **3.4.0**: `Core.me` is now the one place that knows the player's stamina / exp / level and keeps the top bar right (a fresh fetch beats a stale bar; see `Core.me` in §7), Battle Page and Cube Suite no longer write the bar themselves, addons can declare `"button": true|false` in `addons.json`, and addons that are skipped on a page are kept up to date and keep one fixed place in ⚙️ (§4, §11). Before that, Core **3.13.0** / Cube Suite **3.3.0**: `Core.potions` (shared, coordinated potion use, sidebar first then inventory), update-queue fix, and ⚙️ now lists addons that run without a button last and shows each button's real look (e.g. the Stat Builder's points badge) instead of a dot. Recent changes (all tested): Elemental Orb slot; hover ⋯ menus; loader rewrite (instant start from saved copy); Equipped badge that matches pets, links, sigils and orbs exactly on all three teams; apply on an already-matching team finishes at once, with request timeouts; one **Check for updates** button; Core updates itself like an addon; page scroll lock while a modal is open; `Core.me` (stamina, level, exp, gold, server clock, pid from the top bar) and `Core.csrf` (one registry for CSRF tokens); `Core.keepAlive` (Web Lock + loopback WebRTC + silent audio, to keep a background tab alive), `Core.lock` (Web Lock hold/steal/release/elect) and `Core.tab` (main-tab / idle-tab election with take-over, built on Core.lock). Addons not yet migrated to them: pet-presets still keeps its own sigil token.
+
+Core **3.16.0** (api level 5): **capabilities**. An addon offers named functions with `provides` and another addon calls them with `Core.call(name, ...args)` without knowing who offers them (`Core.cap / has / caps / when`, event `caps:changed`; full guide: §9, "Capabilities"). Gear Presets **3.5.0**, Crystal Presets **1.8.0** and Pet Presets **2.10.0** all offer the same `preset.<kind>.list` / `preset.<kind>.apply` pair; Automator **1.1.0** discovers those instead of naming addons, so a new preset kind appears in its per-boss dropdowns by itself. `Core.get('gear-presets')` etc. keep working unchanged.
 
 ---
 
@@ -303,7 +306,7 @@ Core.emit('my-addon:changed', { id: 1 });                       // this tab
 Core.emit('my-addon:changed', { id: 1 }, { shared: true });     // also your other tabs
 Core.state.set('lastBoss', 42);  Core.state.watch('lastBoss', (v, old) => {});   // in-memory, this page
 ```
-For a proper dependency (use another addon's functions) use `Core.module` + `Core.use` (below).
+For a proper dependency (use another addon's functions) use `Core.module` + `Core.use` (below). To call a function without caring WHICH addon offers it (or whether one does), use capabilities: `await Core.call('preset.gear.apply', id, { silent: true })`. See "Capabilities" at the end of this section.
 
 ### A module with a public API and a dependency
 ```js
@@ -319,6 +322,104 @@ Core.module({
 });
 // elsewhere:  const api = await Core.use('price-tools');   // null if missing/failed      Core.get('price-tools') // sync
 ```
+
+### Capabilities: call another addon's function by name (Core 3.16.0+, api level 5)
+
+An addon can **offer named functions**; any other addon **calls them by name** without knowing who offers them, or whether anyone does. Core only keeps the table and never looks inside a name, so it knows nothing about gear, crystals, pets or bosses. `examples/addon-template.js` section D is a working offer + call. To depend on ONE specific addon (wait for it, use its whole api), use `Core.module` + `Core.use` above instead.
+
+```
+Gear Presets   ──offers──▶  preset.gear.list / preset.gear.apply     ─┐
+Crystal Presets──offers──▶  preset.crystal.list / .apply              ├─ Core (a table of names) ◀──calls── Automator
+Pet Presets    ──offers──▶  preset.pet.list / .apply                  ┘
+A new addon    ──offers──▶  preset.title.list / .apply   ← shows up in the Automator with no change to either side
+```
+
+**Calling one**
+
+```js
+const r = await Core.call('preset.gear.apply', presetId, { silent: true });   // -> { ok, message }
+if (!r.ok) Core.ui.toast('Gear failed: ' + r.message, false);
+
+const list = Core.cap('preset.gear.list');       // the function itself, or null: cheap synchronous reads
+const presets = list ? list() : [];              // [{ id, name }]
+```
+
+| Call | Returns |
+|---|---|
+| `Core.call(name, ...args)` | `Promise` of what the provider returns. **Rejects** if nobody offers `name` (`err.code === 'NO_CAP'`, `err.cap`) or if the provider throws (also logged as a warning) |
+| `Core.cap(name)` | the provider's function or `null`; use it for fast synchronous calls such as `list()` |
+| `Core.has(name)` | `true` / `false` |
+| `Core.caps(prefix?)` | `[{ cap, by, doc, args, returns }]` sorted by name; `Core.caps('preset.')` filters |
+| `Core.when(name, { timeout = 10000 })` | `Promise<boolean>`: `true` as soon as someone offers it, `false` on timeout |
+| `Core.on('caps:changed', ({ by, added }) => …)` | fires each time an addon registers capabilities (`by` = addon id, `added` = names) |
+
+**Load order.** Addons load asynchronously, so a capability may not exist yet when yours starts. Either check at the moment you need it (`if (!Core.has(name)) return toast('… is not loaded')`, best for "do X when the user clicks"), or `await Core.when(name, { timeout: 5000 })` once, or keep a UI in step with `Core.on('caps:changed', ({ added }) => { if (added.some((n) => n.startsWith('preset.'))) redraw(); })` (what the Automator does for its dropdowns). If your addon *must* have another module, use `deps: ['pet-presets']`: your `init` then runs after that module is ready, and its capabilities are already registered.
+
+**Offering one.** Put `provides` on a `Core.module` (three equivalent forms):
+
+```js
+Core.module({ id: 'title-presets', name: 'Title Presets',
+  provides: {                                    // A. object: a function, or { fn, doc, args, returns } (doc fields show in Core.caps())
+    'preset.title.list':  () => loadPresets().map((p) => ({ id: p.id, name: p.name })),
+    'preset.title.apply': { fn: applyTitle, doc: 'equip a title', args: '(id)', returns: 'Promise<{ ok, message }>' },
+  },
+  init() { return { /* your normal public api: Core.get('title-presets') */ }; } });
+// B. provides: (api, ctx) => ({ 'demo.x.get': () => api.value })     reuses what init() returned
+// C. inside init:  ctx.provide('demo.x.get', () => 42, { doc: 'the answer' })
+```
+
+- **Names are lowercase and dotted with at least two parts** (`preset.gear.apply`, `automator.status`); letters, digits and `-` only. Start with your own area, never `core.`.
+- **First provider of a name wins.** A second addon offering the same name is ignored with a console warning, so a name is a contract.
+- **Offered only after `init` succeeded.** A disabled addon, one skipped on this page (`match`) or one that crashes in `init` offers nothing, so a caller never sees a capability that cannot work.
+- Offering does not replace your own api: `Core.get('your-id')` still returns what `init` returned. Often the capability and the api method are the same function (the preset addons do this).
+
+**Writing a good one.** Never throw for an expected problem: return `{ ok: false, message: 'preset not found' }`. Never open a `confirm()` or modal from a capability (the caller is another addon, often unattended; keep your own button's dialog path separate). Keep `list`-style functions cheap and synchronous. Return plain data, no DOM nodes. Fill `doc` / `args` / `returns` and add a row to the table below.
+
+**The preset contract** (gear, crystal, pet, and any future kind). Every preset addon offers the same pair, `<kind>` = `gear`, `crystal`, `pet`, …:
+
+```
+preset.<kind>.list    ()                          -> [{ id, name }]
+preset.<kind>.apply   (id, { silent?, target? })  -> Promise<{ ok: boolean, message: string }>
+```
+
+`list` returns only `id` and `name`. `apply` equips the saved preset **without any confirmation dialog** and never throws: an unknown id gives `{ ok:false, message:'preset not found' }`, an unreadable page gives `{ ok:false, message:'…' }`. `silent` is accepted by every kind (callers pass `{ silent: true }`). `target` picks the set or team where there is more than one:
+
+| Kind | `target` | Default |
+|---|---|---|
+| `gear` | `'attack'`, `'pvp_attack'`, `'defense'` | `'attack'` (PvE) |
+| `pet` | `'attack'`, `'pvp_attack'`, `'defense'` | `'attack'` (PvE) |
+| `crystal` | not used (crystals apply to the whole setup) | |
+
+The **Automator** picks up every `list` + `apply` pair under `preset.<kind>.`: each boss gets a `<kind> preset` dropdown and the chosen preset is applied when it moves to that boss. A new kind needs nothing but an addon offering `preset.<kind>.list` and `.apply`. (A kind named like a boss setting, such as `cap`, `gate`, `wave`, `targeting`, is ignored.)
+
+**What exists today** (`Core.caps()` in the console is always the up-to-date list; keep this table in step when you add one)
+
+| Name | Offered by | Arguments | Returns |
+|---|---|---|---|
+| `preset.gear.list` | `gear-presets` | none | `[{ id, name }]` |
+| `preset.gear.apply` | `gear-presets` | `(id, { target? })` | `Promise<{ ok, message }>` |
+| `preset.crystal.list` | `crystal-presets` | none | `[{ id, name }]` |
+| `preset.crystal.apply` | `crystal-presets` | `(id)` | `Promise<{ ok, message }>` |
+| `preset.pet.list` | `pet-presets` | none | `[{ id, name }]` |
+| `preset.pet.apply` | `pet-presets` | `(id, { target? })` | `Promise<{ ok, message }>` |
+| `automator.status` | `automator` | none | string: what it is doing now |
+| `automator.start` / `automator.stop` | `automator` | none | start / stop attacking the ticked bosses |
+| `automator.scan` | `automator` | none | rescan the bosses now |
+
+The older way still works and returns the same functions: `Core.get('gear-presets').list()` / `.apply(id, opts)`. Prefer `Core.call` / `Core.cap` in new code: the caller does not need the addon's id, and a missing addon is a clean `NO_CAP` instead of `undefined`.
+
+**Older Core.** Before 3.16.0 there is no `Core.call` / `Core.caps` / `Core.cap`. An addon that *offers* capabilities still loads there (the unknown `provides` key is ignored); one that *calls* them must guard: `if (typeof Core.call !== 'function') return showMessage('Needs Core 3.16.0 or newer; reload to update.')`. The Automator does this: on an older Core it works as before and only the per-boss preset dropdowns are absent (Diagnostics says "needs Core 3.16.0+").
+
+**Try it in the game's console**
+
+```js
+Core.caps('preset.')                                                    // who offers what
+await Core.call('preset.gear.list')                                     // [{ id, name }, ...]
+await Core.call('preset.gear.apply', 'gp_abc123', { silent: true })     // really equips it
+Core.when('preset.pet.apply', { timeout: 3000 }).then(console.log)
+```
+
+For an addon of your own, ⚙️ → "Add by URL" (§6), then `Core.caps()` should list its names with `by` set to your id. A missing name has a `[Core]` warning in the console: invalid name, already taken, or the module did not start.
 
 ---
 
@@ -410,8 +511,14 @@ Coordination, per potion kind (`stamina`, `hp`, or the item name): callers that 
 
 ### Modules
 
-`Core.module({ id, name, icon, version, match, deps, early, float, init(Core, ctx) })` · `Core.use(id)` (async) · `Core.get(id)` (sync).
-`ctx` = `{ id, store(ns, opts), float(def), log(...) }`. `match` here is a RegExp / string / function; it's separate from the manifest `match`.
+`Core.module({ id, name, icon, version, match, deps, early, float, provides, init(Core, ctx) })` · `Core.use(id)` (async) · `Core.get(id)` (sync).
+`ctx` = `{ id, store(ns, opts), float(def), log(...), provide(name, fn, meta?) }`. `match` here is a RegExp / string / function; it's separate from the manifest `match`.
+
+### Capabilities (api level 5)
+
+`provides: { 'area.thing.verb': fn | { fn, doc, args, returns } }` (or `(api, ctx) => ({…})`, or `ctx.provide(name, fn, meta)`) on a module offers functions; they register only after `init` succeeded.
+`Core.call(name, ...args)` (async; rejects with `err.code === 'NO_CAP'` when nobody offers it) · `Core.cap(name)` (the function or `null`, for sync reads) · `Core.has(name)` · `Core.caps(prefix?)` → `[{ cap, by, doc, args, returns }]` · `Core.when(name, { timeout })` → `Promise<boolean>` · event `caps:changed` `{ by, added }`.
+Names are lowercase dotted (≥ 2 parts); the first provider of a name wins. Today: `preset.{gear,crystal,pet}.{list,apply}` and `automator.{status,start,stop,scan}`. Rules, the preset contract and examples: §9, "Capabilities".
 
 ### Console
 
@@ -558,6 +665,7 @@ DATA RULES
 - Monster-cookie-dependent fetches go through Core.cookies.withMode('alive'|'dead'|'all', fn).
 - DOM changes: Core.dom.watch(fn) (must be idempotent), Core.dom.when(selector), Core.dom.ready. No own MutationObserver on document.
 - Events between addons: Core.on / emit; state: Core.state; dependencies: Core.module({ id, deps, float, init }) + Core.use(id).
+- Using another addon's function: `await Core.call('area.thing.verb', ...args)` (check `Core.has(name)` first; `Core.caps()` lists what exists). Offering one: `Core.module({ id, provides: { 'area.thing.verb': { fn, doc, args, returns } }, init })`. Names lowercase dotted; return `{ ok, message }` instead of throwing; never open a confirm() from a capability. Preset addons must offer `preset.<kind>.list` () -> [{id,name}] and `preset.<kind>.apply` (id, { silent, target }) -> Promise<{ok,message}> (see §9, "Capabilities").
 
 DELIVER
 1. addons/<id>.js
