@@ -1158,24 +1158,33 @@
     onHide() { if (gpHome && gpPanel) gpHome.appendChild(gpPanel); },
   });
 
-  // Public API for other addons (the Automator switches gear per boss). Read it with Core.get('gear-presets').
-  //   list()                      -> [{ id, name }]
-  //   apply(id, { set?: 'attack' }) -> Promise<{ ok, message }>   equips the preset on that set; never asks for confirmation
+  // ---- Public API for other addons ---------------------------------------------------------------------------------------
+  // Offered through Core capabilities (see guides/CAPABILITIES.md). The SAME contract for every preset addon (gear, crystal, pet):
+  //   Core.call('preset.gear.list')                          -> [{ id, name }]   (cheap and synchronous: Core.cap('preset.gear.list')())
+  //   Core.call('preset.gear.apply', id, { silent, target }) -> Promise<{ ok, message }>   equips it; never asks for confirmation. target = which set: 'attack' (default, PvE), 'pvp_attack' or 'defense'
+  //   apply never throws: a problem comes back as { ok: false, message }.
+  // The older way keeps working: Core.get('gear-presets').list() / .apply(id, opts) is the same object.
+  const gearApi = {
+    list: () => loadPresets().map((p) => ({ id: p.id, name: p.name })),
+    async apply(id, o) {
+      const p = loadPresets().find((x) => String(x.id) === String(id));
+      if (!p) return { ok: false, message: 'preset not found' };
+      const target = (o && (o.target || o.set)) || 'attack';
+      if (!SET_KEYS.includes(target)) return { ok: false, message: 'unknown set "' + target + '" (use ' + SET_KEYS.join(', ') + ')' };
+      lastSay = null;
+      try { await restorePresetToSet(p, target); }
+      catch (e) { return { ok: false, message: 'failed: ' + ((e && e.message) || e) }; }
+      const s = lastSay;
+      return s ? { ok: s.ok !== false, message: s.msg } : { ok: false, message: 'no result' };
+    },
+  };
   Core.module({
     id: 'gear-presets', name: 'Gear Presets',
-    init() {
-      return {
-        list: () => loadPresets().map((p) => ({ id: p.id, name: p.name })),
-        async apply(id, o) {
-          const p = loadPresets().find((x) => String(x.id) === String(id));
-          if (!p) return { ok: false, message: 'preset not found' };
-          lastSay = null;
-          await restorePresetToSet(p, (o && o.set) || 'attack');
-          const s = lastSay;
-          return s ? { ok: s.ok !== false, message: s.msg } : { ok: false, message: 'no result' };
-        },
-      };
+    provides: {
+      'preset.gear.list':  { fn: gearApi.list,  doc: 'saved gear presets', returns: '[{ id, name }]' },
+      'preset.gear.apply': { fn: gearApi.apply, doc: 'equip a gear preset (no confirm dialog)', args: "(id, { target? = 'attack' | 'pvp_attack' | 'defense' })", returns: 'Promise<{ ok, message }>' },
     },
+    init() { return gearApi; },
   });
 
 })();
