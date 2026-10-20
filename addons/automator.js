@@ -1,11 +1,12 @@
 /* automator.js — Automator addon for Core (one file, swappable parts)
  *
- * Plain script, no ==UserScript== header. `Core` is in scope (>= 3.15.0: Core.auth, Core.potions, Core.tab, Core.me).
+ * Plain script, no ==UserScript== header. `Core` is in scope (>= 3.16.0: Core.auth, Core.potions, Core.tab, Core.me, and Core.caps/call for presets;
+ * on an older Core everything works except the per-boss preset dropdowns).
  * Replaces "Boss DMG Automator 3.0.0" (and must not run together with it or with Rahik's DMG Boss Script).
  *
  *   PART 0  KERNEL     config, log, diagnostics, action queue, player state, auth guard, part registry, scheduler
  *   PART 1  BOSSES     wave bosses: roster, authoritative page scans, attack engine, side-mob (toggle), potions,
- *                      auto-farm coordination, gear/crystal preset bridge
+ *                      auto-farm coordination, preset bridge (gear / crystal / pet, found through Core capabilities)
  *   PART 2  DUNGEONS   Castle bosses (+ Khaal phases), Shadowbridge Gribble swarm. NOT the cube: Cube Suite owns it.
  *                      Swappable: turn the part off (or delete it) and the wave bosses keep working.
  *   PART 3  DUELS      Phase duels, shared by wave and dungeon bosses
@@ -18,10 +19,18 @@
  * replies were retried instantly instead of honouring their delay.
  */
 Core.module({
-  id: 'automator', name: 'Automator', icon: '🤖', version: '1.0.0',
+  id: 'automator', name: 'Automator', icon: '🤖', version: '1.1.0',
+  // Offered to other addons through Core capabilities (guides/CAPABILITIES.md):
+  //   automator.status() -> the status string     automator.start() / automator.stop()     automator.scan() -> scan the bosses now
+  provides: (api) => api && api.start ? {
+    'automator.status': { fn: api.status, doc: 'what the automator is doing right now', returns: 'string' },
+    'automator.start':  { fn: api.start,  doc: 'start auto-attacking the ticked bosses' },
+    'automator.stop':   { fn: api.stop,   doc: 'stop attacking' },
+    'automator.scan':   { fn: api.scanNow, doc: 'rescan the bosses now' },
+  } : {},
   init(Core) {
 'use strict';
-const ID = 'automator', VERSION = '1.0.0';
+const ID = 'automator', VERSION = '1.1.0';
 if (window.__automatorLoaded) { console.warn('[automator] already loaded', window.__automatorLoaded); return null; }
 window.__automatorLoaded = VERSION;
 
@@ -67,7 +76,7 @@ const loadJSON = (k, fb) => { try { const r = localStorage.getItem(k); return r 
 const DEFAULT_CFG = {
   v: 1,
   targets: [],                         // nameLow list = enabled bosses, in priority order (first alive + uncapped wins)
-  bosses: {},                          // nameLow -> { cap, gate, wave, targeting:'auto|normal|shielded', gear:'', crystal:'', switchAt:'HH:MM', capAfterSwitch }
+  bosses: {},                          // nameLow -> { cap, gate, wave, targeting:'auto|normal|shielded', <kind>:'' (one per preset kind that is offered: gear, crystal, pet, …), switchAt:'HH:MM', capAfterSwitch }
   defaultBossCap: 3_000_000_000,
   maxTier: 'LEGENDARY',
   classOverride: 'auto', useClassSkill: true,
@@ -805,45 +814,56 @@ async function detectClass() {
 }
 const effectiveClass = () => { const o = (cfg.classOverride || 'auto').toLowerCase(); if (o !== 'auto' && CLASS_SKILLS[o]) return o; return CLASS_SKILLS[cfg.detectedClass] ? cfg.detectedClass : null; };
 
-/* ---- gear / crystal preset bridge --------------------------------------------------------------------------------
- * Presets live in the Gear Presets and Crystal Presets addons. We never copy their code and Core does not know about them:
- * each addon publishes a small public API with Core.module, and we read it through Core.get('<id>'):
+/* ---- preset bridge (found through Core capabilities) ---------------------------------------------------------------
+ * The automator knows no preset addon by name and Core knows nothing about presets. Any addon that offers the pair
  *
- *     Core.module({ id: 'gear-presets', init: () => ({
- *       list():  [{ id, name }],                          // saved presets
- *       apply(id, { silent: true }): Promise<{ ok, message? }>   // equip it, no confirm() dialog
- *     }) })                                               // same shape for 'crystal-presets'
+ *     preset.<kind>.list    ()                    -> [{ id, name }]            saved presets
+ *     preset.<kind>.apply   (id, { silent, target }) -> Promise<{ ok, message }>   equip it, never a confirm() dialog
  *
- * Until an addon publishes that, the bridge reports "not available" and the per-boss dropdowns stay empty. Nothing breaks.
+ * through Core capabilities (guides/CAPABILITIES.md) gets a "<kind> preset" dropdown on every boss, and the chosen preset is applied
+ * when the engine moves to that boss. Today that is gear, crystal and pet; an addon that later offers preset.title.* shows up here
+ * with no change to either side. A kind that is not offered shows nothing; a late-loading addon redraws the panel (caps:changed).
  */
 const Presets = (() => {
-  const KINDS = { gear: 'gear-presets', crystal: 'crystal-presets' };
+  const FIRST = ['gear', 'crystal', 'pet'];                                        // applied in this order; any other kind follows A-Z
+  const RESERVED = new Set(['cap', 'gate', 'wave', 'targeting', 'switchAt', 'capAfterSwitch']);   // boss fields a kind must not shadow
   const applied = {}, failedAt = {};
-  const api = (kind) => { try { const a = Core.get(KINDS[kind]); return a && typeof a.list === 'function' && typeof a.apply === 'function' ? a : null; } catch (_) { return null; } };
-  const available = (kind) => !!api(kind);
+  const haveCaps = () => typeof Core.caps === 'function' && typeof Core.call === 'function';
+  const kinds = () => {
+    if (!haveCaps()) return [];
+    const ks = [];
+    for (const c of Core.caps('preset.')) {
+      const m = /^preset\.([a-z0-9-]+)\.list$/.exec(c.cap);
+      if (m && !RESERVED.has(m[1]) && Core.has('preset.' + m[1] + '.apply')) ks.push(m[1]);
+    }
+    const rank = (k) => { const i = FIRST.indexOf(k); return i < 0 ? 99 : i; };
+    return ks.sort((a, b) => rank(a) - rank(b) || (a < b ? -1 : 1));
+  };
+  const available = (kind) => kinds().includes(kind);
   function list(kind) {
-    const a = api(kind); if (!a) return [];
-    try { return (a.list() || []).map((p) => ({ id: String(p.id), name: String(p.name == null ? p.id : p.name) })); } catch (_) { return []; }
+    const f = haveCaps() ? Core.cap('preset.' + kind + '.list') : null; if (!f) return [];
+    try { return (f() || []).map((p) => ({ id: String(p.id), name: String(p.name == null ? p.id : p.name) })); } catch (_) { return []; }
   }
   const nameOf = (kind, id) => { const p = list(kind).find((x) => x.id === String(id)); return p ? p.name : String(id); };
-  // Called between swings, when the engine moves to a boss. Applies the boss's gear / crystal preset if it is not already on.
+  // Called between swings, when the engine moves to a boss. Applies the boss's preset of each kind if it is not already on.
   async function ensure(low) {
     const o = cfg.bosses[low] || {};
-    for (const kind of ['gear', 'crystal']) {
+    for (const kind of kinds()) {
       const want = o[kind]; if (!want || applied[kind] === String(want)) continue;
       const key = kind + ':' + want;
       if (Date.now() - (failedAt[key] || 0) < 300000) continue;           // a failed apply is not retried for 5 min
-      const a = api(kind);
-      if (!a) { Diag.skip('preset-api-missing', kind + ' presets addon has no public API'); failedAt[key] = Date.now(); continue; }
       log(`🎒 applying ${kind} preset "${esc(nameOf(kind, want))}" for ${esc(bossName(low))}…`, 'info');
       let r;
-      try { r = await withTimeout(Promise.resolve(a.apply(String(want), { silent: true })), 120000, { ok: false, message: 'timed out' }); }
-      catch (e) { r = { ok: false, message: (e && e.message) || String(e) }; }
+      try { r = await withTimeout(Core.call('preset.' + kind + '.apply', String(want), { silent: true }), 120000, { ok: false, message: 'timed out' }); }
+      catch (e) { r = { ok: false, message: (e && e.code === 'NO_CAP') ? 'the addon that offered it is gone' : ((e && e.message) || String(e)) }; }
       if (r && r.ok !== false) { applied[kind] = String(want); log(`✅ ${kind} preset applied`, 'ok'); try { await Core.me.sync(); } catch (_) { /* */ } Me.statsAt = 0; }
       else { failedAt[key] = Date.now(); log(`⚠️ ${kind} preset "${esc(nameOf(kind, want))}" failed: ${esc((r && r.message) || 'unknown')}`, 'warn'); }
     }
   }
-  return { available, list, ensure, applied: () => Object.assign({}, applied), forget: () => { delete applied.gear; delete applied.crystal; } };
+  // "gear: Boss gear · pet: Boss pets" for the Status tab, or an em dash when nothing was applied this session
+  const summary = () => { const a = kinds().filter((k) => applied[k]).map((k) => k + ': ' + nameOf(k, applied[k])); return a.length ? a.join(' · ') : '—'; };
+  const note = () => !haveCaps() ? 'needs Core 3.16.0+' : (kinds().length ? kinds().map((k) => `${k} (${list(k).length})`).join(' · ') : 'none offered');
+  return { kinds, available, list, ensure, summary, note, applied: () => Object.assign({}, applied), forget: () => { Object.keys(applied).forEach((k) => delete applied[k]); } };
 })();
 
 /* ---- side-mob / shielded-boss support (TOGGLE, off by default: it should not be needed) ------------------------------
@@ -1723,7 +1743,7 @@ const Panel = (() => {
       card('HP', Me.hpKnown ? `${fmtNum(Me.hp)} / ${fmtNum(Me.maxHp)}` : '?'), card('MP', Me.mpKnown ? `${fmtNum(Me.mp)} / ${fmtNum(Me.maxMp)}` : '?'),
       card('Level · EXP', `${Me.level() || '?'} · ${Me.expPct() != null ? Me.expPct().toFixed(1) + '%' : '?'}`), card('Class', cls || 'unknown'),
       card('Hits · damage', `${stats.hits} · ${fmtNum(stats.dmg)}`), card('Potions used', `stam ${stats.stamA + stats.stamB} · hp ${stats.hpUses} · mana ${stats.mpRefills}`),
-      card('Gear · crystal', `${Presets.applied().gear ? Presets.list('gear').concat([]).find((p) => p.id === Presets.applied().gear)?.name || 'set' : '—'} · ${Presets.applied().crystal ? Presets.list('crystal').find((p) => p.id === Presets.applied().crystal)?.name || 'set' : '—'}`))];
+      card('Presets applied', Presets.summary()))];
     const conf = Conflicts.list(); if (conf.length) out.push(h('div', { class: 'core-err' }, '⛔ ' + conf.join(' · ')));
     const gi = Guard.info(); if (gi.faulted || gi.lastInfo) out.push(h('div', { class: 'core-err' }, '🔒 ' + (gi.lastInfo || gi.faulted) + (gi.lastInfo === 'unconfigured' ? ' — add a login source (Account Switcher) or sign in by hand' : '')));
     if (!Tab.isMain()) out.push(h('div', { class: 'core-row' }, h('span', { class: 'core-dim' }, 'Another tab is the main one and does the attacking.'), btn('Take over this tab', 'soft', () => { Tab.takeOver(); })));
@@ -1749,14 +1769,14 @@ const Panel = (() => {
   }
   function presetSel(kind, low) {
     const list = Presets.list(kind);
-    if (!Presets.available(kind)) return fld(kind + ' preset', h('span', { class: 'core-dim' }, 'addon API not available'));
     return fld(kind + ' preset', sel([['', '— keep current —'], ...list.map((p) => [p.id, p.name])], ovr(low)[kind] || '', (v) => { ovr(low)[kind] = v; }, 190));
   }
   function bossRow(def) {
     const low = def.low, on = cfg.targets.includes(low), o = cfg.bosses[low] || {}, loc = bossLoc(low), swarm = def.kind === 'dungeon-swarm';
     const opts = h('details', { class: 'ma-det' }, h('summary', {}, 'options'),
       cfg.sideMob.enabled ? fld('shield targeting', sel([['auto', 'auto'], ['normal', 'normal (never divert)'], ['shielded', 'shielded (always divert)']], SideMob.modeOf(low), (v) => { ovr(low).targeting = v; }, 190)) : null,
-      presetSel('gear', low), presetSel('crystal', low),
+      ...Presets.kinds().map((k) => presetSel(k, low)),
+      Presets.kinds().length ? null : h('div', { class: 'core-dim' }, 'no preset addon loaded (gear / crystal / pet presets show up here when they are)'),
       fld('switch cap at (server time)', h('input', { class: 'core-input', style: { width: '70px' }, value: o.switchAt || '', placeholder: 'HH:MM', onchange: changed((el) => { const v = parseClock(el.value); if (!el.value.trim()) delete ovr(low).switchAt; else if (v) { ovr(low).switchAt = v; el.value = v; } else el.value = o.switchAt || ''; }) })),
       fld('cap after switch', h('input', { class: 'core-input', style: { width: '90px' }, value: o.capAfterSwitch != null ? fmtNum(o.capAfterSwitch) : '', onchange: changed((el) => { if (!el.value.trim()) delete ovr(low).capAfterSwitch; else { const n = parseCap(el.value); if (n != null) ovr(low).capAfterSwitch = n; } }) })),
       def.kind === 'wave' ? fld('gate / wave', h('span', {}, h('input', { class: 'core-input', style: { width: '48px' }, value: loc ? loc.gate : '', onchange: changed((el) => { const n = parseInt(el.value, 10); if (n > 0) ovr(low).gate = n; }) }), ' ', h('input', { class: 'core-input', style: { width: '48px' }, value: loc ? loc.wave : '', onchange: changed((el) => { const n = parseInt(el.value, 10); if (n > 0) ovr(low).wave = n; }) }))) : null);
@@ -1808,7 +1828,7 @@ const Panel = (() => {
   function tDiag() {
     const l = Diag.last(), counts = Object.entries(Diag.counts).sort((a, b) => b[1] - a[1]), au = Guard.info();
     return [h('div', { class: 'ma-grid' }, card('Why isn’t it attacking?', l.reason ? `${l.reason}${l.detail ? ' — ' + l.detail : ''}` : 'nothing skipped'), card('Last skip', ago(l.at)),
-      card('Gear presets API', Presets.available('gear') ? `ok (${Presets.list('gear').length})` : 'not available'), card('Crystal presets API', Presets.available('crystal') ? `ok (${Presets.list('crystal').length})` : 'not available'),
+      card('Preset capabilities', Presets.note()),
       card('Re-login', au.status ? (au.status.configured ? 'configured' : 'unconfigured') : 'Core.auth missing'), card('Shielded mobs known', SideMob.shielded()), card('Version', VERSION)),
       h('div', { class: 'core-row' }, btn('Clear diagnostics', 'soft', () => Diag.clear()), btn('Forget shielded mobs', 'soft', () => { SideMob.forget(); draw(); })),
       sec('Skip reasons (count)'), counts.length ? h('table', { class: 'ma-table' }, h('tbody', {}, counts.map(([k, n]) => h('tr', {}, h('td', {}, k), h('td', {}, n))))) : h('div', { class: 'core-dim' }, 'none'),
@@ -1841,6 +1861,7 @@ const Panel = (() => {
   }
   const typing = () => root && root.contains(document.activeElement) && /^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement.tagName);
   function schedule(ms) { if (drawT) return; drawT = setTimeout(() => { drawT = 0; if (typing()) schedule(1500); else draw(); }, ms || 400); }
+  if (typeof Core.on === 'function') Core.on('caps:changed', (d) => { if (open && d && (d.added || []).some((n) => n.startsWith('preset.'))) schedule(300); });   // a preset addon loaded late
   UI.hook((what) => { if (!open) return; if (what === undefined || DIRTY_TAB[what] === tab || (what === 'status' && tab === 'status')) schedule(); });
 
   function register() {
