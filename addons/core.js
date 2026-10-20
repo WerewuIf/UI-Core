@@ -21,6 +21,7 @@
  *   Core.dom.{watch,when,ready} · Core.ui.{toast,modal,menu,h,btn,css}
  *   Core.potions.{stamina,hp,use,find}  (one shared, coordinated potion user: sidebar first, inventory as fallback)
  *   Core.me.get() (stamina, gold, gems, level, exp, server clock) · Core.me.apply / addExp / fromAttack / ingest / sync (feed it newer numbers) · Core.clock (server time zone: weekday, is('mon'), isAfter('14:30'), at(...))
+ *   Core.auth.{check,pageState,isSignedOut,ensure,login,register,setCredentials,status}  session check + automatic sign-back-in
  *   Core.compact(n) -> "3.3B" · Core.parseNum("3.3B") -> 3300000000
  * Full reference with examples: REFERENCE.md in the repo.
  * ========================================================================== */
@@ -30,7 +31,7 @@
   // >>> Raw URL of addons.json
   const CONFIG = { manifest: 'https://raw.githubusercontent.com/WerewuIf/UI-Core/main/addons.json' };
 
-  const API = 3;   // 3: Core.potions, Core.me.apply / addExp / fromAttack / ingest / sync
+  const API = 4;   // 4: Core.auth.  3: Core.potions, Core.me.apply / addExp / fromAttack / ingest / sync
   if (root.Core && root.Core.__isCore) {
     if (root.Core.apiLevel < API) console.warn('[Core] an older core (api ' + root.Core.apiLevel + ') is already loaded; this script wants ' + API + '.');
     return;
@@ -268,7 +269,7 @@
     // "when a POST hits `when`, forget cached pages matching `drop`"
     function invalidateOn(when, drop, bodyMatch) { rules.push({ when, body: bodyMatch || null, drop: [].concat(drop) }); }
     invalidateOn(/\/inventory_ajax\.php/, [/\/inventory\.php/, /\/pets\.php/]);
-    invalidateOn(/\/use_item\.php|\/user_heal_potion\.php/, /\/inventory\.php/);
+    invalidateOn(/\/use_item\.php|\/user_heal_potion\.php/, [/\/inventory\.php/, /\/stats\.php/]);
     invalidateOn(/\/power_crystals\.php/, /\/power_crystals\.php/);
     invalidateOn(/\/pet_link_action\.php|\/pet_sigil_action\.php/, /\/pets\.php/);
     invalidateOn(/\/adventurers_(accept|finish|giveup|donate)/, /\/adventurers_guild\.php/);
@@ -1906,6 +1907,7 @@
       if (isExpired(s, r)) { tok.delete(name); await refresh(name); r = await send(); }
       return r;
     }
+    on('auth:signedin', () => tok.clear());   // tokens belong to the session that was just replaced
     const api = { register, get, set, refresh, post };
     // Known from the real pages (see the guide, "Site knowledge"):
     register('petSigil', { page: '/pets.php', re: /const\s+PET_SIGIL_CSRF\s*=\s*"([^"]*)"/, get: () => (typeof PET_SIGIL_CSRF === 'undefined' ? null : PET_SIGIL_CSRF), field: 'csrf_token', expired: /security token expired|csrf_expired/i });
@@ -2268,13 +2270,173 @@
     };
   })();
 
+  /* -------------------------------------------------------------- auth --- */
+  // Is the player signed in, and if not, sign back in. Same flow the Reaction Farmer uses (POST /signin.php, then
+  // /stats.php must no longer show #login-container), made shareable so no addon needs its own copy.
+  //
+  //   Core.auth.check({ force })        -> Promise<boolean>  signed in? One shared request, answer reused for 5 s.
+  //                                        Rejects when the site can't be reached or shows a blocked page (maintenance...),
+  //                                        which is NOT the same as signed out.
+  //   Core.auth.pageState(docOrText)    -> 'ok' | 'signedout' | <detector name>   free test on a page or reply you ALREADY
+  //                                        fetched (a login page where the real page should be). Fires the events below.
+  //   Core.auth.isSignedOut(docOrText)  -> boolean           pageState(...) === 'signedout'
+  //   Core.auth.ensure()                -> Promise<boolean>  signed in already, or sign back in. One attempt at a time, across
+  //                                        every tab. false = could not (the reason is in status().lastError).
+  //   Core.auth.login(creds?)           -> Promise<{ ok, error?, unconfigured?, waiting?, unavailable? }>
+  //   Core.auth.register({ id, name, credentials, configured })  -> unregister
+  //                                        A source of logins, e.g. the account switcher. credentials() returns
+  //                                        { email, password } for the account that should be signed in (or null); it may be
+  //                                        async. configured() is an optional sync "is it set up" for status().
+  //                                        Sources are asked in registration order, then the saved login.
+  //   Core.auth.setCredentials(email, password) · clearCredentials() · importLegacy()
+  //                                        A login saved by hand (fallback). NOTE it is plain text in this site's localStorage,
+  //                                        readable by every script on the page. importLegacy() copies the Reaction Farmer's
+  //                                        saved login over once, on request; it is never read silently.
+  //   Core.auth.addDetector(fn)         fn(docOrText) -> state name | falsy. Teach it a page that means "stop" (maintenance).
+  //   Core.auth.status()                -> { signedIn, configured, source, sources[], legacyFound, lastOk, lastError, retryAt }
+  //
+  // Events: 'auth:signedout' { reason } · 'auth:signedin' { via } · 'auth:blocked' { state } · 'auth:failed' { error }
+  // A failed automatic sign-in is not repeated for 60 s, so a wrong password can't be sent in a loop.
+  const auth = (() => {
+    const SIGNIN = '/signin.php', PROBE = '/stats.php';
+    const PROBE_TTL = 5000, RETRY_MS = 60000;
+    const LEGACY_KEY = 'veyraFarmLogin';
+    const saved = store('auth', { def: {}, key: 'core:auth' });
+    const sources = [], detectors = [];
+    const LOGIN_RE = /id\s*=\s*["']login-container["']/i;
+    let signedIn = null, probedAt = 0, probeJob = null, loginJob = null;
+    let lastOk = 0, lastError = '', retryAt = 0;
+    const lsGet = (k) => { try { return JSON.parse(root.localStorage.getItem(k) || 'null'); } catch (_) { return null; } };
+
+    // 'ok', 'signedout', or the name a detector gave.
+    function stateOf(x) {
+      if (typeof x === 'string' ? LOGIN_RE.test(x) : !!(x && typeof x.querySelector === 'function' && x.querySelector('#login-container'))) return 'signedout';
+      for (const d of detectors) {
+        let r = ''; try { r = d(x) || ''; } catch (e) { warn('auth detector threw', e); }
+        if (r) return String(r);
+      }
+      return 'ok';
+    }
+    // State changes go through the bus so every tab (and every listener) sees the same thing.
+    on('auth:signedout', () => { signedIn = false; probedAt = Date.now(); emit('net:invalidate', { all: true }); });   // cached copies may be login pages now
+    on('auth:blocked', () => { probedAt = 0; });   // a maintenance page means the cached answer can't be trusted
+    on('auth:signedin', () => { signedIn = true; probedAt = Date.now(); pidCache = null; emit('net:invalidate', { all: true }); });
+
+    function pageState(x) {
+      const s = stateOf(x);
+      if (s === 'signedout') { if (signedIn !== false) emit('auth:signedout', { reason: 'login page' }, { shared: true }); }
+      else if (s !== 'ok') emit('auth:blocked', { state: s });
+      return s;
+    }
+    const isSignedOut = (x) => pageState(x) === 'signedout';
+
+    function check(o = {}) {
+      if (!o.force && signedIn !== null && Date.now() - probedAt < PROBE_TTL) return Promise.resolve(signedIn);
+      if (probeJob) return o.force ? probeJob.then(() => 0, () => 0).then(() => check(o)) : probeJob;   // a forced probe never reuses one that started earlier
+      const job = (async () => {
+        const res = await root.fetch(PROBE, { credentials: 'same-origin', cache: 'no-store' });
+        if (!res.ok) throw new Error('HTTP ' + res.status + ' from ' + PROBE);
+        const s = stateOf(await res.text());
+        if (s !== 'ok' && s !== 'signedout') { emit('auth:blocked', { state: s }); throw new Error('site unavailable: ' + s); }
+        const up = s === 'ok';
+        probedAt = Date.now();
+        if (o.quiet) signedIn = up;
+        else if (up && signedIn !== true) emit('auth:signedin', { via: 'check' });
+        else if (!up && signedIn !== false) emit('auth:signedout', { reason: 'login page' }, { shared: true });
+        return up;
+      })();
+      probeJob = job;
+      const done = () => { if (probeJob === job) probeJob = null; };
+      job.then(done, done);
+      return job;
+    }
+
+    async function credentials() {
+      for (const s of sources) {
+        try {
+          const c = await s.credentials();
+          if (c && c.email && c.password) return { email: String(c.email), password: String(c.password), source: s.id };
+        } catch (e) { warn('auth source "' + s.id + '" threw', e); }
+      }
+      const m = saved.get() || {};
+      return m.email && m.password ? { email: m.email, password: m.password, source: 'saved' } : null;
+    }
+
+    const nav = root.navigator;
+    const locked = (fn) => (nav && nav.locks && nav.locks.request ? nav.locks.request('core:auth', fn) : fn());
+    function fail(msg, extra) { lastError = msg; emit('auth:failed', { error: msg }); return Object.assign({ ok: false, error: msg }, extra); }
+
+    function login(given) {
+      if (loginJob) return loginJob;
+      const job = locked(async () => {
+        if (!given) {
+          // another tab may have signed in while this one waited for the lock
+          let up = false;
+          try { up = await check({ force: true }); }
+          catch (e) { return fail('cannot reach the site: ' + ((e && e.message) || e), { unavailable: true }); }   // down / maintenance: never send a login to it
+          if (up) return { ok: true, already: true };
+          if (Date.now() < retryAt) return { ok: false, waiting: true, error: lastError || 'waiting before the next sign-in attempt' };
+        }
+        const c = given ? { email: given.email, password: given.password, source: 'given' } : await credentials();
+        if (!c || !c.email || !c.password) return fail('no login configured', { unconfigured: true });
+        let r;
+        try { r = await net.post(SIGNIN, { email: c.email, password: c.password, submit: 'Sign In' }); }
+        catch (e) { retryAt = Date.now() + RETRY_MS; return fail('sign-in request failed: ' + ((e && e.message) || e)); }
+        let up = false; try { up = await check({ force: true, quiet: true }); } catch (_) { /* */ }
+        if (!up) {
+          const why = [...new DOMParser().parseFromString(r.text, 'text/html').querySelectorAll('p.error')].map((e) => e.textContent.trim()).filter(Boolean).join(' ');
+          retryAt = Date.now() + RETRY_MS;
+          return fail(why || 'sign-in failed (HTTP ' + r.status + ')');
+        }
+        lastOk = Date.now(); lastError = ''; retryAt = 0;
+        emit('auth:signedin', { via: c.source }, { shared: true });
+        return { ok: true, source: c.source };
+      });
+      loginJob = job;
+      const done = () => { if (loginJob === job) loginJob = null; };
+      job.then(done, done);
+      return job;
+    }
+
+    async function ensure() {
+      let up;
+      try { up = await check(); } catch (e) { lastError = 'cannot tell if signed in: ' + ((e && e.message) || e); return false; }
+      return up ? true : !!(await login()).ok;
+    }
+
+    function register(src) {
+      if (!src || !src.id || typeof src.credentials !== 'function') { warn('auth.register needs { id, credentials }'); return () => {}; }
+      const i = sources.findIndex((s) => s.id === src.id);
+      if (i >= 0) sources.splice(i, 1);
+      sources.push(src);
+      return () => { const k = sources.indexOf(src); if (k >= 0) sources.splice(k, 1); };
+    }
+    function setCredentials(email, password) {
+      if (!email || !password) return false;
+      saved.set({ email: String(email).trim(), password: String(password) }); retryAt = 0; return true;
+    }
+    const clearCredentials = () => { saved.set({}); };
+    function importLegacy() { const l = lsGet(LEGACY_KEY); return !!(l && l.email && l.password && setCredentials(l.email, l.password)); }
+    const addDetector = (fn) => { if (typeof fn === 'function') detectors.push(fn); return () => { const i = detectors.indexOf(fn); if (i >= 0) detectors.splice(i, 1); }; };
+
+    function status() {
+      const m = saved.get() || {}, has = !!(m.email && m.password), l = lsGet(LEGACY_KEY);
+      const list = sources.map((s) => { let ok = true; try { if (s.configured) ok = !!s.configured(); } catch (_) { ok = false; } return { id: s.id, name: s.name || s.id, configured: ok }; });
+      list.push({ id: 'saved', name: 'Saved login', configured: has });
+      const first = list.find((x) => x.configured);
+      return { signedIn, configured: !!first, source: first ? first.id : '', sources: list, legacyFound: !has && !!(l && l.email), lastOk, lastError, retryAt };
+    }
+
+    return { check, pageState, isSignedOut, ensure, login, register, setCredentials, clearCredentials, importLegacy, addDetector, status };
+  })();
+
   /* ------------------------------------------------------------ export --- */
   const Core = {
-    __isCore: true, apiLevel: API, version: '3.14.1', debug: false, tabId: TAB,
+    __isCore: true, apiLevel: API, version: '3.15.0', debug: false, tabId: TAB,
     esc, sleep, debounce, fmt, int, compact, parseNum, parseJson,
     on, off, once, emit,
     state, store, player,
-    net, pages, dom, cookies, ui, me, clock, csrf, lock, keepAlive, tab, potions,
+    net, pages, dom, cookies, ui, me, clock, csrf, lock, keepAlive, tab, potions, auth,
     module: module_, use, get, status,
     float, addons: { list: entries, add: addCustom, remove: removeCustom, enable: setEnabled, status: rt, reload: startOne },
   };
