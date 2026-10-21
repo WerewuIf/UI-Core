@@ -19,7 +19,7 @@
  * replies were retried instantly instead of honouring their delay.
  */
 Core.module({
-  id: 'automator', name: 'Automator', icon: '🤖', version: '1.1.0',
+  id: 'automator', name: 'Automator', icon: '🤖', version: '1.2.0',
   // Offered to other addons through Core capabilities (guides/CAPABILITIES.md):
   //   automator.status() -> the status string     automator.start() / automator.stop()     automator.scan() -> scan the bosses now
   provides: (api) => api && api.start ? {
@@ -30,7 +30,7 @@ Core.module({
   } : {},
   init(Core) {
 'use strict';
-const ID = 'automator', VERSION = '1.1.0';
+const ID = 'automator', VERSION = '1.2.0';
 if (window.__automatorLoaded) { console.warn('[automator] already loaded', window.__automatorLoaded); return null; }
 window.__automatorLoaded = VERSION;
 
@@ -1668,132 +1668,195 @@ Object.assign(Loot, (() => {
 
 /* ===================================================================================================================
  * PART 5 — PANEL (one Core.float button + panel: Status, Bosses, Potions, Graveyard, Log, Diagnostics, Settings)
- * Same look as Gear / Crystal / Pet Presets and Account Switcher: Core's own classes (core-btn / core-input / core-footer /
- * core-empty / core-pill / core-dim) plus a few ma-* ones that copy the preset addons' card rows (#11192d, 14px corners).
- * One scroller (Core's modal), no nested scroll areas. Forms are never redrawn while you are typing in them.
+ * Same look as the other Core tools: the shared Core modal, underline tabs, section cards, a status + Start/Stop footer,
+ * boss / graveyard cards with avatars. Core's own classes (core-btn / core-input / core-pill / core-dim ...) plus ma-* ones.
+ * No dragging, no skins. Forms are never redrawn while you are typing in them.
  * ================================================================================================================ */
 const Panel = (() => {
   const { h, btn } = Core.ui;
-  const TABS = [['status', 'Status'], ['bosses', 'Bosses'], ['potions', 'Potions'], ['graveyard', 'Graveyard'], ['log', 'Log'], ['diag', 'Diagnostics'], ['settings', 'Settings']];
+  const TABS = [['status', 'Status'], ['bosses', 'Bosses'], ['potions', 'Potions'], ['graveyard', 'Graveyard'], ['log', 'Log'], ['diag', 'Diag'], ['settings', 'Settings']];
   const DIRTY_TAB = { status: 'status', log: 'log', diag: 'diag', loot: 'graveyard' };
   let root = null, tab = 'status', open = false, drawT = 0;
-  const openOpts = new Set();   // bosses whose "Options" are expanded (kept across redraws)
+  const expanded = new Set();                                      // boss option drawers that are open (survive redraws)
 
   (function css() {
     if (document.getElementById('ma-css')) return;
     const s = document.createElement('style'); s.id = 'ma-css';
     s.textContent = `
-.ma-hero{display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:12px 14px;margin-bottom:12px;background:#11192d;border:1px solid rgba(255,255,255,.06);border-radius:16px}
-.ma-hero-main{flex:1 1 220px;min-width:0}
-.ma-hero-top{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
-.ma-hero-target{margin-top:6px;font:800 14px Arial,sans-serif;color:#eef3ff;overflow-wrap:anywhere}
-.ma-tabs{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px}
-.ma-tab{padding:7px 12px}
-.ma-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px;margin-bottom:12px}
-.ma-card{background:#11192d;border:1px solid rgba(255,255,255,.06);border-radius:14px;padding:10px 12px;min-width:0}
-.ma-k{font:700 11px Arial,sans-serif;color:#9caad0;text-transform:uppercase;letter-spacing:.03em;margin-bottom:4px}
-.ma-v{font:800 14px Arial,sans-serif;color:#eef3ff;overflow-wrap:anywhere}
-.ma-panel{background:#11192d;border:1px solid rgba(255,255,255,.06);border-radius:14px;padding:12px 14px;margin-bottom:10px}
-.ma-sec{font:800 12px Arial,sans-serif;color:#9fc1ff;text-transform:uppercase;letter-spacing:.05em;margin:0 0 10px}
-.ma-sec.out{margin:14px 0 8px}
-.ma-note{color:#9caad0;font-size:12px;margin:0 0 12px}
-.ma-row{display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:12px;margin-bottom:10px;background:#11192d;border:1px solid rgba(255,255,255,.06);border-radius:14px}
-.ma-row.on{border-color:rgba(51,181,127,.45);background:linear-gradient(180deg,#132a22,#11192d 70%)}
-.ma-row-main{flex:1 1 200px;min-width:0}
-.ma-row-name{font-weight:800;color:#eef3ff;overflow-wrap:anywhere}
-.ma-row-meta{color:#9caad0;font-size:12px;margin-top:2px;overflow-wrap:anywhere}
-.ma-row-actions{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
-.ma-row-actions .core-btn{padding:6px 10px;font-size:12px}
-.ma-num{flex:0 0 auto;width:28px;height:28px;border-radius:10px;background:#18223a;color:#cfd8f7;font:800 12px Arial,sans-serif;display:flex;align-items:center;justify-content:center}
-.ma-tick,.ma-chk input{accent-color:#4b6dd0;width:17px;height:17px;margin:0;cursor:pointer;flex:0 0 auto}
-.ma-bar{height:5px;border-radius:999px;background:#0d1322;margin-top:8px;overflow:hidden}
-.ma-bar i{display:block;height:100%;border-radius:999px;background:linear-gradient(90deg,#3657a7,#4b6dd0)}
+.ma-root{display:flex;flex-direction:column;font-size:13px;color:#eef3ff}
+.ma-tabs{display:flex;gap:4px;margin:0 -4px 14px;border-bottom:1px solid rgba(255,255,255,.08);overflow-x:auto;scrollbar-width:none}.ma-tabs::-webkit-scrollbar{display:none}
+.ma-tab{flex:1 0 auto;background:none;border:none;border-bottom:2px solid transparent;border-radius:10px 10px 0 0;color:#9caad0;padding:9px 4px;font:700 12px Arial,sans-serif;cursor:pointer;transition:.15s ease}
+.ma-tab:hover{color:#cfd8f7}
+.ma-tab.on{color:#6ea8ff;border-bottom-color:#6ea8ff;background:rgba(110,168,255,.08)}
+.ma-body{min-height:260px}
+.ma-sec{margin-bottom:12px;padding:14px;background:#11192d;border:1px solid rgba(255,255,255,.06);border-radius:16px}
+.ma-sec h4{margin:0 0 10px;color:#cfd8f7;font:800 11px Arial,sans-serif;text-transform:uppercase;letter-spacing:.06em;display:flex;align-items:center;gap:8px}
+.ma-sec h4 .ma-sp{flex:1}
+.ma-sec h4 .core-dim{text-transform:none;letter-spacing:0;font-weight:400}
+.ma-note{color:#9caad0;font-size:12px;line-height:1.5;margin:0 0 12px}
+.ma-hud{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.ma-cell{background:#0d1322;border:1px solid rgba(255,255,255,.06);border-radius:12px;padding:8px 10px;min-width:0}
+.ma-cell .l{color:#6e7a8c;font-size:9.5px;text-transform:uppercase;letter-spacing:.04em}
+.ma-cell .v{color:#fff;font:800 14px Arial,sans-serif;overflow-wrap:anywhere}
+.ma-row{display:flex;align-items:center;gap:10px;margin:8px 0}
+.ma-row>label,.ma-row>.ma-lbl{flex:1;min-width:0;color:#9caad0;font-size:12.5px}
+.ma-row .core-input{width:104px;padding:6px 9px;font-size:12px;flex:0 0 auto}
+.ma-row .core-input.wide{width:210px;max-width:62%}
+.ma-row .core-input.mid{width:150px}
+.ma-root input[type=checkbox]{appearance:none;-webkit-appearance:none;width:18px;height:18px;flex:0 0 auto;cursor:pointer;margin:0;border-radius:6px;border:1px solid #3a4a73;background:#0d1322;display:inline-grid;place-content:center;transition:.15s ease}
+.ma-root input[type=checkbox]:hover{border-color:#6ea8ff}
+.ma-root input[type=checkbox]:checked{background:linear-gradient(135deg,#3657a7,#4b6dd0);border-color:transparent}
+.ma-root input[type=checkbox]:checked::after{content:'';width:8px;height:4px;border-left:2px solid #fff;border-bottom:2px solid #fff;transform:translateY(-1px) rotate(-45deg)}
+.ma-root input[type=checkbox]:focus-visible{outline:2px solid rgba(110,168,255,.55);outline-offset:2px}
+.ma-row.chk{cursor:pointer}.ma-row.chk>label{color:#dbe4ff;cursor:pointer}
+.ma-pair{display:flex;gap:6px;flex:0 0 auto}.ma-pair .core-input{width:52px}
+.ma-actions{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 12px}
+.ma-actions .core-btn{padding:8px 12px;font-size:12px}
+.ma-actions .core-btn-soft{transition:.18s ease}
+.ma-actions .core-btn:hover{filter:brightness(1.12);transform:translateY(-1px)}
+.ma-list{border:1px solid rgba(255,255,255,.06);border-radius:14px;padding:4px;background:#0d1322}
+.ma-item{padding:8px 10px;border-radius:10px;margin-bottom:2px}.ma-item:last-child{margin-bottom:0}.ma-item:hover{background:#141d38}
+.ma-item-main{display:flex;align-items:center;gap:10px}
+.ma-item-main .n{flex:1;min-width:0;color:#cfd8f7;font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ma-item-main .tag{flex:0 0 auto;font:800 10px Arial,sans-serif;letter-spacing:.03em;text-transform:uppercase;color:#9caad0;white-space:nowrap}
+.ma-item-main .tag.ok{color:#8ee6a8}.ma-item-main .tag.warn{color:#ffd978}.ma-item-main .tag.err{color:#ff8a97}.ma-item-main .tag.cap{color:#6e8f7c}
+.ma-item-sub{font-size:10.5px;color:#6e7a8c;margin-top:3px;font-variant-numeric:tabular-nums;margin-left:42px}
+.ma-bar{height:6px;border-radius:99px;background:#0d1322;border:1px solid rgba(255,255,255,.06);overflow:hidden;margin-top:8px}
+.ma-bar i{display:block;height:100%;background:linear-gradient(90deg,#3657a7,#6ea8ff);border-radius:99px}
 .ma-bar.full i{background:linear-gradient(90deg,#217f5b,#33b57f)}
-.ma-fields{display:flex;flex-wrap:wrap;align-items:flex-end}
-.ma-fields:has(.ma-fld) .ma-chk{min-height:33px}
-.ma-fld{display:inline-flex;flex-direction:column;gap:6px;margin:0 12px 10px 0;vertical-align:top}
-.ma-fld.in-row{margin:0}
-.ma-fl{font:700 11px Arial,sans-serif;color:#9caad0;letter-spacing:.02em}
-.ma-chk{display:inline-flex;gap:8px;align-items:center;margin:0 18px 10px 0;color:#dbe4ff;font:13px Arial,sans-serif;cursor:pointer}
-.ma-det{flex:1 1 100%;min-width:0;border-top:1px solid rgba(255,255,255,.06);padding-top:8px}
-.ma-det summary{cursor:pointer;color:#9caad0;font:700 12px Arial,sans-serif}
-.ma-det summary:hover{color:#eef3ff}
-.ma-opts{padding-top:12px}
-.ma-log{background:#0d1322;border:1px solid rgba(255,255,255,.06);border-radius:14px;padding:10px 12px}
-.ma-line{font:12px/1.6 monospace;color:#c9d4f5;overflow-wrap:anywhere}.ma-line b{color:#7f8fb8;font-weight:400}
-.ma-line.err{color:#ff8a97}.ma-line.warn{color:#ffd978}.ma-line.ok{color:#8ee6a8}.ma-line.dmg{color:#9fc1ff}.ma-line.skill{color:#d6a8ff}
-.ma-kv{display:flex;justify-content:space-between;gap:12px;padding:6px 0;border-bottom:1px solid rgba(255,255,255,.05);font-size:13px;color:#dbe4ff}
-.ma-kv:last-child{border-bottom:none}.ma-kv span:last-child{color:#9caad0}`;
+.ma-av-wrap{position:relative;flex:0 0 auto;width:34px;height:34px}
+.ma-av-wrap.lg{width:46px;height:46px}.ma-av-wrap.sm{width:22px;height:22px}
+.ma-av,.ma-av-fb{width:100%;height:100%;border-radius:10px;display:block}
+.ma-av{object-fit:cover;background:#0d1322;border:1px solid rgba(255,255,255,.08);box-sizing:border-box}
+.ma-av-fb{display:flex;align-items:center;justify-content:center;font:800 14px Arial,sans-serif;color:#fff}
+.ma-av-wrap.lg .ma-av-fb{font-size:16px;border-radius:12px}.ma-av-wrap.lg .ma-av{border-radius:12px}
+.ma-av-wrap.sm .ma-av,.ma-av-wrap.sm .ma-av-fb{border-radius:6px;font-size:9px}
+.ma-badge-boss{position:absolute;bottom:-3px;right:-3px;width:15px;height:15px;border-radius:50%;background:#e3b341;border:2px solid #11192d;color:#3a2c04;font:900 8px/11px Arial,sans-serif;text-align:center}
+.ma-card{border:1px solid rgba(255,255,255,.06);border-radius:16px;padding:12px 14px;margin-bottom:8px;background:#11192d}
+.ma-card.off{background:#0e1526}
+.ma-card-hdr{display:flex;align-items:center;gap:10px}
+.ma-card-name{flex:1;min-width:0;font:700 13px/1.35 Arial,sans-serif;color:#eef3ff}
+.ma-card-name small{display:block;font:400 11px Arial,sans-serif;color:#6e7a8c;margin-top:1px}
+.ma-card-sub{margin-top:10px;padding-top:10px;border-top:1px solid rgba(255,255,255,.06);display:flex;align-items:center;gap:8px;font-size:11.5px;flex-wrap:wrap}
+.ma-card-sub .core-input{width:96px;padding:5px 8px;font-size:11.5px;border-radius:8px}
+.ma-card-sub .sp{flex:1}
+.ma-card-sub .lbl{color:#6e7a8c}
+.ma-mini{border:none;cursor:pointer;color:#fff;background:linear-gradient(135deg,#222d49,#2b3859);width:28px;height:28px;border-radius:9px;font:700 13px Arial,sans-serif;transition:.18s ease;padding:0}
+.ma-mini:hover{filter:brightness(1.2)}
+.ma-mini:disabled{opacity:.35;cursor:default}
+.ma-rank{font:800 10px Arial,sans-serif;color:#6ea8ff;background:rgba(110,168,255,.12);border:1px solid rgba(110,168,255,.3);border-radius:999px;padding:2px 8px}
+.ma-compact{padding:8px 12px;margin-bottom:6px}
+.ma-compact>summary{list-style:none;cursor:pointer}.ma-compact>summary::-webkit-details-marker{display:none}
+.ma-compact .ma-card-name{font-size:12.5px}.ma-compact .ma-card-name small{font-size:10.5px}
+.ma-compact .core-input{width:84px;padding:5px 8px;font-size:11.5px;border-radius:8px}
+.ma-chev{color:#6e7a8c;font-size:11px;transition:.15s}.ma-compact[open] .ma-chev{transform:rotate(180deg)}
+.ma-compact .ma-det{margin-top:8px}
+.ma-det{margin-top:10px;padding-top:10px;border-top:1px solid rgba(255,255,255,.06)}
+.ma-det summary{cursor:pointer;color:#9caad0;font-size:12px;font-weight:700;user-select:none}
+.ma-det summary:hover{color:#cfd8f7}
+.ma-gy-claim{background:linear-gradient(135deg,#217f5b,#33b57f)!important;box-shadow:0 6px 14px rgba(33,127,91,.28)!important;padding:6px 12px!important;font-size:11.5px!important;margin-left:auto}
+.ma-logs{display:flex;flex-direction:column;gap:5px}
+.ma-line{padding:8px 10px;border-radius:10px;border-left:3px solid #2b3859;background:#0d1322;font-size:12px;line-height:1.45;color:#c9d4f5;overflow-wrap:anywhere}
+.ma-line b{color:#6e7a8c;font-weight:400;margin-right:6px;font-variant-numeric:tabular-nums}
+.ma-line.ok{border-left-color:#33b57f;color:#8ee6a8}.ma-line.warn{border-left-color:#e3b341;color:#ffd978}.ma-line.err{border-left-color:#e5484d;color:#ff9a9a}
+.ma-line.dmg{border-left-color:#e3b341;color:#ffe3a3}.ma-line.skill{border-left-color:#a371f7;color:#d9c4ff}.ma-line.info{border-left-color:#6ea8ff;color:#c9e6ff}
+.ma-alert{margin-bottom:12px;padding:10px 12px;border-radius:12px;background:rgba(255,107,122,.08);border:1px solid rgba(255,107,122,.3);color:#ff9aa6;font-size:12px;line-height:1.45}
+.ma-kv{display:flex;justify-content:space-between;gap:10px;padding:6px 2px;border-bottom:1px solid rgba(255,255,255,.05);font-size:12px;color:#cfd8f7}
+.ma-kv:last-child{border-bottom:none}.ma-kv span:last-child{color:#fff;font-weight:700}
+.ma-foot{position:sticky;bottom:-22px;z-index:2;display:flex;align-items:center;gap:10px;margin:14px -22px -22px;padding:14px 22px;background:#0e1422;border-top:1px solid rgba(255,255,255,.08);border-radius:0 0 22px 22px}
+.ma-foot-st{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px}
+.ma-foot-st b{display:flex;align-items:center;gap:7px;font:800 12px Arial,sans-serif;color:#eef3ff;text-transform:uppercase;letter-spacing:.03em}
+.ma-foot-st span{color:#9caad0;font-size:11.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ma-dot{width:9px;height:9px;border-radius:50%;background:#ff6b7a;flex:0 0 auto}
+.ma-dot.running{background:#33b57f;box-shadow:0 0 0 3px rgba(51,181,127,.18)}.ma-dot.waiting{background:#e3b341}.ma-dot.follower{background:#6e7a8c}
+.ma-foot .core-btn{padding:9px 18px;font-size:12.5px}
+@media (max-width:560px){.ma-hud{grid-template-columns:1fr}.ma-row .core-input.wide{max-width:55%}.ma-tab{font-size:11px;padding:9px 7px}}`;
     document.head.appendChild(s);
   })();
 
-  /* ---- tiny form helpers ---- */
+  /* ---- small helpers ---- */
   const ago = (t) => (t ? fmtDur(Date.now() - t) + ' ago' : 'never');
   const pill = (txt, kind) => h('span', { class: 'core-pill' + (kind ? ' core-pill-' + kind : '') }, txt);
-  const card = (k, v) => h('div', { class: 'ma-card' }, h('div', { class: 'ma-k' }, k), h('div', { class: 'ma-v' }, v));
-  const sec = (t, out) => h('div', { class: 'ma-sec' + (out ? ' out' : '') }, t);
-  const box = (...kids) => h('div', { class: 'ma-panel' }, kids);
-  const foot = (...kids) => h('div', { class: 'core-footer' }, kids);
-  const fld = (label, el, inRow) => h('label', { class: 'ma-fld' + (inRow ? ' in-row' : '') }, h('span', { class: 'ma-fl' }, label), el);
+  const cell = (k, v) => h('div', { class: 'ma-cell' }, h('div', { class: 'l' }, k), h('div', { class: 'v' }, v));
+  const section = (title, aside, ...kids) => h('div', { class: 'ma-sec' }, h('h4', {}, title, aside ? [h('span', { class: 'ma-sp' }), h('span', { class: 'core-dim' }, aside)] : null), ...kids);
+  const kv = (k, v) => h('div', { class: 'ma-kv' }, h('span', {}, k), h('span', {}, v));
+  const hueOf = (s) => { let x = 0; for (const c of String(s)) x = (x * 31 + c.charCodeAt(0)) >>> 0; return `hsl(${x % 360} 48% 40%)`; };
+  const iconUrl = (i) => { if (!i) return null; try { return new URL(i, BASE).href; } catch (_) { return null; } };
+  function avatar(name, icon, o = {}) {
+    const bg = hueOf(String(name || '?').toLowerCase()), letter = (String(name || '?').trim().charAt(0) || '?').toUpperCase();
+    const fb = () => h('div', { class: 'ma-av-fb', style: { background: bg } }, letter), src = iconUrl(icon);
+    const inner = src ? h('img', { class: 'ma-av', src, loading: 'lazy', alt: '', onerror: (e) => e.target.replaceWith(fb()) }) : fb();
+    return h('span', { class: 'ma-av-wrap' + (o.size ? ' ' + o.size : '') }, inner, o.boss ? h('span', { class: 'ma-badge-boss', title: 'Boss' }, '♛') : null);
+  }
   const changed = (fn) => (e) => { fn(e.target); saveCfg(); };
-  const check = (label, get, set) => h('label', { class: 'ma-chk' }, h('input', { type: 'checkbox', checked: get() ? true : null, onchange: changed((el) => set(el.checked)) }), label);
-  const sel = (opts, cur, set, w) => h('select', { class: 'core-input', style: w ? { width: w + 'px' } : null, onchange: changed((el) => set(el.value)) },
+  const row = (label, ...ctl) => h('div', { class: 'ma-row' }, h('label', {}, label), ...ctl);
+  const check = (label, get, set) => {
+    const box = h('input', { type: 'checkbox', checked: get() ? true : null, onchange: changed((el) => set(el.checked)) });
+    const r = h('div', { class: 'ma-row chk', onclick: (e) => { if (e.target !== box) { box.click(); } } }, h('label', {}, label), box);
+    return r;
+  };
+  const sel = (opts, cur, set, cls) => h('select', { class: 'core-input' + (cls ? ' ' + cls : ''), onchange: changed((el) => set(el.value)) },
     opts.map(([v, l]) => h('option', Object.assign({ value: v }, String(v) === String(cur) ? { selected: true } : {}), l)));
-  const intIn = (obj, key, w, label) => fld(label, h('input', { class: 'core-input', style: { width: (w || 80) + 'px' }, value: obj[key], onchange: changed((el) => { const n = parseCap(el.value); if (n != null) obj[key] = n; else el.value = obj[key]; }) }));
-  const pctIn = (obj, key, w, label) => fld(label, h('input', { class: 'core-input', style: { width: (w || 70) + 'px' }, value: obj[key], onchange: changed((el) => { const n = parseFloat(el.value); if (Number.isFinite(n) && n >= 0 && n <= 100) obj[key] = n; else el.value = obj[key]; }) }));
-  const textIn = (obj, key, w, label, ph) => fld(label, h('input', { class: 'core-input', style: { width: (w || 140) + 'px' }, value: obj[key] || '', placeholder: ph || '', onchange: changed((el) => { obj[key] = el.value.trim(); }) }));
-  const redraw = () => draw();
+  const intIn = (obj, key, label) => row(label, h('input', { class: 'core-input', value: obj[key], onchange: changed((el) => { const n = parseCap(el.value); if (n != null) obj[key] = n; else el.value = obj[key]; }) }));
+  const pctIn = (obj, key, label) => row(label, h('input', { class: 'core-input', value: obj[key], onchange: changed((el) => { const n = parseFloat(el.value); if (Number.isFinite(n) && n >= 0 && n <= 100) obj[key] = n; else el.value = obj[key]; }) }));
+  const textIn = (obj, key, label, ph) => row(label, h('input', { class: 'core-input mid', value: obj[key] || '', placeholder: ph || '', onchange: changed((el) => { obj[key] = el.value.trim(); }) }));
 
-  /* ---- header (always visible) ---- */
-  function header() {
+  /* ---- footer (always visible): status + Start / Stop ---- */
+  function footer() {
     const st = Status.get(), cur = Engine.current(), run = Run.wanted() && !Run.paused();
-    const kind = /FIGHT|RUN/.test(st) ? 'ok' : /STOP|PAUSE|NO |DEAD|FOLLOW/.test(st) ? 'error' : 'loading';
-    return h('div', { class: 'ma-hero' },
-      h('div', { class: 'ma-hero-main' },
-        h('div', { class: 'ma-hero-top' }, pill(st, kind), h('span', { class: 'core-dim' }, Tab.isMain() ? 'main tab' : 'follower tab')),
-        h('div', { class: 'ma-hero-target' }, cur ? '🎯 ' + cur.name : (Tab.isMain() ? 'No target right now' : 'Another tab is running it'))),
+    const dot = !Tab.isMain() ? 'follower' : /FIGHT|RUN|DUEL/.test(st) ? 'running' : /WAIT|STAMINA/.test(st) ? 'waiting' : /PAUSE/.test(st) ? 'follower' : '';
+    const sub = cur ? '🎯 ' + cur.name : (Tab.isMain() ? 'no target' : 'another tab is running it');
+    return h('div', { class: 'ma-foot' },
+      h('div', { class: 'ma-foot-st' }, h('b', {}, h('i', { class: 'ma-dot ' + dot }), st), h('span', { title: sub }, sub)),
       run ? btn('⏹ Stop', 'danger', () => { Run.stop('stopped from the panel'); draw(); }) : btn('▶ Start', 'success', () => { Run.start(); draw(); }));
   }
-  function tabsBar() { return h('div', { class: 'ma-tabs' }, TABS.map(([id, label]) => h('button', { type: 'button', class: 'core-btn ma-tab' + (id === tab ? '' : ' core-btn-soft'), onclick: () => { tab = id; draw(); } }, label))); }
+  function tabsBar() { return h('div', { class: 'ma-tabs' }, TABS.map(([id, label]) => h('button', { type: 'button', class: 'ma-tab' + (id === tab ? ' on' : ''), onclick: () => { tab = id; draw(); } }, label))); }
 
   /* ---- STATUS ---- */
   function bossState(low) {
-    const def = Roster.get(low), e = Board.get(low), cap = bossCap(low); if (!def) return ['?', 'error'];
-    if (cap <= 0) return ['cap 0 (disabled)', ''];
-    if (!e || !e.seenAt) return ['not scanned yet', 'loading'];
-    if (def.kind === 'dungeon-swarm') return [`${(e.swarm || []).length} under cap / ${e.totalAlive || 0} alive`, (e.swarm || []).length ? 'ok' : ''];
-    if (e.alive) { if (e.needsDuel) return ['needs Phase Duel', 'loading']; return (e.userDmg || 0) >= cap ? ['capped', ''] : ['alive', 'ok']; }
-    if (e.locked) return ['locked / sealed', 'loading'];
-    if (e.noInstance) return ['no open dungeon', ''];
-    if (e.nextTs && e.nextTs * 1000 > Date.now()) return ['respawns in ' + fmtDur(e.nextTs * 1000 - Date.now()), ''];
+    const def = Roster.get(low), e = Board.get(low), cap = bossCap(low); if (!def) return ['?', 'err'];
+    if (cap <= 0) return ['cap 0 · off', ''];
+    if (!e || !e.seenAt) return ['not scanned', 'warn'];
+    if (def.kind === 'dungeon-swarm') return [`${(e.swarm || []).length} open · ${e.totalAlive || 0} alive`, (e.swarm || []).length ? 'ok' : ''];
+    if (e.alive) { if (e.needsDuel) return ['needs duel', 'warn']; return (e.userDmg || 0) >= cap ? ['capped', 'cap'] : ['alive', 'ok']; }
+    if (e.locked) return ['locked', 'warn'];
+    if (e.noInstance) return ['no dungeon', ''];
+    if (e.nextTs && e.nextTs * 1000 > Date.now()) return ['respawn ' + fmtDur(e.nextTs * 1000 - Date.now()), ''];
     return ['not up', ''];
   }
-  function statusRow(low, i) {
-    const [txt, kind] = bossState(low), ev = Board.get(low) || {}, def = Roster.get(low), cap = bossCap(low);
-    const swarm = !!(def && def.kind === 'dungeon-swarm'), dealt = ev.userDmg || 0, pct = cap > 0 ? Math.min(100, dealt / cap * 100) : 0;
-    return h('div', { class: 'ma-row' + (kind === 'ok' ? ' on' : '') },
-      h('div', { class: 'ma-num' }, i + 1),
-      h('div', { class: 'ma-row-main' },
-        h('div', { class: 'ma-row-name' }, bossName(low)),
-        h('div', { class: 'ma-row-meta' }, swarm ? 'cap ' + fmtNum(cap) + ' per mob' : `${fmtNum(dealt)} / ${fmtNum(cap)} damage`),
-        swarm || !(cap > 0) ? null : h('div', { class: 'ma-bar' + (pct >= 100 ? ' full' : '') }, h('i', { style: { width: pct.toFixed(1) + '%' } }))),
-      pill(txt, kind));
-  }
+  const iconOfBoss = (low) => { const e = Board.get(low); return e && e.icon; };
   function tStatus() {
-    const m = Core.me.get() || {}, e = m.exp, cls = effectiveClass();
-    const out = [h('div', { class: 'ma-grid' },
-      card('Role', Tab.isMain() ? 'main tab (works)' : 'follower'), card('Stamina', Me.stamKnown() ? `${fmtNum(Me.stam())} / ${fmtNum(Me.maxStam())}` : '?'),
-      card('HP', Me.hpKnown ? `${fmtNum(Me.hp)} / ${fmtNum(Me.maxHp)}` : '?'), card('MP', Me.mpKnown ? `${fmtNum(Me.mp)} / ${fmtNum(Me.maxMp)}` : '?'),
-      card('Level · EXP', `${Me.level() || '?'} · ${Me.expPct() != null ? Me.expPct().toFixed(1) + '%' : '?'}`), card('Class', cls || 'unknown'),
-      card('Hits · damage', `${stats.hits} · ${fmtNum(stats.dmg)}`), card('Potions used', `stam ${stats.stamA + stats.stamB} · hp ${stats.hpUses} · mana ${stats.mpRefills}`),
-      card('Presets applied', Presets.summary()))];
-    const conf = Conflicts.list(); if (conf.length) out.push(h('div', { class: 'core-err', style: { marginBottom: '10px' } }, '⛔ ' + conf.join(' · ')));
-    const gi = Guard.info(); if (gi.faulted || gi.lastInfo) out.push(h('div', { class: 'core-err', style: { marginBottom: '10px' } }, '🔒 ' + (gi.lastInfo || gi.faulted) + (gi.lastInfo === 'unconfigured' ? ' — add a login source (Account Switcher) or sign in by hand' : '')));
-    if (!Tab.isMain()) out.push(h('div', { class: 'ma-row' }, h('div', { class: 'ma-row-main core-dim' }, 'Another tab is the main one and does the attacking.'), btn('Take over this tab', 'soft', () => { Tab.takeOver(); })));
-    out.push(sec('Bosses', true));
-    if (!cfg.targets.length) out.push(h('div', { class: 'core-empty' }, 'No bosses selected — tick the ones to farm in the Bosses tab, then press Start.'));
-    else out.push(h('div', {}, cfg.targets.map(statusRow)));
-    out.push(foot(btn('🔎 Scan now', 'soft', () => Engine.scanNow()), btn('Clear skips', 'soft', () => { Engine.clearSkips(); Diag.clear(); draw(); })));
+    const m = Core.me.get() || {}, cls = effectiveClass(), cur = Engine.current();
+    const out = [];
+    const conf = Conflicts.list(); if (conf.length) out.push(h('div', { class: 'ma-alert' }, '⛔ ' + conf.join(' · ')));
+    const gi = Guard.info(); if (gi.faulted || gi.lastInfo) out.push(h('div', { class: 'ma-alert' }, '🔒 ' + (gi.lastInfo || gi.faulted) + (gi.lastInfo === 'unconfigured' ? ' — add a login source (Account Switcher) or sign in by hand' : '')));
+    if (!Tab.isMain()) out.push(section('Another tab is in charge', null, h('p', { class: 'ma-note' }, 'Another tab is the main one and does the attacking. This tab only shows what it is doing.'), h('div', { class: 'ma-actions', style: { marginBottom: 0 } }, btn('Take over this tab', 'soft', () => { Tab.takeOver(); }))));
+
+    // active target
+    if (cur) {
+      const ev = Board.get(cur.low) || {}, cap = bossCap(cur.low), dmg = ev.userDmg || cur.userDmg || 0, pct = cap > 0 ? Math.min(100, dmg / cap * 100) : 0;
+      out.push(section('Active target', null,
+        h('div', { class: 'ma-item-main' }, avatar(cur.name, ev.icon, { size: 'lg', boss: true }),
+          h('div', { class: 'ma-card-name' }, cur.name, h('small', {}, `${fmtNum(dmg)} / ${fmtNum(cap)} damage`)), pill(bossState(cur.low)[0], ({ cap: '', err: 'error', warn: 'loading' })[bossState(cur.low)[1]] ?? bossState(cur.low)[1])),
+        h('div', { class: 'ma-bar' + (pct >= 100 ? ' full' : '') }, h('i', { style: { width: pct.toFixed(1) + '%' } }))));
+    } else out.push(section('Active target', null, h('div', { class: 'core-dim' }, 'none' + (Tab.isMain() ? '' : ' (another tab is fighting)'))));
+
+    // tracked
+    out.push(section(`Tracked targets (${cfg.targets.length})`, null, !cfg.targets.length
+      ? h('div', { class: 'core-empty' }, 'No bosses selected. Tick the ones to farm in the Bosses tab, then press Start.')
+      : h('div', { class: 'ma-list' }, cfg.targets.map((low, i) => {
+        const [txt, kind] = bossState(low), ev = Board.get(low) || {}, def = Roster.get(low), swarm = def && def.kind === 'dungeon-swarm';
+        return h('div', { class: 'ma-item', title: bossName(low) },
+          h('div', { class: 'ma-item-main' }, avatar(bossName(low), ev.icon, { boss: true }), h('span', { class: 'n' }, `${i + 1}. ${bossName(low)}`), h('span', { class: 'tag ' + kind }, txt)),
+          swarm ? null : h('div', { class: 'ma-item-sub' }, `${fmtNum(ev.userDmg || 0)} / ${fmtNum(bossCap(low))} dmg`));
+      }))));
+
+    out.push(h('div', { class: 'ma-actions' }, btn('🔎 Scan now', 'soft', () => Engine.scanNow()), btn('Clear skips', 'soft', () => { Engine.clearSkips(); Diag.clear(); draw(); })));
+    out.push(section('Live stats', null, h('div', { class: 'ma-hud' },
+      cell('HP', Me.hpKnown ? `${fmtNum(Me.hp)} / ${fmtNum(Me.maxHp)}` : '?'), cell('Stamina', Me.stamKnown() ? `${fmtNum(Me.stam())} / ${fmtNum(Me.maxStam())}` : '?'),
+      cell('MP', Me.mpKnown ? `${fmtNum(Me.mp)} / ${fmtNum(Me.maxMp)}` : '?'), cell('Level · EXP', `${Me.level() || '?'} · ${Me.expPct() != null ? Me.expPct().toFixed(1) + '%' : '?'}`),
+      cell('Hits', `${stats.hits} (${fmtNum(stats.dmg)})`), cell('Class', cls || 'unknown'),
+      cell('Potions used', `stam ${stats.stamA + stats.stamB} · hp ${stats.hpUses} · mp ${stats.mpRefills}`), cell('Presets', Presets.summary()))));
     return out;
   }
 
@@ -1808,99 +1871,130 @@ const Panel = (() => {
   }
   function presetSel(kind, low) {
     const list = Presets.list(kind);
-    return fld(kind + ' preset', sel([['', '— keep current —'], ...list.map((p) => [p.id, p.name])], ovr(low)[kind] || '', (v) => { ovr(low)[kind] = v; }, 190));
+    return row(kind + ' preset', sel([['', '— keep current —'], ...list.map((p) => [p.id, p.name])], (cfg.bosses[low] || {})[kind] || '', (v) => { ovr(low)[kind] = v; }, 'wide'));
   }
-  function bossRow(def) {
-    const low = def.low, on = cfg.targets.includes(low), o = cfg.bosses[low] || {}, loc = bossLoc(low), swarm = def.kind === 'dungeon-swarm';
+  function bossOptions(def) {
+    const low = def.low, o = cfg.bosses[low] || {}, loc = bossLoc(low);
+    return [
+      cfg.sideMob.enabled ? row('shield targeting', sel([['auto', 'auto'], ['normal', 'normal (never divert)'], ['shielded', 'shielded (always divert)']], SideMob.modeOf(low), (v) => { ovr(low).targeting = v; }, 'wide')) : null,
+      ...Presets.kinds().map((k) => presetSel(k, low)),
+      Presets.kinds().length ? null : h('div', { class: 'core-dim', style: { margin: '8px 0' } }, 'No preset addon loaded (gear / crystal / pet presets show up here when they are).'),
+      row('switch cap at (server time)', h('input', { class: 'core-input', value: o.switchAt || '', placeholder: 'HH:MM', onchange: changed((el) => { const v = parseClock(el.value); if (!el.value.trim()) delete ovr(low).switchAt; else if (v) { ovr(low).switchAt = v; el.value = v; } else el.value = o.switchAt || ''; }) })),
+      row('cap after switch', h('input', { class: 'core-input', value: o.capAfterSwitch != null ? fmtNum(o.capAfterSwitch) : '', onchange: changed((el) => { if (!el.value.trim()) delete ovr(low).capAfterSwitch; else { const n = parseCap(el.value); if (n != null) ovr(low).capAfterSwitch = n; } }) })),
+      def.kind === 'wave' ? row('gate / wave', h('span', { class: 'ma-pair' },
+        h('input', { class: 'core-input', value: loc ? loc.gate : '', onchange: changed((el) => { const n = parseInt(el.value, 10); if (n > 0) ovr(low).gate = n; }) }),
+        h('input', { class: 'core-input', value: loc ? loc.wave : '', onchange: changed((el) => { const n = parseInt(el.value, 10); if (n > 0) ovr(low).wave = n; }) }))) : null];
+  }
+  const capInput = (low) => h('input', { class: 'core-input', value: fmtNum(bossCap(low)), title: 'damage cap for this boss (5B, 750M, 2,000,000,000 …); 0 = skip', onchange: changed((el) => { const n = parseCap(el.value); if (n != null) { ovr(low).cap = n; el.value = fmtNum(n); } else el.value = fmtNum(bossCap(low)); }) });
+  const bossMeta = (def) => {
+    const loc = bossLoc(def.low), swarm = def.kind === 'dungeon-swarm';
     const phaseOf = def.group && Roster.canon(def) !== def ? 'phase of ' + Roster.canon(def).name : '';
-    const opts = h('details', { class: 'ma-det', open: openOpts.has(low) ? true : null, ontoggle: (e) => { if (e.target.open) openOpts.add(low); else openOpts.delete(low); } }, h('summary', {}, 'Options'),
-      h('div', { class: 'ma-opts ma-fields' },
-        cfg.sideMob.enabled ? fld('shield targeting', sel([['auto', 'auto'], ['normal', 'normal (never divert)'], ['shielded', 'shielded (always divert)']], SideMob.modeOf(low), (v) => { ovr(low).targeting = v; }, 190)) : null,
-        ...Presets.kinds().map((k) => presetSel(k, low)),
-        Presets.kinds().length ? null : h('div', { class: 'ma-note' }, 'No preset addon loaded — gear / crystal / pet presets show up here when they are.'),
-        fld('switch cap at (server time)', h('input', { class: 'core-input', style: { width: '90px' }, value: o.switchAt || '', placeholder: 'HH:MM', onchange: changed((el) => { const v = parseClock(el.value); if (!el.value.trim()) delete ovr(low).switchAt; else if (v) { ovr(low).switchAt = v; el.value = v; } else el.value = o.switchAt || ''; }) })),
-        fld('cap after switch', h('input', { class: 'core-input', style: { width: '100px' }, value: o.capAfterSwitch != null ? fmtNum(o.capAfterSwitch) : '', onchange: changed((el) => { if (!el.value.trim()) delete ovr(low).capAfterSwitch; else { const n = parseCap(el.value); if (n != null) ovr(low).capAfterSwitch = n; } }) })),
-        def.kind === 'wave' ? fld('gate / wave', h('span', {}, h('input', { class: 'core-input', style: { width: '56px' }, value: loc ? loc.gate : '', onchange: changed((el) => { const n = parseInt(el.value, 10); if (n > 0) ovr(low).gate = n; }) }), ' ', h('input', { class: 'core-input', style: { width: '56px' }, value: loc ? loc.wave : '', onchange: changed((el) => { const n = parseInt(el.value, 10); if (n > 0) ovr(low).wave = n; }) }))) : null));
-    return h('div', { class: 'ma-row' + (on ? ' on' : '') },
-      h('input', { type: 'checkbox', class: 'ma-tick', title: on ? 'Farming this boss' : 'Tick to farm this boss', checked: on ? true : null, onchange: (e) => toggle(low, e.target.checked) }),
-      h('div', { class: 'ma-row-main' },
-        h('div', { class: 'ma-row-name' }, bossName(low), ' ', pill(def.kind === 'wave' ? `wave ${loc ? loc.gate + '/' + loc.wave : '?'}` : swarm ? 'dungeon · swarm' : 'dungeon', '')),
-        phaseOf ? h('div', { class: 'ma-row-meta' }, phaseOf) : null),
-      h('div', { class: 'ma-row-actions' },
-        fld('cap', h('input', { class: 'core-input', style: { width: '90px' }, value: fmtNum(bossCap(low)), title: 'damage cap for this boss (5B, 750M, 2,000,000,000 …); 0 = skip', onchange: changed((el) => { const n = parseCap(el.value); if (n != null) { ovr(low).cap = n; el.value = fmtNum(n); } else el.value = fmtNum(bossCap(low)); }) }), true),
-        on ? h('span', { class: 'ma-row-actions' }, btn('↑', 'soft', () => move(low, -1)), btn('↓', 'soft', () => move(low, 1)), h('span', { class: 'core-dim' }, '#' + (cfg.targets.indexOf(low) + 1))) : null),
-      opts);
+    return [def.kind === 'wave' ? `wave ${loc ? loc.gate + '/' + loc.wave : '?'}` : swarm ? 'dungeon · swarm' : 'dungeon', phaseOf].filter(Boolean).join(' · ');
+  };
+  const drawerState = (low) => ({ open: expanded.has(low) ? true : null, ontoggle: (e) => { if (e.target.open) expanded.add(low); else expanded.delete(low); } });
+  const tick = (low, on) => h('input', { type: 'checkbox', checked: on ? true : null, title: 'farm this boss', onchange: (e) => toggle(low, e.target.checked) });
+
+  /* a boss that is being farmed: full card with priority arrows */
+  function bossCard(def) {
+    const low = def.low, pos = cfg.targets.indexOf(low);
+    return h('div', { class: 'ma-card' },
+      h('div', { class: 'ma-card-hdr' }, tick(low, true), avatar(bossName(low), iconOfBoss(low), { size: 'lg', boss: true }),
+        h('div', { class: 'ma-card-name' }, bossName(low), h('small', {}, bossMeta(def))), h('span', { class: 'ma-rank' }, '#' + (pos + 1))),
+      h('div', { class: 'ma-card-sub' }, h('span', { class: 'lbl' }, 'cap'), capInput(low), h('span', { class: 'sp' }),
+        h('button', { class: 'ma-mini', type: 'button', title: 'higher priority', disabled: pos <= 0 ? true : null, onclick: () => move(low, -1) }, '↑'),
+        h('button', { class: 'ma-mini', type: 'button', title: 'lower priority', disabled: pos >= cfg.targets.length - 1 ? true : null, onclick: () => move(low, 1) }, '↓')),
+      h('details', Object.assign({ class: 'ma-det' }, drawerState(low)), h('summary', {}, 'Options'), ...bossOptions(def)));
+  }
+  /* a boss that is not being farmed: one compact row, options fold out */
+  function bossRowOff(def) {
+    const low = def.low;
+    return h('details', Object.assign({ class: 'ma-card off ma-compact' }, drawerState(low)),
+      h('summary', { class: 'ma-card-hdr' }, tick(low, false), avatar(bossName(low), iconOfBoss(low), { boss: true }),
+        h('div', { class: 'ma-card-name' }, bossName(low), h('small', {}, bossMeta(def))), capInput(low), h('span', { class: 'ma-chev' }, '▾')),
+      h('div', { class: 'ma-det' }, ...bossOptions(def)));
   }
   function tBosses() {
     const on = cfg.targets.map((l) => Roster.get(l)).filter(Boolean), off = Roster.list.filter((d) => !cfg.targets.includes(d.low) && (d.kind === 'wave' || Kernel.isOn('dungeons')));
-    return [h('div', { class: 'ma-note' }, 'The first alive boss that is still under its cap is attacked, in the order below (↑ ↓). Phases of one boss are ticked together.'),
-      h('div', {}, [...on, ...off].map(bossRow))];
+    return [h('p', { class: 'ma-note' }, 'The first alive boss that is still under its cap is attacked, in the order shown (↑ ↓). Phases of one boss are ticked together.'),
+      ...on.map(bossCard),
+      off.length ? h('div', { class: 'ma-sec', style: { background: 'none', border: 'none', padding: '4px 2px 8px', marginBottom: 0 } }, h('h4', { style: { margin: 0 } }, 'Not farming')) : null,
+      ...off.map(bossRowOff)];
   }
 
   /* ---- POTIONS ---- */
   function tPotions() {
     const m = cfg.mana, A = cfg.stam.A, B = cfg.stam.B, S = cfg.stam.save, H = cfg.hp;
     return [
-      box(sec('Mana'),
-        h('div', { class: 'ma-fields' }, check('Refill mana automatically', () => m.enabled, (v) => { m.enabled = v; }), check('When max MP is 0 fill the bar', () => m.fullMaxAt0, (v) => { m.fullMaxAt0 = v; })),
-        h('div', { class: 'ma-fields' }, fld('potion size', sel([['S', 'S (20 MP)'], ['M', 'M (40 MP)'], ['L', 'L (60 MP)'], ['XL', 'XL (100 MP)']], m.type, (v) => { m.type = v; }, 130)), textIn(m, 'name', 180, 'exact item name (optional)', 'auto'), intIn(m, 'threshold', 70, 'refill at MP ≤'), intIn(m, 'fillTo', 70, 'fill up to MP'))),
-      box(sec('Stamina'), h('div', { class: 'ma-note' }, 'Uses Core.potions: sidebar first, then the remembered id, then your inventory.'),
-        h('div', { class: 'ma-fields' }, check('Potion A', () => A.enabled, (v) => { A.enabled = v; }), textIn(A, 'item', 200, 'item name')),
-        h('div', { class: 'ma-fields' }, check('Potion B (next)', () => B.enabled, (v) => { B.enabled = v; }), textIn(B, 'item', 200, 'item name')),
-        h('div', { class: 'ma-fields' }, check('Save stamina near the EXP cap', () => S.enabled, (v) => { S.enabled = v; }), pctIn(S, 'thresholdPct', 80, 'pause at EXP %'))),
-      box(sec('HP'), h('div', { class: 'ma-fields' }, check('Drink an HP potion when low', () => H.enabled, (v) => { H.enabled = v; }), pctIn(H, 'thresholdPct', 80, 'at HP ≤ %')))];
+      section('Mana', null,
+        check('Refill mana automatically', () => m.enabled, (v) => { m.enabled = v; }), check('When max MP is 0, fill the bar', () => m.fullMaxAt0, (v) => { m.fullMaxAt0 = v; }),
+        row('potion size', sel([['S', 'S (20 MP)'], ['M', 'M (40 MP)'], ['L', 'L (60 MP)'], ['XL', 'XL (100 MP)']], m.type, (v) => { m.type = v; }, 'mid')),
+        textIn(m, 'name', 'exact item name (optional)', 'auto'), intIn(m, 'threshold', 'refill at MP ≤'), intIn(m, 'fillTo', 'fill up to MP')),
+      section('Stamina', 'sidebar → remembered id → inventory',
+        check('Potion A', () => A.enabled, (v) => { A.enabled = v; }), textIn(A, 'item', 'item name'),
+        check('Potion B (used next)', () => B.enabled, (v) => { B.enabled = v; }), textIn(B, 'item', 'item name'),
+        check('Save stamina near the EXP cap', () => S.enabled, (v) => { S.enabled = v; }), pctIn(S, 'thresholdPct', 'pause at EXP %')),
+      section('HP', null, check('Drink an HP potion when low', () => H.enabled, (v) => { H.enabled = v; }), pctIn(H, 'thresholdPct', 'at HP ≤ %'))];
   }
 
   /* ---- GRAVEYARD ---- */
   function tGraveyard() {
     const L = cfg.autoLoot, s = Loot.state, groups = new Map();
-    s.rows.filter((r) => r.needsLoot !== false).forEach((r) => { const g = groups.get(r.nameLow) || { name: r.name, rows: [], boss: r.isBoss }; g.rows.push(r); groups.set(r.nameLow, g); });
+    s.rows.filter((r) => r.needsLoot !== false).forEach((r) => { const g = groups.get(r.nameLow) || { name: r.name, rows: [], boss: r.isBoss, icon: r.icon }; g.rows.push(r); if (!g.icon && r.icon) g.icon = r.icon; groups.set(r.nameLow, g); });
     const need = (() => { const m = Core.me.get(), e = m && m.exp; return e && e.max > 0 ? Math.max(0, e.max - e.cur) : null; })();
-    const lootable = [...groups.values()].reduce((n, g) => n + g.rows.length, 0);
+    const total = [...groups.values()].reduce((n, g) => n + g.rows.length, 0);
+    const list = [...groups.entries()].sort((a, b) => (b[1].boss - a[1].boss) || a[1].name.localeCompare(b[1].name));
     return [
-      box(sec('Auto-loot'), h('div', { class: 'ma-fields' }, check('Auto-loot when out of stamina', () => L.enabled, (v) => { L.enabled = v; })),
-        h('div', { class: 'ma-fields' }, fld('mode', sel([['toLevel', 'only what reaches the next level'], ['all', 'everything']], L.mode, (v) => { L.mode = v; }, 250)), intIn(L, 'scanMs', 90, 'scan every (ms)'), intIn(L, 'claimGapMs', 90, 'gap between claims (ms)'))),
-      h('div', { class: 'ma-note' }, `${lootable} lootable · last scan ${ago(s.lastScanAt)}${need != null ? ' · EXP to next level ' + fmtNum(need) : ''}`),
-      groups.size ? h('div', {}, [...groups.entries()].map(([low, g]) => h('div', { class: 'ma-row' },
-        h('div', { class: 'ma-row-main' }, h('div', { class: 'ma-row-name' }, g.name + (g.boss ? ' 👑' : '')),
-          h('div', { class: 'ma-row-meta' }, `${g.rows.length} corpse${g.rows.length === 1 ? '' : 's'} · known damage ${fmtNum(g.rows.reduce((n, r) => n + (Number.isFinite(r.userDamage) ? r.userDamage : 0), 0))}`)),
-        h('div', { class: 'ma-row-actions' }, btn(s.claiming.has(low) ? 'Claiming…' : 'Claim all', 'soft', () => { Loot.claimGroup(low); }))))) : h('div', { class: 'core-empty' }, s.lastScanAt ? 'Nothing lootable right now.' : 'Press Scan graveyard to look.'),
-      foot(btn(s.scanning ? 'Scanning…' : '🔎 Scan graveyard', 'soft', () => { Loot.scan(); }), h('div', { class: 'core-spacer' }), btn(s.looting ? 'Looting…' : '🎒 Loot now (per mode)', 'success', () => { Loot.pass(); }))];
+      section('Auto-loot', null,
+        check('Auto-loot when out of stamina', () => L.enabled, (v) => { L.enabled = v; }),
+        row('mode', sel([['toLevel', 'only what reaches the next level'], ['all', 'everything']], L.mode, (v) => { L.mode = v; }, 'wide')),
+        intIn(L, 'scanMs', 'scan every (ms)'), intIn(L, 'claimGapMs', 'gap between claims (ms)')),
+      h('div', { class: 'ma-actions' }, btn(s.scanning ? 'Scanning…' : '🔎 Scan graveyard', 'soft', () => { Loot.scan(); }), btn(s.looting ? 'Looting…' : '🎒 Loot now', 'success', () => { Loot.pass(); })),
+      h('p', { class: 'ma-note' }, `${total} lootable · last scan ${ago(s.lastScanAt)}${need != null ? ' · EXP to next level ' + fmtNum(need) : ''}`),
+      ...(list.length ? list.map(([low, g]) => {
+        const dmg = g.rows.reduce((n, r) => n + (Number.isFinite(r.userDamage) ? r.userDamage : 0), 0), busy = s.claiming.has(low);
+        return h('div', { class: 'ma-card' },
+          h('div', { class: 'ma-card-hdr' }, avatar(g.name, g.icon, { size: 'lg', boss: g.boss }),
+            h('div', { class: 'ma-card-name' }, g.name, h('small', {}, g.boss ? 'boss' : 'monster')),
+            h('span', { class: 'tag', style: { font: '800 11px Arial,sans-serif', color: '#ffd978', whiteSpace: 'nowrap' } }, `${g.rows.length} unclaimed`)),
+          h('div', { class: 'ma-card-sub' }, h('span', { class: 'lbl' }, 'known damage'), h('span', { style: { color: '#9caad0', fontVariantNumeric: 'tabular-nums' } }, fmtNum(dmg)),
+            (() => { const b = btn(busy ? 'Claiming…' : 'Claim all', 'soft', () => { Loot.claimGroup(low); }); b.classList.add('ma-gy-claim'); return b; })()));
+      })
+        : [h('div', { class: 'core-empty' }, s.lastScanAt ? 'Nothing lootable right now.' : 'Press Scan graveyard to look.')])];
   }
 
   /* ---- LOG ---- */
   function tLog() {
     const f = cfg.logFilter || 'all', rows = Log.all().filter((r) => f === 'all' || r.k === f).slice(-160).reverse();
-    return [h('div', { class: 'core-row' }, sel([['all', 'all'], ['ok', 'ok'], ['warn', 'warnings'], ['err', 'errors'], ['dmg', 'hits'], ['skill', 'skills'], ['info', 'info']], f, (v) => { cfg.logFilter = v; draw(); }, 140), h('div', { class: 'core-spacer' }), btn('Clear log', 'soft', () => Log.clear())),
-      rows.length ? h('div', { class: 'ma-log' }, rows.map((r) => h('div', { class: 'ma-line ' + r.k }, h('b', {}, r.t + ' '), r.m.replace(/<[^>]+>/g, '')))) : h('div', { class: 'core-empty' }, 'Nothing logged yet.')];
+    return [h('div', { class: 'ma-actions' }, sel([['all', 'all'], ['ok', 'ok'], ['warn', 'warnings'], ['err', 'errors'], ['dmg', 'hits'], ['skill', 'skills'], ['info', 'info']], f, (v) => { cfg.logFilter = v; draw(); }, 'mid'), btn('Clear log', 'soft', () => Log.clear())),
+      rows.length ? h('div', { class: 'ma-logs' }, rows.map((r) => h('div', { class: 'ma-line ' + r.k }, h('b', {}, r.t), r.m.replace(/<[^>]+>/g, '')))) : h('div', { class: 'core-empty' }, 'Nothing logged yet.')];
   }
 
   /* ---- DIAGNOSTICS ---- */
   function tDiag() {
     const l = Diag.last(), counts = Object.entries(Diag.counts).sort((a, b) => b[1] - a[1]), au = Guard.info();
-    return [h('div', { class: 'ma-grid' }, card('Why isn’t it attacking?', l.reason ? `${l.reason}${l.detail ? ' — ' + l.detail : ''}` : 'nothing skipped'), card('Last skip', ago(l.at)),
-      card('Preset capabilities', Presets.note()),
-      card('Re-login', au.status ? (au.status.configured ? 'configured' : 'unconfigured') : 'Core.auth missing'), card('Shielded mobs known', SideMob.shielded()), card('Version', VERSION)),
-      box(sec('Skip reasons (count)'), counts.length ? h('div', {}, counts.map(([k, n]) => h('div', { class: 'ma-kv' }, h('span', {}, k), h('span', {}, n)))) : h('div', { class: 'core-dim' }, 'none')),
-      box(sec('Recent events'), Diag.events.length ? h('div', {}, Diag.events.slice(-40).reverse().map((e) => h('div', { class: 'ma-line' }, h('b', {}, e.t + ' '), e.reason + (e.detail ? ' — ' + e.detail : '')))) : h('div', { class: 'core-dim' }, 'none')),
-      foot(btn('Clear diagnostics', 'soft', () => Diag.clear()), btn('Forget shielded mobs', 'soft', () => { SideMob.forget(); draw(); }))];
+    return [
+      section('Why isn’t it attacking?', null, h('div', { style: { color: '#fff', fontWeight: 700, overflowWrap: 'anywhere' } }, l.reason ? `${l.reason}${l.detail ? ' — ' + l.detail : ''}` : 'nothing skipped'), h('div', { class: 'core-dim', style: { marginTop: '4px' } }, 'last skip: ' + ago(l.at))),
+      section('Info', null, h('div', { class: 'ma-hud' }, cell('Version', VERSION), cell('Re-login', au.status ? (au.status.configured ? 'configured' : 'unconfigured') : 'Core.auth missing'), cell('Shielded mobs', SideMob.shielded()), cell('Presets', Presets.note()))),
+      h('div', { class: 'ma-actions' }, btn('Clear diagnostics', 'soft', () => Diag.clear()), btn('Forget shielded mobs', 'soft', () => { SideMob.forget(); draw(); })),
+      section('Skip reasons', 'count', counts.length ? counts.map(([k, n]) => kv(k, n)) : h('div', { class: 'core-dim' }, 'none')),
+      section('Recent events', null, Diag.events.length ? h('div', { class: 'ma-logs' }, Diag.events.slice(-40).reverse().map((e) => h('div', { class: 'ma-line' }, h('b', {}, e.t), e.reason + (e.detail ? ' — ' + e.detail : '')))) : h('div', { class: 'core-dim' }, 'none'))];
   }
 
   /* ---- SETTINGS ---- */
   function tSettings() {
     const tiers = TIER_CHAIN.slice(0, 4).map((t) => [t, SKILLS[t].label + ' (' + SKILLS[t].cost + ' stam)']);
     return [
-      box(sec('Attacks'),
-        h('div', { class: 'ma-fields' }, fld('highest skill tier', sel(tiers, cfg.maxTier, (v) => { cfg.maxTier = v; }, 230)), fld('class skill', sel([['auto', 'auto' + (cfg.detectedClass ? ' (' + cfg.detectedClass + ')' : '')], ['warrior', 'warrior'], ['cleric', 'cleric'], ['hunter', 'hunter'], ['mage', 'mage']], cfg.classOverride, (v) => { cfg.classOverride = v; }, 170))),
-        h('div', { class: 'ma-fields' }, check('Use the class skill', () => cfg.useClassSkill, (v) => { cfg.useClassSkill = v; }))),
-      box(sec('Timing'),
-        h('div', { class: 'ma-fields' }, intIn(cfg, 'attackDelayMs', 90, 'wave swing gap (ms)'), intIn(cfg, 'dungeonAttackDelayMs', 90, 'dungeon swing gap (ms)'), intIn(cfg, 'minActionGapMs', 90, 'min gap between requests (ms)'), intIn(cfg, 'skillToAttackGapMs', 90, 'skill → attack gap (ms)')),
-        h('div', { class: 'ma-fields' }, intIn(cfg, 'defaultBossCap', 100, 'default boss cap'), intIn(cfg, 'fightScanMs', 90, 'rescan while fighting (ms)'), intIn(cfg, 'idleRecheckMs', 90, 'recheck idle boss (ms)'), intIn(cfg, 'dungeonPollMs', 90, 'dungeon poll (ms)'))),
-      box(sec('Behaviour'),
-        h('div', { class: 'ma-fields' }, check('Pause the server auto-farm while fighting', () => cfg.autoFarmControl, (v) => { cfg.autoFarmControl = v; }), check('Fight Phase Duels automatically', () => cfg.autoDuel, (v) => { cfg.autoDuel = v; }),
-          check('Shield pierce on a side mob (only if a boss is shielded)', () => cfg.sideMob.enabled, (v) => { cfg.sideMob.enabled = v; draw(); }))),
-      box(sec('Parts'), h('div', { class: 'ma-note' }, 'Switch one off and the rest keep working.'),
-        h('div', { class: 'ma-fields' }, [...Kernel.parts.values()].map((p) => check(`${p.icon || ''} ${p.name || p.id}`, () => Kernel.isOn(p.id), (v) => { cfg.parts[p.id] = v; Engine.poke(true); }))))];
+      section('Attacks', null,
+        row('highest skill tier', sel(tiers, cfg.maxTier, (v) => { cfg.maxTier = v; }, 'wide')),
+        row('class skill', sel([['auto', 'auto' + (cfg.detectedClass ? ' (' + cfg.detectedClass + ')' : '')], ['warrior', 'warrior'], ['cleric', 'cleric'], ['hunter', 'hunter'], ['mage', 'mage']], cfg.classOverride, (v) => { cfg.classOverride = v; }, 'mid')),
+        check('Use the class skill', () => cfg.useClassSkill, (v) => { cfg.useClassSkill = v; })),
+      section('Timing', null,
+        intIn(cfg, 'attackDelayMs', 'wave swing gap (ms)'), intIn(cfg, 'dungeonAttackDelayMs', 'dungeon swing gap (ms)'), intIn(cfg, 'minActionGapMs', 'min gap between requests (ms)'), intIn(cfg, 'skillToAttackGapMs', 'skill → attack gap (ms)'),
+        intIn(cfg, 'fightScanMs', 'rescan while fighting (ms)'), intIn(cfg, 'idleRecheckMs', 'recheck idle boss (ms)'), intIn(cfg, 'dungeonPollMs', 'dungeon poll (ms)'), intIn(cfg, 'defaultBossCap', 'default boss cap')),
+      section('Behaviour', null,
+        check('Pause the server auto-farm while fighting', () => cfg.autoFarmControl, (v) => { cfg.autoFarmControl = v; }), check('Fight Phase Duels automatically', () => cfg.autoDuel, (v) => { cfg.autoDuel = v; }),
+        check('Shield pierce on a side mob (only if a boss is shielded)', () => cfg.sideMob.enabled, (v) => { cfg.sideMob.enabled = v; draw(); })),
+      section('Parts', 'switch one off and the rest keep working', [...Kernel.parts.values()].map((p) => check(`${p.icon || ''} ${p.name || p.id}`, () => Kernel.isOn(p.id), (v) => { cfg.parts[p.id] = v; Engine.poke(true); })))];
   }
 
   const BUILD = { status: tStatus, bosses: tBosses, potions: tPotions, graveyard: tGraveyard, log: tLog, diag: tDiag, settings: tSettings };
@@ -1908,18 +2002,18 @@ const Panel = (() => {
   function draw() {
     if (!root || !open || !root.isConnected) return;
     const sc = scroller(root), top = sc ? sc.scrollTop : 0;
-    let body; try { body = BUILD[tab]() } catch (e) { body = [h('div', { class: 'core-err' }, 'panel error: ' + e.message)]; console.warn('[automator] panel', e); }
-    root.replaceChildren(header(), tabsBar(), ...[].concat(body));
+    let body; try { body = BUILD[tab]() } catch (e) { body = [h('div', { class: 'ma-alert' }, 'panel error: ' + e.message)]; console.warn('[automator] panel', e); }
+    root.replaceChildren(tabsBar(), h('div', { class: 'ma-body' }, ...[].concat(body)), footer());
     if (sc) sc.scrollTop = top;
   }
   const typing = () => root && root.contains(document.activeElement) && /^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement.tagName);
   function schedule(ms) { if (drawT) return; drawT = setTimeout(() => { drawT = 0; if (typing()) schedule(1500); else draw(); }, ms || 400); }
   if (typeof Core.on === 'function') Core.on('caps:changed', (d) => { if (open && d && (d.added || []).some((n) => n.startsWith('preset.'))) schedule(300); });   // a preset addon loaded late
-  UI.hook((what) => { if (!open) return; if (what === undefined || DIRTY_TAB[what] === tab || (what === 'status' && tab === 'status')) schedule(); });
+  UI.hook((what) => { if (!open) return; if (what === undefined || what === 'status' || DIRTY_TAB[what] === tab) schedule(); });
 
   function register() {
-    Core.float.add({ id: ID, title: 'Automator', icon: '🤖', order: 40,
-      render(el) { root = h('div', {}); el.replaceChildren(root); open = true; draw(); },
+    Core.float.add({ id: ID, title: 'Automator', icon: '🤖', order: 40, width: 600,
+      render(el) { root = h('div', { class: 'ma-root' }); el.replaceChildren(root); open = true; draw(); },
       onShow() { open = true; }, onHide() { open = false; } });
   }
   return { register, draw };
