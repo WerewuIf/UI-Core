@@ -621,6 +621,11 @@ const LootData = (() => {
     return [...m.entries()].sort((x, y) => x[0] - y[0]).map(([req, items]) => ({ req, items }));
   }
   const top = (low) => { const t = tiers(low); return t.length ? t[t.length - 1].req : null; };
+  let iconMap = null, iconFor = null;                                // item name -> picture, from whichever boss's scan had one (the same item looks the same everywhere)
+  const icon = (name) => {
+    if (iconFor !== d) { iconFor = d; iconMap = new Map(); Object.values(d.bosses).forEach((b) => ((b && b.loot) || []).forEach((it) => { if (it && it.icon && it.name && !iconMap.has(it.name)) iconMap.set(it.name, it.icon); })); }
+    return iconMap.get(name) || null;
+  };
   // bosses the roster does not know yet: a wave boss joins its wave (a second phase of a known boss there becomes that boss's next phase);
   // a Castle boss is only added when the scan saw where it stands
   function apply() {
@@ -655,7 +660,7 @@ const LootData = (() => {
     saveCfg();
   }
   lootStore.watch((v) => { d = norm(v); const n = apply(); if (n) log(`🆕 loot scan added ${n} boss${n === 1 ? '' : 'es'} to the Bosses tab`, 'info'); UI.dirty(); });
-  return { get, tiers, top, apply, purge, dismiss, isBossRecord, all: () => d.bosses, at: () => d.at || 0 };
+  return { get, tiers, top, icon, apply, purge, dismiss, isBossRecord, all: () => d.bosses, at: () => d.at || 0 };
 })();
 
 /* ---- board: what we KNOW about each boss right now. Only a validated page / confirmed reply may change it. -------- */
@@ -1828,7 +1833,8 @@ Object.assign(LootScan, (() => {
         if (child.matches && child.matches('h4.tier-head')) { tier = clean(child.textContent).toUpperCase(); return; }
         (child.querySelectorAll ? child.querySelectorAll('.loot-card') : []).forEach((card) => {
           const chips = Array.from(card.querySelectorAll('.chip')).map((c) => clean(c.textContent));
-          loot.push({ tier, name: clean((card.querySelector('.loot-name') || {}).textContent), dropPct: numIn(chips.find((t) => /drop:/i.test(t))), dmgReq: numIn(chips.find((t) => /dmg req:/i.test(t))) });
+          const im = card.querySelector('img'), icon = im ? (im.getAttribute('src') || im.getAttribute('data-src') || '') : '';
+          loot.push({ tier, name: clean((card.querySelector('.loot-name') || {}).textContent), icon: icon || undefined, dropPct: numIn(chips.find((t) => /drop:/i.test(t))), dmgReq: numIn(chips.find((t) => /dmg req:/i.test(t))) });
         });
       });
     }
@@ -2182,7 +2188,6 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
 .ma-ld label{display:block;font:800 9.5px Arial,sans-serif;color:#6e7a9c;text-transform:uppercase;letter-spacing:.06em;margin:0 3px 3px}
 .ma-ld select{width:100%;text-overflow:ellipsis}
 .ma-capbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px}.ma-capbar .ma-in{font:800 17px Arial,sans-serif;padding:7px 10px}.ma-capbar small{color:#7c88ad;font-size:11px;line-height:1.35;flex:1;min-width:90px}
-.ma-capq{display:flex;gap:4px;margin-left:auto}.ma-capq .ma-tbtn{padding:5px 10px}
 .ma-trk{display:flex;margin:0 0 6px;padding:5px 0 1px;overflow-x:auto;scrollbar-width:none}.ma-trk::-webkit-scrollbar{display:none}
 .ma-nd{flex:1 0 46px;position:relative;display:flex;flex-direction:column;align-items:center;gap:5px;background:none;border:0;padding:4px 0 3px;cursor:pointer;color:#5d6990;font:800 10.5px Arial,sans-serif;white-space:nowrap}
 .ma-nd i{position:relative;z-index:1;width:14px;height:14px;box-sizing:border-box;border-radius:50%;background:#0b1120;border:2px solid #33406a;transition:.15s}
@@ -2193,15 +2198,19 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
 .ma-nd:hover i{border-color:#9fc1ff}
 .ma-nd.on{color:#fff}.ma-nd.on i{background:#fff;border-color:#6ea8ff;box-shadow:0 0 0 4px rgba(110,168,255,.3)}
 .ma-nd.exp{color:#c9a8ff}.ma-nd.exp i{border-color:#a07ad8}.ma-nd.exp.got i{background:#a07ad8}.ma-nd.exp.on i{background:#fff}
-.ma-get{background:#0a0f1c;border:1px solid rgba(255,255,255,.06);border-radius:14px;padding:7px 9px 8px}
-.ma-get-h{display:flex;align-items:baseline;gap:5px;font:700 11px Arial,sans-serif;color:#9aa7cf;margin-bottom:6px}.ma-get-h b{color:#fff;font-size:12.5px}.ma-get-h small{margin-left:auto;color:#6e7a9c;font:400 10.5px Arial,sans-serif}
-.ma-lt{display:flex;flex-wrap:wrap;gap:4px}
-.ma-it{font:600 11px/1.3 Arial,sans-serif;color:#c4cdeb;background:#131c33;border:1px solid #27324f;border-radius:8px;padding:2px 8px}
-.ma-it.new{color:#fff;background:rgba(75,115,224,.22);border-color:#6ea8ff}
-.ma-it.xp{color:#e8dcff;background:rgba(160,122,216,.16);border-color:#a07ad8}
-.ma-it em{font-style:normal;font-weight:800;color:#9fc1ff;margin-left:4px}
-.ma-nxt{display:flex;align-items:baseline;gap:8px;width:100%;box-sizing:border-box;margin-top:7px;text-align:left;background:transparent;border:1px dashed #33406a;border-radius:10px;padding:5px 9px;color:#7c88ad;font:600 11px/1.3 Arial,sans-serif;cursor:pointer;transition:.15s}
-.ma-nxt b{flex:0 0 auto;color:#9fc1ff}.ma-nxt span{flex:1;min-width:0}.ma-nxt:hover{border-color:#6ea8ff;color:#cfd8f7}
+.ma-get{background:#0a0f1c;border:1px solid rgba(255,255,255,.06);border-radius:14px;padding:7px 9px 9px}
+.ma-get-h{display:flex;align-items:baseline;gap:5px;font:700 11px Arial,sans-serif;color:#9aa7cf;margin-bottom:8px}.ma-get-h b{color:#fff;font-size:12.5px}.ma-get-h small{margin-left:auto;color:#6e7a9c;font:400 10.5px Arial,sans-serif}
+.ma-tiles{display:flex;flex-wrap:wrap;gap:8px 7px}
+.ma-tile{position:relative;display:flex;flex-direction:column;align-items:center;gap:3px;width:46px;padding:0;background:none;border:0;cursor:default;opacity:.4;filter:grayscale(.75);transition:.15s}
+.ma-tile.up{cursor:pointer}.ma-tile.up:hover{opacity:.85;filter:none}
+.ma-tile.got{opacity:1;filter:none}
+.ma-ti{width:42px;height:42px;box-sizing:border-box;border-radius:12px;overflow:hidden;border:1px solid #33406a;background:#0d1322;display:flex;align-items:center;justify-content:center}
+.ma-tile.got .ma-ti{border-color:#6ea8ff;box-shadow:0 0 0 2px rgba(110,168,255,.14)}
+.ma-ti img{width:100%;height:100%;object-fit:contain;display:block}
+.ma-ti-fb{width:100%;height:100%;display:flex;align-items:center;justify-content:center;font:800 13px Arial,sans-serif;color:#fff}
+.ma-tile.xp .ma-ti{border-color:#a07ad8;background:#1c1530;color:#d9c4ff;font:800 20px Arial,sans-serif}.ma-tile.xp.got .ma-ti{box-shadow:0 0 0 2px rgba(160,122,216,.2)}
+.ma-tile em{position:absolute;top:-5px;right:-2px;min-width:18px;height:18px;box-sizing:border-box;padding:0 4px;border-radius:9px;background:#4b73e0;border:2px solid #0a0f1c;color:#fff;font:800 9.5px/14px Arial,sans-serif;font-style:normal;text-align:center}
+.ma-tile small{font:700 9.5px Arial,sans-serif;color:#8b97bd;white-space:nowrap}.ma-tile.got small{color:#c4cdeb}
 /* select several bosses: the check on a bubble, and the bar that applies one setup to all of them */
 .ma-ck{flex:0 0 auto;width:20px;height:20px;box-sizing:border-box;border-radius:50%;border:2px solid #33406a;display:flex;align-items:center;justify-content:center;font:900 11px Arial,sans-serif;color:#fff}
 .ma-bb.pick{background:rgba(75,115,224,.2);border-color:#6ea8ff}.ma-bb.pick .ma-ck{background:#4b73e0;border-color:#6ea8ff}
@@ -2487,43 +2496,42 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     });
   }
 
-  /* DAMAGE: the number on top, a track of loot levels under it (tap a dot to cap there), then what that cap gets you. */
+  /* DAMAGE: the number, a track of loot levels (tap a dot to cap there), then the loot itself as pictures: bright = the cap gets it, dim = it needs more damage. */
+  const initials = (n) => String(n || '?').split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w.charAt(0).toUpperCase()).join('');
+  function lootIcon(name) {
+    const src = iconUrl(LootData.icon(name)), fb = () => h('span', { class: 'ma-ti-fb', style: { background: hueOf(String(name).toLowerCase()) } }, initials(name));
+    return src ? h('img', { src, loading: 'lazy', alt: '', onerror: (e) => e.target.replaceWith(fb()) }) : fb();
+  }
   function damageBlock(low) {
-    const base = baseCap(low), info = LootData.get(low), mine = cfg.bosses[low] && cfg.bosses[low].cap != null, top = LootData.top(low);
+    const base = baseCap(low), info = LootData.get(low);
     const exp = info && info.expCapDmg > 0 ? info.expCapDmg : 0;
     const rungs = LootData.tiers(low).map((t) => ({ req: t.req, items: t.items, exp: t.req === exp }));
     if (exp && !rungs.some((r) => r.exp)) { rungs.push({ req: exp, items: [], exp: true }); rungs.sort((a, b) => a.req - b.req); }
     const pctTxt = info && info.expCapPct != null ? ` (${info.expCapPct}%)` : '';
-    const setCap = (v) => (e) => { stop(e); if (v == null) delete ovr(low).cap; else ovr(low).cap = v; saveCfg(); draw(); };
-    const qb = (label, title, on, fn) => h('button', { type: 'button', class: 'ma-tbtn' + (on ? ' on' : ''), title, onclick: fn }, label);
-    const bits = info ? [info.levelReq ? lvTxt(info.levelReq) : '', info.expCapPct != null ? `EXP cap ${info.expCapPct}%` : ''].filter(Boolean) : [];
-    const head = h('div', { class: 'ma-capbar' }, num(() => baseCap(low), (n) => { ovr(low).cap = n; draw(); }, { fmt: fmtNum, w: 108 }), bits.length ? h('small', {}, bits.join(' · ')) : null,
-      h('div', { class: 'ma-capq' },
-        top != null ? qb('Max', 'The highest loot level (the default)', !mine || base === top, setCap(null)) : null,
-        exp ? qb('EXP', 'Stop where the EXP cap is reached', base === exp, setCap(exp)) : null,
-        qb('Skip', 'Cap 0: never attack this boss', base === 0, setCap(0))));
+    const setCap = (v) => (e) => { stop(e); ovr(low).cap = v; saveCfg(); draw(); };
+    const bits = [info && info.levelReq ? lvTxt(info.levelReq) : '', info && info.expCapPct != null ? `EXP cap ${info.expCapPct}%` : '', '0 = skip'].filter(Boolean);
+    const head = h('div', { class: 'ma-capbar' }, num(() => baseCap(low), (n) => { ovr(low).cap = n; draw(); }, { fmt: fmtNum, w: 108 }), h('small', {}, bits.join(' · ')));
     if (!rungs.length) {
       return [head, chips([[1e8, '100M'], [5e8, '500M'], [1e9, '1B'], [2e9, '2B'], [3e9, '3B'], [5e9, '5B']], base, (v) => { ovr(low).cap = v; }),
         h('div', { class: 'ma-what' }, base <= 0 ? 'Cap 0: this boss is skipped.' : !info ? (LootScan.available ? 'No loot data yet. Press Scan at the top to read it.' : 'No loot data for this boss yet.') : '')];
     }
-    const got = rungs.filter((r) => r.req <= base), last = got[got.length - 1] || null, next = rungs.find((r) => r.req > base) || null;
+    const got = rungs.filter((r) => r.req <= base), topReq = rungs[rungs.length - 1].req;
     const track = h('div', { class: 'ma-trk' }, rungs.map((r, i) => h('button', { type: 'button',
       class: 'ma-nd' + (r.req <= base ? ' got' : '') + (r.req === base ? ' on' : '') + (r.exp ? ' exp' : '') + (i === 0 ? ' first' : '') + (i === rungs.length - 1 ? ' last' : '') + (rungs[i + 1] && rungs[i + 1].req <= base ? ' nx' : ''),
       title: `${fmtNum(r.req)} damage` + (r.items.length ? ': ' + r.items.join(', ') : '') + (r.exp ? ' · reaches the EXP cap' : ''), onclick: setCap(r.req) }, h('i', {}), h('b', {}, short(r.req) + (r.exp ? '★' : '')))));
-    const seen = new Map();                                            // item -> the levels (within the cap) that list it, highest level first
-    got.slice().reverse().forEach((r) => r.items.forEach((nm) => { const e = seen.get(nm) || []; e.push(r.req); seen.set(nm, e); }));
-    const fresh = last ? new Set(last.items) : new Set(), expGot = got.some((r) => r.exp);
-    const list = [expGot ? h('span', { class: 'ma-it xp', title: 'Damage this high reaches the EXP cap' }, '★ EXP cap' + pctTxt) : null,
-      ...[...seen.entries()].map(([nm, at]) => h('span', { class: 'ma-it' + (fresh.has(nm) && got.length > 1 ? ' new' : ''), title: 'Drops at ' + at.slice().reverse().map(short).join(', ') }, nm, at.length > 1 ? h('em', {}, '×' + at.length) : null))].filter(Boolean);
-    const topReq = rungs[rungs.length - 1].req;
-    const nextTxt = !next ? '' : next.items.length ? '+ ' + next.items.slice(0, 3).join(', ') + (next.items.length > 3 ? ` +${next.items.length - 3} more` : '') + (next.exp ? ' · ★ EXP cap' : '') : '★ reaches the EXP cap' + pctTxt;
+    const items = new Map();                                           // item -> every loot level that drops it, lowest first
+    rungs.forEach((r) => r.items.forEach((nm) => { const e = items.get(nm) || []; e.push(r.req); items.set(nm, e); }));
+    const tiles = [...items.entries()].map(([nm, at]) => {
+      const n = at.filter((q) => q <= base).length, up = n === 0 && base > 0;
+      return h('button', { type: 'button', class: 'ma-tile' + (n ? ' got' : '') + (up ? ' up' : ''), title: `${nm}\nDrops at ${at.map(short).join(' · ')} damage` + (n ? '' : '\nTap to raise the cap to the first one'), onclick: up ? setCap(at[0]) : stop },
+        h('span', { class: 'ma-ti' }, lootIcon(nm)), n > 1 ? h('em', {}, '×' + n) : null, h('small', {}, short(at[0])));
+    });
+    if (exp) tiles.push(h('button', { type: 'button', class: 'ma-tile xp' + (exp <= base ? ' got' : '') + (exp > base ? ' up' : ''), title: `Reaches the EXP cap${pctTxt}\nat ${fmtNum(exp)} damage` + (exp > base ? '\nTap to raise the cap there' : ''), onclick: exp > base ? setCap(exp) : stop }, h('span', { class: 'ma-ti' }, '★'), h('small', {}, short(exp))));
+    const have = [...items.values()].filter((at) => at[0] <= base).length;
     return [head, track, h('div', { class: 'ma-get' },
-      h('div', { class: 'ma-get-h' }, base <= 0 ? h('b', {}, 'Skipped') : h('span', {}, 'At ', h('b', {}, short(base)), ' you get'), base > 0 ? h('small', {}, `${got.length} of ${rungs.length} loot levels` + (list.length > 1 && got.length > 1 && fresh.size ? ' · highlighted: added at ' + short(last.req) : '')) : null),
-      base <= 0 ? h('div', { class: 'ma-what', style: { margin: 0 } }, 'Cap 0: this boss is skipped.')
-        : list.length ? h('div', { class: 'ma-lt' }, list)
-        : h('div', { class: 'ma-what', style: { margin: 0 } }, `Nothing yet: the first drop needs ${short(rungs[0].req)}.`),
-      base > topReq ? h('div', { class: 'ma-what', style: { margin: '6px 0 0' } }, `Above the top level (${short(topReq)}): the extra damage adds nothing.`) : null,
-      next && base > 0 ? h('button', { type: 'button', class: 'ma-nxt', title: 'Raise the cap to ' + fmtNum(next.req), onclick: setCap(next.req) }, h('b', {}, '▲ ' + short(next.req)), h('span', {}, nextTxt)) : null)];
+      h('div', { class: 'ma-get-h' }, base <= 0 ? h('b', {}, 'Skipped') : h('span', {}, 'At ', h('b', {}, short(base)), ' you get'), items.size && base > 0 ? h('small', {}, `${have} of ${items.size} drops`) : null),
+      tiles.length ? h('div', { class: 'ma-tiles' }, tiles) : h('div', { class: 'ma-what', style: { margin: 0 } }, 'No drops with a damage requirement.'),
+      base > topReq ? h('div', { class: 'ma-what', style: { margin: '7px 0 0' } }, `Above the top level (${short(topReq)}): the extra damage adds nothing.`) : null)];
   }
   function placeOf(m) {
     if (m.kind === 'wave') { const l = bossLoc(m.low); return l ? `Gate ${l.gate} · Wave ${l.wave}` : ''; }
