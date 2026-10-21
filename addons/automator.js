@@ -24,7 +24,7 @@
  * replies were retried instantly instead of honouring their delay.
  */
 Core.module({
-  id: 'automator', name: 'Automator', icon: '🤖', version: '1.5.0',
+  id: 'automator', name: 'Automator', icon: '🤖', version: '1.6.0',
   // Offered to other addons through Core capabilities (guides/CAPABILITIES.md):
   //   automator.status() -> the status string     automator.start() / automator.stop()     automator.scan() -> scan the bosses now
   provides: (api) => api && api.start ? {
@@ -35,7 +35,7 @@ Core.module({
   } : {},
   init(Core) {
 'use strict';
-const ID = 'automator', VERSION = '1.5.0';
+const ID = 'automator', VERSION = '1.6.0';
 if (window.__automatorLoaded) { console.warn('[automator] already loaded', window.__automatorLoaded); return null; }
 window.__automatorLoaded = VERSION;
 
@@ -98,7 +98,7 @@ const DEFAULT_CFG = {
   hp: { enabled: false, thresholdPct: 0 },                // drinks when the server says you are dead (HP 0)
   autoFarmControl: true,
   autoDuel: true,
-  sideMob: { enabled: false, lockedKey: '' },          // shielded-boss side-mob targeting (off: it shouldn't be needed)
+  sideMob: { enabled: false, source: 'auto' },         // shielded-boss side-mob targeting (off: it shouldn't be needed). source: 'auto' | 'gribble' | 'easy:<location>' | 'hard:<location>'
   autoLoot: { enabled: false, mode: 'toLevel', scanMs: 60000, claimGapMs: 500 },
   parts: { bosses: true, dungeons: true, duels: true, loot: true },
   logFilter: 'all',
@@ -111,6 +111,8 @@ function mergeCfg(saved) {
   const d = JSON.parse(JSON.stringify(DEFAULT_CFG)), s = saved && typeof saved === 'object' ? saved : {};
   const out = Object.assign(d, s);
   for (const k of ['mana', 'hp', 'sideMob', 'autoLoot']) out[k] = Object.assign({}, DEFAULT_CFG[k], s[k] || {});
+  delete out.sideMob.locked; delete out.sideMob.lockedKey;      // (the old single locked mob: sources replace it)
+  if (!/^(auto|gribble|(easy|hard):\d+)$/.test(String(out.sideMob.source))) out.sideMob.source = 'auto';
   out.parts = Object.assign({}, DEFAULT_CFG.parts); Object.keys(out.parts).forEach((k) => { out.parts[k] = true; });   // modules are always on
   out.maxTier = 'WORLD_BREAKER';
   // stamina: one potion (Large or Full). Older saves had two slots (A, then B): keep whichever was switched on.
@@ -692,7 +694,7 @@ function candidates() {
 const targetKey = (t) => `${t.kind}:${t.instanceId || ''}:${t.monsterId}`;
 
 /* ---- slots the other parts fill in. Each has a harmless stub, so deleting PART 2 / 3 / 4 never breaks the wave bosses ---- */
-const Dungeons = { nextCheck: () => Infinity, refresh: async () => {}, sideMobs: null, corpses: null };   // PART 2 fills this
+const Dungeons = { nextCheck: () => Infinity, refresh: async () => {}, sideMobs: null, catalog: null, terrName: () => '', corpses: null };   // PART 2 fills this
 const Duels = { fight: null, bootPage: () => {} };                                                         // PART 3 fills this
 const Loot = { onStamStall: async () => {} };                                                              // PART 4 fills this
 const LootScan = { available: false, state: { running: false, stop: false, label: '', done: 0, total: 0, read: 0, added: 0, notes: [], error: '', startedAt: 0, endedAt: 0 }, run: async () => {}, stop() {}, download() {}, text: () => '' };   // PART 4b fills this
@@ -963,8 +965,10 @@ const Presets = (() => {
 
 /* ---- side-mob / shielded-boss support (TOGGLE, off by default: it should not be needed) ------------------------------
  * A shielded boss rejects the class skill ("divine shield" / "couldn't pierce"). With the toggle on we remember that, and cast
- * ONLY the class skill on a live non-boss, non-shielded mob (a dungeon mob, else a wave mob); the damage attack always goes to
- * the real boss. Per boss: targeting normal (never divert) | shielded (always divert) | auto (divert once the server says so).
+ * ONLY the class skill on a live DUNGEON mob (never a boss, never a wave mob: wave pages are not fetched for this any more);
+ * the damage attack always goes to the real boss. Per boss: targeting normal (never divert) | shielded (always divert) | auto
+ * (divert once the server says so). Where the mob comes from is one global choice (cfg.sideMob.source): Auto (first live mob of
+ * an open normal dungeon) | Gribbles | one normal-dungeon territory | one hard-dungeon territory.
  */
 const SideMob = (() => {
   const shStore = Core.store(ID + '-shielded', { def: [] });
@@ -979,33 +983,26 @@ const SideMob = (() => {
   const mark = (t) => { const k = keyOf(t); if (!shielded.has(k)) { shielded.add(k); saveSh(); } };
   let cache = null; const joined = new Map();
 
-  async function waveMob(t) {
-    const loc = bossLoc(t.low); if (!loc) return null;
-    let html; try { html = await Core.net.fetchText(`/active_wave.php?gate=${loc.gate}&wave=${loc.wave}`, { ttl: 15000, key: `ma:wave:${loc.gate}:${loc.wave}`, via: (run) => Core.cookies.withMode('alive', run) }); } catch (_) { return null; }
-    const doc = parseHtml(html); if (Guard.pageState(doc) !== 'ok') return null;
-    for (const card of doc.querySelectorAll('.monster-container .monster-card, .monster-card')) {
-      if (!Scan.cardAlive(card)) continue;
-      const id = Scan.cardId(card); if (!id || String(id) === String(t.monsterId)) continue;
-      const name = (card.dataset.name || '').trim().toLowerCase();
-      if (!name || Roster.get(name)) continue;                          // never a boss
-      const mob = { kind: 'wave', monsterId: String(id), name: card.dataset.name || 'wave mob', low: name };
-      if (!shielded.has(keyOf(mob))) return mob;
-    }
-    return null;
+  const srcLabel = (src) => {
+    const m = /^(easy|hard):(\d+)$/.exec(src || '');
+    if (m) { const n = Dungeons.terrName ? Dungeons.terrName(m[1], +m[2]) : ''; return `${m[1] === 'hard' ? 'Hard dungeon' : 'Normal dungeon'} · Loc ${m[2]}${n ? ' ' + n : ''}`; }
+    return src === 'gribble' ? 'Gribbles' : 'Auto (normal dungeon)';
+  };
+  // the mob for `src`; a picked source that is empty right now falls back to Auto once (and says so)
+  async function pick(excludeKey, src) {
+    if (!Dungeons.sideMobs) return { mob: null, used: src };
+    let mob = null;
+    try { mob = await Dungeons.sideMobs(excludeKey, shielded, src); } catch (_) { /* none */ }
+    if (!mob && src !== 'auto') { try { mob = await Dungeons.sideMobs(excludeKey, shielded, 'auto'); } catch (_) { /* none */ } if (mob) return { mob, used: 'auto', fell: true }; }
+    return { mob, used: src };
   }
   async function find(t) {
-    const now = Date.now(), lk = cfg.sideMob.locked;
-    if (lk && lk.monsterId && lk.instanceId) {
-      const mob = { kind: 'dungeon', monsterId: String(lk.monsterId), instanceId: String(lk.instanceId), locationId: lk.locationId || lk.locId || '', name: lk.name || 'locked side mob' };
-      if (!shielded.has(keyOf(mob)) && keyOf(mob) !== keyOf(t)) return mob;
-    }
-    if (cache && cache.exp > now && keyOf(cache.mob) !== keyOf(t) && !shielded.has(keyOf(cache.mob))) return cache.mob;
-    let mob = null;
-    try { if (Dungeons.sideMobs) mob = await Dungeons.sideMobs(keyOf(t), shielded); } catch (_) { /* fall back to a wave mob */ }
-    if (!mob) { mob = await waveMob(t); if (mob) log(`🌊 no dungeon mob for the pierce — using wave mob ${esc(mob.name)}`, 'info'); }
-    if (mob) cache = { mob, exp: now + 30000 };
-    else log('⚠️ no usable side mob (all dungeon / wave mobs empty, locked or shielded)', 'warn');
-    return mob;
+    const now = Date.now(), src = cfg.sideMob.source || 'auto';
+    if (cache && cache.exp > now && cache.src === src && keyOf(cache.mob) !== keyOf(t) && !shielded.has(keyOf(cache.mob))) return cache.mob;
+    const r = await pick(keyOf(t), src);
+    if (r.mob) { cache = { mob: r.mob, exp: now + 30000, src }; if (r.fell) log(`↪ no live mob in ${esc(srcLabel(src))} — using ${esc(r.mob.name)} from the normal dungeon`, 'info'); }
+    else log('⚠️ no usable side mob (no live dungeon mob that is free, not shielded and not a boss)', 'warn');
+    return r.mob;
   }
   const forgetCache = () => { cache = null; };
   const targetFields = (m) => (m.kind === 'dungeon' ? { dgmid: m.monsterId, instance_id: m.instanceId, location_id: m.locationId } : { monster_id: m.monsterId });
@@ -1021,17 +1018,11 @@ const SideMob = (() => {
   }
   const isRejoin = (m) => /removed due to inactivity|rejoin the battle/i.test(String(m || ''));
   // what find() would pick, same order, without caching it, logging it or joining anything
-  async function preview(low) {
-    const lk = cfg.sideMob.locked;
-    if (lk && lk.monsterId && lk.instanceId) return { mob: { name: lk.name || 'locked side mob' }, src: 'the mob you locked' };
-    let mob = null;
-    try { if (Dungeons.sideMobs) mob = await Dungeons.sideMobs('', shielded); } catch (_) { /* then a wave mob */ }
-    if (mob) return { mob, src: `Shadowbridge · location ${mob.locationId}` };
-    const loc = bossLoc(low); mob = await waveMob({ low, monsterId: '' });
-    return mob ? { mob, src: loc ? `Gate ${loc.gate} · Wave ${loc.wave} page` : 'a wave page' } : null;
+  async function preview() {
+    const r = await pick('', cfg.sideMob.source || 'auto');
+    return r.mob ? { mob: r.mob, src: `${srcLabel(r.used)} · Loc ${r.mob.locationId}` } : null;
   }
-  const lockedName = () => { const lk = cfg.sideMob.locked; return lk && lk.monsterId && lk.instanceId ? (lk.name || 'a locked mob') : ''; };
-  return { preview, lockedName, isShieldMsg, eligible, isShielded, mark, find, forgetCache, join, isRejoin, targetFields, keyOf, modeOf, shielded: () => shielded.size, forget: () => { shielded.clear(); saveSh(); cache = null; } };
+  return { preview, label: srcLabel, isShieldMsg, eligible, isShielded, mark, find, forgetCache, join, isRejoin, targetFields, keyOf, modeOf, shielded: () => shielded.size, forget: () => { shielded.clear(); saveSh(); cache = null; } };
 })();
 
 /* ---- the attack engine -------------------------------------------------------------------------------------------
@@ -1300,7 +1291,7 @@ const Engine = (() => {
 
 /* ===================================================================================================================
  * PART 2 — DUNGEONS (swappable: switch the part off, or delete this block, and the wave bosses keep working)
- * Castle of the Fallen Prince bosses (+ Khaal's second phase), the Shadowbridge Gribble swarm, mobs for the shield pierce,
+ * Castle of the Fallen Prince bosses (+ Khaal's second phase), the Shadowbridge Gribble swarm, the dungeon-mob catalogue for the shield pierce,
  * and the dungeon pages the graveyard reads. NOT the cube / Polyhedral Crucible: Cube Suite owns it completely.
  * ================================================================================================================ */
 (function seedDungeonRoster() {
@@ -1368,16 +1359,25 @@ Object.assign(Dungeons, (() => {
     inst = { at: Date.now(), v, ended };
     return inst;
   }
+  /* territory names: read off the instance map pins (their label minus the "3/5" counter), remembered between sessions */
+  const terrStore = Core.store(ID + '-terr', { def: {} });
+  const terrMap = (() => { const v = terrStore.get(); return v && typeof v === 'object' ? v : {}; })();
+  const terrName = (type, loc) => terrMap[type + ':' + loc] || '';
+  const typeOfId = (id) => ['easy', 'hard'].find((t) => (inst.v[t] || []).includes(String(id)) || (inst.ended[t] || []).includes(String(id))) || '';
+  const tidy = (t) => String(t || '').replace(/\d+\s*\/\s*\d+/g, ' ').replace(/\bboss\b/gi, ' ').replace(/[·|:()\[\]–—-]+/g, ' ').replace(/\s+/g, ' ').trim();
   async function pins(id) {                                              // the instance map: one pin per location
     const r = await getDoc(`/guild_dungeon_instance.php?id=${id}`, 10000, 'ma:dinst:' + id); if (!r || !r.doc) return null;
-    const out = [];
+    const out = [], type = typeOfId(id); let changed = false;
     r.doc.querySelectorAll('a.pin').forEach((pin) => {
       const m = (pin.getAttribute('href') || '').match(/location_id=(\d+)/);
       const label = ((pin.querySelector('.label') || {}).textContent || '').replace(/\s+/g, ' ').trim();
       const cm = label.match(/(\d+)\s*\/\s*(\d+)/), done = cm ? parseInt(cm[1], 10) : null, total = cm ? parseInt(cm[2], 10) : null;
-      out.push({ locationId: m ? parseInt(m[1], 10) : null, isLocked: pin.classList.contains('locked'),
-        isBoss: /\bboss\b/i.test(label) || /\bboss\b/i.test(pin.getAttribute('title') || ''), isDone: done !== null && total > 0 && done >= total });
+      const loc = m ? parseInt(m[1], 10) : null, isBoss = /\bboss\b/i.test(label) || /\bboss\b/i.test(pin.getAttribute('title') || '');
+      const name = tidy(label) || tidy(pin.getAttribute('title'));
+      if (type && loc != null && name && terrMap[type + ':' + loc] !== name) { terrMap[type + ':' + loc] = name; changed = true; }
+      out.push({ locationId: loc, name, isLocked: pin.classList.contains('locked'), isBoss, isDone: done !== null && total > 0 && done >= total });
     });
+    if (changed) terrStore.set(terrMap);
     return out;
   }
   async function dmgOn(id, dgmid) {                                       // the server's own damage total for us on that monster
@@ -1484,20 +1484,68 @@ Object.assign(Dungeons, (() => {
     }
   }
 
-  /* ---- a live non-boss mob for the shield pierce (Shadowbridge orcs first; the cube is never used) ---- */
-  async function sideMobs(excludeKey, shielded) {
-    const ins = await instances();
-    for (const id of ins.v.easy || []) for (const loc of [1, 3, 2, 4]) {
-      const r = await getDoc(`${LOC}?instance_id=${id}&location_id=${loc}`, 8000, `ma:dloc:${id}:${loc}`);
-      if (!r || !r.doc || /route is still sealed/i.test(r.html)) continue;
-      for (const card of r.doc.querySelectorAll('.mon')) {
-        if (card.classList.contains('dead')) continue;
-        const name = monName(card), dgmid = dgmidOf(card); if (!dgmid || Roster.get(name.toLowerCase())) continue;
-        const key = `dungeon:${dgmid}:${id}`; if (key === excludeKey || (shielded && shielded.has(key))) continue;
-        return { kind: 'dungeon', monsterId: dgmid, instanceId: String(id), locationId: loc, name: name || 'dungeon mob', low: name.toLowerCase() };
+  /* ---- dungeon mobs for the shield pierce: one location page -> its live mobs; never a boss, never the cube ---- */
+  const GRIBBLE = /gribble/i, FALLBACK_LOCS = { easy: [1, 2, 3, 4], hard: [] };
+  const isBossName = (n) => !!Roster.get(String(n || '').toLowerCase());
+  async function scanLoc(id, loc) {                                    // null = fetch failed, undefined = login / maintenance page
+    const r = await getDoc(`${LOC}?instance_id=${id}&location_id=${loc}`, 8000, `ma:dloc:${id}:${loc}`);
+    if (!r) return null; if (!r.doc) return undefined;
+    const sealed = /route is still sealed/i.test(r.html) || Array.from(r.doc.querySelectorAll('.wrap .row .pill')).map((x) => (x.textContent || '').trim().toLowerCase()).includes('locked');
+    if (sealed) return { sealed: true, mobs: [] };
+    const mobs = [];
+    for (const card of r.doc.querySelectorAll('.mon')) {
+      if (card.classList.contains('dead')) continue;
+      const name = monName(card), dgmid = dgmidOf(card); if (!dgmid) continue;
+      mobs.push({ name: name || 'dungeon mob', dgmid });
+    }
+    return { sealed: false, mobs };
+  }
+  async function places(type, id) {                                    // the locations of an instance (the pins; a fixed list if the map cannot be read)
+    const p = await pins(id); if (p) return p.filter((x) => x.locationId != null);
+    return (FALLBACK_LOCS[type] || []).map((l) => ({ locationId: l, name: '', isBoss: false, isLocked: false }));
+  }
+  const mobOf = (type, id, loc, c) => ({ kind: 'dungeon', monsterId: c.dgmid, instanceId: String(id), locationId: loc, dtype: type, name: c.name, low: c.name.toLowerCase() });
+  /* the first usable live mob for `source`: 'gribble' | 'easy:<loc>' | 'hard:<loc>' | 'auto' (normal dungeon, first live mob, Gribbles included) */
+  async function sideMobs(excludeKey, shielded, source) {
+    const ins = await instances(), m = /^(easy|hard):(\d+)$/.exec(source || ''), src = m ? 'terr' : source === 'gribble' ? 'gribble' : 'auto';
+    const swarm = Roster.list.find((d) => d.kind === 'dungeon-swarm');
+    const plan = src === 'gribble' ? { type: 'easy', locs: (swarm && swarm.locationIds) || [2, 4] } : src === 'terr' ? { type: m[1], locs: [+m[2]] } : { type: 'easy', locs: [1, 3, 2, 4] };
+    for (const id of ins.v[plan.type] || []) for (const loc of plan.locs) {
+      const s = await scanLoc(id, loc); if (!s || s.sealed) continue;
+      for (const c of s.mobs) {
+        const g = GRIBBLE.test(c.name);
+        if (src === 'gribble' ? !g : src === 'terr' ? g : false) continue;           // Gribbles are their own section: never inside a territory
+        if (isBossName(c.name)) continue;
+        const mob = mobOf(plan.type, id, loc, c), key = `dungeon:${c.dgmid}:${id}`;
+        if (key === excludeKey || (shielded && shielded.has(key))) continue;
+        return mob;
       }
     }
     return null;
+  }
+  /* everything a side mob can come from, for the picker: Gribbles on their own, then normal and hard dungeon grouped by territory */
+  let cat = null;
+  async function catalog(force) {
+    if (!force && cat && Date.now() - cat.at < 20000) return cat;
+    const ins = await instances(!!force), out = { at: Date.now(), gribble: [], easy: [], hard: [], open: { easy: (ins.v.easy || []).length, hard: (ins.v.hard || []).length } };
+    for (const type of ['easy', 'hard']) {
+      const terrs = new Map(), jobs = [];
+      for (const id of ins.v[type] || []) for (const p of await places(type, id)) {
+        if (p.isBoss) continue;                                         // a boss location holds the boss, not mobs
+        let t = terrs.get(p.locationId); if (!t) terrs.set(p.locationId, (t = { type, loc: p.locationId, name: p.name || terrName(type, p.locationId), mobs: [], open: false }));
+        if (!p.isLocked) jobs.push({ t, id, loc: p.locationId });
+      }
+      let halted = false;
+      await pool(jobs, async (j) => {
+        if (halted) return;
+        const s = await scanLoc(j.id, j.loc); if (s === undefined) { halted = true; return; } if (!s || s.sealed) return;
+        j.t.open = true;
+        for (const c of s.mobs) { if (isBossName(c.name)) continue; (GRIBBLE.test(c.name) ? out.gribble : j.t.mobs).push(mobOf(type, j.id, j.loc, c)); }
+      }, 3);
+      if (halted) return cat || out;                                    // the guard has taken over: nothing to show
+      out[type] = [...terrs.values()].map((t) => Object.assign(t, { name: t.name || terrName(type, t.loc), sealed: !t.open })).sort((a, b) => a.loc - b.loc);
+    }
+    cat = out; return out;
   }
 
   /* ---- for the graveyard (PART 4): finished-but-lootable corpses of a location ---- */
@@ -1520,7 +1568,7 @@ Object.assign(Dungeons, (() => {
     return out;
   }
 
-  return { nextCheck, refresh, sideMobs, instances, pins, deadMobs, dmgOn, pool, monName, dgmidOf };
+  return { nextCheck, refresh, sideMobs, catalog, terrName, instances, pins, deadMobs, dmgOn, pool, monName, dgmidOf };
 })());
 
 /* ===================================================================================================================
@@ -2041,7 +2089,8 @@ Object.assign(LootScan, (() => {
  * PART 5 — PANEL (one Core.float button + panel)
  *   Overview   what it is doing now: vitals, bosses being farmed, session numbers (collapsible groups)
  *   Bosses     loot scan strip, Waves | Dungeons switch; waves grouped by area (Generals / Ocean / Olympus), one row per wave with its bosses as
- *              bubbles; tap a boss for its cap (loot tiers fill the field), loadout and, for dungeon bosses, timed cap changes
+ *              bubbles. Dungeons: Gribbles in their own section, then normal and hard dungeon grouped by territory. Tapping a boss opens
+ *              ITS OWN PAGE (the list is hidden meanwhile, ‹ › step to the next boss): one section at a time: Damage · Timing · Gear · Shield
  *   Supplies   stamina potion (+ save near EXP cap, auto-loot when out), HP potion, mana potion
  *   Loot       the graveyard
  *   Settings   class skill, behaviour, advanced timing
@@ -2058,7 +2107,8 @@ const Panel = (() => {
   const ui = Object.assign({ tab: 'home', open: {}, filter: '', bsec: 'waves' }, uiStore.get() || {}); if (!ui.open || typeof ui.open !== 'object') ui.open = {};
   const saveUi = () => uiStore.set(ui);
   let root = null, tab = TABS.some((t) => t[0] === ui.tab) ? ui.tab : 'home', shown = false, drawT = 0;
-  const phaseSel = {};                                              // boss entry -> which phase the editor is on
+  const phaseSel = {};                                              // boss entry -> which phase the boss page is on
+  let nextTop = null;                                               // scroll position the next draw() should land on (null = keep it)
   const isOpen = (key, dflt) => (ui.open[key] != null ? !!ui.open[key] : !!dflt);
 
   (function css() {
@@ -2203,7 +2253,18 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
 .ma-opt.exp b{color:#c9a8ff}
 .ma-lrow{display:flex;align-items:center;gap:10px;margin:7px 0}.ma-lrow label{flex:0 0 84px;font:800 11.5px Arial,sans-serif;color:#aeb9dc}.ma-lrow select{flex:1;min-width:0}
 .ma-edbody .ma-set{padding:2px 0 8px}.ma-edbody .ma-seg{margin-bottom:8px}
-.ma-foot{display:flex;justify-content:flex-end;margin-top:10px;padding-top:8px;border-top:1px solid rgba(255,255,255,.06)}
+.ma-reset{display:flex;justify-content:flex-end;margin-top:10px;padding-top:8px;border-top:1px solid rgba(255,255,255,.06)}
+/* a boss's own page (replaces the list while open) */
+.ma-pg-top{display:flex;align-items:center;gap:6px;margin:0 0 8px}.ma-pg-top .sp{flex:1}
+.ma-back{background:#0d1322;border:1px solid #27324f;color:#cfd8f7;font:800 11.5px Arial,sans-serif;padding:6px 13px;border-radius:999px;cursor:pointer;transition:.15s}.ma-back:hover{border-color:#6ea8ff;color:#fff}
+.ma-pos{color:#7c88ad;font-size:11px;font-variant-numeric:tabular-nums}
+.ma-nav{width:30px;height:28px;background:#0d1322;border:1px solid #27324f;color:#cfd8f7;font:800 14px Arial,sans-serif;border-radius:10px;cursor:pointer;transition:.15s;padding:0}.ma-nav:hover:not([disabled]){border-color:#6ea8ff;color:#fff}.ma-nav[disabled]{opacity:.3;cursor:default}
+.ma-pg-id{display:flex;align-items:center;gap:10px;padding:9px 12px;margin-bottom:8px;border-radius:16px;background:linear-gradient(135deg,#17233f,#11192d);border:1px solid rgba(110,168,255,.22)}
+.ma-pg-id .t{flex:1;min-width:0}.ma-pg-id .t b{display:block;font:800 13.5px/1.25 Arial,sans-serif;color:#fff;overflow-wrap:anywhere}.ma-pg-id .t small{display:flex;align-items:center;gap:6px;flex-wrap:wrap;color:#8b97bd;font-size:11px;margin-top:2px}
+.ma-pg-body{padding:10px 11px 11px;background:#0b1120;border:1px solid rgba(110,168,255,.2);border-radius:16px}
+.ma-pg-body>.ma-edtabs{margin-top:0}
+.ma-grp{margin:10px 0 4px}.ma-src-top{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:8px 0 2px}.ma-src-top .sp{flex:1}
+.ma-opt.sealed{opacity:.55}.ma-opt small{display:none}
 .ma-sched{margin-top:8px;padding:7px 10px;background:#0a0f1c;border:1px solid rgba(255,255,255,.06);border-radius:14px}
 .ma-sub-h{display:flex;align-items:center;gap:8px;color:#c4cdeb;font:700 11.5px Arial,sans-serif;margin-bottom:4px}.ma-sub-h .sp{flex:1}.ma-sub-h small{font-weight:400;color:#6e7a9c}
 .ma-srow{display:flex;align-items:center;gap:7px;margin:4px 0}.ma-srow .arrow{color:#53608a}
@@ -2411,7 +2472,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
       ? [h('div', { class: 'ma-empty', style: { margin: '8px 0 0' } }, 'Nothing to farm yet.', h('div', {}, btn('Choose bosses', '', () => go('bosses'))))]
       : sel.map((def) => {
         const low = (Roster.members(def).find((m) => { const e = Board.get(m.low); return e && e.alive; }) || def).low, [txt, kind] = entryState(def), ev = Board.get(low) || {}, cap = bossCap(low), dmg = ev.userDmg || 0, swarm = def.kind === 'dungeon-swarm';
-        return h('div', { class: 'ma-q', onclick: () => go('bosses') }, avatar(def.name, ev.icon || iconOfBoss(def.low), { boss: true }),
+        return h('div', { class: 'ma-q', onclick: () => { ui.bsec = def.kind === 'wave' ? 'waves' : 'dungeons'; ui.sel = def.low; ui.listTop = 0; nextTop = 0; go('bosses'); } }, avatar(def.name, ev.icon || iconOfBoss(def.low), { boss: true }),
           h('div', { class: 'ma-q-n' }, h('b', {}, def.name), swarm ? null : h('div', { class: 'ma-bar' + (cap > 0 && dmg >= cap ? ' done' : '') }, h('i', { style: { width: (cap > 0 ? Math.min(100, dmg / cap * 100) : 0).toFixed(1) + '%' } })), swarm ? null : h('small', {}, `${fmtNum(dmg)} / ${fmtNum(cap)}`)), pill(txt, kind));
       })));
 
@@ -2445,7 +2506,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   const itemsText = (items) => (items.length > 2 ? items.slice(0, 2).join(', ') + ' +' + (items.length - 2) : items.join(', '));
   const lvTxt = (n) => 'Lv ' + Number(n).toLocaleString('en-US');
 
-  /* ONE boss is selected at a time (ui.sel). Its editor is one panel with one section at a time: Damage · Timing · Gear · Shield. */
+  /* ONE boss is open at a time (ui.sel), on its own page, one section at a time: Damage · Timing · Gear · Shield. */
   let flashCap = '';
   function setCap(low, n) { ovr(low).cap = n; saveCfg(); flashCap = low; draw(); setTimeout(() => { flashCap = ''; }, 1000); }
   Object.keys(ui.open).forEach((k) => { if (k.indexOf('boss:') === 0) delete ui.open[k]; });          // (the old "many editors open" flags)
@@ -2475,44 +2536,96 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     return [...Presets.kinds().map((k) => h('div', { class: 'ma-lrow' }, h('label', {}, (KIND_ICO[k] || '🎒') + ' ' + cap1(k)), loadoutPick(k, low))),
       note('“Default” is the default loadout (the 🎒 Loadout button above the list). Pick one here to change it just for this boss.')];
   }
-  /* the shield pierce, spelled out: what it does for this boss and which mob it would use right now */
-  const sideSeen = {};                                              // boss -> 'loading' | { mob, src } | { none: true }
-  function sideMobInfo(low) {
-    const mode = SideMob.modeOf(low), loc = bossLoc(low), r = sideSeen[low], lk = SideMob.lockedName();
-    const what = { auto: 'Hits the boss itself. Only if the server says it is shielded, the class skill moves to a side mob.', normal: 'Never uses a side mob: the class skill is cast on the boss.', shielded: 'The class skill is always cast on a side mob. The damage swings still hit the boss.' }[mode];
-    const lines = [h('div', {}, what), h('div', {}, lk ? ['Side mob: ', h('b', {}, lk), ' (locked).'] : `Side mob = a live regular mob, never a boss: first one in an open Shadowbridge, else one from ${loc ? `this boss’s wave page (Gate ${loc.gate} · Wave ${loc.wave})` : 'a wave page'}.`)];
-    const res = r === 'loading' ? h('span', {}, ' looking…') : r ? (r.none ? h('span', {}, ' none found right now (all empty, shielded or locked)') : h('span', {}, ' ', h('b', {}, r.mob.name), ' · ' + r.src)) : null;
-    return h('div', { class: 'ma-note' }, ...lines, h('div', { style: { marginTop: '4px' } }, btn('Show which mob', 'soft', async () => {
-      sideSeen[low] = 'loading'; draw();
-      try { const x = await SideMob.preview(low); sideSeen[low] = x || { none: true }; } catch (_) { sideSeen[low] = { none: true }; }
-      draw();
-    }), res));
+  /* SHIELD: the switch (the same one as Settings), how this boss behaves, and where the side mob comes from. Never a wave mob. */
+  const sideSeen = { v: null };                                    // 'loading' | { mob, src } | { none: true }
+  let sideCat = null, sideBusy = false, sideTried = false;         // what a side mob can come from (fetched on demand)
+  async function loadSideCat(force) {
+    if (sideBusy || !Dungeons.catalog) return; sideBusy = true; draw();
+    try { sideCat = (await Dungeons.catalog(!!force)) || sideCat; } catch (_) { /* keep what we had */ }
+    sideBusy = false; draw();
   }
-  /* SHIELD: the switch lives here too (the same one as Settings), then how it behaves for this boss and which mob it would use */
+  const mobSummary = (mobs) => { const c = new Map(); mobs.forEach((m) => c.set(m.name, (c.get(m.name) || 0) + 1)); return [...c].map(([n, k]) => (k > 1 ? `${n} ×${k}` : n)).join(', '); };
+  const SRC_RE = /^(easy|hard):(\d+)$/;
+  function setSource(src) { cfg.sideMob.source = src; SideMob.forgetCache(); sideSeen.v = null; saveCfg(); draw(); }
+  function sidePicker() {
+    const src = cfg.sideMob.source || 'auto', cm = SRC_RE.exec(src), curGrp = cm ? cm[1] : src;
+    const grp = ['auto', 'gribble', 'easy', 'hard'].includes(ui.sideGrp) ? ui.sideGrp : curGrp;
+    if (!sideCat && !sideBusy && !sideTried && Dungeons.catalog) { sideTried = true; setTimeout(() => loadSideCat(false), 0); }
+    const out = [h('div', { class: 'ma-note', style: { margin: '2px 3px 7px' } }, 'Using: ', h('b', { style: { color: '#fff' } }, SideMob.label(src)))];
+    out.push(seg([['auto', 'Auto'], ['gribble', '🦠 Gribbles'], ['easy', '🌉 Normal'], ['hard', '🏰 Hard']], grp, (v) => { ui.sideGrp = v; if (v === 'auto' || v === 'gribble') { cfg.sideMob.source = v; SideMob.forgetCache(); sideSeen.v = null; } saveUi(); }, { full: true }));
+    const age = sideCat ? 'fetched ' + ago(sideCat.at) : '';
+    const body = [];
+    if (grp === 'auto') body.push(note('Takes the first live mob it finds in an open normal dungeon (Gribbles included). Hard-dungeon mobs are only used when you pick a hard territory.'));
+    else if (!sideCat) body.push(note(sideBusy ? '⏳ Looking for dungeon mobs…' : 'Dungeon mobs are not loaded yet.'));
+    else if (grp === 'gribble') {
+      const g = sideCat.gribble, locs = [...new Set(g.map((m) => m.locationId))].join(', ');
+      body.push(h('div', { class: 'ma-opts' }, h('button', { type: 'button', class: 'ma-opt' + (src === 'gribble' ? ' on' : ''), onclick: (e) => { stop(e); setSource('gribble'); } },
+        h('i', { class: 'dot' }), h('b', {}, '🦠'), h('span', {}, g.length ? `${g.length} live Gribble${g.length === 1 ? '' : 's'}${locs ? ' · Loc ' + locs : ''}` : sideCat.open.easy ? 'No live Gribble right now' : 'No open normal dungeon right now'))));
+      body.push(note('Only Gribbles are used. If none is alive when it is needed, Auto takes over for that cast.'));
+    } else {
+      const list = sideCat[grp] || [], word = grp === 'hard' ? 'hard' : 'normal';
+      if (!sideCat.open[grp]) body.push(h('div', { class: 'ma-empty' }, `No open ${word} dungeon right now.`));
+      else if (!list.length) body.push(h('div', { class: 'ma-empty' }, 'No territories could be read.'));
+      else body.push(h('div', { class: 'ma-opts' }, list.map((t) => {
+        const key = `${grp}:${t.loc}`, live = t.mobs.length;
+        return h('button', { type: 'button', class: 'ma-opt' + (src === key ? ' on' : '') + (t.sealed ? ' sealed' : ''), title: t.sealed ? 'Still sealed' : null, onclick: (e) => { stop(e); setSource(key); } },
+          h('i', { class: 'dot' }), h('b', {}, 'Loc ' + t.loc), h('span', {}, [t.name, t.sealed ? 'sealed' : live ? `${live} live: ${mobSummary(t.mobs)}` : 'no live mobs'].filter(Boolean).join(' · ')));
+      })));
+    }
+    out.push(...body);
+    const r = sideSeen.v;
+    out.push(h('div', { class: 'ma-src-top' },
+      btn('Which mob now?', 'soft', async () => { sideSeen.v = 'loading'; draw(); try { sideSeen.v = (await SideMob.preview()) || { none: true }; } catch (_) { sideSeen.v = { none: true }; } draw(); }),
+      btn('↻ Refresh mobs', 'soft', () => loadSideCat(true)), h('span', { class: 'sp' }), age ? h('small', { style: { color: '#6e7a9c', fontSize: '11px' } }, age) : null));
+    if (r) out.push(h('div', { class: 'ma-note' }, r === 'loading' ? 'looking…' : r.none ? 'None found right now (all empty, shielded or locked).' : ['Would use ', h('b', { style: { color: '#fff' } }, r.mob.name), ' · ' + r.src]));
+    return out;
+  }
   function shieldTab(low) {
     const out = [setting('Use a side mob for the class skill', 'only when this boss blocks it (divine shield)', sw(() => cfg.sideMob.enabled, (v) => { cfg.sideMob.enabled = v; }))];
-    if (cfg.sideMob.enabled) {
-      out.push(seg([['auto', 'Auto'], ['normal', 'Never'], ['shielded', 'Always']], SideMob.modeOf(low), (v) => { ovr(low).targeting = v; }, { full: true }));
-      out.push(sideMobInfo(low));
-    } else out.push(note('Off: a shielded boss is simply attacked directly.'));
+    if (!cfg.sideMob.enabled) { out.push(note('Off: a shielded boss is simply attacked directly.')); return out; }
+    const mode = SideMob.modeOf(low);
+    out.push(caption('For this boss'));
+    out.push(seg([['auto', 'Auto'], ['normal', 'Never'], ['shielded', 'Always']], mode, (v) => { ovr(low).targeting = v; }, { full: true }));
+    out.push(note({ auto: 'Hits the boss itself. Only if the server says it is shielded, the class skill moves to a side mob.', normal: 'Never uses a side mob: the class skill is cast on the boss.', shielded: 'The class skill is always cast on a side mob. The damage swings still hit the boss.' }[mode]));
+    out.push(caption('Side mob comes from (same for every boss)'));
+    out.push(...sidePicker());
     return out;
   }
   const EDTABS = [['dmg', '🎯 Damage'], ['time', '⏰ Timing'], ['gear', '🎒 Gear'], ['shield', '🛡 Shield']];
-  function bossEditor(def) {
-    const ms = Roster.members(def), idx = Math.min(phaseSel[def.low] || 0, ms.length - 1), m = ms[idx], low = m.low, o = cfg.bosses[low] || {}, kinds = Presets.kinds(), l = bossLoc(low);
+  /* the order the list shows bosses in, so ‹ › on a boss's page walk the same list */
+  function navOrder(def) {
+    const canon = Roster.list.filter((d) => Roster.canon(d) === d);
+    if (def.kind === 'wave') return waveGroups(canon.filter((d) => d.kind === 'wave')).flatMap((g) => g.waves.flatMap((w) => w.defs));
+    return dungeonGroups(canon.filter((d) => d.kind !== 'wave')).flatMap((g) => g.rows.flatMap((r) => r.defs));
+  }
+  function placeOf(m) {
+    if (m.kind === 'wave') { const l = bossLoc(m.low); return l ? `Gate ${l.gate} · Wave ${l.wave}` : ''; }
+    const easy = m.dtype === 'easy' || m.kind === 'dungeon-swarm', loc = m.locationId || (m.locationIds || [])[0] || 0, tn = loc ? Dungeons.terrName(easy ? 'easy' : 'hard', loc) : '';
+    return (easy ? 'Normal dungeon' : 'Hard dungeon') + (m.locationIds ? ' · Loc ' + m.locationIds.join('/') : loc ? ' · Loc ' + loc : '') + (tn ? ' · ' + tn : '');
+  }
+  function openBoss(low) { const sc = scroller(root); ui.listTop = sc ? sc.scrollTop : 0; ui.sel = low; nextTop = 0; saveUi(); draw(); }
+  function closeBoss() { ui.sel = ''; nextTop = ui.listTop || 0; saveUi(); draw(); }
+  /* ONE boss page at a time: the list is hidden while it is open. Header (back, ‹ ›, name, switch), then one section: Damage · Timing · Gear · Shield */
+  function bossPage(def) {
+    const ms = Roster.members(def), idx = Math.min(phaseSel[def.low] || 0, ms.length - 1), m = ms[idx], low = m.low, o = cfg.bosses[low] || {}, kinds = Presets.kinds();
     const tabs = EDTABS.filter(([k]) => (k !== 'time' || m.kind !== 'wave') && (k !== 'gear' || kinds.length));       // timed cap changes: dungeon bosses only
     const cur = tabs.some((t) => t[0] === ui.edTab) ? ui.edTab : 'dmg';
     const dot = { dmg: o.cap != null, time: Array.isArray(o.schedule) && o.schedule.length > 0, gear: kinds.some((k) => o[k]), shield: o.targeting === 'normal' || o.targeting === 'shielded' };
-    const place = m.kind === 'wave' ? (l ? `Gate ${l.gate} · Wave ${l.wave}` : '') : (m.dtype === 'easy' || m.kind === 'dungeon-swarm' ? 'Shadowbridge' : 'Castle') + (m.locationId ? ' · location ' + m.locationId : '');
     const body = cur === 'time' ? [scheduleEditor(low)] : cur === 'gear' ? gearTab(low) : cur === 'shield' ? shieldTab(low) : damageTab(low);
-    return h('div', { class: 'ma-ed' },
-      h('div', { class: 'ma-ed-h' }, h('div', { class: 'ma-ed-t' }, h('b', { title: m.name }, m.name), place ? h('small', {}, place) : null),
-        sw(() => isOn(def), (v) => setMany([def], v), { sm: true }),
-        h('button', { type: 'button', class: 'ma-x', title: 'Close', onclick: (e) => { stop(e); ui.sel = ''; saveUi(); draw(); } }, '✕')),
-      ms.length > 1 ? h('div', { style: { margin: '0 0 7px' } }, seg(ms.map((x, i) => [i, 'Phase ' + (i + 1), x.name]), idx, (v) => { phaseSel[def.low] = v; }, { full: true })) : null,
-      h('div', { class: 'ma-edtabs' }, tabs.map(([k, label]) => h('button', { type: 'button', class: 'ma-edtab' + (k === cur ? ' on' : ''), onclick: (e) => { stop(e); ui.edTab = k; saveUi(); draw(); } }, label, dot[k] ? h('i', { title: 'changed for this boss' }) : null))),
-      h('div', { class: 'ma-edbody' }, ...body),
-      Object.keys(o).length ? h('div', { class: 'ma-foot' }, h('button', { type: 'button', class: 'ma-link', onclick: () => { delete cfg.bosses[low]; saveCfg(); draw(); } }, '↺ Reset this boss to defaults')) : null);
+    const order = navOrder(def), pos = order.findIndex((d) => d.low === def.low), prev = pos > 0 ? order[pos - 1] : null, next = pos >= 0 && pos < order.length - 1 ? order[pos + 1] : null;
+    const step = (d) => { ui.sel = d.low; nextTop = 0; saveUi(); draw(); };
+    const arrow = (txt, d, title) => h('button', { type: 'button', class: 'ma-nav', title, disabled: d ? null : true, onclick: () => { if (d) step(d); } }, txt);
+    const [txt, kind] = entryState(def), place = placeOf(m);
+    return [
+      h('div', { class: 'ma-pg-top' }, h('button', { type: 'button', class: 'ma-back', onclick: closeBoss }, '← Back'), h('span', { class: 'sp' }),
+        pos >= 0 ? h('span', { class: 'ma-pos' }, `${pos + 1} / ${order.length}`) : null, arrow('‹', prev, prev ? prev.name : ''), arrow('›', next, next ? next.name : '')),
+      h('div', { class: 'ma-pg-id' }, avatar(m.name, iconOfBoss(low) || iconOfBoss(def.low), { boss: m.kind !== 'dungeon-swarm' }),
+        h('div', { class: 't' }, h('b', { title: m.name }, m.name), h('small', {}, place, pill(txt, kind))), sw(() => isOn(def), (v) => setMany([def], v))),
+      ms.length > 1 ? h('div', { style: { margin: '0 0 8px' } }, seg(ms.map((x, i) => [i, 'Phase ' + (i + 1), x.name]), idx, (v) => { phaseSel[def.low] = v; }, { full: true })) : null,
+      h('div', { class: 'ma-pg-body' },
+        h('div', { class: 'ma-edtabs' }, tabs.map(([k, label]) => h('button', { type: 'button', class: 'ma-edtab' + (k === cur ? ' on' : ''), onclick: (e) => { stop(e); ui.edTab = k; saveUi(); draw(); } }, label, dot[k] ? h('i', { title: 'changed for this boss' }) : null))),
+        h('div', { class: 'ma-edbody' }, ...body),
+        Object.keys(o).length ? h('div', { class: 'ma-reset' }, h('button', { type: 'button', class: 'ma-link', onclick: () => { delete cfg.bosses[low]; saveCfg(); draw(); } }, '↺ Reset this boss to defaults')) : null)];
   }
   function loadoutCard() {
     const kinds = Presets.kinds();
@@ -2529,20 +2642,19 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     return m && !/\bof$/i.test(m[1]) ? [m[1], m[2]] : [n, ''];
   }
   function bubble(def) {
-    const on = isOn(def), op = ui.sel === def.low, ms = Roster.members(def), cap = bossCap(def.low), [txt, kind] = entryState(def), nx = nextChange(def.low);
-    const loc = def.kind === 'wave' ? '' : def.locationId ? 'Loc ' + def.locationId : def.locationIds ? 'Loc ' + def.locationIds.join('/') : '';
-    const bits = [h('span', { class: 'capv' }, cap > 0 ? 'cap ' + short(cap) : 'skipped'), nx ? `→ ${short(nx.cap)} ${fmtClock(nx.t)}` : '', loc, ms.length > 1 ? ms.length + ' phases' : '', on ? h('span', { class: 'st-' + (kind || 'x') }, txt) : ''].filter(Boolean);
+    const on = isOn(def), ms = Roster.members(def), cap = bossCap(def.low), [txt, kind] = entryState(def), nx = nextChange(def.low);
+    const bits = [h('span', { class: 'capv' }, cap > 0 ? 'cap ' + short(cap) : 'skipped'), nx ? `→ ${short(nx.cap)} ${fmtClock(nx.t)}` : '', ms.length > 1 ? ms.length + ' phases' : '', on ? h('span', { class: 'st-' + (kind || 'x') }, txt) : ''].filter(Boolean);
     const sub = []; bits.forEach((b, i) => { if (i) sub.push(' · '); sub.push(b); });
-    return h('div', { class: 'ma-bb' + (on ? ' on' : '') + (op ? ' open' : ''), title: def.name, onclick: () => { ui.sel = op ? '' : def.low; saveUi(); draw(); if (!op) setTimeout(() => { const e = root && root.querySelector('.ma-ed'); if (e && e.scrollIntoView) e.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); }, 40); } },
+    return h('div', { class: 'ma-bb' + (on ? ' on' : ''), title: def.name, onclick: () => openBoss(def.low) },
       avatar(def.name, iconOfBoss(def.low), { boss: true, dot: on ? kind || 'x' : '' }),
       h('div', { class: 'ma-bb-n' }, h('b', {}, splitName(def.name)[0]), h('small', {}, ...sub)),
       sw(() => on, (v) => setMany([def], v), { sm: true, redraw: false }));
   }
-  /* one wave = one row: "W12 Poseidon" + its bosses; an open boss's editor sits right under the row */
+  /* one row = a label (W12 for a wave, L6 for a dungeon territory) + its bosses as bubbles */
   function rowOf(label, defs, wv) {
-    const open = defs.filter((d) => ui.sel === d.low), all = defs.every(isOn);
-    const lab = wv ? h('div', { class: 'ma-wv-l' + (defs.some(isOn) ? ' on' : ''), title: `Switch every boss of this wave ${all ? 'off' : 'on'}`, onclick: () => setMany(defs, !all) }, h('b', {}, wv.wave ? 'W' + wv.wave : '?'), h('small', { title: label }, label)) : null;
-    return h('div', { class: 'ma-wv', style: wv ? null : { gridTemplateColumns: 'minmax(0,1fr)' } }, lab, h('div', { class: 'ma-grid' }, defs.map(bubble)), ...open.map(bossEditor));
+    const all = defs.every(isOn);
+    const lab = wv ? h('div', { class: 'ma-wv-l' + (defs.some(isOn) ? ' on' : ''), title: `Switch every boss here ${all ? 'off' : 'on'}`, onclick: () => setMany(defs, !all) }, h('b', {}, wv.tag || (wv.wave ? 'W' + wv.wave : '?')), h('small', { title: label }, label)) : null;
+    return h('div', { class: 'ma-wv', style: wv ? null : { gridTemplateColumns: 'minmax(0,1fr)' } }, lab, h('div', { class: 'ma-grid' }, defs.map(bubble)));
   }
 
   function waveGroups(defs) {
@@ -2560,10 +2672,18 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
       return Object.assign(g, { waves, sub });
     });
   }
+  /* Dungeons: Gribbles in their own section, then the normal dungeon and the hard dungeon, each grouped by territory (location) */
   function dungeonGroups(defs) {
-    const castle = defs.filter((d) => !(d.kind === 'dungeon-swarm' || d.dtype === 'easy')), shadow = defs.filter((d) => d.kind === 'dungeon-swarm' || d.dtype === 'easy');
-    const sort = (a) => a.slice().sort((x, y) => (x.locationId || (x.locationIds || [0])[0] || 0) - (y.locationId || (y.locationIds || [0])[0] || 0) || rIdx(x.low) - rIdx(y.low));
-    return [{ id: 'castle', title: 'Castle', ico: '🏰', sub: 'hard', defs: sort(castle) }, { id: 'shadow', title: 'Shadowbridge', ico: '🌉', sub: 'easy', defs: sort(shadow) }].filter((g) => g.defs.length);
+    const locOf = (d) => d.locationId || (d.locationIds || [0])[0] || 0;
+    const sort = (a) => a.slice().sort((x, y) => locOf(x) - locOf(y) || rIdx(x.low) - rIdx(y.low));
+    const swarm = defs.filter((d) => d.kind === 'dungeon-swarm'), rest = defs.filter((d) => d.kind !== 'dungeon-swarm');
+    const normal = rest.filter((d) => d.dtype === 'easy'), hard = rest.filter((d) => d.dtype !== 'easy');
+    const rowsOf = (type, list) => { const by = new Map(); sort(list).forEach((d) => { const l = locOf(d); if (!by.has(l)) by.set(l, []); by.get(l).push(d); }); return [...by].map(([l, ds]) => ({ tag: l ? 'L' + l : '?', label: (l && Dungeons.terrName(type, l)) || (l ? 'Territory ' + l : ''), defs: ds })); };
+    return [
+      { id: 'gribble', title: 'Gribbles', ico: '🦠', sub: 'own section', defs: swarm, rows: swarm.length ? [{ plain: true, label: '', defs: swarm }] : [] },
+      { id: 'shadow', title: 'Normal dungeon', ico: '🌉', sub: 'Shadowbridge · by territory', defs: normal, rows: rowsOf('easy', normal) },
+      { id: 'castle', title: 'Hard dungeon', ico: '🏰', sub: 'Castle · by territory', defs: hard, rows: rowsOf('hard', hard) },
+    ].filter((g) => g.defs.length);
   }
   function bossSections(sec) {
     const f = (ui.filter || '').trim().toLowerCase(), force = !!f;
@@ -2573,7 +2693,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     const bulk = (defs) => [h('button', { class: 'ma-link', type: 'button', onclick: (e) => { stop(e); setMany(defs, true); } }, 'All'), h('button', { class: 'ma-link', type: 'button', onclick: (e) => { stop(e); setMany(defs, false); } }, 'None')];
     const mk = (g, body) => fold('grp:' + g.id, g.defs.some(isOn), [g.ico + ' ' + g.title, g.sub ? h('small', {}, g.sub) : null], body, { force, aside: [counts(g.defs), ...bulk(g.defs)] });
     let out;
-    if (sec === 'dungeons') out = dungeonGroups(canon.filter((d) => d.kind !== 'wave')).map((g) => mk(g, () => { const rows = []; for (let i = 0; i < g.defs.length; i += 2) rows.push(rowOf('', g.defs.slice(i, i + 2), null)); return rows; }));
+    if (sec === 'dungeons') out = dungeonGroups(canon.filter((d) => d.kind !== 'wave')).map((g) => mk(g, () => g.rows.map((r) => rowOf(r.label, r.defs, r.plain ? null : { tag: r.tag }))));
     else out = waveGroups(canon.filter((d) => d.kind === 'wave')).map((g) => mk(g, () => g.waves.map((wv) => rowOf(wv.label, wv.defs, wv))));
     if (!out.length) out = [h('div', { class: 'ma-empty' }, f ? `No ${sec === 'dungeons' ? 'dungeon' : 'wave'} boss matches “${ui.filter}”.` : 'No bosses known yet.')];
     return out;
@@ -2602,6 +2722,9 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   function paintScan() { if (scanBox && scanBox.isConnected) scanBox.replaceChildren(...scanBar()); }
 
   function tBosses() {
+    const sel = ui.sel ? Roster.get(ui.sel) : null;
+    if (ui.sel && !sel) { ui.sel = ''; saveUi(); }
+    if (sel) { scanBox = null; return bossPage(Roster.canon(sel)); }          // one page at a time: the boss's own page hides the list
     const out = [];
     if (LootScan.available) { scanBox = h('div', {}, ...scanBar()); out.push(scanBox); } else scanBox = null;
     const canon = Roster.list.filter((d) => Roster.canon(d) === d), dunOn = Kernel.isOn('dungeons');
@@ -2665,7 +2788,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
       h('div', { class: 'ma-card' },
         setting('Pause the server auto-farm while fighting', 'So the two never fight over stamina.', sw(() => cfg.autoFarmControl, (v) => { cfg.autoFarmControl = v; }, { redraw: false })),
         setting('Fight phase duels automatically', null, sw(() => cfg.autoDuel, (v) => { cfg.autoDuel = v; }, { redraw: false })),
-        setting('Shield pierce on a side mob', 'If a boss blocks the class skill (divine shield), only the class skill is cast on another live regular mob: first one in an open Shadowbridge, else a regular mob on the boss’s wave page. Never a boss. The damage swings still hit the boss. Pick the mob per boss in its settings.', sw(() => cfg.sideMob.enabled, (v) => { cfg.sideMob.enabled = v; }))),
+        setting('Shield pierce on a side mob', 'If a boss blocks the class skill (divine shield), only the class skill is cast on a live dungeon mob (never a boss, never a wave mob). The damage swings still hit the boss. Choose where the mob comes from, and whether a boss uses it, in the boss’s Shield section.', sw(() => cfg.sideMob.enabled, (v) => { cfg.sideMob.enabled = v; }))),
       fold('adv', false, '🛠 Advanced timing', () => [note('Pause between requests, in milliseconds. The defaults are safe; lower numbers risk the server rejecting swings.'),
         ...timing.map(([l, k]) => setting(l, null, num(() => cfg[k], (n) => { cfg[k] = n; }, { w: 76, unit: 'ms' }))),
         setting('Graveyard scan every', null, num(() => cfg.autoLoot.scanMs, (n) => { cfg.autoLoot.scanMs = n; }, { w: 76, unit: 'ms' })),
@@ -2699,10 +2822,10 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   function scroller(el) { for (let n = el && el.parentElement; n; n = n.parentElement) { const o = getComputedStyle(n).overflowY; if ((o === 'auto' || o === 'scroll') && n.scrollHeight > n.clientHeight) return n; } return null; }
   function draw() {
     if (!root || !shown || !root.isConnected) return;
-    const sc = scroller(root), top = sc ? sc.scrollTop : 0;
+    const sc = scroller(root), top = sc ? sc.scrollTop : 0, want = nextTop; nextTop = null;
     let body; try { body = BUILD[tab]() } catch (e) { body = [h('div', { class: 'ma-alert' }, 'panel error: ' + e.message)]; console.warn('[automator] panel', e); }
     root.replaceChildren(tabsBar(), h('div', { class: 'ma-body' }, ...[].concat(body).filter(Boolean)), footer());
-    if (sc) sc.scrollTop = top;
+    const sc2 = want != null ? scroller(root) : sc; if (sc2) sc2.scrollTop = want != null ? want : top;
   }
   const typing = () => root && root.contains(document.activeElement) && /^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement.tagName);
   function schedule(ms) { if (drawT) return; drawT = setTimeout(() => { drawT = 0; if (typing()) schedule(1500); else draw(); }, ms || 400); }
