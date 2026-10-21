@@ -24,7 +24,7 @@
  * replies were retried instantly instead of honouring their delay.
  */
 Core.module({
-  id: 'automator', name: 'Automator', icon: '🤖', version: '1.6.1',
+  id: 'automator', name: 'Automator', icon: '🤖', version: '1.7.0',
   // Offered to other addons through Core capabilities (guides/CAPABILITIES.md):
   //   automator.status() -> the status string     automator.start() / automator.stop()     automator.scan() -> scan the bosses now
   provides: (api) => api && api.start ? {
@@ -35,7 +35,7 @@ Core.module({
   } : {},
   init(Core) {
 'use strict';
-const ID = 'automator', VERSION = '1.6.1';
+const ID = 'automator', VERSION = '1.7.0';
 if (window.__automatorLoaded) { console.warn('[automator] already loaded', window.__automatorLoaded); return null; }
 window.__automatorLoaded = VERSION;
 
@@ -2039,7 +2039,9 @@ Object.assign(LootScan, (() => {
  *   Overview   what it is doing now: vitals, bosses being farmed, session numbers (collapsible groups)
  *   Bosses     loot scan strip, Waves | Dungeons switch; waves grouped by area (Generals / Ocean / Olympus), one row per wave with its bosses as
  *              bubbles (dungeons: Castle / Shadowbridge by location). Tapping a boss opens its picker under the row (one at a time, no tabs):
- *              Gear / Crystal / Pet dropdowns, damage cap (number + loot chips), timed cap (dungeon bosses)
+ *              Gear / Crystal / Pet dropdowns, damage cap (the number, a track of loot levels to tap, and what the cap gets you), timed cap (dungeon bosses).
+ *              ☑ Select: tick bosses (one by one, by wave, by group, All shown, or Farming), choose gear / crystal / pet / cap once, Apply to all of them.
+ *              "⧉ Copy loadout to…" in a boss's picker starts that with the boss's own picks filled in.
  *   Supplies   stamina potion (+ save near EXP cap, auto-loot when out), HP potion, mana potion
  *   Loot       the graveyard
  *   Settings   class skill, behaviour, advanced timing
@@ -2057,6 +2059,8 @@ const Panel = (() => {
   const saveUi = () => uiStore.set(ui);
   let root = null, tab = TABS.some((t) => t[0] === ui.tab) ? ui.tab : 'home', shown = false, drawT = 0;
   const phaseSel = {};                                              // boss entry -> which phase the boss page is on
+  /* Select mode (Bosses tab): tap bosses to tick them, pick gear / crystal / pet / cap once, apply to all. Not saved: it is a one-off action. */
+  const BK = { on: false, sel: new Set(), pick: {}, cap: '', n: 3e9, msg: '', from: '' };
   const isOpen = (key, dflt) => (ui.open[key] != null ? !!ui.open[key] : !!dflt);
 
   (function css() {
@@ -2177,15 +2181,37 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
 .ma-ld{display:grid;grid-template-columns:repeat(auto-fit,minmax(96px,1fr));gap:6px;margin:2px 0 2px}
 .ma-ld label{display:block;font:800 9.5px Arial,sans-serif;color:#6e7a9c;text-transform:uppercase;letter-spacing:.06em;margin:0 3px 3px}
 .ma-ld select{width:100%;text-overflow:ellipsis}
-.ma-lad{display:flex;flex-direction:column;gap:2px}
-.ma-rung{display:flex;align-items:baseline;gap:9px;min-width:0;text-align:left;background:none;border:0;border-left:3px solid #27324f;border-radius:4px 8px 8px 4px;padding:3px 8px;color:#5d6990;cursor:pointer;transition:.12s}
-.ma-rung b{flex:0 0 46px;font:800 12px Arial,sans-serif;color:#6e7a9c}
-.ma-rung span{flex:1;min-width:0;font-size:11px;line-height:1.3}
-.ma-rung em{flex:0 0 auto;font:700 9px Arial,sans-serif;font-style:normal;color:#9fc1ff;background:rgba(75,115,224,.16);border-radius:999px;padding:1px 7px}
-.ma-rung:hover{background:#111a30}
-.ma-rung.got{border-left-color:#4b73e0;color:#c4cdeb}.ma-rung.got b{color:#e8edff}
-.ma-rung.on{background:rgba(75,115,224,.22);border-left-color:#6ea8ff;color:#e8edff}
-.ma-rung.exp b{color:#c9a8ff}.ma-rung.exp.got{border-left-color:#a07ad8}
+.ma-capbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px}.ma-capbar .ma-in{font:800 17px Arial,sans-serif;padding:7px 10px}.ma-capbar small{color:#7c88ad;font-size:11px;line-height:1.35;flex:1;min-width:90px}
+.ma-capq{display:flex;gap:4px;margin-left:auto}.ma-capq .ma-tbtn{padding:5px 10px}
+.ma-trk{display:flex;margin:0 0 6px;padding:5px 0 1px;overflow-x:auto;scrollbar-width:none}.ma-trk::-webkit-scrollbar{display:none}
+.ma-nd{flex:1 0 46px;position:relative;display:flex;flex-direction:column;align-items:center;gap:5px;background:none;border:0;padding:4px 0 3px;cursor:pointer;color:#5d6990;font:800 10.5px Arial,sans-serif;white-space:nowrap}
+.ma-nd i{position:relative;z-index:1;width:14px;height:14px;box-sizing:border-box;border-radius:50%;background:#0b1120;border:2px solid #33406a;transition:.15s}
+.ma-nd::before,.ma-nd::after{content:'';position:absolute;top:10px;height:2px;width:50%;background:#27324f}.ma-nd::before{left:0}.ma-nd::after{right:0}
+.ma-nd.first::before,.ma-nd.last::after{display:none}
+.ma-nd.got::before,.ma-nd.nx::after{background:#4b73e0}
+.ma-nd.got{color:#c4cdeb}.ma-nd.got i{background:#4b73e0;border-color:#6ea8ff}
+.ma-nd:hover i{border-color:#9fc1ff}
+.ma-nd.on{color:#fff}.ma-nd.on i{background:#fff;border-color:#6ea8ff;box-shadow:0 0 0 4px rgba(110,168,255,.3)}
+.ma-nd.exp{color:#c9a8ff}.ma-nd.exp i{border-color:#a07ad8}.ma-nd.exp.got i{background:#a07ad8}.ma-nd.exp.on i{background:#fff}
+.ma-get{background:#0a0f1c;border:1px solid rgba(255,255,255,.06);border-radius:14px;padding:7px 9px 8px}
+.ma-get-h{display:flex;align-items:baseline;gap:5px;font:700 11px Arial,sans-serif;color:#9aa7cf;margin-bottom:6px}.ma-get-h b{color:#fff;font-size:12.5px}.ma-get-h small{margin-left:auto;color:#6e7a9c;font:400 10.5px Arial,sans-serif}
+.ma-lt{display:flex;flex-wrap:wrap;gap:4px}
+.ma-it{font:600 11px/1.3 Arial,sans-serif;color:#c4cdeb;background:#131c33;border:1px solid #27324f;border-radius:8px;padding:2px 8px}
+.ma-it.new{color:#fff;background:rgba(75,115,224,.22);border-color:#6ea8ff}
+.ma-it.xp{color:#e8dcff;background:rgba(160,122,216,.16);border-color:#a07ad8}
+.ma-it em{font-style:normal;font-weight:800;color:#9fc1ff;margin-left:4px}
+.ma-nxt{display:flex;align-items:baseline;gap:8px;width:100%;box-sizing:border-box;margin-top:7px;text-align:left;background:transparent;border:1px dashed #33406a;border-radius:10px;padding:5px 9px;color:#7c88ad;font:600 11px/1.3 Arial,sans-serif;cursor:pointer;transition:.15s}
+.ma-nxt b{flex:0 0 auto;color:#9fc1ff}.ma-nxt span{flex:1;min-width:0}.ma-nxt:hover{border-color:#6ea8ff;color:#cfd8f7}
+/* select several bosses: the check on a bubble, and the bar that applies one setup to all of them */
+.ma-ck{flex:0 0 auto;width:20px;height:20px;box-sizing:border-box;border-radius:50%;border:2px solid #33406a;display:flex;align-items:center;justify-content:center;font:900 11px Arial,sans-serif;color:#fff}
+.ma-bb.pick{background:rgba(75,115,224,.2);border-color:#6ea8ff}.ma-bb.pick .ma-ck{background:#4b73e0;border-color:#6ea8ff}
+.ma-bulk{position:sticky;top:0;z-index:3;margin:0 0 8px;padding:8px 10px 9px;background:#0d1526;border:1px solid #6ea8ff;border-radius:16px;box-shadow:0 10px 24px rgba(0,0,0,.5)}
+@media (max-height:720px){.ma-bulk{position:static}}
+.ma-bk-h{display:flex;align-items:center;gap:2px;flex-wrap:wrap}.ma-bk-h b{font:800 12.5px Arial,sans-serif;color:#fff;margin-right:auto}
+.ma-bk-from{margin:2px 0 0;color:#9fc1ff;font-size:11px}
+.ma-bulk .ma-ld{margin-top:7px}.ma-bulk .ma-in.chg{border-color:#6ea8ff;background:#101b36}
+.ma-bk-cap{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:8px}.ma-bk-cap label{font:800 9.5px Arial,sans-serif;color:#6e7a9c;text-transform:uppercase;letter-spacing:.06em;margin:0 3px}
+.ma-bk-go{display:flex;align-items:center;gap:9px;margin-top:9px}.ma-bk-go span{flex:1;min-width:0;font-size:11px;color:#8ee6a8;line-height:1.35}.ma-bk-go .core-btn{padding:7px 16px;font-size:12px}
 .ma-what{margin:7px 3px 0;color:#7c88ad;font-size:11px;line-height:1.35;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .ma-reset{display:flex;align-items:center;gap:4px;flex-wrap:wrap;margin-top:9px;padding-top:6px;border-top:1px solid rgba(255,255,255,.06)}.ma-reset .sp{flex:1}
 .ma-link.warn{color:#ff9b9b}.ma-link.warn:hover{color:#ffc4c4;background:rgba(255,120,120,.1)}
@@ -2461,21 +2487,43 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     });
   }
 
-  /* DAMAGE: the number, then the loot ladder: every damage requirement with what it drops, lit up as far as the cap reaches. Tap a rung to use it. */
+  /* DAMAGE: the number on top, a track of loot levels under it (tap a dot to cap there), then what that cap gets you. */
   function damageBlock(low) {
-    const base = baseCap(low), tiers = LootData.tiers(low), info = LootData.get(low), mine = cfg.bosses[low] && cfg.bosses[low].cap != null;
-    const top = tiers.length ? tiers[tiers.length - 1].req : null;
-    const rungs = tiers.map((t) => ({ req: t.req, txt: t.items.join(', '), exp: false }));
-    if (info && info.expCapDmg > 0 && !tiers.some((t) => t.req === info.expCapDmg)) { rungs.push({ req: info.expCapDmg, txt: 'Reaches the EXP cap' + (info.expCapPct != null ? ' (' + info.expCapPct + '%)' : ''), exp: true }); rungs.sort((a, b) => a.req - b.req); }
+    const base = baseCap(low), info = LootData.get(low), mine = cfg.bosses[low] && cfg.bosses[low].cap != null, top = LootData.top(low);
+    const exp = info && info.expCapDmg > 0 ? info.expCapDmg : 0;
+    const rungs = LootData.tiers(low).map((t) => ({ req: t.req, items: t.items, exp: t.req === exp }));
+    if (exp && !rungs.some((r) => r.exp)) { rungs.push({ req: exp, items: [], exp: true }); rungs.sort((a, b) => a.req - b.req); }
+    const pctTxt = info && info.expCapPct != null ? ` (${info.expCapPct}%)` : '';
+    const setCap = (v) => (e) => { stop(e); if (v == null) delete ovr(low).cap; else ovr(low).cap = v; saveCfg(); draw(); };
+    const qb = (label, title, on, fn) => h('button', { type: 'button', class: 'ma-tbtn' + (on ? ' on' : ''), title, onclick: fn }, label);
     const bits = info ? [info.levelReq ? lvTxt(info.levelReq) : '', info.expCapPct != null ? `EXP cap ${info.expCapPct}%` : ''].filter(Boolean) : [];
-    const reached = rungs.filter((r) => r.req <= base).length;
-    return [
-      h('div', { class: 'ma-big' }, num(() => baseCap(low), (n) => { ovr(low).cap = n; }, { fmt: fmtNum, w: 108 }), bits.length ? h('small', {}, bits.join(' · ')) : null),
-      rungs.length ? h('div', { class: 'ma-lad' }, rungs.map((r) => h('button', { type: 'button', class: 'ma-rung' + (r.req <= base ? ' got' : '') + (r.req === base ? ' on' : '') + (r.exp ? ' exp' : ''), title: `${fmtNum(r.req)} damage: ${r.txt}`, onclick: (e) => { stop(e); ovr(low).cap = r.req; saveCfg(); draw(); } },
-        h('b', {}, short(r.req)), h('span', {}, r.txt), r.req === top && !mine ? h('em', {}, 'default') : null)))
-        : chips([[1e8, '100M'], [5e8, '500M'], [1e9, '1B'], [2e9, '2B'], [3e9, '3B'], [5e9, '5B']], base, (v) => { ovr(low).cap = v; }),
-      rungs.length ? h('div', { class: 'ma-what' }, base <= 0 ? 'Cap 0: this boss is skipped.' : `Cap ${short(base)} reaches ${reached} of ${rungs.length} loot levels (lit above).`)
-        : h('div', { class: 'ma-what' }, base <= 0 ? 'Cap 0: this boss is skipped.' : !info ? (LootScan.available ? 'No loot data yet. Press Scan at the top to read it.' : 'No loot data for this boss yet.') : '')];
+    const head = h('div', { class: 'ma-capbar' }, num(() => baseCap(low), (n) => { ovr(low).cap = n; draw(); }, { fmt: fmtNum, w: 108 }), bits.length ? h('small', {}, bits.join(' · ')) : null,
+      h('div', { class: 'ma-capq' },
+        top != null ? qb('Max', 'The highest loot level (the default)', !mine || base === top, setCap(null)) : null,
+        exp ? qb('EXP', 'Stop where the EXP cap is reached', base === exp, setCap(exp)) : null,
+        qb('Skip', 'Cap 0: never attack this boss', base === 0, setCap(0))));
+    if (!rungs.length) {
+      return [head, chips([[1e8, '100M'], [5e8, '500M'], [1e9, '1B'], [2e9, '2B'], [3e9, '3B'], [5e9, '5B']], base, (v) => { ovr(low).cap = v; }),
+        h('div', { class: 'ma-what' }, base <= 0 ? 'Cap 0: this boss is skipped.' : !info ? (LootScan.available ? 'No loot data yet. Press Scan at the top to read it.' : 'No loot data for this boss yet.') : '')];
+    }
+    const got = rungs.filter((r) => r.req <= base), last = got[got.length - 1] || null, next = rungs.find((r) => r.req > base) || null;
+    const track = h('div', { class: 'ma-trk' }, rungs.map((r, i) => h('button', { type: 'button',
+      class: 'ma-nd' + (r.req <= base ? ' got' : '') + (r.req === base ? ' on' : '') + (r.exp ? ' exp' : '') + (i === 0 ? ' first' : '') + (i === rungs.length - 1 ? ' last' : '') + (rungs[i + 1] && rungs[i + 1].req <= base ? ' nx' : ''),
+      title: `${fmtNum(r.req)} damage` + (r.items.length ? ': ' + r.items.join(', ') : '') + (r.exp ? ' · reaches the EXP cap' : ''), onclick: setCap(r.req) }, h('i', {}), h('b', {}, short(r.req) + (r.exp ? '★' : '')))));
+    const seen = new Map();                                            // item -> the levels (within the cap) that list it, highest level first
+    got.slice().reverse().forEach((r) => r.items.forEach((nm) => { const e = seen.get(nm) || []; e.push(r.req); seen.set(nm, e); }));
+    const fresh = last ? new Set(last.items) : new Set(), expGot = got.some((r) => r.exp);
+    const list = [expGot ? h('span', { class: 'ma-it xp', title: 'Damage this high reaches the EXP cap' }, '★ EXP cap' + pctTxt) : null,
+      ...[...seen.entries()].map(([nm, at]) => h('span', { class: 'ma-it' + (fresh.has(nm) && got.length > 1 ? ' new' : ''), title: 'Drops at ' + at.slice().reverse().map(short).join(', ') }, nm, at.length > 1 ? h('em', {}, '×' + at.length) : null))].filter(Boolean);
+    const topReq = rungs[rungs.length - 1].req;
+    const nextTxt = !next ? '' : next.items.length ? '+ ' + next.items.slice(0, 3).join(', ') + (next.items.length > 3 ? ` +${next.items.length - 3} more` : '') + (next.exp ? ' · ★ EXP cap' : '') : '★ reaches the EXP cap' + pctTxt;
+    return [head, track, h('div', { class: 'ma-get' },
+      h('div', { class: 'ma-get-h' }, base <= 0 ? h('b', {}, 'Skipped') : h('span', {}, 'At ', h('b', {}, short(base)), ' you get'), base > 0 ? h('small', {}, `${got.length} of ${rungs.length} loot levels` + (list.length > 1 && got.length > 1 && fresh.size ? ' · highlighted: added at ' + short(last.req) : '')) : null),
+      base <= 0 ? h('div', { class: 'ma-what', style: { margin: 0 } }, 'Cap 0: this boss is skipped.')
+        : list.length ? h('div', { class: 'ma-lt' }, list)
+        : h('div', { class: 'ma-what', style: { margin: 0 } }, `Nothing yet: the first drop needs ${short(rungs[0].req)}.`),
+      base > topReq ? h('div', { class: 'ma-what', style: { margin: '6px 0 0' } }, `Above the top level (${short(topReq)}): the extra damage adds nothing.`) : null,
+      next && base > 0 ? h('button', { type: 'button', class: 'ma-nxt', title: 'Raise the cap to ' + fmtNum(next.req), onclick: setCap(next.req) }, h('b', {}, '▲ ' + short(next.req)), h('span', {}, nextTxt)) : null)];
   }
   function placeOf(m) {
     if (m.kind === 'wave') { const l = bossLoc(m.low); return l ? `Gate ${l.gate} · Wave ${l.wave}` : ''; }
@@ -2495,6 +2543,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     const sched = Array.isArray(o.schedule) && o.schedule.length > 0, tOpen = isOpen('time', sched), [txt, kind] = entryState(def), place = placeOf(m);
     const timedBtn = m.kind !== 'wave' ? h('button', { type: 'button', class: 'ma-link', onclick: () => { ui.open.time = !tOpen; saveUi(); draw(); } }, (tOpen ? '▾ ' : '▸ ') + '⏰ Timed cap' + (sched ? ' (' + o.schedule.length + ')' : '')) : null;
     const resetBtn = Object.keys(o).length ? h('button', { type: 'button', class: 'ma-link', onclick: () => { delete cfg.bosses[low]; saveCfg(); draw(); } }, '↺ Reset') : null;
+    const copyBtn = kinds.length ? h('button', { type: 'button', class: 'ma-link', title: 'Give other bosses this boss’s gear / crystal / pet picks', onclick: (e) => { stop(e); startBulk(def, low); } }, '⧉ Copy loadout to…') : null;
     const removeBtn = def.fromScan ? h('button', { type: 'button', class: 'ma-link warn', title: 'The loot scan added this boss. Remove it from the list (a rescan will not bring it back).', onclick: (e) => { stop(e); removeAdded([def]); } }, '🗑 Remove') : null;
     return h('div', { class: 'ma-ed' },
       h('div', { class: 'ma-ed-h' }, h('div', { class: 'ma-ed-t' }, h('b', { title: m.name }, m.name), h('small', {}, place, pill(txt, kind))),
@@ -2503,7 +2552,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
       ms.length > 1 ? h('div', { style: { margin: '0 0 6px' } }, seg(ms.map((x, i) => [i, 'Phase ' + (i + 1), x.name]), idx, (v) => { phaseSel[def.low] = v; }, { full: true })) : null,
       kinds.length ? bossLoadout(low) : null,
       caption('🎯 Damage cap'), ...damageBlock(low),
-      timedBtn || resetBtn || removeBtn ? h('div', { class: 'ma-reset' }, timedBtn, h('span', { class: 'sp' }), resetBtn, removeBtn) : null,
+      timedBtn || resetBtn || removeBtn || copyBtn ? h('div', { class: 'ma-reset' }, timedBtn, h('span', { class: 'sp' }), copyBtn, resetBtn, removeBtn) : null,
       m.kind !== 'wave' && tOpen ? scheduleEditor(low) : null);
   }
   function loadoutCard() {
@@ -2518,23 +2567,92 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     const m = /^(.+?)\s+(the\s.+)$/i.exec(n);                         // "Oceanus The Water Titan" -> Oceanus | The Water Titan
     return m && !/\bof$/i.test(m[1]) ? [m[1], m[2]] : [n, ''];
   }
+  const loadoutBits = (def) => {                                     // "gear: PVE Full SS" for the first phase that has its own picks
+    const kinds = Presets.kinds(); if (!kinds.length) return [];
+    for (const m of Roster.members(def)) {
+      const o = cfg.bosses[m.low]; if (!o) continue;
+      const a = kinds.filter((k) => o[k]).map((k) => k + ': ' + (o[k] === '__keep' ? 'keep equipped' : (Presets.list(k).find((x) => x.id === String(o[k])) || { name: o[k] }).name));
+      if (a.length) return a;
+    }
+    return [];
+  };
   function bubble(def) {
-    const on = isOn(def), op = ui.sel === def.low, ms = Roster.members(def), cap = bossCap(def.low), [txt, kind] = entryState(def), nx = nextChange(def.low);
+    const pickMode = BK.on, picked = pickMode && BK.sel.has(def.low);
+    const on = isOn(def), op = !pickMode && ui.sel === def.low, ms = Roster.members(def), cap = bossCap(def.low), [txt, kind] = entryState(def), nx = nextChange(def.low), ld = loadoutBits(def);
     const loc = def.kind === 'wave' ? '' : def.locationId ? 'Loc ' + def.locationId : def.locationIds ? 'Loc ' + def.locationIds.join('/') : '';
-    const bits = [h('span', { class: 'capv' }, cap > 0 ? 'cap ' + short(cap) : 'skipped'), nx ? `→ ${short(nx.cap)} ${fmtClock(nx.t)}` : '', loc, ms.length > 1 ? ms.length + ' phases' : '', on ? h('span', { class: 'st-' + (kind || 'x') }, txt) : ''].filter(Boolean);
+    const bits = [h('span', { class: 'capv' }, cap > 0 ? 'cap ' + short(cap) : 'skipped'), nx ? `→ ${short(nx.cap)} ${fmtClock(nx.t)}` : '', ld.length ? h('span', { title: ld.join('\n') }, '🎒') : '', loc, ms.length > 1 ? ms.length + ' phases' : '', on ? h('span', { class: 'st-' + (kind || 'x') }, txt) : ''].filter(Boolean);
     const sub = []; bits.forEach((b, i) => { if (i) sub.push(' · '); sub.push(b); });
-    return h('div', { class: 'ma-bb' + (on ? ' on' : '') + (op ? ' open' : ''), title: def.name, onclick: () => { ui.sel = op ? '' : def.low; saveUi(); draw(); if (!op) setTimeout(() => { const e = root && root.querySelector('.ma-ed'); if (e && e.scrollIntoView) e.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); }, 40); } },
+    return h('div', { class: 'ma-bb' + (on ? ' on' : '') + (op ? ' open' : '') + (picked ? ' pick' : ''), title: def.name + (ld.length ? '\n' + ld.join('\n') : ''),
+      onclick: pickMode ? () => toggleSel([def]) : () => { ui.sel = op ? '' : def.low; saveUi(); draw(); if (!op) setTimeout(() => { const e = root && root.querySelector('.ma-ed'); if (e && e.scrollIntoView) e.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); }, 40); } },
       avatar(def.name, iconOfBoss(def.low), { boss: true, dot: on ? kind || 'x' : '' }),
       h('div', { class: 'ma-bb-n' }, h('b', {}, splitName(def.name)[0]), h('small', {}, ...sub)),
-      sw(() => on, (v) => setMany([def], v), { sm: true, redraw: false }));
+      pickMode ? h('span', { class: 'ma-ck' }, picked ? '✓' : '') : sw(() => on, (v) => setMany([def], v), { sm: true, redraw: false }));
   }
   /* one row = a label (W12 for a wave, L6 for a dungeon territory) + its bosses as bubbles */
   function rowOf(label, defs, wv) {
-    const open = defs.filter((d) => ui.sel === d.low), all = defs.every(isOn);
-    const lab = wv ? h('div', { class: 'ma-wv-l' + (defs.some(isOn) ? ' on' : ''), title: `Switch every boss of this wave ${all ? 'off' : 'on'}`, onclick: () => setMany(defs, !all) }, h('b', {}, wv.wave ? 'W' + wv.wave : '?'), h('small', { title: label }, label)) : null;
+    const open = BK.on ? [] : defs.filter((d) => ui.sel === d.low), all = defs.every(isOn), allPick = BK.on && defs.every((d) => BK.sel.has(d.low)), anyPick = BK.on && defs.some((d) => BK.sel.has(d.low));
+    const lab = wv ? h('div', { class: 'ma-wv-l' + ((BK.on ? anyPick : defs.some(isOn)) ? ' on' : ''), title: BK.on ? `${allPick ? 'Untick' : 'Tick'} every boss of this wave` : `Switch every boss of this wave ${all ? 'off' : 'on'}`, onclick: () => { if (BK.on) toggleSel(defs); else setMany(defs, !all); } }, h('b', {}, wv.wave ? 'W' + wv.wave : '?'), h('small', { title: label }, label)) : null;
     return h('div', { class: 'ma-wv', style: wv ? null : { gridTemplateColumns: 'minmax(0,1fr)' } }, lab, h('div', { class: 'ma-grid' }, defs.map(bubble)), ...open.map(bossEditor));
   }
 
+  /* ---- select mode: tick several bosses, choose gear / crystal / pet / cap once, apply to every ticked boss ---- */
+  const selCount = () => { let n = 0; BK.sel.forEach((l) => { if (Roster.get(l)) n++; }); return n; };
+  function toggleSel(defs, force) {
+    const on = force != null ? force : !defs.every((d) => BK.sel.has(d.low));
+    defs.forEach((d) => { if (on) BK.sel.add(d.low); else BK.sel.delete(d.low); });
+    BK.msg = ''; draw();
+  }
+  function startBulk(def, low) {                                      // from a boss's editor: carry its picks over, then tick the bosses to give them to
+    const o = cfg.bosses[low || def.low] || {};
+    BK.on = true; BK.sel = new Set(); BK.pick = {}; BK.cap = ''; BK.msg = ''; BK.from = def.name;
+    Presets.kinds().forEach((k) => { if (o[k]) BK.pick[k] = o[k]; });
+    ui.sel = ''; saveUi(); draw();
+    setTimeout(() => { const e = root && root.querySelector('.ma-bulk'); if (e && e.scrollIntoView) e.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); }, 40);
+  }
+  function endBulk() { BK.on = false; BK.sel = new Set(); BK.pick = {}; BK.cap = ''; BK.msg = ''; BK.from = ''; draw(); }
+  const bulkChanges = () => Presets.kinds().filter((k) => BK.pick[k]).length + (BK.cap ? 1 : 0);
+  function applyBulk() {
+    const defs = [...BK.sel].map((l) => Roster.get(l)).filter(Boolean), kinds = Presets.kinds(), did = new Set(), mode = BK.cap; let capDefs = 0, noExp = 0;
+    defs.forEach((def) => {
+      let capped = false;
+      Roster.members(def).forEach((m) => {                                                               // every phase of the boss gets it
+        const o = ovr(m.low);
+        kinds.forEach((k) => { const v = BK.pick[k]; if (!v) return; if (v === '__default') delete o[k]; else o[k] = v; did.add(k); });
+        if (mode === 'max') { delete o.cap; capped = true; }
+        else if (mode === 'skip') { o.cap = 0; capped = true; }
+        else if (mode === 'num') { o.cap = Math.max(0, Math.round(BK.n) || 0); capped = true; }
+        else if (mode === 'exp') { const i = LootData.get(m.low); if (i && i.expCapDmg > 0) { o.cap = i.expCapDmg; capped = true; } }
+        if (!Object.keys(o).length) delete cfg.bosses[m.low];
+      });
+      if (capped) capDefs++; else if (mode === 'exp') noExp++;
+    });
+    saveCfg(); Engine.poke(true);
+    const parts = [...did]; if (capDefs) parts.push('cap' + (capDefs < defs.length ? ` (${capDefs} of ${defs.length})` : '')); const cnt = defs.length;
+    BK.msg = parts.length ? `✅ ${parts.join(' + ')} applied to ${cnt} boss${cnt === 1 ? '' : 'es'}` + (noExp ? ` · ${noExp} ${noExp === 1 ? 'has' : 'have'} no EXP cap data, so ${noExp === 1 ? 'its' : 'their'} cap was left alone` : '') : '⚠ nothing changed' + (noExp ? ': none of them has EXP cap data (scan the loot first)' : '');
+    BK.pick = {}; BK.cap = '';
+    draw();
+  }
+  function bulkBar(sec) {
+    const kinds = Presets.kinds(), n = selCount(), chg = bulkChanges();
+    const pickBox = (items, cur, set) => h('select', { class: 'ma-in' + (cur ? ' chg' : ''), onclick: stop, onchange: (e) => { set(e.target.value); BK.msg = ''; draw(); } },
+      items.map(([v, l]) => h('option', Object.assign({ value: v }, String(v) === String(cur) ? { selected: true } : {}), l)));
+    const lnk = (label, title, fn) => h('button', { type: 'button', class: 'ma-link', title, onclick: (e) => { stop(e); fn(); } }, label);
+    const go = btn(n ? `Apply to ${n} boss${n === 1 ? '' : 'es'}` : 'Tick some bosses', 'success', () => { if (n && chg) applyBulk(); });
+    if (!n || !chg) { go.disabled = true; go.style.opacity = '.45'; go.style.cursor = 'default'; }
+    return h('div', { class: 'ma-bulk' },
+      h('div', { class: 'ma-bk-h' }, h('b', {}, n ? `☑ ${n} selected` : '☑ Tap bosses to select them'),
+        lnk('All shown', 'Tick every boss in the list below (it follows the filter)', () => toggleSel(shownDefs(sec), true)),
+        lnk('Farming', 'Tick the bosses that are switched on', () => toggleSel(Roster.list.filter((d) => Roster.canon(d) === d && isOn(d)), true)),
+        lnk('None', 'Untick everything', () => toggleSel([...BK.sel].map((l) => Roster.get(l)).filter(Boolean), false)),
+        lnk('Done', 'Leave select mode', endBulk)),
+      BK.from ? h('div', { class: 'ma-bk-from' }, `Loadout copied from ${BK.from}. Tick the bosses that should get it.`) : null,
+      kinds.length ? h('div', { class: 'ma-ld' }, kinds.map((k) => h('div', {}, h('label', {}, (KIND_ICO[k] || '🎒') + ' ' + cap1(k)),
+        pickBox([['', 'Leave as is'], ['__default', 'Default loadout'], ['__keep', 'Keep equipped'], ...presetOpts(k)], BK.pick[k] || '', (v) => { if (v) BK.pick[k] = v; else delete BK.pick[k]; })))) : null,
+      h('div', { class: 'ma-bk-cap' }, h('label', {}, '🎯 Cap'),
+        seg([['', 'Leave'], ['max', 'Max loot'], ['exp', 'EXP cap'], ['skip', 'Skip'], ['num', 'Set…']], BK.cap, (v) => { BK.cap = v; BK.msg = ''; }),
+        BK.cap === 'num' ? num(() => BK.n, (v) => { BK.n = v; }, { fmt: fmtNum, w: 96 }) : null),
+      h('div', { class: 'ma-bk-go' }, go, h('span', {}, BK.msg || (chg ? '' : 'Pick something to change above. “Leave as is” keeps what each boss has.'))));
+  }
   function waveGroups(defs) {
     const groups = new Map();
     defs.forEach((def) => {
@@ -2555,13 +2673,18 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     const sort = (a) => a.slice().sort((x, y) => (x.locationId || (x.locationIds || [0])[0] || 0) - (y.locationId || (y.locationIds || [0])[0] || 0) || rIdx(x.low) - rIdx(y.low));
     return [{ id: 'castle', title: 'Castle', ico: '🏰', sub: 'hard', defs: sort(castle) }, { id: 'shadow', title: 'Shadowbridge', ico: '🌉', sub: 'easy', defs: sort(shadow) }].filter((g) => g.defs.length);
   }
+  const shownDefs = (sec) => {                                        // the bosses the list shows right now (this section, after the filter)
+    const f = (ui.filter || '').trim().toLowerCase();
+    return Roster.list.filter((d) => Roster.canon(d) === d && (sec === 'dungeons' ? d.kind !== 'wave' : d.kind === 'wave') && (!f || Roster.members(d).some((m) => m.name.toLowerCase().includes(f))));
+  };
   function bossSections(sec) {
     const f = (ui.filter || '').trim().toLowerCase(), force = !!f;
     const match = (d) => !f || Roster.members(d).some((m) => m.name.toLowerCase().includes(f));
     const canon = Roster.list.filter((d) => Roster.canon(d) === d && match(d));
-    const counts = (defs) => { const n = defs.filter(isOn).length; return h('span', { class: 'ma-pill' + (n ? ' blue' : '') }, n + '/' + defs.length); };
-    const bulk = (defs) => [h('button', { class: 'ma-link', type: 'button', onclick: (e) => { stop(e); setMany(defs, true); } }, 'All'), h('button', { class: 'ma-link', type: 'button', onclick: (e) => { stop(e); setMany(defs, false); } }, 'None')];
-    const mk = (g, body) => fold('grp:' + g.id, g.defs.some(isOn), [g.ico + ' ' + g.title, g.sub ? h('small', {}, g.sub) : null], body, { force, aside: [counts(g.defs), ...bulk(g.defs)] });
+    const lit = (d) => (BK.on ? BK.sel.has(d.low) : isOn(d));            // select mode counts ticked bosses, otherwise switched-on ones
+    const counts = (defs) => { const n = defs.filter(lit).length; return h('span', { class: 'ma-pill' + (n ? ' blue' : '') }, n + '/' + defs.length); };
+    const bulk = (defs) => [h('button', { class: 'ma-link', type: 'button', onclick: (e) => { stop(e); if (BK.on) toggleSel(defs, true); else setMany(defs, true); } }, 'All'), h('button', { class: 'ma-link', type: 'button', onclick: (e) => { stop(e); if (BK.on) toggleSel(defs, false); else setMany(defs, false); } }, 'None')];
+    const mk = (g, body) => fold('grp:' + g.id, g.defs.some(lit), [g.ico + ' ' + g.title, g.sub ? h('small', {}, g.sub) : null], body, { force, aside: [counts(g.defs), ...bulk(g.defs)] });
     let out;
     if (sec === 'dungeons') out = dungeonGroups(canon.filter((d) => d.kind !== 'wave')).map((g) => mk(g, () => { const rows = []; for (let i = 0; i < g.defs.length; i += 2) rows.push(rowOf('', g.defs.slice(i, i + 2), null)); return rows; }));
     else out = waveGroups(canon.filter((d) => d.kind === 'wave')).map((g) => mk(g, () => g.waves.map((wv) => rowOf(wv.label, wv.defs, wv))));
@@ -2602,8 +2725,10 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     out.push(h('div', { class: 'ma-sec' }, [['waves', '🌊 Waves'], ...(dunOn ? [['dungeons', '🏰 Dungeons']] : [])].map(([id, label]) => h('button', { type: 'button', class: id === sec ? 'on' : '', onclick: () => { ui.bsec = id; saveUi(); draw(); } }, label, (badges[id] = h('i', {}, badge(id)))))));
     const kinds = Presets.kinds(), box = h('div', {}), fill = () => { box.replaceChildren(...bossSections(sec)); Object.keys(badges).forEach((id) => { badges[id].textContent = badge(id); }); };
     out.push(h('div', { class: 'ma-tool' }, h('input', { class: 'ma-search', placeholder: '🔎 Filter bosses…', value: ui.filter || '', oninput: (e) => { ui.filter = e.target.value; saveUi(); fill(); } }),
+      h('button', { type: 'button', class: 'ma-tbtn' + (BK.on ? ' on' : ''), title: 'Tick several bosses and give them all the same gear / crystal / pet / cap', onclick: () => { if (BK.on) endBulk(); else { BK.on = true; ui.sel = ''; saveUi(); draw(); } } }, '☑ Select'),
       kinds.length ? h('button', { type: 'button', class: 'ma-tbtn' + (ui.open.loadout ? ' on' : ''), title: 'The loadout equipped before every boss', onclick: () => { ui.open.loadout = !ui.open.loadout; saveUi(); draw(); } }, '🎒 Loadout') : null));
     if (kinds.length && ui.open.loadout) out.push(loadoutCard());
+    if (BK.on) out.push(bulkBar(sec));
     fill(); out.push(box);
     return out;
   }
