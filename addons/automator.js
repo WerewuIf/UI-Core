@@ -1837,14 +1837,29 @@ Object.assign(LootScan, (() => {
     }
     return [...waves.values()].sort((a, b) => a[0] - b[0] || a[1] - b[1]);
   }
-  async function scanWave(gate, wave) {
-    const doc = await page(`/active_wave.php?gate=${gate}&wave=${wave}`, `Gate ${gate} · Wave ${wave}`, 'all');
+  /* One wave page in one cookie view (Core swaps hide_dead_monsters / show_dead_bosses_only around the request).
+   * 'alive' has to be the real alive view: no dead card in it. If Core's swap did not take, ask once more, then say so. */
+  async function waveDoc(gate, wave, mode) {
+    const where = `Gate ${gate} · Wave ${wave}`, url = `/active_wave.php?gate=${gate}&wave=${wave}`, dead = (d) => d.querySelector('.monster-card[data-dead="1"]');
+    let doc = await page(url, where, mode);
+    if (mode === 'alive' && dead(doc)) {
+      doc = await page(url, where, mode);
+      if (dead(doc)) note(`${where}: asked for the alive view but the page still listed dead monsters, so live ones may have been missed`);
+    }
+    return doc;
+  }
+  /* monster name -> its cards on a wave page (alive ones only when aliveOnly) */
+  function cardsByName(doc, aliveOnly) {
     const names = new Map();
     doc.querySelectorAll('.monster-card').forEach((c) => {
-      const name = clean(c.dataset.name || (c.querySelector('.monster-name,.name,h2,h3') || {}).textContent);
+      if (aliveOnly && c.dataset.dead === '1') return;
+      const name = clean((c.querySelector('h3,.monster-name,.name,h2') || {}).textContent) || clean(c.dataset.name);       // the visible title keeps its capitals; data-name is lowercase
       const id = Scan.cardId(c); if (!name || !id) return;
       const e = names.get(name.toLowerCase()) || { name, ids: [] }; e.ids.push({ id, dead: c.dataset.dead === '1' }); names.set(name.toLowerCase(), e);
     });
+    return names;
+  }
+  async function readNames(names, gate, wave) {
     for (const e of names.values()) {
       let got = false;
       for (const { id } of e.ids.sort((a, b) => a.dead - b.dead)) {         // alive first; a dead one is fine too, it still shows its loot
@@ -1854,13 +1869,21 @@ Object.assign(LootScan, (() => {
       }
       if (!got) note(`${e.name} (Gate ${gate} · Wave ${wave}): its battle page showed no loot or stats`);
     }
-    // roster bosses of this wave that were not on the page at all (not spawned, so there is nothing to open)
-    Roster.list.forEach((d) => {
-      const l = d.kind === 'wave' && bossLoc(d.low); if (!l || l.gate !== gate || l.wave !== wave) return;
-      if (names.has(d.low) || found[d.low]) return;
-      if (Roster.members(d).some((m) => names.has(m.low) || found[m.low])) return;
-      if (!LootData.get(d.low)) note(`${d.name}: not on the Gate ${gate} · Wave ${wave} page (not spawned yet?), so no loot data`);
-    });
+  }
+  async function scanWave(gate, wave) {
+    // 1. the alive view: every monster that is up right now (the one you are fighting included, in whichever phase it is in)
+    await readNames(cardsByName(await waveDoc(gate, wave, 'alive'), true), gate, wave);
+    // 2. roster bosses of this wave with no data yet (a phase counts for its whole boss): they may be dead, so look at the "all" view once
+    const bosses = Roster.list.filter((d) => { const l = d.kind === 'wave' && Roster.canon(d) === d && bossLoc(d.low); return l && l.gate === gate && l.wave === wave; });
+    const have = (d) => Roster.members(d).some((m) => found[m.low] || LootData.get(m.low));
+    let missing = bosses.filter((d) => !have(d));
+    if (missing.length) {
+      const all = cardsByName(await waveDoc(gate, wave, 'all'), false), pick = new Map();
+      all.forEach((e, low) => { if (missing.some((d) => Roster.members(d).some((m) => m.low === low))) pick.set(low, e); });
+      await readNames(pick, gate, wave);
+      missing = bosses.filter((d) => !have(d));
+    }
+    missing.forEach((d) => note(`${d.name}${Roster.members(d).length > 1 ? ' (or its later phase)' : ''}: not on the Gate ${gate} · Wave ${wave} page, alive or dead (not spawned yet?), so no loot data`));
   }
 
   /* ---- dungeons (Shadowbridge = easy, Castle = hard; the Crucible is the cube and is never touched) ---- */
