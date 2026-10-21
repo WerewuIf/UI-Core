@@ -2225,6 +2225,10 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
 .ma-meter.hp i{background:linear-gradient(90deg,#b4465c,#ff6b7a)}.ma-meter.st i{background:linear-gradient(90deg,#b08a1d,#e3b341)}.ma-meter.mp i{background:linear-gradient(90deg,#3657a7,#6ea8ff)}.ma-meter.xp i{background:linear-gradient(90deg,#7a4fc4,#a371f7)}
 .ma-q{display:flex;align-items:center;gap:9px;padding:5px 6px;border-radius:14px;cursor:pointer}.ma-q:hover{background:rgba(255,255,255,.035)}
 .ma-q-n{flex:1;min-width:0}.ma-q-n b{display:block;font:700 12px Arial,sans-serif;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.ma-q-n .ma-bar{height:4px;margin-top:3px}
+.ma-sum{display:flex;align-items:center;flex-wrap:wrap;gap:5px;margin:8px 2px 2px}.ma-sum .ma-link{margin-left:auto}
+.ma-minis{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:4px;margin-top:6px}
+.ma-mini{display:flex;align-items:center;gap:7px;min-width:0;padding:4px 7px;background:#0d1322;border:1px solid #1d2742;border-radius:11px;cursor:pointer}.ma-mini:hover{border-color:#3b4a73}
+.ma-mini>div{min-width:0}.ma-mini b{display:block;font:700 11px Arial,sans-serif;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.ma-mini small{display:block;font-size:10px;color:#7c88ad;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .ma-q small{color:#7c88ad;font-size:10.5px;margin-top:2px;display:block}
 .ma-stats{display:flex;gap:5px;flex-wrap:wrap;margin:2px 0 6px}
 .ma-stat{background:#0d1322;border:1px solid rgba(255,255,255,.06);border-radius:999px;padding:4px 10px;font-size:11px;color:#9aa7cf}.ma-stat b{color:#fff;margin-left:4px}
@@ -2310,7 +2314,9 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   const ovr = (low) => cfg.bosses[low] || (cfg.bosses[low] = {});
   const baseCap = (low) => baseCapOf(low);
   const short = (n) => fmtNum(n).replace(/\.?0+([TBMK])$/, '$1');   // 3.00B -> 3B, 1.50B -> 1.5B
-  const isOn = (def) => Roster.members(def).some((m) => cfg.targets.includes(m.low));
+  let tSet = null, tSrc = null, tN = -1;                              // the selected bosses as a Set (the list is changed in place and replaced, so check both)
+  const targetSet = () => { if (tSrc !== cfg.targets || tN !== cfg.targets.length) { tSrc = cfg.targets; tN = cfg.targets.length; tSet = new Set(cfg.targets); } return tSet; };
+  const isOn = (def) => { const t = targetSet(); return Roster.members(def).some((m) => t.has(m.low)); };
   const iconOfBoss = (low) => { const e = Board.get(low); return e && e.icon; };
   const waveOf = (def) => { const l = bossLoc(def.low); return l ? l.wave : 0; };
   function bossState(low) {
@@ -2333,7 +2339,8 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     const now = serverMinutes(); if (now == null) return null;
     return o.schedule.map((b) => ({ t: toMin(b.at), cap: b.cap })).sort((a, b) => a.t - b.t).find((b) => b.t > now) || null;
   }
-  const rIdx = (low) => Roster.list.indexOf(Roster.get(low));
+  let idxMap = null, idxN = -1;                                       // roster position by name, rebuilt only when the roster changes
+  const rIdx = (low) => { if (!idxMap || idxN !== Roster.list.length) { idxMap = new Map(); Roster.list.forEach((d, i) => idxMap.set(d.low, i)); idxN = Roster.list.length; } const d = Roster.get(low); return d ? idxMap.get(d.low) : -1; };
   function setMany(defs, on) {
     defs.forEach((def) => {
       const ms = Roster.members(def);
@@ -2390,15 +2397,33 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
       meter('HP', Me.hp, Me.maxHp, 'hp', Me.hpKnown), meter('Stamina', Me.stam(), Me.maxStam(), 'st', Me.stamKnown()),
       meter('Mana', Me.mp, Me.maxMp, 'mp', Me.mpKnown), meter('EXP · Lv ' + (Me.level() || '?'), xp || 0, 100, 'xp', xp != null, xp != null ? xp.toFixed(1) + '%' : ''))]));
 
-    // bosses being farmed
+    // bosses being farmed: a one-line summary, the ones that are up right now, and everything else folded away
     const sel = selectedEntries();
-    out.push(fold('ov:targets', true, ['🎯 Bosses to farm', h('small', {}, sel.length ? sel.length + ' selected' : '')], () => !sel.length
-      ? [h('div', { class: 'ma-empty', style: { margin: '8px 0 0' } }, 'Nothing to farm yet.', h('div', {}, btn('Choose bosses', '', () => go('bosses'))))]
-      : sel.map((def) => {
-        const low = (Roster.members(def).find((m) => { const e = Board.get(m.low); return e && e.alive; }) || def).low, [txt, kind] = entryState(def), ev = Board.get(low) || {}, cap = bossCap(low), dmg = ev.userDmg || 0, swarm = def.kind === 'dungeon-swarm';
-        return h('div', { class: 'ma-q', onclick: () => { ui.bsec = def.kind === 'wave' ? 'waves' : 'dungeons'; ui.sel = def.low; go('bosses'); } }, avatar(def.name, ev.icon || iconOfBoss(def.low), { boss: true }),
-          h('div', { class: 'ma-q-n' }, h('b', {}, def.name), swarm ? null : h('div', { class: 'ma-bar' + (cap > 0 && dmg >= cap ? ' done' : '') }, h('i', { style: { width: (cap > 0 ? Math.min(100, dmg / cap * 100) : 0).toFixed(1) + '%' } })), swarm ? null : h('small', {}, `${fmtNum(dmg)} / ${fmtNum(cap)}`)), pill(txt, kind));
-      })));
+    const go2 = (def) => () => { ui.bsec = def.kind === 'wave' ? 'waves' : 'dungeons'; ui.sel = def.low; go('bosses'); };
+    const rows = sel.map((def) => { const [txt, kind] = entryState(def); return { def, txt, kind, live: (Roster.members(def).find((m) => { const e = Board.get(m.low); return e && e.alive; }) || def).low }; });
+    const isUp = (r) => r.kind === 'ok' || r.txt === 'needs duel';                                   // up and under its cap, or waiting on a duel
+    const upNow = rows.filter(isUp), rest = rows.filter((r) => !isUp(r));
+    const bigRow = (r) => {
+      const def = r.def, ev = Board.get(r.live) || {}, cap = bossCap(r.live), dmg = ev.userDmg || 0, swarm = def.kind === 'dungeon-swarm';
+      return h('div', { class: 'ma-q', onclick: go2(def) }, avatar(def.name, ev.icon || iconOfBoss(def.low), { boss: true }),
+        h('div', { class: 'ma-q-n' }, h('b', {}, def.name), swarm ? null : h('div', { class: 'ma-bar' + (cap > 0 && dmg >= cap ? ' done' : '') }, h('i', { style: { width: (cap > 0 ? Math.min(100, dmg / cap * 100) : 0).toFixed(1) + '%' } })), swarm ? null : h('small', {}, `${fmtNum(dmg)} / ${fmtNum(cap)}`)), pill(r.txt, r.kind));
+    };
+    const miniRow = (r) => h('div', { class: 'ma-mini', title: r.def.name, onclick: go2(r.def) }, avatar(r.def.name, iconOfBoss(r.live), { size: 'xs' }), h('div', {}, h('b', {}, splitName(r.def.name)[0]), h('small', { class: 'st-' + (r.kind || 'x') }, r.txt)));
+    const tally = (k, label) => { const n = rest.filter((r) => k(r)).length; return n ? pill(`${n} ${label}`, k === isCapped ? 'cap' : k === isWait ? 'blue' : 'warn') : null; };
+    const isCapped = (r) => r.kind === 'cap', isWait = (r) => r.kind === 'blue' || r.kind === '' , isOther = (r) => !isCapped(r) && !isWait(r);
+    const few = rows.length <= 6, all = isOpen('ov:rest', false);
+    out.push(fold('ov:targets', true, ['🎯 Bosses to farm', h('small', {}, sel.length ? `${sel.length} selected · ${upNow.length} up` : '')], () => {
+      if (!sel.length) return [h('div', { class: 'ma-empty', style: { margin: '8px 0 0' } }, 'Nothing to farm yet.', h('div', {}, btn('Choose bosses', '', () => go('bosses'))))];
+      if (few) return rows.map(bigRow);
+      const body = [];
+      body.push(upNow.length ? h('div', {}, upNow.map(bigRow)) : h('div', { class: 'ma-note', style: { margin: '8px 3px 2px' } }, 'None of them is up right now.'));
+      if (rest.length) {
+        body.push(h('div', { class: 'ma-sum' }, tally(isCapped, 'capped'), tally(isWait, 'waiting'), tally(isOther, 'other'),
+          h('button', { type: 'button', class: 'ma-link', onclick: () => { ui.open['ov:rest'] = !all; saveUi(); draw(); } }, (all ? '▾ hide ' : '▸ show ') + rest.length)));
+        if (all) body.push(h('div', { class: 'ma-minis' }, rest.map(miniRow)));
+      }
+      return body;
+    }));
 
     // numbers
     const up = Date.now() - (stats.started || Date.now()), ap = Presets.summary();
@@ -2664,19 +2689,28 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
 
   const BUILD = { home: tHome, bosses: tBosses, supplies: tSupplies, loot: tLoot, settings: tSettings, activity: tActivity };
   function scroller(el) { for (let n = el && el.parentElement; n; n = n.parentElement) { const o = getComputedStyle(n).overflowY; if ((o === 'auto' || o === 'scroll') && n.scrollHeight > n.clientHeight) return n; } return null; }
-  function draw() {
+  /* A redraw builds the tab off-screen first. For the automatic ones (a timer, a status change) the page is only touched when the result
+   * differs from what is showing: most ticks change nothing, so nothing is replaced, no image reloads, no scroll jump, no lost focus. */
+  let lastSig = '', lastTab = '';
+  const sigOf = (box) => box.innerHTML + '\u0001' + Array.from(box.querySelectorAll('input,select')).map((e) => (e.type === 'checkbox' ? (e.checked ? 1 : 0) : e.value)).join('\u0002');
+  function draw(auto) {
     if (!root || !shown || !root.isConnected) return;
-    const sc = scroller(root), top = sc ? sc.scrollTop : 0;
     let body; try { body = BUILD[tab]() } catch (e) { body = [h('div', { class: 'ma-alert' }, 'panel error: ' + e.message)]; console.warn('[automator] panel', e); }
-    root.replaceChildren(tabsBar(), h('div', { class: 'ma-body' }, ...[].concat(body).filter(Boolean)), footer());
+    const next = [tabsBar(), h('div', { class: 'ma-body' }, ...[].concat(body).filter(Boolean)), footer()];
+    const tmp = document.createElement('div'); tmp.append(...next);
+    const sig = tab + '\u0003' + sigOf(tmp);
+    if (auto === true && sig === lastSig && root.firstChild) return;
+    lastSig = sig;
+    const sc = scroller(root), top = sc ? sc.scrollTop : 0;
+    root.replaceChildren(...next);
     if (sc) sc.scrollTop = top;
   }
   const typing = () => root && root.contains(document.activeElement) && /^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement.tagName);
-  function schedule(ms) { if (drawT) return; drawT = setTimeout(() => { drawT = 0; if (typing()) schedule(1500); else draw(); }, ms || 400); }
+  function schedule(ms) { if (drawT) return; drawT = setTimeout(() => { drawT = 0; if (typing() || document.hidden) schedule(1500); else draw(true); }, ms || 400); }
   if (typeof Core.on === 'function') Core.on('caps:changed', (d) => { if (shown && d && (d.added || []).some((n) => n.startsWith('preset.'))) schedule(300); });   // a preset addon loaded late
   UI.hook((what) => { if (!shown) return; if (what === 'scan') { if (tab === 'bosses') paintScan(); return; } if (what === undefined || what === 'status' || DIRTY_TAB[what] === tab) schedule(); });
   let beat = 0;
-  setInterval(() => { if (!shown || !root || !root.isConnected || document.hidden) return; if (++beat % 3 === 0 && (tab === 'home') && !typing()) draw(); }, 1000);   // overview: vitals + timers refresh every 3 s
+  setInterval(() => { if (!shown || !root || !root.isConnected || document.hidden) return; if (++beat % 3 === 0 && (tab === 'home') && !typing()) draw(true); }, 1000);   // overview: vitals + timers refresh every 3 s
 
   function register() {
     Core.float.add({ id: ID, title: 'Automator', icon: '🤖', order: 40, width: 560,
@@ -2702,7 +2736,7 @@ Duels.bootPage().catch((e) => log('❌ duel page: ' + e.message, 'err'));
 Tab.join().catch((e) => log('❌ tab leadership: ' + e.message, 'err'));
 
 return {
-  version: VERSION, cfg: () => cfg, board: Board.all, status: Status.get,
+  version: VERSION, cfg: () => cfg, draw: Panel.draw, board: Board.all, status: Status.get,
   start: Run.start, stop: Run.stop, scanNow: Engine.scanNow, register: Kernel.register, loot: LootData.all, lootScan: LootScan,
 };
 
