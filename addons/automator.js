@@ -2038,7 +2038,7 @@ Object.assign(LootScan, (() => {
  *   Overview   what it is doing now: vitals, bosses being farmed, session numbers (collapsible groups)
  *   Bosses     loot scan strip, Waves | Dungeons switch; waves grouped by area (Generals / Ocean / Olympus), one row per wave with its bosses as
  *              bubbles. Dungeons: Gribbles in their own section, then normal and hard dungeon grouped by territory. Tapping a boss opens
- *              ITS OWN PAGE (the list is hidden meanwhile, ‹ › step to the next boss): one section at a time: Damage · Timing · Gear
+ *              its picker under the row (one at a time, no tabs): loadout chips, damage cap, timed cap (dungeon bosses)
  *   Supplies   stamina potion (+ save near EXP cap, auto-loot when out), HP potion, mana potion
  *   Loot       the graveyard
  *   Settings   class skill, behaviour, advanced timing
@@ -2056,7 +2056,6 @@ const Panel = (() => {
   const saveUi = () => uiStore.set(ui);
   let root = null, tab = TABS.some((t) => t[0] === ui.tab) ? ui.tab : 'home', shown = false, drawT = 0;
   const phaseSel = {};                                              // boss entry -> which phase the boss page is on
-  let nextTop = null;                                               // scroll position the next draw() should land on (null = keep it)
   const isOpen = (key, dflt) => (ui.open[key] != null ? !!ui.open[key] : !!dflt);
 
   (function css() {
@@ -2104,7 +2103,7 @@ const Panel = (() => {
 .ma-seg-btn{background:#0d1322;border:1px solid #27324f;color:#aeb9dc;font:700 11.5px Arial,sans-serif;padding:5px 11px;border-radius:999px;cursor:pointer;transition:.15s;white-space:nowrap}
 .ma-seg-btn:hover{border-color:#3b4a73}.ma-seg-btn.on{background:rgba(75,115,224,.2);border-color:#6ea8ff;color:#d6e5ff}
 .ma-chips{display:flex;gap:4px;flex-wrap:wrap}
-.ma-chip{background:#0d1322;border:1px solid #27324f;color:#9caad0;font:700 11px Arial,sans-serif;padding:3px 10px;border-radius:999px;cursor:pointer;transition:.15s}
+.ma-chip{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:#0d1322;border:1px solid #27324f;color:#9caad0;font:700 11.5px Arial,sans-serif;padding:5px 11px;border-radius:999px;cursor:pointer;transition:.15s}
 .ma-chip:hover{border-color:#3b4a73;color:#cfd8f7}.ma-chip.on{background:rgba(75,115,224,.2);border-color:#6ea8ff;color:#d6e5ff}
 .ma-chip i{font-style:normal;margin-left:5px;opacity:.7}
 /* inputs */
@@ -2170,9 +2169,6 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
 .ma-bb-n small .st-ok{color:#8ee6a8}.ma-bb-n small .st-warn{color:#ffd978}.ma-bb-n small .st-cap{color:#8fb7a0}.ma-bb-n small .st-blue{color:#9fc1ff}.ma-bb-n small .st-err{color:#ff9aa6}
 .ma-bb-n small .capv{color:#aeb9dc;font-weight:700}
 /* the editor of an open boss */
-.ma-ed{grid-column:1/-1;margin:1px 0 3px;padding:9px 11px 10px;background:#0b1120;border:1px solid rgba(110,168,255,.28);border-radius:16px}
-.ma-ed-h{display:flex;align-items:center;gap:8px;margin-bottom:6px}.ma-ed-h b{flex:1;min-width:0;font:800 12px Arial,sans-serif;color:#fff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.ma-ed-sub{color:#7c88ad;font-size:11px;margin:-2px 2px 5px}
 .ma-capline{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.ma-capline .ma-capinfo{color:#7c88ad;font-size:11px}
 .ma-tiers{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:5px;margin-top:6px}
 .ma-tier{display:flex;align-items:center;gap:8px;min-width:0;text-align:left;background:#0d1322;border:1px solid #27324f;color:#aeb9dc;border-radius:12px;padding:5px 10px;cursor:pointer;transition:.15s}
@@ -2181,14 +2177,6 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
 .ma-tier:hover{border-color:#4b5f94;background:#111a30}
 .ma-tier.on{background:rgba(75,115,224,.2);border-color:#6ea8ff}.ma-tier.on b{color:#fff}.ma-tier.on span{color:#b9c9f0}
 .ma-tier.exp b{color:#c9a8ff}
-.ma-ld{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:6px;margin-top:2px}
-.ma-ld label{display:block;font:800 9.5px Arial,sans-serif;color:#6e7a9c;text-transform:uppercase;letter-spacing:.06em;margin:0 3px 2px}
-.ma-ld select{width:100%}
-.ma-ed-h .ma-ed-t{flex:1;min-width:0}.ma-ed-h .ma-ed-t b{display:block;font-size:13px}.ma-ed-h .ma-ed-t small{display:block;color:#7c88ad;font-size:10.5px;margin-top:1px}
-.ma-edtabs{display:grid;grid-auto-flow:column;grid-auto-columns:1fr;gap:3px;margin:2px 0 10px;padding:3px;background:#080d19;border:1px solid #1d2742;border-radius:999px}
-.ma-edtab{position:relative;background:none;border:0;color:#8c98c0;font:700 11.5px Arial,sans-serif;padding:7px 4px;border-radius:999px;cursor:pointer;transition:.15s;white-space:nowrap}
-.ma-edtab:hover{color:#d6e5ff}.ma-edtab.on{background:rgba(75,115,224,.28);color:#fff;box-shadow:inset 0 0 0 1px #6ea8ff}
-.ma-edtab i{position:absolute;top:5px;right:8px;width:6px;height:6px;border-radius:50%;background:#6ea8ff}
 .ma-big{display:flex;align-items:center;gap:10px;margin-bottom:10px}.ma-big .ma-in{font:800 17px Arial,sans-serif;padding:7px 10px}.ma-big small{color:#7c88ad;font-size:11px;line-height:1.35}
 .ma-opts{display:flex;flex-direction:column;gap:5px}
 .ma-opt{display:flex;align-items:center;gap:10px;min-width:0;text-align:left;background:#0d1322;border:1px solid #27324f;color:#aeb9dc;border-radius:14px;padding:8px 12px;cursor:pointer;transition:.15s}
@@ -2199,20 +2187,12 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
 .ma-opt em{flex:0 0 auto;font:700 9.5px Arial,sans-serif;font-style:normal;color:#9fc1ff;background:rgba(75,115,224,.16);border-radius:999px;padding:2px 8px}
 .ma-opt.on{background:rgba(75,115,224,.2);border-color:#6ea8ff}.ma-opt.on .dot{border-color:#6ea8ff;background:radial-gradient(circle,#6ea8ff 0 38%,transparent 44%)}.ma-opt.on b{color:#fff}.ma-opt.on span{color:#b9c9f0}
 .ma-opt.exp b{color:#c9a8ff}
-.ma-lrow{display:flex;align-items:center;gap:10px;margin:7px 0}.ma-lrow label{flex:0 0 84px;font:800 11.5px Arial,sans-serif;color:#aeb9dc}.ma-lrow select{flex:1;min-width:0}
-.ma-edbody .ma-set{padding:2px 0 8px}.ma-edbody .ma-seg{margin-bottom:8px}
+.ma-lrow{margin:0 0 9px}.ma-lrow label{display:block;font:800 11px Arial,sans-serif;color:#9caad0;margin:0 3px 5px}
+.ma-ed{grid-column:1/-1;margin:1px 0 3px;padding:9px 11px 10px;background:#0b1120;border:1px solid rgba(110,168,255,.28);border-radius:16px}
+.ma-ed-h{display:flex;align-items:center;gap:8px;margin-bottom:4px}.ma-ed-t{flex:1;min-width:0}.ma-ed-t b{display:block;font:800 13px Arial,sans-serif;color:#fff;overflow-wrap:anywhere}
+.ma-ed-t small{display:flex;align-items:center;gap:6px;flex-wrap:wrap;color:#7c88ad;font-size:10.5px;margin-top:1px}
 .ma-reset{display:flex;justify-content:flex-end;margin-top:10px;padding-top:8px;border-top:1px solid rgba(255,255,255,.06)}
 /* a boss's own page (replaces the list while open) */
-.ma-pg-top{display:flex;align-items:center;gap:6px;margin:0 0 8px}.ma-pg-top .sp{flex:1}
-.ma-back{background:#0d1322;border:1px solid #27324f;color:#cfd8f7;font:800 11.5px Arial,sans-serif;padding:6px 13px;border-radius:999px;cursor:pointer;transition:.15s}.ma-back:hover{border-color:#6ea8ff;color:#fff}
-.ma-pos{color:#7c88ad;font-size:11px;font-variant-numeric:tabular-nums}
-.ma-nav{width:30px;height:28px;background:#0d1322;border:1px solid #27324f;color:#cfd8f7;font:800 14px Arial,sans-serif;border-radius:10px;cursor:pointer;transition:.15s;padding:0}.ma-nav:hover:not([disabled]){border-color:#6ea8ff;color:#fff}.ma-nav[disabled]{opacity:.3;cursor:default}
-.ma-pg-id{display:flex;align-items:center;gap:10px;padding:9px 12px;margin-bottom:8px;border-radius:16px;background:linear-gradient(135deg,#17233f,#11192d);border:1px solid rgba(110,168,255,.22)}
-.ma-pg-id .t{flex:1;min-width:0}.ma-pg-id .t b{display:block;font:800 13.5px/1.25 Arial,sans-serif;color:#fff;overflow-wrap:anywhere}.ma-pg-id .t small{display:flex;align-items:center;gap:6px;flex-wrap:wrap;color:#8b97bd;font-size:11px;margin-top:2px}
-.ma-pg-body{padding:10px 11px 11px;background:#0b1120;border:1px solid rgba(110,168,255,.2);border-radius:16px}
-.ma-pg-body>.ma-edtabs{margin-top:0}
-.ma-grp{margin:10px 0 4px}.ma-src-top{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:8px 0 2px}.ma-src-top .sp{flex:1}
-.ma-opt.sealed{opacity:.55}.ma-opt small{display:none}
 .ma-sched{margin-top:8px;padding:7px 10px;background:#0a0f1c;border:1px solid rgba(255,255,255,.06);border-radius:14px}
 .ma-sub-h{display:flex;align-items:center;gap:8px;color:#c4cdeb;font:700 11.5px Arial,sans-serif;margin-bottom:4px}.ma-sub-h .sp{flex:1}.ma-sub-h small{font-weight:400;color:#6e7a9c}
 .ma-srow{display:flex;align-items:center;gap:7px;margin:4px 0}.ma-srow .arrow{color:#53608a}
@@ -2420,7 +2400,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
       ? [h('div', { class: 'ma-empty', style: { margin: '8px 0 0' } }, 'Nothing to farm yet.', h('div', {}, btn('Choose bosses', '', () => go('bosses'))))]
       : sel.map((def) => {
         const low = (Roster.members(def).find((m) => { const e = Board.get(m.low); return e && e.alive; }) || def).low, [txt, kind] = entryState(def), ev = Board.get(low) || {}, cap = bossCap(low), dmg = ev.userDmg || 0, swarm = def.kind === 'dungeon-swarm';
-        return h('div', { class: 'ma-q', onclick: () => { ui.bsec = def.kind === 'wave' ? 'waves' : 'dungeons'; ui.sel = def.low; ui.listTop = 0; nextTop = 0; go('bosses'); } }, avatar(def.name, ev.icon || iconOfBoss(def.low), { boss: true }),
+        return h('div', { class: 'ma-q', onclick: () => { ui.bsec = def.kind === 'wave' ? 'waves' : 'dungeons'; ui.sel = def.low; go('bosses'); } }, avatar(def.name, ev.icon || iconOfBoss(def.low), { boss: true }),
           h('div', { class: 'ma-q-n' }, h('b', {}, def.name), swarm ? null : h('div', { class: 'ma-bar' + (cap > 0 && dmg >= cap ? ' done' : '') }, h('i', { style: { width: (cap > 0 ? Math.min(100, dmg / cap * 100) : 0).toFixed(1) + '%' } })), swarm ? null : h('small', {}, `${fmtNum(dmg)} / ${fmtNum(cap)}`)), pill(txt, kind));
       })));
 
@@ -2441,20 +2421,20 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
       num(() => b.cap, (n) => { ovr(low).schedule[i].cap = n; saveCfg(); }, { fmt: fmtNum, w: 96 }),
       h('span', { style: { flex: 1 } }), h('button', { type: 'button', class: 'ma-x', title: 'Remove', onclick: (e) => { stop(e); ovr(low).schedule.splice(i, 1); if (!ovr(low).schedule.length) delete ovr(low).schedule; saveCfg(); draw(); } }, '✕')));
     return h('div', { class: 'ma-sched' },
-      h('div', { class: 'ma-sub-h' }, '⏰ Change the cap during the day', h('span', { class: 'sp' }), now != null ? h('small', {}, 'server time now ' + fmtClock(now)) : null),
+      now != null ? h('div', { class: 'ma-sub-h' }, h('small', {}, 'server time now ' + fmtClock(now))) : null,
       rows.length ? rows : h('div', { class: 'ma-note', style: { margin: '2px 0 6px' } }, 'The cap stays the same all day. Add a change to raise or lower it from a set server time (it starts over at midnight).'),
       h('button', { type: 'button', class: 'ma-add', onclick: (e) => { stop(e); const t = now != null ? hhmm((Math.floor(now / 60) + 1) * 60) : '12:00'; (ovr(low).schedule = ovr(low).schedule || []).push({ at: t, cap: bossCap(low) }); sortSave(); } }, '+ Add a cap change'));
   }
-  function loadoutPick(kind, low) {
-    const list = Presets.list(kind), cur = (cfg.bosses[low] || {})[kind] || '', dflt = (cfg.loadout || {})[kind], dn = dflt ? (list.find((p) => p.id === String(dflt)) || { name: dflt }).name : '';
-    return dropdown([['', dflt ? 'Default · ' + dn : 'Default · keep equipped'], ['__keep', 'Keep what is equipped'], ...list.map((p) => [p.id, p.name])], cur, (v) => { if (v) ovr(low)[kind] = v; else delete ovr(low)[kind]; });
+  function loadoutPick(kind, low) {                                  // the boss's own pick for one kind: tap a chip to switch
+    const list = Presets.list(kind), cur = (cfg.bosses[low] || {})[kind] || '', dflt = (cfg.loadout || {})[kind], dn = dflt ? (list.find((p) => p.id === String(dflt)) || { name: dflt }).name : 'keep equipped';
+    return chips([['', 'Default · ' + dn], ['__keep', 'Keep equipped'], ...list.map((p) => [p.id, p.name])], cur, (v) => { if (v) ovr(low)[kind] = v; else delete ovr(low)[kind]; });
   }
   const KIND_ICO = { gear: '⚔️', crystal: '💎', pet: '🐾' };
   const cap1 = (s) => s.charAt(0).toUpperCase() + s.slice(1);
   const itemsText = (items) => (items.length > 2 ? items.slice(0, 2).join(', ') + ' +' + (items.length - 2) : items.join(', '));
   const lvTxt = (n) => 'Lv ' + Number(n).toLocaleString('en-US');
 
-  /* ONE boss is open at a time (ui.sel), on its own page, one section at a time: Damage · Timing · Gear. */
+  /* ONE boss picker is open at a time (ui.sel), under its row. */
   let flashCap = '';
   function setCap(low, n) { ovr(low).cap = n; saveCfg(); flashCap = low; draw(); setTimeout(() => { flashCap = ''; }, 1000); }
   Object.keys(ui.open).forEach((k) => { if (k.indexOf('boss:') === 0) delete ui.open[k]; });          // (the old "many editors open" flags)
@@ -2480,51 +2460,30 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     return out;
   }
   /* GEAR: what gets equipped before this boss */
-  function gearTab(low) {
-    return [...Presets.kinds().map((k) => h('div', { class: 'ma-lrow' }, h('label', {}, (KIND_ICO[k] || '🎒') + ' ' + cap1(k)), loadoutPick(k, low))),
-      note('“Default” is the default loadout (the 🎒 Loadout button above the list). Pick one here to change it just for this boss.')];
-  }
-  const EDTABS = [['dmg', '🎯 Damage'], ['time', '⏰ Timing'], ['gear', '🎒 Gear']];
-  /* the order the list shows bosses in, so ‹ › on a boss's page walk the same list */
-  function navOrder(def) {
-    const canon = Roster.list.filter((d) => Roster.canon(d) === d);
-    if (def.kind === 'wave') return waveGroups(canon.filter((d) => d.kind === 'wave')).flatMap((g) => g.waves.flatMap((w) => w.defs));
-    return dungeonGroups(canon.filter((d) => d.kind !== 'wave')).flatMap((g) => g.rows.flatMap((r) => r.defs));
-  }
+  const loadoutRows = (low) => Presets.kinds().map((k) => h('div', { class: 'ma-lrow' }, h('label', {}, (KIND_ICO[k] || '🎒') + ' ' + cap1(k)), loadoutPick(k, low)));
   function placeOf(m) {
     if (m.kind === 'wave') { const l = bossLoc(m.low); return l ? `Gate ${l.gate} · Wave ${l.wave}` : ''; }
     const easy = m.dtype === 'easy' || m.kind === 'dungeon-swarm', loc = m.locationId || (m.locationIds || [])[0] || 0, tn = loc ? Dungeons.terrName(easy ? 'easy' : 'hard', loc) : '';
     return (easy ? 'Normal dungeon' : 'Hard dungeon') + (m.locationIds ? ' · Loc ' + m.locationIds.join('/') : loc ? ' · Loc ' + loc : '') + (tn ? ' · ' + tn : '');
   }
-  function openBoss(low) { const sc = scroller(root); ui.listTop = sc ? sc.scrollTop : 0; ui.sel = low; nextTop = 0; saveUi(); draw(); }
-  function closeBoss() { ui.sel = ''; nextTop = ui.listTop || 0; saveUi(); draw(); }
-  /* ONE boss page at a time: the list is hidden while it is open. Header (back, ‹ ›, name, switch), then one section: Damage · Timing · Gear */
-  function bossPage(def) {
+  /* The picker that opens under a boss's row (one at a time, no tabs): loadout, damage cap, and for dungeon bosses a timed cap. */
+  function bossEditor(def) {
     const ms = Roster.members(def), idx = Math.min(phaseSel[def.low] || 0, ms.length - 1), m = ms[idx], low = m.low, o = cfg.bosses[low] || {}, kinds = Presets.kinds();
-    const tabs = EDTABS.filter(([k]) => (k !== 'time' || m.kind !== 'wave') && (k !== 'gear' || kinds.length));       // timed cap changes: dungeon bosses only
-    const cur = tabs.some((t) => t[0] === ui.edTab) ? ui.edTab : 'dmg';
-    const dot = { dmg: o.cap != null, time: Array.isArray(o.schedule) && o.schedule.length > 0, gear: kinds.some((k) => o[k]) };
-    const body = cur === 'time' ? [scheduleEditor(low)] : cur === 'gear' ? gearTab(low) : damageTab(low);
-    const order = navOrder(def), pos = order.findIndex((d) => d.low === def.low), prev = pos > 0 ? order[pos - 1] : null, next = pos >= 0 && pos < order.length - 1 ? order[pos + 1] : null;
-    const step = (d) => { ui.sel = d.low; nextTop = 0; saveUi(); draw(); };
-    const arrow = (txt, d, title) => h('button', { type: 'button', class: 'ma-nav', title, disabled: d ? null : true, onclick: () => { if (d) step(d); } }, txt);
-    const [txt, kind] = entryState(def), place = placeOf(m);
-    return [
-      h('div', { class: 'ma-pg-top' }, h('button', { type: 'button', class: 'ma-back', onclick: closeBoss }, '← Back'), h('span', { class: 'sp' }),
-        pos >= 0 ? h('span', { class: 'ma-pos' }, `${pos + 1} / ${order.length}`) : null, arrow('‹', prev, prev ? prev.name : ''), arrow('›', next, next ? next.name : '')),
-      h('div', { class: 'ma-pg-id' }, avatar(m.name, iconOfBoss(low) || iconOfBoss(def.low), { boss: m.kind !== 'dungeon-swarm' }),
-        h('div', { class: 't' }, h('b', { title: m.name }, m.name), h('small', {}, place, pill(txt, kind))), sw(() => isOn(def), (v) => setMany([def], v))),
-      ms.length > 1 ? h('div', { style: { margin: '0 0 8px' } }, seg(ms.map((x, i) => [i, 'Phase ' + (i + 1), x.name]), idx, (v) => { phaseSel[def.low] = v; }, { full: true })) : null,
-      h('div', { class: 'ma-pg-body' },
-        h('div', { class: 'ma-edtabs' }, tabs.map(([k, label]) => h('button', { type: 'button', class: 'ma-edtab' + (k === cur ? ' on' : ''), onclick: (e) => { stop(e); ui.edTab = k; saveUi(); draw(); } }, label, dot[k] ? h('i', { title: 'changed for this boss' }) : null))),
-        h('div', { class: 'ma-edbody' }, ...body),
-        Object.keys(o).length ? h('div', { class: 'ma-reset' }, h('button', { type: 'button', class: 'ma-link', onclick: () => { delete cfg.bosses[low]; saveCfg(); draw(); } }, '↺ Reset this boss to defaults')) : null)];
+    const sched = Array.isArray(o.schedule) && o.schedule.length > 0, tOpen = isOpen('time', sched), place = placeOf(m), [txt, kind] = entryState(def);
+    return h('div', { class: 'ma-ed' },
+      h('div', { class: 'ma-ed-h' }, h('div', { class: 'ma-ed-t' }, h('b', { title: m.name }, m.name), h('small', {}, place, pill(txt, kind))),
+        sw(() => isOn(def), (v) => setMany([def], v), { sm: true }),
+        h('button', { type: 'button', class: 'ma-x', title: 'Close', onclick: (e) => { stop(e); ui.sel = ''; saveUi(); draw(); } }, '✕')),
+      ms.length > 1 ? h('div', { style: { margin: '0 0 6px' } }, seg(ms.map((x, i) => [i, 'Phase ' + (i + 1), x.name]), idx, (v) => { phaseSel[def.low] = v; }, { full: true })) : null,
+      kinds.length ? caption('🎒 Loadout') : null, ...(kinds.length ? loadoutRows(low) : []),
+      caption('🎯 Damage cap'), ...damageTab(low),
+      m.kind !== 'wave' ? h('div', { style: { marginTop: '9px' } }, h('button', { type: 'button', class: 'ma-link', onclick: () => { ui.open.time = !tOpen; saveUi(); draw(); } }, (tOpen ? '▾ ' : '▸ ') + '⏰ Timed cap changes' + (sched ? ' (' + o.schedule.length + ')' : '')), tOpen ? scheduleEditor(low) : null) : null,
+      Object.keys(o).length ? h('div', { class: 'ma-reset' }, h('button', { type: 'button', class: 'ma-link', onclick: () => { delete cfg.bosses[low]; saveCfg(); draw(); } }, '↺ Reset this boss to defaults')) : null);
   }
   function loadoutCard() {
-    const kinds = Presets.kinds();
-    return h('div', { class: 'ma-card' }, h('div', { class: 'ma-card-h' }, h('span', { class: 'ma-ico' }, '🎒'), h('div', { class: 'ma-card-t' }, h('b', {}, 'Default loadout'), h('small', {}, 'Equipped before any boss that has no loadout of its own. Open a boss to change it just for that boss.'))),
-      h('div', { class: 'ma-ld', style: { marginTop: '8px' } }, kinds.map((k) => h('div', {}, h('label', {}, (KIND_ICO[k] || '🎒') + ' ' + cap1(k)),
-        dropdown([['', 'Keep what is equipped'], ...Presets.list(k).map((p) => [p.id, p.name])], (cfg.loadout || {})[k] || '', (v) => { cfg.loadout = cfg.loadout || {}; if (v) cfg.loadout[k] = v; else delete cfg.loadout[k]; Presets.forget(); })))));
+    return h('div', { class: 'ma-card' }, h('div', { class: 'ma-card-h' }, h('span', { class: 'ma-ico' }, '🎒'), h('div', { class: 'ma-card-t' }, h('b', {}, 'Default loadout'), h('small', {}, 'Equipped before any boss that has no pick of its own. Open a boss to change it just for that boss.'))),
+      h('div', { style: { marginTop: '9px' } }, Presets.kinds().map((k) => h('div', { class: 'ma-lrow' }, h('label', {}, (KIND_ICO[k] || '🎒') + ' ' + cap1(k)),
+        chips([['', 'Keep equipped'], ...Presets.list(k).map((p) => [p.id, p.name])], (cfg.loadout || {})[k] || '', (v) => { cfg.loadout = cfg.loadout || {}; if (v) cfg.loadout[k] = v; else delete cfg.loadout[k]; Presets.forget(); })))));
   }
 
   /* a boss as a bubble: avatar (dot = state), short name, cap · state, switch. Tap it to select it (one at a time) and open its editor. */
@@ -2535,19 +2494,19 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     return m && !/\bof$/i.test(m[1]) ? [m[1], m[2]] : [n, ''];
   }
   function bubble(def) {
-    const on = isOn(def), ms = Roster.members(def), cap = bossCap(def.low), [txt, kind] = entryState(def), nx = nextChange(def.low);
+    const on = isOn(def), op = ui.sel === def.low, ms = Roster.members(def), cap = bossCap(def.low), [txt, kind] = entryState(def), nx = nextChange(def.low);
     const bits = [h('span', { class: 'capv' }, cap > 0 ? 'cap ' + short(cap) : 'skipped'), nx ? `→ ${short(nx.cap)} ${fmtClock(nx.t)}` : '', ms.length > 1 ? ms.length + ' phases' : '', on ? h('span', { class: 'st-' + (kind || 'x') }, txt) : ''].filter(Boolean);
     const sub = []; bits.forEach((b, i) => { if (i) sub.push(' · '); sub.push(b); });
-    return h('div', { class: 'ma-bb' + (on ? ' on' : ''), title: def.name, onclick: () => openBoss(def.low) },
+    return h('div', { class: 'ma-bb' + (on ? ' on' : '') + (op ? ' open' : ''), title: def.name, onclick: () => { ui.sel = op ? '' : def.low; saveUi(); draw(); if (!op) setTimeout(() => { const e = root && root.querySelector('.ma-ed'); if (e && e.scrollIntoView) e.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); }, 40); } },
       avatar(def.name, iconOfBoss(def.low), { boss: true, dot: on ? kind || 'x' : '' }),
       h('div', { class: 'ma-bb-n' }, h('b', {}, splitName(def.name)[0]), h('small', {}, ...sub)),
       sw(() => on, (v) => setMany([def], v), { sm: true, redraw: false }));
   }
   /* one row = a label (W12 for a wave, L6 for a dungeon territory) + its bosses as bubbles */
   function rowOf(label, defs, wv) {
-    const all = defs.every(isOn);
+    const open = defs.filter((d) => ui.sel === d.low), all = defs.every(isOn);
     const lab = wv ? h('div', { class: 'ma-wv-l' + (defs.some(isOn) ? ' on' : ''), title: `Switch every boss here ${all ? 'off' : 'on'}`, onclick: () => setMany(defs, !all) }, h('b', {}, wv.tag || (wv.wave ? 'W' + wv.wave : '?')), h('small', { title: label }, label)) : null;
-    return h('div', { class: 'ma-wv', style: wv ? null : { gridTemplateColumns: 'minmax(0,1fr)' } }, lab, h('div', { class: 'ma-grid' }, defs.map(bubble)));
+    return h('div', { class: 'ma-wv', style: wv ? null : { gridTemplateColumns: 'minmax(0,1fr)' } }, lab, h('div', { class: 'ma-grid' }, defs.map(bubble)), ...open.map(bossEditor));
   }
 
   function waveGroups(defs) {
@@ -2615,9 +2574,6 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   function paintScan() { if (scanBox && scanBox.isConnected) scanBox.replaceChildren(...scanBar()); }
 
   function tBosses() {
-    const sel = ui.sel ? Roster.get(ui.sel) : null;
-    if (ui.sel && !sel) { ui.sel = ''; saveUi(); }
-    if (sel) { scanBox = null; return bossPage(Roster.canon(sel)); }          // one page at a time: the boss's own page hides the list
     const out = [];
     if (LootScan.available) { scanBox = h('div', {}, ...scanBar()); out.push(scanBox); } else scanBox = null;
     const canon = Roster.list.filter((d) => Roster.canon(d) === d), dunOn = Kernel.isOn('dungeons');
@@ -2715,10 +2671,10 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   function scroller(el) { for (let n = el && el.parentElement; n; n = n.parentElement) { const o = getComputedStyle(n).overflowY; if ((o === 'auto' || o === 'scroll') && n.scrollHeight > n.clientHeight) return n; } return null; }
   function draw() {
     if (!root || !shown || !root.isConnected) return;
-    const sc = scroller(root), top = sc ? sc.scrollTop : 0, want = nextTop; nextTop = null;
+    const sc = scroller(root), top = sc ? sc.scrollTop : 0;
     let body; try { body = BUILD[tab]() } catch (e) { body = [h('div', { class: 'ma-alert' }, 'panel error: ' + e.message)]; console.warn('[automator] panel', e); }
     root.replaceChildren(tabsBar(), h('div', { class: 'ma-body' }, ...[].concat(body).filter(Boolean)), footer());
-    const sc2 = want != null ? scroller(root) : sc; if (sc2) sc2.scrollTop = want != null ? want : top;
+    if (sc) sc.scrollTop = top;
   }
   const typing = () => root && root.contains(document.activeElement) && /^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement.tagName);
   function schedule(ms) { if (drawT) return; drawT = setTimeout(() => { drawT = 0; if (typing()) schedule(1500); else draw(); }, ms || 400); }
