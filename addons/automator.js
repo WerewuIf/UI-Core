@@ -654,10 +654,8 @@ const LootData = (() => {
     if (d.bosses[low]) { const b = Object.assign({}, d.bosses); delete b[low]; d = Object.assign({}, d, { bosses: b }); lootStore.set(d); }
     saveCfg();
   }
-  const addedDefs = () => Roster.list.filter((x) => x.fromScan && Roster.canon(x) === x);          // bosses on the list only because a scan added them
-  function restore() { const n = cfg.ignored.length; cfg.ignored = []; saveCfg(); return n; }
   lootStore.watch((v) => { d = norm(v); const n = apply(); if (n) log(`🆕 loot scan added ${n} boss${n === 1 ? '' : 'es'} to the Bosses tab`, 'info'); UI.dirty(); });
-  return { get, tiers, top, apply, purge, dismiss, addedDefs, restore, isBossRecord, all: () => d.bosses, at: () => d.at || 0 };
+  return { get, tiers, top, apply, purge, dismiss, isBossRecord, all: () => d.bosses, at: () => d.at || 0 };
 })();
 
 /* ---- board: what we KNOW about each boss right now. Only a validated page / confirmed reply may change it. -------- */
@@ -2179,6 +2177,15 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
 .ma-ld{display:grid;grid-template-columns:repeat(auto-fit,minmax(96px,1fr));gap:6px;margin:2px 0 2px}
 .ma-ld label{display:block;font:800 9.5px Arial,sans-serif;color:#6e7a9c;text-transform:uppercase;letter-spacing:.06em;margin:0 3px 3px}
 .ma-ld select{width:100%;text-overflow:ellipsis}
+.ma-lad{display:flex;flex-direction:column;gap:2px}
+.ma-rung{display:flex;align-items:baseline;gap:9px;min-width:0;text-align:left;background:none;border:0;border-left:3px solid #27324f;border-radius:4px 8px 8px 4px;padding:3px 8px;color:#5d6990;cursor:pointer;transition:.12s}
+.ma-rung b{flex:0 0 46px;font:800 12px Arial,sans-serif;color:#6e7a9c}
+.ma-rung span{flex:1;min-width:0;font-size:11px;line-height:1.3}
+.ma-rung em{flex:0 0 auto;font:700 9px Arial,sans-serif;font-style:normal;color:#9fc1ff;background:rgba(75,115,224,.16);border-radius:999px;padding:1px 7px}
+.ma-rung:hover{background:#111a30}
+.ma-rung.got{border-left-color:#4b73e0;color:#c4cdeb}.ma-rung.got b{color:#e8edff}
+.ma-rung.on{background:rgba(75,115,224,.22);border-left-color:#6ea8ff;color:#e8edff}
+.ma-rung.exp b{color:#c9a8ff}.ma-rung.exp.got{border-left-color:#a07ad8}
 .ma-what{margin:7px 3px 0;color:#7c88ad;font-size:11px;line-height:1.35;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .ma-reset{display:flex;align-items:center;gap:4px;flex-wrap:wrap;margin-top:9px;padding-top:6px;border-top:1px solid rgba(255,255,255,.06)}.ma-reset .sp{flex:1}
 .ma-link.warn{color:#ff9b9b}.ma-link.warn:hover{color:#ffc4c4;background:rgba(255,120,120,.1)}
@@ -2429,19 +2436,21 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     });
   }
 
+  /* DAMAGE: the number, then the loot ladder: every damage requirement with what it drops, lit up as far as the cap reaches. Tap a rung to use it. */
   function damageBlock(low) {
     const base = baseCap(low), tiers = LootData.tiers(low), info = LootData.get(low), mine = cfg.bosses[low] && cfg.bosses[low].cap != null;
     const top = tiers.length ? tiers[tiers.length - 1].req : null;
-    const opts = tiers.map((t) => [t.req, short(t.req)]);
-    if (info && info.expCapDmg > 0 && !tiers.some((t) => t.req === info.expCapDmg)) { opts.push([info.expCapDmg, short(info.expCapDmg) + ' EXP']); opts.sort((a, b) => a[0] - b[0]); }
+    const rungs = tiers.map((t) => ({ req: t.req, txt: t.items.join(', '), exp: false }));
+    if (info && info.expCapDmg > 0 && !tiers.some((t) => t.req === info.expCapDmg)) { rungs.push({ req: info.expCapDmg, txt: 'Reaches the EXP cap' + (info.expCapPct != null ? ' (' + info.expCapPct + '%)' : ''), exp: true }); rungs.sort((a, b) => a.req - b.req); }
     const bits = info ? [info.levelReq ? lvTxt(info.levelReq) : '', info.expCapPct != null ? `EXP cap ${info.expCapPct}%` : ''].filter(Boolean) : [];
-    const at = tiers.find((t) => t.req === base);
-    const what = base <= 0 ? 'Cap 0: this boss is skipped.' : !info ? (LootScan.available ? 'No loot data yet. Press Scan at the top to read it.' : 'No loot data for this boss yet.')
-      : at ? `${short(base)} gets: ${at.items.join(', ')}${base === top && !mine ? ' (default)' : ''}` : info.expCapDmg === base ? 'Reaches the EXP cap' : '';
+    const reached = rungs.filter((r) => r.req <= base).length;
     return [
       h('div', { class: 'ma-big' }, num(() => baseCap(low), (n) => { ovr(low).cap = n; }, { fmt: fmtNum, w: 108 }), bits.length ? h('small', {}, bits.join(' · ')) : null),
-      chips(opts.length ? opts : [[1e8, '100M'], [5e8, '500M'], [1e9, '1B'], [2e9, '2B'], [3e9, '3B'], [5e9, '5B']], base, (v) => { ovr(low).cap = v; }),
-      what ? h('div', { class: 'ma-what', title: what }, what) : null];
+      rungs.length ? h('div', { class: 'ma-lad' }, rungs.map((r) => h('button', { type: 'button', class: 'ma-rung' + (r.req <= base ? ' got' : '') + (r.req === base ? ' on' : '') + (r.exp ? ' exp' : ''), title: `${fmtNum(r.req)} damage: ${r.txt}`, onclick: (e) => { stop(e); ovr(low).cap = r.req; saveCfg(); draw(); } },
+        h('b', {}, short(r.req)), h('span', {}, r.txt), r.req === top && !mine ? h('em', {}, 'default') : null)))
+        : chips([[1e8, '100M'], [5e8, '500M'], [1e9, '1B'], [2e9, '2B'], [3e9, '3B'], [5e9, '5B']], base, (v) => { ovr(low).cap = v; }),
+      rungs.length ? h('div', { class: 'ma-what' }, base <= 0 ? 'Cap 0: this boss is skipped.' : `Cap ${short(base)} reaches ${reached} of ${rungs.length} loot levels (lit above).`)
+        : h('div', { class: 'ma-what' }, base <= 0 ? 'Cap 0: this boss is skipped.' : !info ? (LootScan.available ? 'No loot data yet. Press Scan at the top to read it.' : 'No loot data for this boss yet.') : '')];
   }
   function placeOf(m) {
     if (m.kind === 'wave') { const l = bossLoc(m.low); return l ? `Gate ${l.gate} · Wave ${l.wave}` : ''; }
@@ -2549,10 +2558,6 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     const sub = s.error ? '⚠ ' + s.error : n ? `${n} monsters · scanned ${ago(LootData.at())}` + (s.endedAt ? ` · last run read ${s.read}${s.added ? ', ' + s.added + ' new' : ''}${s.skipped ? ' · ' + s.skipped + ' regular mob' + (s.skipped === 1 ? '' : 's') + ' left out' : ''}` : '') : 'Reads every boss’s loot, level requirement and EXP cap.';
     out.push(h('div', { class: 'ma-scan' }, h('span', { class: 'ma-ico' }, '🔎'), h('div', { class: 'ma-scan-t' }, h('b', {}, 'Loot scan'), h('small', { title: sub }, sub)),
       h('div', { class: 'ma-scan-b' }, btn(n ? '↻ Rescan' : '🔎 Scan', 'soft', () => LootScan.run()), n ? btn('⬇ Export .txt', 'soft', () => LootScan.download()) : null)));
-    const added = LootData.addedDefs(), gone = cfg.ignored.length;           // bosses on the list only because a scan added them, and ones you removed
-    if (added.length || gone) out.push(h('div', { style: { margin: '-3px 4px 6px', display: 'flex', gap: '6px', flexWrap: 'wrap' } },
-      added.length ? h('button', { type: 'button', class: 'ma-link warn', title: added.map((d) => d.name).join('\n'), onclick: () => { if (confirm(`Remove the ${added.length} boss${added.length === 1 ? '' : 'es'} the loot scan added to the list?\n\n` + added.map((d) => '• ' + d.name).join('\n') + '\n\nA rescan will not add them back.')) removeAdded(added); } }, `🗑 Remove the ${added.length} added by a scan`) : null,
-      gone ? h('button', { type: 'button', class: 'ma-link', onclick: () => { LootData.restore(); draw(); } }, `↺ Allow the ${gone} removed again`) : null));
     if (s.notes.length) {
       out.push(h('div', { style: { margin: '-3px 4px 6px' } }, h('button', { type: 'button', class: 'ma-link', onclick: () => { scanOpen = !scanOpen; paintScan(); } }, `⚠ ${s.notes.length} thing${s.notes.length === 1 ? '' : 's'} could not be read ${scanOpen ? '▾' : '▸'}`)));
       if (scanOpen) out.push(h('div', { class: 'ma-scan-n' }, s.notes.map((t) => h('div', {}, t))));
@@ -2638,6 +2643,8 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
 
   /* =================================================== ACTIVITY =================================================== */
   function tActivity() {
+    const prevLog = root && root.querySelector('.ma-log'), stick = !prevLog || prevLog.scrollTop + prevLog.clientHeight >= prevLog.scrollHeight - 30, keepTop = prevLog ? prevLog.scrollTop : 0;
+    setTimeout(() => { const e = root && root.querySelector('.ma-log'); if (e) e.scrollTop = stick ? e.scrollHeight : keepTop; }, 0);     // newest line is at the bottom: follow it, unless you scrolled up
     const f = cfg.logFilter || 'all', all = Log.all(), cnt = (k) => all.filter((r) => r.k === k).length, l = Diag.last(), nSkip = Object.values(Diag.counts).reduce((a, b) => a + b, 0);
     const chipDefs = [['all', 'All', all.length], ['dmg', 'Hits', cnt('dmg')], ['skill', 'Skills', cnt('skill')], ['warn', 'Warnings', cnt('warn')], ['err', 'Errors', cnt('err')], ['skips', 'Skips', nSkip]];
     const out = [h('div', { class: 'ma-alert info' }, l.reason ? h('span', {}, h('b', {}, 'Last skip: '), `${l.reason}${l.detail ? ' — ' + l.detail : ''} · ${ago(l.at)}`) : 'Nothing has been skipped. It attacks whenever a boss is up and under its cap.'),
@@ -2645,10 +2652,10 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     if (f === 'skips') {
       const counts = Object.entries(Diag.counts).sort((a, b) => b[1] - a[1]);
       out.push(counts.length ? h('div', { class: 'ma-chips', style: { marginBottom: '10px' } }, counts.map(([k, n]) => pill(`${k} · ${n}`, 'warn'))) : null);
-      out.push(Diag.events.length ? h('div', { class: 'ma-log' }, Diag.events.slice(-60).reverse().map((e) => h('div', { class: 'ma-ll warn' }, h('b', {}, e.t), e.reason + (e.detail ? ' — ' + e.detail : '')))) : h('div', { class: 'ma-empty' }, 'No skips recorded.'));
+      out.push(Diag.events.length ? h('div', { class: 'ma-log' }, Diag.events.slice(-60).map((e) => h('div', { class: 'ma-ll warn' }, h('b', {}, e.t), e.reason + (e.detail ? ' — ' + e.detail : '')))) : h('div', { class: 'ma-empty' }, 'No skips recorded.'));
       out.push(h('div', { class: 'ma-actions', style: { marginTop: '10px' } }, btn('Clear', 'soft', () => { Diag.clear(); draw(); })));
     } else {
-      const rows = all.filter((r) => f === 'all' || r.k === f).slice(-200).reverse();
+      const rows = all.filter((r) => f === 'all' || r.k === f).slice(-200);
       out.push(rows.length ? h('div', { class: 'ma-log' }, rows.map((r) => h('div', { class: 'ma-ll ' + r.k }, h('b', {}, r.t), r.m.replace(/<[^>]+>/g, '')))) : h('div', { class: 'ma-empty' }, 'Nothing logged yet.'));
       out.push(h('div', { class: 'ma-actions', style: { marginTop: '10px' } }, btn('Clear log', 'soft', () => Log.clear())));
     }
