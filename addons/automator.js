@@ -11,16 +11,15 @@
  *                      Swappable: turn the part off (or delete it) and the wave bosses keep working.
  *   PART 3  DUELS      Phase duels, shared by wave and dungeon bosses
  *   PART 4  LOOT       graveyard scan + EXP-aware auto-loot
- *   PART 4b LOOT SCAN  read-only loot / level / EXP-cap scan, cap tier buttons and plain-text export
  *   PART 5  [slots]    quests / adventurers guild / PvP / dailies: Kernel.register({ id, name, icon, every, tick, panel })
- *   PART 5  PANEL      compact rounded panel; Bosses split into Waves | Dungeons with grouped wave cards
+ *   PART 6  PANEL      Core.float panel: Status, Bosses, Potions, Graveyard, Log, Diagnostics
  *
  * Why this exists (3.0.0 bugs fixed here, see the notes): a login/maintenance page used to parse as "no bosses";
  * boss timers were never reloaded after a tab took over; nothing scanned while a boss was being fought; error
  * replies were retried instantly instead of honouring their delay.
  */
 Core.module({
-  id: 'automator', name: 'Automator', icon: '🤖', version: '1.5.0',
+  id: 'automator', name: 'Automator', icon: '🤖', version: '1.2.0',
   // Offered to other addons through Core capabilities (guides/CAPABILITIES.md):
   //   automator.status() -> the status string     automator.start() / automator.stop()     automator.scan() -> scan the bosses now
   provides: (api) => api && api.start ? {
@@ -31,7 +30,7 @@ Core.module({
   } : {},
   init(Core) {
 'use strict';
-const ID = 'automator', VERSION = '1.5.0';
+const ID = 'automator', VERSION = '1.2.0';
 if (window.__automatorLoaded) { console.warn('[automator] already loaded', window.__automatorLoaded); return null; }
 window.__automatorLoaded = VERSION;
 
@@ -109,15 +108,6 @@ function mergeCfg(saved) {
   out.stam = { A: Object.assign({}, DEFAULT_CFG.stam.A, (s.stam || {}).A), B: Object.assign({}, DEFAULT_CFG.stam.B, (s.stam || {}).B), save: Object.assign({}, DEFAULT_CFG.stam.save, (s.stam || {}).save) };
   out.targets = Array.isArray(s.targets) ? s.targets.slice() : [];
   out.bosses = s.bosses && typeof s.bosses === 'object' ? s.bosses : {};
-  // Upgrade the previous single timed-cap switch to the multi-entry schedule without losing user settings.
-  Object.keys(out.bosses).forEach((low) => {
-    const o = out.bosses[low];
-    if (o && !Array.isArray(o.schedule) && o.switchAt && o.capAfterSwitch != null) {
-      const at = parseClock(o.switchAt);
-      if (at) o.schedule = [{ at, cap: Number(o.capAfterSwitch) || 0 }];
-      delete o.switchAt; delete o.capAfterSwitch;
-    }
-  });
   return out;
 }
 let cfg = mergeCfg(cfgStore.get());
@@ -541,24 +531,12 @@ const Roster = (() => {
 })();
 
 const bossName = (low) => { const d = Roster.get(low); return (d && d.name) || low; };
-function clockMinutes(value) { const s = parseClock(value); if (!s) return 0; const p = s.split(':').map(Number); return p[0] * 60 + p[1]; }
 function bossCap(low) {
   const def = Roster.get(low), o = cfg.bosses[low] || {};
-  const base = baseCap(low);
-  // Timed cap changes are for dungeon bosses only; they repeat each server day.
-  if (def && def.kind !== 'wave' && Array.isArray(o.schedule) && o.schedule.length) {
-    const now = serverMinutes();
-    if (now != null) {
-      const entries = o.schedule.filter((x) => x && parseClock(x.at) && Number.isFinite(Number(x.cap))).slice().sort((a, b) => clockMinutes(a.at) - clockMinutes(b.at));
-      let active = null;
-      entries.forEach((x) => { if (clockMinutes(x.at) <= now) active = x; });
-      if (active) return Number(active.cap);
-    }
-  }
-  // Backward-compatible fallback for a config that has not yet been migrated.
-  if (def && def.kind !== 'wave' && o.switchAt && o.capAfterSwitch != null) {
-    const mins = serverMinutes(), at = parseClock(o.switchAt);
-    if (mins != null && at && mins >= clockMinutes(at)) return Number(o.capAfterSwitch);
+  const base = o.cap != null ? o.cap : (def && def.defaultCap != null ? def.defaultCap : cfg.defaultBossCap);
+  if (o.switchAt && o.capAfterSwitch != null) {       // "from this SERVER time on, use this cap"
+    const mins = serverMinutes();
+    if (mins != null) { const [h, m] = o.switchAt.split(':').map(Number); if (mins >= h * 60 + (m || 0)) return o.capAfterSwitch; }
   }
   return base;
 }
@@ -567,31 +545,6 @@ function bossLoc(low) {
   const gate = o.gate != null ? o.gate : def && def.gate, wave = o.wave != null ? o.wave : def && def.wave;
   return gate && wave ? { gate, wave } : null;
 }
-
-
-/* ---- map wave coordinates to their world area. Grouping is based on Gate/Wave, never on a monster's name. ---- */
-const WaveMap = (() => {
-  const GROUPS = {
-    generals: { id: 'generals', title: 'Generals', sub: 'Gate 3', ico: '⚔️', order: 1 },
-    ocean: { id: 'ocean', title: 'Ocean', sub: 'Gate 5', ico: '🌊', order: 2 },
-    olympus: { id: 'olympus', title: 'Olympus', sub: 'Gate 5', ico: '🏛️', order: 3 },
-    other: { id: 'other', title: 'More waves', sub: 'other locations', ico: '🗺️', order: 4 },
-  };
-  const WAVES = {
-    '3/8': ['generals', 'Generals'],
-    '5/9': ['ocean', 'Oceanus'],
-    '5/10': ['olympus', 'Hermes'], '5/11': ['olympus', 'Artemis'],
-    '5/12': ['olympus', 'Poseidon'], '5/13': ['olympus', 'Ares'],
-    '5/14': ['olympus', 'Apollo'], '5/15': ['olympus', 'Athena'],
-    '5/16': ['olympus', 'Hera'], '5/17': ['olympus', 'Zeus'],
-  };
-  function of(gate, wave) {
-    const key = `${gate || ''}/${wave || ''}`, hit = WAVES[key];
-    if (hit) return { key, group: GROUPS[hit[0]], label: hit[1] };
-    return { key, group: GROUPS.other, label: gate && wave ? `Gate ${gate} · Wave ${wave}` : 'Unmapped wave' };
-  }
-  return { of, groups: GROUPS };
-})();
 
 /* ---- board: what we KNOW about each boss right now. Only a validated page / confirmed reply may change it. -------- */
 const boardStore = Core.store(ID + '-board', { def: {} });
@@ -645,7 +598,6 @@ const targetKey = (t) => `${t.kind}:${t.instanceId || ''}:${t.monsterId}`;
 const Dungeons = { nextCheck: () => Infinity, refresh: async () => {}, sideMobs: null, corpses: null };   // PART 2 fills this
 const Duels = { fight: null, bootPage: () => {} };                                                         // PART 3 fills this
 const Loot = { onStamStall: async () => {} };                                                              // PART 4 fills this
-const LootScan = { available: false, state: { running: false, stop: false, label: '', done: 0, total: 0, read: 0, added: 0, notes: [], error: '', startedAt: 0, endedAt: 0 }, run: async () => {}, stop() {}, download() {}, text: () => '' }; // PART 4b fills this
 
 /* ---- skills, tiers, damage profile (3.0.0 algorithm kept; profile keyed per boss NAME so it can't grow forever) ---- */
 const SKILLS = {
@@ -1256,63 +1208,6 @@ const Engine = (() => {
   if (khaal) Roster.addPhase(khaal, 'Khaal Sovereign of the Shattered Bloodline', 2e9);
 })();
 
-
-/* ---- scanned loot data. Loot requirements become choices in each boss's cap editor. ---------------------------- */
-const lootStore = Core.store('automator-loot', { def: { v: 1, at: 0, bosses: {} } });
-const LootData = (() => {
-  const store = lootStore;
-  let data = store.get() || { v: 1, at: 0, bosses: {} };
-  const all = () => data && data.bosses && typeof data.bosses === 'object' ? data.bosses : {};
-  const at = () => Number(data && data.at) || 0;
-  const get = (low) => {
-    const key = String(low || '').toLowerCase();
-    if (all()[key]) return all()[key];
-    return Object.values(all()).find((e) => String(e && e.name || '').toLowerCase() === key) || null;
-  };
-  function tiers(low) {
-    const e = get(low), grouped = new Map();
-    (e && Array.isArray(e.loot) ? e.loot : []).forEach((item) => {
-      const req = Number(item && item.dmgReq);
-      if (!(req > 0) || !Number.isFinite(req)) return;
-      if (!grouped.has(req)) grouped.set(req, []);
-      if (item.name && !grouped.get(req).includes(item.name)) grouped.get(req).push(item.name);
-    });
-    return [...grouped.entries()].sort((a, b) => a[0] - b[0]).map(([req, items]) => ({ req, items }));
-  }
-  function updateRoster() {
-    Object.values(all()).forEach((e) => {
-      if (!e || !e.name) return;
-      // For waves, every card is a wave boss. In dungeons, add only locations the map marks as boss locations.
-      if (e.kind !== 'wave' && !e.boss) return;
-      const low = String(e.name).toLowerCase();
-      if (Roster.get(low)) return;
-      const maxReq = (Array.isArray(e.loot) ? e.loot : []).reduce((n, l) => Math.max(n, Number(l && l.dmgReq) || 0), 0);
-      Roster.add({
-        name: e.name, kind: e.kind === 'wave' ? 'wave' : 'dungeon',
-        defaultCap: maxReq || Number(e.expCapDmg) || cfg.defaultBossCap,
-        gate: e.gate, wave: e.wave, dtype: e.dtype, locationId: e.locationId,
-      });
-    });
-  }
-  store.watch((v) => {
-    if (v && typeof v === 'object') {
-      data = v; updateRoster(); UI.dirty('loot'); UI.dirty('scan');
-    }
-  });
-  updateRoster();
-  return { all, get, tiers, at };
-})();
-
-function baseCap(low) {
-  const def = Roster.get(low), o = cfg.bosses[low] || {};
-  if (o.cap != null && Number.isFinite(Number(o.cap))) return Number(o.cap);
-  // This roster entry is deliberately skipped by default (cap 0), even if the scanner finds loot on its page.
-  if (def && Number(def.defaultCap) === 0) return 0;
-  const choices = LootData.tiers(low);
-  if (choices.length) return choices[choices.length - 1].req;
-  return def && def.defaultCap != null ? Number(def.defaultCap) : Number(cfg.defaultBossCap) || 0;
-}
-
 Object.assign(Dungeons, (() => {
   const LIST = '/guild_dungeon.php', LOC = '/guild_dungeon_location.php';
   const typeOfTitle = (t) => { t = String(t || '').toLowerCase(); return t.includes('shadowbridge') ? 'easy' : t.includes('castle') ? 'hard' : t.includes('crucible') ? 'crucible' : ''; };
@@ -1517,7 +1412,7 @@ Object.assign(Dungeons, (() => {
     return out;
   }
 
-  return { nextCheck, refresh, sideMobs, instances, pins, deadMobs, dmgOn, pool, monName, dgmidOf };
+  return { nextCheck, refresh, sideMobs, instances, pins, deadMobs, dmgOn, pool };
 })());
 
 /* ===================================================================================================================
@@ -1772,571 +1667,325 @@ Object.assign(Loot, (() => {
 })());
 
 /* ===================================================================================================================
- * PART 4b — LOOT SCAN (swappable: delete this block and the Bosses tab just loses its Scan / Export buttons)
- * Reads every boss's battle page once per monster NAME (dead ones included, like the "Possible Loot" panel does) and keeps
- *   loot tier, item, drop %, DMG req · Level Req · EXP Cap % (and the damage it takes to reach it) · EXP / DMG · HP
- * in the loot store (PART 1: LootData). Every loot DMG req becomes a cap choice of that boss, and bosses the roster did not
- * know yet are added. "Export .txt" writes everything saved so far as a plain-text report.
- * Read-only: GET requests only, one at a time through the same action queue as the attacks (so it keeps their pace and
- * never overlaps an attack), stops on a login / maintenance page. Never joins, attacks, loots or equips. The cube is left alone.
- * Extra wave pages can be added by hand before pressing Scan:  window.LOOT_SCAN = { waves: [[5, 18]] }
- * ================================================================================================================ */
-Object.assign(LootScan, (() => {
-  const st = LootScan.state;
-  class Halt extends Error { }                                   // a deliberate stop (Stop pressed, signed out, site down)
-  const clean = (s) => String(s == null ? '' : s).replace(/\s+/g, ' ').trim();
-  const numIn = (s) => { const m = clean(s).replace(/,/g, '').match(/\d+(?:\.\d+)?/); return m ? Number(m[0]) : null; };
-  const gapMs = () => Math.max(250, cfg.minActionGapMs || 450);
-  const note = (m) => { st.notes.push(m); };
-  const step = (label) => { st.label = label; UI.dirty('scan'); };
-  const check = () => { if (st.stop) throw new Halt('stopped'); };
-  let found = {};                                                // nameLow -> record, for this run
-
-  /* one GET through the action queue, validated. mode: 'all' shows dead monsters on wave pages (Core swaps the cookies under its lock) */
-  async function page(url, where, mode) {
-    check();
-    if (Guard.isFaulted()) throw new Halt('the site is signed out or unavailable right now');
-    let html;
-    try {
-      html = await Act.run(() => Core.net.fetchText(url, Object.assign({ force: true, ttl: 0, key: 'ma:scan:' + (mode || '') + url }, mode ? { via: (run) => Core.cookies.withMode(mode, run) } : {})), gapMs());
-    } catch (e) { throw new Error(`${where}: ${e.message}`); }
-    const doc = parseHtml(html), s = Guard.pageState(doc);
-    if (s !== 'ok') { Guard.fault(s, 'loot scan'); throw new Halt(s === 'signedout' ? 'you are signed out' : 'the site is unavailable'); }
-    if (!Guard.chromeOk(doc)) throw new Error(`${where}: not a normal game page`);
-    return doc;
-  }
-
-  /* a battle page -> loot + requirements (the same selectors as the "Possible Loot" panel on the wave page) */
-  function parseBattle(doc) {
-    const stat = (label) => Array.from(doc.querySelectorAll('.stat-block')).find((b) => clean((b.querySelector('.label') || {}).textContent).toLowerCase() === label) || null;
-    const val = (b) => numIn(b && (b.querySelector('strong') || {}).textContent);
-    const expBlock = stat('exp cap'), m = expBlock && /deal\s*~?\s*([\d,]+)/i.exec(expBlock.textContent || '');
-    const loot = [], panel = Array.from(doc.querySelectorAll('.panel')).find((p) => /possible loot/i.test((p.querySelector('strong') || {}).textContent || ''));
-    if (panel) {
-      let tier = '';
-      Array.from((panel.querySelector('.loot-grid') || panel).children).forEach((child) => {
-        if (child.matches && child.matches('h4.tier-head')) { tier = clean(child.textContent).toUpperCase(); return; }
-        (child.querySelectorAll ? child.querySelectorAll('.loot-card') : []).forEach((card) => {
-          const chips = Array.from(card.querySelectorAll('.chip')).map((c) => clean(c.textContent));
-          loot.push({ tier, name: clean((card.querySelector('.loot-name') || {}).textContent), dropPct: numIn(chips.find((t) => /drop:/i.test(t))), dmgReq: numIn(chips.find((t) => /dmg req:/i.test(t))) });
-        });
-      });
-    }
-    return { levelReq: val(stat('level req')), expCapPct: val(expBlock), expCapDmg: m ? numIn(m[1]) : null, expPerDmg: val(stat('exp / dmg')), hp: val(stat('monster hp')), loot };
-  }
-  const hasData = (b) => !!(b.loot.length || b.levelReq || b.hp);
-  const readBattle = async (url, where) => parseBattle(await page(url, where));
-  function keep(name, extra, b) {
-    const low = clean(name).toLowerCase(), old = LootData.get(low);
-    // a page that shows no loot panel this time must not wipe loot we already know
-    const rec = Object.assign({ name: clean(name), scannedAt: Date.now() }, extra, b);
-    if (!rec.loot.length && old && Array.isArray(old.loot) && old.loot.length) rec.loot = old.loot;
-    found[low] = rec; st.read = Object.keys(found).length; UI.dirty('scan');
-  }
-
-  /* ---- waves ---- */
-  async function discoverWaves() {
-    const waves = new Map(), add = (g, w) => { if (g > 0 && w > 0) waves.set(g + '/' + w, [g, w]); };
-    Roster.list.forEach((d) => { if (d.kind === 'wave') { const l = bossLoc(d.low); if (l) add(l.gate, l.wave); } });
-    Object.values(LootData.all()).forEach((e) => { if (e && e.kind === 'wave') add(e.gate, e.wave); });
-    ((window.LOOT_SCAN && window.LOOT_SCAN.waves) || []).forEach(([g, w]) => add(+g, +w));
-    // best effort: a wave page the gates pages link to (this does not stop the scan when the page looks different)
-    const queue = ['/gates.php'], seen = new Set();
-    while (queue.length && seen.size < 12) {
-      const path = queue.shift(); if (seen.has(path)) continue; seen.add(path); step('Looking for wave pages…');
-      let doc; try { doc = await page(path, path); } catch (e) { if (e instanceof Halt) throw e; note(`${path}: ${e.message}`); continue; }
-      doc.querySelectorAll('a[href]').forEach((a) => {
-        let u; try { u = new URL(a.getAttribute('href'), location.origin); } catch (_) { return; }
-        if (u.origin !== location.origin) return;
-        if (/active_wave\.php$/.test(u.pathname)) add(+u.searchParams.get('gate'), +u.searchParams.get('wave'));
-        else if (/(gate|wave)/i.test(u.pathname + u.search) && !/battle\.php|guild|pvp/i.test(u.pathname)) queue.push(u.pathname + u.search);
-      });
-    }
-    return [...waves.values()].sort((a, b) => a[0] - b[0] || a[1] - b[1]);
-  }
-  async function scanWave(gate, wave) {
-    const doc = await page(`/active_wave.php?gate=${gate}&wave=${wave}`, `Gate ${gate} · Wave ${wave}`, 'all');
-    const names = new Map();
-    doc.querySelectorAll('.monster-card').forEach((c) => {
-      const name = clean(c.dataset.name || (c.querySelector('.monster-name,.name,h2,h3') || {}).textContent);
-      const id = Scan.cardId(c); if (!name || !id) return;
-      const e = names.get(name.toLowerCase()) || { name, ids: [] }; e.ids.push({ id, dead: c.dataset.dead === '1' }); names.set(name.toLowerCase(), e);
-    });
-    for (const e of names.values()) {
-      let got = false;
-      for (const { id } of e.ids.sort((a, b) => a.dead - b.dead)) {         // alive first; a dead one is fine too, it still shows its loot
-        let b; try { b = await readBattle(`/battle.php?id=${encodeURIComponent(id)}`, e.name); } catch (err) { if (err instanceof Halt) throw err; note(`${e.name}: ${err.message}`); continue; }
-        if (!hasData(b)) continue;
-        keep(e.name, { kind: 'wave', gate, wave }, b); got = true; break;
-      }
-      if (!got) note(`${e.name} (Gate ${gate} · Wave ${wave}): its battle page showed no loot or stats`);
-    }
-    // roster bosses of this wave that were not on the page at all (not spawned, so there is nothing to open)
-    Roster.list.forEach((d) => {
-      const l = d.kind === 'wave' && bossLoc(d.low); if (!l || l.gate !== gate || l.wave !== wave) return;
-      if (names.has(d.low) || found[d.low]) return;
-      if (Roster.members(d).some((m) => names.has(m.low) || found[m.low])) return;
-      if (!LootData.get(d.low)) note(`${d.name}: not on the Gate ${gate} · Wave ${wave} page (not spawned yet?), so no loot data`);
-    });
-  }
-
-  /* ---- dungeons (Shadowbridge = easy, Castle = hard; the Crucible is the cube and is never touched) ---- */
-  async function scanDungeons() {
-    if (!Dungeons.instances || !Dungeons.pins || !Dungeons.monName) { note('The Dungeons part is not installed, so dungeons were skipped'); return; }
-    const ins = await Dungeons.instances(true);
-    for (const type of ['hard', 'easy']) {
-      const label = type === 'hard' ? 'Castle' : 'Shadowbridge', id = (ins.v[type] || [])[0] || (ins.ended[type] || [])[0];
-      if (!id) { note(`${label}: no instance open or finished right now, skipped`); continue; }
-      step(label); check();
-      const pins = await Dungeons.pins(id);
-      if (!pins) { note(`${label}: could not read the map`); continue; }
-      let read = 0;
-      for (const pin of pins) {
-        if (pin.locationId == null) continue;
-        if (read >= 60) break;
-        if (pin.isLocked) { note(`${label} location ${pin.locationId}: sealed, skipped (scan again once it is open)`); continue; }
-        step(`${label} · location ${pin.locationId}`);
-        let doc; try { doc = await page(`/guild_dungeon_location.php?instance_id=${id}&location_id=${pin.locationId}`, `${label} location ${pin.locationId}`); } catch (e) { if (e instanceof Halt) throw e; note(e.message); continue; }
-        if (/route is still sealed/i.test((doc.body && doc.body.textContent) || '')) { note(`${label} location ${pin.locationId}: sealed, skipped`); continue; }
-        const seen = new Set();
-        for (const card of doc.querySelectorAll('.mon')) {
-          const name = Dungeons.monName(card), dgmid = Dungeons.dgmidOf(card), low = clean(name).toLowerCase();
-          if (!name || !dgmid || seen.has(low) || read >= 60) continue; seen.add(low);
-          try {
-            const b = await readBattle(`/battle.php?dgmid=${encodeURIComponent(dgmid)}&instance_id=${encodeURIComponent(id)}`, name);
-            if (hasData(b)) { keep(name, { kind: 'dungeon', dtype: type, locationId: pin.locationId, boss: !!pin.isBoss }, b); read++; }
-          } catch (e) { if (e instanceof Halt) throw e; note(`${name}: ${e.message}`); }
-        }
-      }
-    }
-  }
-
-  /* ---- run / stop ---- */
-  function save() {
-    const rows = Object.keys(found); if (!rows.length) return 0;
-    const prev = (() => { const o = lootStore.get(); return o && o.bosses && typeof o.bosses === 'object' ? o.bosses : {}; })();
-    st.added = rows.filter((k) => !Roster.get(k) && !prev[k]).length;
-    lootStore.set({ v: 1, at: Date.now(), bosses: Object.assign({}, prev, found) });
-    return rows.length;
-  }
-  async function run() {
-    if (st.running) return;
-    Object.assign(st, { running: true, stop: false, label: 'Starting…', done: 0, total: 0, read: 0, added: 0, notes: [], error: '', startedAt: Date.now(), endedAt: 0 });
-    found = {}; UI.dirty('scan'); log('🔎 loot scan started (read-only)', 'info');
-    try {
-      const waves = await discoverWaves();
-      st.total = waves.length + 1; UI.dirty('scan');
-      for (const [g, w] of waves) {
-        step(`Gate ${g} · Wave ${w}`);
-        try { await scanWave(g, w); } catch (e) { if (e instanceof Halt) throw e; note(`Gate ${g} · Wave ${w}: ${e.message}`); }
-        st.done++; UI.dirty('scan');
-      }
-      try { await scanDungeons(); } catch (e) { if (e instanceof Halt) throw e; note('Dungeons: ' + e.message); }
-      st.done++;
-    } catch (e) { st.error = e instanceof Halt ? (e.message === 'stopped' ? '' : e.message) : String((e && e.message) || e); }
-    finally {
-      let n = 0; try { n = save(); } catch (e) { st.error = 'could not save: ' + e.message; }
-      st.running = false; st.endedAt = Date.now(); st.label = '';
-      if (!n) { if (!st.error) st.error = 'nothing was read. Are you signed in?'; }
-      log(`${st.error ? '⚠️' : '✅'} loot scan ${st.stop ? 'stopped' : 'finished'}: ${n} monster${n === 1 ? '' : 's'} read${st.added ? ', ' + st.added + ' new' : ''}${st.notes.length ? ', ' + st.notes.length + ' note' + (st.notes.length === 1 ? '' : 's') : ''}${st.error ? ' — ' + st.error : ''}`, st.error ? 'warn' : 'ok');
-      UI.dirty('scan'); UI.dirty('loot');
-    }
-  }
-  const stop = () => { if (st.running) { st.stop = true; st.label = 'Stopping…'; UI.dirty('scan'); } };
-
-  /* ---- export: everything saved so far, as plain text ---- */
-  const shortN = (n) => (Number.isFinite(n) ? fmtNum(n).replace(/\.?0+([TBMK])$/, '$1') : '?');
-  const fullN = (n) => (Number.isFinite(n) ? Number(n).toLocaleString('en-US') : '?');
-  const when = (t) => { if (!t) return 'never'; const d = new Date(t), p = (x) => String(x).padStart(2, '0'); return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`; };
-  const TIER_RANK = { MYTHIC: 0, LEGENDARY: 1, EPIC: 2, RARE: 3, UNCOMMON: 4, COMMON: 5 };
-  function whereOf(e) {
-    if (e.kind === 'wave') { const w = WaveMap.of(e.gate, e.wave); return { sort: (e.gate || 0) * 1000 + (e.wave || 0), head: `${w.group.title} · Gate ${e.gate} · Wave ${e.wave}${w.group.id === 'other' ? '' : ' · ' + w.label}`, short: `G${e.gate} W${e.wave}` }; }
-    const hard = e.dtype === 'hard';
-    return { sort: 1e6 + (hard ? 0 : 1e4) + (e.locationId || 0), head: `${hard ? 'Castle' : 'Shadowbridge'} · location ${e.locationId || '?'}`, short: `${hard ? 'Castle' : 'Shadowbridge'} #${e.locationId || '?'}` };
-  }
-  function text() {
-    const rows = Object.values(LootData.all()).filter((e) => e && e.name).map((e) => ({ e, w: whereOf(e) }))
-      .sort((a, b) => a.w.sort - b.w.sort || (Roster.list.findIndex((d) => d.low === a.e.name.toLowerCase()) - Roster.list.findIndex((d) => d.low === b.e.name.toLowerCase())) || a.e.name.localeCompare(b.e.name));
-    const L = [], rule = '='.repeat(78), thin = '-'.repeat(78);
-    L.push('AUTOMATOR · LOOT SCAN FINDINGS', rule, `Exported        ${when(Date.now())}   (Automator v${VERSION})`, `Data saved      ${when(LootData.at())}`, `Monsters        ${rows.length}`, '');
-    if (!rows.length) { L.push('Nothing has been scanned yet. Press Scan in the Bosses tab.'); return L.join('\r\n'); }
-
-    L.push('CAP CHOICES (the loot DMG requirements; the highest one is the default cap)', thin);
-    const nw = Math.min(46, Math.max(...rows.map((r) => r.e.name.length)));
-    rows.forEach(({ e, w }) => {
-      const reqs = Array.from(new Set((e.loot || []).map((l) => l.dmgReq).filter((n) => n > 0))).sort((a, b) => a - b).map(shortN).join(' · ') || '-';
-      L.push(`${e.name.slice(0, nw).padEnd(nw)}  ${w.short.padEnd(13)}  ${reqs}`);
-    });
-    L.push('', '');
-
-    L.push('DETAILS', rule);
-    let head = '';
-    rows.forEach(({ e, w }) => {
-      if (w.head !== head) { head = w.head; L.push('', `■ ${head}`, thin); }
-      L.push(e.name + (e.boss ? '  [boss location]' : ''));
-      const bits = [e.levelReq ? `Level req ${fullN(e.levelReq)}` : '', e.expCapPct != null ? `EXP cap ${e.expCapPct}%${e.expCapDmg ? ` (~${shortN(e.expCapDmg)} dmg to reach it)` : ''}` : '', e.expPerDmg != null ? `EXP/DMG ${e.expPerDmg}` : '', e.hp ? `HP ${shortN(e.hp)}` : ''].filter(Boolean);
-      L.push('   ' + (bits.join('  ·  ') || 'no stats found'));
-      const loot = (e.loot || []).slice().sort((a, b) => (b.dmgReq || 0) - (a.dmgReq || 0) || (TIER_RANK[a.tier] ?? 9) - (TIER_RANK[b.tier] ?? 9) || String(a.name).localeCompare(String(b.name)));
-      if (!loot.length) L.push('   (no loot shown)');
-      loot.forEach((l) => L.push(`   ${(l.dmgReq > 0 ? shortN(l.dmgReq) + ' dmg' : 'no dmg req').padStart(11)}   ${String(l.tier || '').padEnd(10)} ${l.name}${l.dropPct != null ? `  (${l.dropPct}% drop)` : ''}`));
-      L.push(`   scanned ${when(e.scannedAt)}`, '');
-    });
-
-    if (st.notes.length) { L.push('', 'NOT READ / NOTES FROM THE LAST SCAN', thin); st.notes.forEach((n) => L.push('- ' + n)); }
-    return L.join('\r\n');
-  }
-  function download() {
-    const body = text(), n = Object.keys(LootData.all()).length, d = new Date(), p = (x) => String(x).padStart(2, '0');
-    const name = `automator-loot-scan-${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}.txt`;
-    try {
-      const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([body], { type: 'text/plain;charset=utf-8' })); a.download = name;
-      document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1500);
-      log(`⬇ exported ${n} monster${n === 1 ? '' : 's'} to ${name}`, 'info');
-    } catch (e) { log('❌ export failed: ' + e.message, 'err'); }
-    return name;
-  }
-  return { available: true, run, stop, download, text };
-})());
-
-/* ===================================================================================================================
- * PART 5 — PANEL (compact rounded UI; boss bubbles, grouped Waves | Dungeons, scan-driven cap picks)
- * Uses Core controls plus the smaller rounded bubble skin in ma-* classes.
+ * PART 5 — PANEL (one Core.float button + panel)
+ *   Overview   what it is doing now, your vitals, the farm queue
+ *   Bosses     farm order, default loadout, bosses grouped into Waves / Dungeons (collapsible), per-boss cap + timed cap changes
+ *   Supplies   stamina / HP / mana potions
+ *   Loot       auto-loot + the graveyard
+ *   Settings   skills, behaviour, modules, advanced timing
+ *   Activity   log + skip reasons in one place
+ * Look: Cube Suite's building blocks (switches, segmented controls, chips, pills, collapsible blocks, h:m AM/PM time picker)
+ * on Core's palette. Core's own classes (core-btn / core-pill / core-empty ...) where they fit, ma-* for the rest.
  * Forms are never redrawn while you are typing in them.
  * ================================================================================================================ */
 const Panel = (() => {
   const { h, btn } = Core.ui;
-  const TABS = [['status', 'Status'], ['bosses', 'Bosses'], ['potions', 'Potions'], ['graveyard', 'Graveyard'], ['log', 'Log'], ['diag', 'Diagnostics'], ['settings', 'Settings']];
-  const DIRTY_TAB = { status: 'status', log: 'log', diag: 'diag', loot: 'bosses' };
-  const uiStore = Core.store(ID + '-ui', { def: { tab: 'status', open: {}, filter: '', bsec: 'waves' } });
-  const ui = Object.assign({ tab: 'status', open: {}, filter: '', bsec: 'waves' }, uiStore.get() || {});
-  const saveUi = () => { ui.tab = tab; uiStore.set(ui); };
-  const phaseSel = {};
-  let root = null, tab = ui.tab || 'status', open = false, drawT = 0;
+  const TABS = [['home', 'Overview', '🏠'], ['bosses', 'Bosses', '👹'], ['supplies', 'Supplies', '🧪'], ['loot', 'Loot', '🪦'], ['settings', 'Settings', '⚙️'], ['activity', 'Activity', '📜']];
+  const DIRTY_TAB = { status: 'home', log: 'activity', diag: 'activity', loot: 'loot' };
+  const uiStore = Core.store(ID + '-ui', { def: { tab: 'home', open: {}, filter: '' } });
+  const ui = Object.assign({ tab: 'home', open: {}, filter: '' }, uiStore.get() || {}); if (!ui.open || typeof ui.open !== 'object') ui.open = {};
+  const saveUi = () => uiStore.set(ui);
+  let root = null, tab = TABS.some((t) => t[0] === ui.tab) ? ui.tab : 'home', shown = false, drawT = 0;
+  const phaseSel = {};                                              // boss entry -> which phase the editor is on
+  const isOpen = (key, dflt) => (ui.open[key] != null ? !!ui.open[key] : !!dflt);
 
   (function css() {
-    const old = document.getElementById('ma-css'); if (old) old.remove();
+    if (document.getElementById('ma-css')) return;
     const s = document.createElement('style'); s.id = 'ma-css';
     s.textContent = `
-/* frame: Core's modal card, tightened for this panel only (less padding, smaller title, footer flush with the bottom edge) */
-.core-modal-card:has(.ma-root){padding:12px 14px 0;border-radius:24px}
-.core-modal-card:has(.ma-root) .core-modal-head{margin-bottom:6px}
-.core-modal-card:has(.ma-root) .core-modal-title{font-size:16px;font-weight:800}
-.ma-root{display:flex;flex-direction:column;font:12.5px/1.35 Arial,sans-serif;color:#eef3ff}
-.ma-root *{box-sizing:border-box}
+.ma-root{display:flex;flex-direction:column;font-size:13px;color:#e8edff}
 .ma-root button{font-family:inherit}
-.ma-root .core-btn{padding:6px 12px;font-size:12px;border-radius:12px}
-/* tabs: underline, the active one tinted (3.0.0) */
-.ma-tabs{display:flex;gap:2px;margin:0 0 9px;border-bottom:1px solid rgba(255,255,255,.08);overflow-x:auto;scrollbar-width:none}
+/* tabs */
+.ma-tabs{display:flex;gap:2px;margin:0 0 14px;background:#0d1322;border:1px solid rgba(255,255,255,.05);border-radius:12px;padding:3px;overflow-x:auto;scrollbar-width:none}
 .ma-tabs::-webkit-scrollbar{display:none}
-.ma-tab{flex:1 0 auto;background:none;border:none;border-bottom:2px solid transparent;margin-bottom:-1px;color:#9caad0;font:700 11.5px Arial,sans-serif;padding:7px 8px;border-radius:10px 10px 0 0;cursor:pointer;white-space:nowrap;transition:.15s ease}
-.ma-tab:hover{color:#cfd8f7}.ma-tab.on{color:#6ea8ff;border-bottom-color:#6ea8ff;background:rgba(110,168,255,.08)}
-.ma-body{min-height:200px;padding-bottom:6px}
-.ma-field{margin:6px 0}.ma-fld-h{display:flex;align-items:baseline;gap:8px;color:#c4cdeb;font:700 11.5px Arial,sans-serif;margin-bottom:4px}.ma-fld-h small{font-weight:400;color:#7c88ad;font-size:10.5px}.ma-note{color:#8b97bd;font-size:10.5px;line-height:1.4;margin:4px 2px}.ma-time-input{width:104px}
+.ma-tab{flex:1 0 auto;background:transparent;border:none;color:#8b97bd;font:700 12px Arial,sans-serif;padding:8px 10px;border-radius:9px;cursor:pointer;white-space:nowrap;transition:.15s}
+.ma-tab:hover{color:#cfd8f7}.ma-tab.on{background:#222d49;color:#fff;box-shadow:0 2px 8px rgba(0,0,0,.25)}
+.ma-body{min-height:280px}
 /* cards */
-.ma-card{background:#11192d;border:1px solid rgba(255,255,255,.06);border-radius:16px;padding:9px 12px;margin-bottom:7px}
+.ma-card{background:#11192d;border:1px solid rgba(255,255,255,.06);border-radius:14px;padding:12px 14px;margin-bottom:10px}
 .ma-card.off{background:#0f1628}
-.ma-card-h{display:flex;align-items:center;gap:9px}
-.ma-card-t{flex:1;min-width:0}.ma-card-t b{display:block;font-size:12.5px;color:#fff}.ma-card-t small{display:block;color:#8b97bd;font-size:11px;line-height:1.3}
-.ma-card-b{margin-top:6px;padding-top:6px;border-top:1px solid rgba(255,255,255,.06)}
-.ma-ico{flex:0 0 auto;width:28px;height:28px;display:flex;align-items:center;justify-content:center;font-size:14px;background:#1a2440;border:1px solid rgba(255,255,255,.07);border-radius:10px}
-.ma-cap{color:#6e7a9c;font:800 9.5px Arial,sans-serif;text-transform:uppercase;letter-spacing:.07em;margin:10px 4px 4px}
-.ma-note{color:#8b97bd;font-size:11px;line-height:1.4;margin:4px 3px}
-.ma-empty{padding:14px 12px;text-align:center;color:#8b97bd;background:rgba(255,255,255,.02);border:1px dashed rgba(255,255,255,.1);border-radius:16px;font-size:12px;line-height:1.4}
-.ma-empty .core-btn{margin-top:8px}
-.ma-alert{margin-bottom:7px;padding:7px 11px;border-radius:14px;font-size:11.5px;line-height:1.4;background:rgba(255,107,122,.08);border:1px solid rgba(255,107,122,.28);color:#ff9aa6}
+.ma-card-h{display:flex;align-items:center;gap:11px}
+.ma-card-t{flex:1;min-width:0}.ma-card-t b{display:block;font-size:13.5px;color:#fff}.ma-card-t small{display:block;color:#8b97bd;font-size:11.5px;margin-top:1px;line-height:1.35}
+.ma-card-b{margin-top:12px;padding-top:12px;border-top:1px solid rgba(255,255,255,.06)}
+.ma-ico{flex:0 0 auto;width:34px;height:34px;display:flex;align-items:center;justify-content:center;font-size:17px;background:#1a2440;border:1px solid rgba(255,255,255,.06);border-radius:10px}
+.ma-cap{color:#6e7a9c;font:800 10px Arial,sans-serif;text-transform:uppercase;letter-spacing:.07em;margin:14px 2px 7px}
+.ma-note{color:#8b97bd;font-size:11.5px;line-height:1.5;margin:6px 2px}
+.ma-empty{padding:26px 16px;text-align:center;color:#8b97bd;background:rgba(255,255,255,.02);border:1px dashed rgba(255,255,255,.09);border-radius:14px;font-size:12.5px;line-height:1.5}
+.ma-empty .core-btn{margin-top:12px}
+.ma-alert{margin-bottom:10px;padding:10px 12px;border-radius:12px;font-size:12px;line-height:1.45;background:rgba(255,107,122,.08);border:1px solid rgba(255,107,122,.28);color:#ff9aa6}
 .ma-alert.info{background:rgba(110,168,255,.08);border-color:rgba(110,168,255,.25);color:#b9d2ff}
-.ma-alert .core-btn{margin-top:6px;padding:5px 10px;font-size:11.5px}
-/* switch */
-.ma-sw{position:relative;display:inline-block;width:32px;height:18px;flex:0 0 auto;cursor:pointer}
+.ma-alert .core-btn{margin-top:8px;padding:6px 12px;font-size:12px}
+/* switch (Cube Suite style) */
+.ma-sw{position:relative;display:inline-block;width:36px;height:20px;flex:0 0 auto;cursor:pointer}
 .ma-sw input{opacity:0;width:0;height:0;position:absolute}
-.ma-sl{position:absolute;inset:0;background:#2b3552;border-radius:18px;transition:.15s}
-.ma-sl::before{content:'';position:absolute;width:12px;height:12px;left:3px;top:3px;background:#dfe6ff;border-radius:50%;transition:.15s}
-.ma-sw input:checked+.ma-sl{background:linear-gradient(135deg,#3657a7,#4b6dd0)}.ma-sw input:checked+.ma-sl::before{transform:translateX(14px);background:#fff}
+.ma-sl{position:absolute;inset:0;background:#2b3552;border-radius:20px;transition:.15s}
+.ma-sl::before{content:'';position:absolute;width:14px;height:14px;left:3px;top:3px;background:#dfe6ff;border-radius:50%;transition:.15s}
+.ma-sw input:checked+.ma-sl{background:#4b73e0}.ma-sw input:checked+.ma-sl::before{transform:translateX(16px);background:#fff}
 .ma-sw input:focus-visible+.ma-sl{box-shadow:0 0 0 2px rgba(110,168,255,.55)}
 .ma-sw.sm{width:30px;height:17px}.ma-sw.sm .ma-sl::before{width:11px;height:11px}.ma-sw.sm input:checked+.ma-sl::before{transform:translateX(13px)}
-/* segmented + chips: pills */
-.ma-seg{display:flex;gap:4px}.ma-seg.full .ma-seg-btn{flex:1}
-.ma-seg-btn{background:#0d1322;border:1px solid #27324f;color:#aeb9dc;font:700 11.5px Arial,sans-serif;padding:5px 11px;border-radius:999px;cursor:pointer;transition:.15s;white-space:nowrap}
-.ma-seg-btn:hover{border-color:#3b4a73}.ma-seg-btn.on{background:rgba(75,115,224,.2);border-color:#6ea8ff;color:#d6e5ff}
-.ma-chips{display:flex;gap:4px;flex-wrap:wrap}
-.ma-chip{background:#0d1322;border:1px solid #27324f;color:#9caad0;font:700 11px Arial,sans-serif;padding:3px 10px;border-radius:999px;cursor:pointer;transition:.15s}
-.ma-chip:hover{border-color:#3b4a73;color:#cfd8f7}.ma-chip.on{background:rgba(75,115,224,.2);border-color:#6ea8ff;color:#d6e5ff}
+/* segmented */
+.ma-seg{display:flex;gap:5px}.ma-seg.full .ma-seg-btn{flex:1}
+.ma-seg-btn{background:#0d1322;border:1px solid #27324f;color:#aeb9dc;font:600 12px Arial,sans-serif;padding:7px 12px;border-radius:9px;cursor:pointer;transition:.15s;white-space:nowrap}
+.ma-seg-btn:hover{border-color:#3b4a73}.ma-seg-btn.on{background:rgba(75,115,224,.2);border-color:#4b73e0;color:#cfe0ff}
+/* chips */
+.ma-chips{display:flex;gap:5px;flex-wrap:wrap}
+.ma-chip{background:#0d1322;border:1px solid #27324f;color:#8b97bd;font:700 11px Arial,sans-serif;padding:4px 10px;border-radius:999px;cursor:pointer;transition:.15s}
+.ma-chip:hover{border-color:#3b4a73;color:#cfd8f7}.ma-chip.on{background:rgba(75,115,224,.2);border-color:#4b73e0;color:#cfe0ff}
 .ma-chip i{font-style:normal;margin-left:5px;opacity:.7}
 /* inputs */
-.ma-in{box-sizing:border-box;width:92px;background:#0d1322;border:1px solid rgba(255,255,255,.12);color:#eef3ff;border-radius:10px;padding:5px 9px;font:12.5px Arial,sans-serif;transition:.15s}
-.ma-in:focus{outline:none;border-color:#6ea8ff;box-shadow:0 0 0 2px rgba(110,168,255,.18)}
-select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
-.ma-num{display:inline-flex;align-items:center;gap:5px}.ma-num i{font-style:normal;color:#6e7a9c;font-size:11px}
-.ma-in.flash{animation:ma-flash .9s ease-out}
-@keyframes ma-flash{0%{background:rgba(110,168,255,.55);border-color:#6ea8ff}100%{background:#0d1322}}
-.ma-search{box-sizing:border-box;flex:1;min-width:0;background:#0d1322;border:1px solid rgba(255,255,255,.12);color:#eef3ff;border-radius:12px;padding:6px 11px;font:12.5px Arial,sans-serif}
-.ma-search:focus{outline:none;border-color:#6ea8ff}
+.ma-in{box-sizing:border-box;width:92px;background:#0d1322;border:1px solid #27324f;color:#eef3ff;border-radius:8px;padding:6px 9px;font:13px Arial,sans-serif;transition:.15s}
+.ma-in:focus{outline:none;border-color:#4b73e0;box-shadow:0 0 0 3px rgba(75,115,224,.18)}
+select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:6px}
+.ma-num{display:inline-flex;align-items:center;gap:6px}.ma-num i{font-style:normal;color:#6e7a9c;font-size:11.5px}
+.ma-search{box-sizing:border-box;width:100%;margin:0 0 10px;background:#0d1322;border:1px solid #27324f;color:#eef3ff;border-radius:11px;padding:9px 12px;font:13px Arial,sans-serif}
+.ma-search:focus{outline:none;border-color:#4b73e0}
 /* label + control rows */
-.ma-set{display:flex;align-items:center;gap:10px;padding:5px 0}
+.ma-set{display:flex;align-items:center;gap:12px;padding:8px 0}
 .ma-set+.ma-set{border-top:1px solid rgba(255,255,255,.05)}
-.ma-set-t{flex:1;min-width:0}.ma-set-t b{display:block;font:600 12.5px Arial,sans-serif;color:#e8edff}.ma-set-t small{display:block;color:#8b97bd;font-size:11px;line-height:1.3}
-.ma-fld{margin:7px 0}.ma-fld>label,.ma-fld>.ma-lbl{display:flex;align-items:baseline;gap:8px;color:#c4cdeb;font:700 11.5px Arial,sans-serif;margin-bottom:4px}.ma-fld>label small,.ma-lbl small{font-weight:400;color:#6e7a9c;font-size:11px}
-.ma-two{display:grid;grid-template-columns:1fr 1fr;gap:8px}
-/* folds */
-.ma-fold{margin-bottom:6px;border:1px solid rgba(255,255,255,.06);border-radius:16px;background:#11192d;overflow:hidden}
-.ma-fold-h{display:flex;align-items:center;gap:8px;padding:7px 11px;cursor:pointer;user-select:none}
+.ma-set-t{flex:1;min-width:0}.ma-set-t b{display:block;font:600 13px Arial,sans-serif;color:#e8edff}.ma-set-t small{display:block;color:#8b97bd;font-size:11.5px;margin-top:1px;line-height:1.35}
+.ma-fld{margin:10px 0}.ma-fld>label,.ma-fld>.ma-lbl{display:flex;align-items:baseline;gap:8px;color:#c4cdeb;font:700 11.5px Arial,sans-serif;margin-bottom:6px}.ma-fld>label small,.ma-lbl small{font-weight:400;color:#6e7a9c;font-size:11px}
+.ma-two{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+/* folds (collapsers) */
+.ma-fold{margin-bottom:8px;border:1px solid rgba(255,255,255,.06);border-radius:14px;background:#11192d;overflow:hidden}
+.ma-fold.sub{background:#0f1628;border-radius:12px;margin:8px 0 0}
+.ma-fold-h{display:flex;align-items:center;gap:9px;padding:11px 13px;cursor:pointer;user-select:none}
 .ma-fold-h:hover{background:rgba(255,255,255,.025)}
-.ma-fch{color:#6e7a9c;font-size:10px;transition:.15s;width:9px}.ma-fold.open>.ma-fold-h>.ma-fch{transform:rotate(90deg)}
-.ma-fold-t{flex:1;min-width:0;font:800 12.5px Arial,sans-serif;color:#eef3ff;display:flex;align-items:center;gap:7px}
-.ma-fold-t small{font:400 11px Arial,sans-serif;color:#6e7a9c}
-.ma-fold-b{padding:0 8px 8px}
-.ma-link{background:none;border:none;color:#7fa6ff;font:700 11px Arial,sans-serif;cursor:pointer;padding:2px 5px;border-radius:8px}.ma-link:hover{color:#b5ccff;background:rgba(127,166,255,.1)}
-.ma-pill{display:inline-flex;align-items:center;font:800 9.5px Arial,sans-serif;letter-spacing:.03em;text-transform:uppercase;padding:2px 8px;border-radius:999px;border:1px solid rgba(255,255,255,.12);color:#9caad0;background:rgba(255,255,255,.05);white-space:nowrap}
-.ma-pill.ok{color:#8ee6a8;border-color:rgba(46,204,113,.35);background:rgba(46,204,113,.12)}.ma-pill.warn{color:#ffd978;border-color:rgba(227,179,65,.35);background:rgba(227,179,65,.1)}
-.ma-pill.err{color:#ff9aa6;border-color:rgba(255,107,122,.35);background:rgba(255,107,122,.1)}.ma-pill.cap{color:#8fb7a0;border-color:rgba(143,183,160,.3)}.ma-pill.blue{color:#9fc1ff;border-color:rgba(110,168,255,.35);background:rgba(110,168,255,.12)}
-/* loot scan strip (top of Bosses) */
-.ma-scan{display:flex;align-items:center;gap:9px;padding:8px 10px;margin-bottom:7px;border-radius:16px;background:linear-gradient(135deg,#17233f,#11192d);border:1px solid rgba(110,168,255,.2)}
-.ma-scan-t{flex:1;min-width:0}.ma-scan-t b{display:block;font:800 12px Arial,sans-serif;color:#fff}.ma-scan-t small{display:block;color:#9aa7cf;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.ma-scan .ma-bar{margin-top:5px;height:5px}
-.ma-scan-b{display:flex;gap:5px;flex:0 0 auto}.ma-scan-b .core-btn{padding:6px 11px}
-.ma-scan-n{margin:-3px 4px 7px;padding:6px 10px;border-radius:12px;background:rgba(227,179,65,.07);border:1px solid rgba(227,179,65,.2);color:#ffd978;font-size:11px;line-height:1.45}
-.ma-scan-n div+div{margin-top:2px}
-/* Waves | Dungeons */
-.ma-sec{display:flex;gap:6px;margin:0 0 7px}
-.ma-sec button{flex:1;display:flex;align-items:center;justify-content:center;gap:7px;background:#0d1322;border:1px solid #27324f;color:#9caad0;font:800 12px Arial,sans-serif;padding:7px 10px;border-radius:14px;cursor:pointer;transition:.15s}
-.ma-sec button:hover{border-color:#3b4a73;color:#cfd8f7}
-.ma-sec button.on{background:rgba(110,168,255,.12);border-color:#6ea8ff;color:#d6e5ff}
-.ma-sec button i{font-style:normal;font-size:10px;padding:1px 8px;border-radius:99px;background:rgba(255,255,255,.07);color:#9caad0}
-.ma-sec button.on i{background:rgba(110,168,255,.28);color:#fff}
-.ma-tool{display:flex;gap:6px;margin:0 0 7px}
-.ma-tbtn{flex:0 0 auto;background:#0d1322;border:1px solid rgba(255,255,255,.12);color:#9caad0;font:700 11.5px Arial,sans-serif;padding:0 11px;border-radius:12px;cursor:pointer;transition:.15s;white-space:nowrap}
-.ma-tbtn:hover{border-color:#3b4a73;color:#cfd8f7}.ma-tbtn.on{background:rgba(75,115,224,.2);border-color:#6ea8ff;color:#d6e5ff}
-/* a wave = one row: its label + the bosses on it as bubbles (and the editor of an open boss underneath) */
-.ma-wv{display:grid;grid-template-columns:64px minmax(0,1fr);gap:6px 8px;align-items:center;padding:5px 0}
-.ma-wv+.ma-wv{border-top:1px solid rgba(255,255,255,.05)}
-.ma-wv-l{align-self:stretch;display:flex;flex-direction:column;justify-content:center;padding:0 4px;border-radius:12px;cursor:pointer;min-width:0}
-.ma-wv-l:hover{background:rgba(255,255,255,.04)}
-.ma-wv-l b{font:800 13px Arial,sans-serif;color:#cfd8f7}.ma-wv-l small{font-size:10.5px;color:#7c88ad;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.ma-wv-l.on b{color:#8fb7ff}
-.ma-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;min-width:0}
-.ma-grid.solo{padding:4px 0 0}
-.ma-bb{position:relative;display:flex;align-items:center;gap:8px;min-width:0;padding:6px 9px 6px 7px;border-radius:14px;background:#0f1628;border:1px solid rgba(255,255,255,.06);cursor:pointer;transition:.15s}
-.ma-bb:hover{background:#141d38}
-.ma-bb.on{background:rgba(75,115,224,.11);border-color:rgba(110,168,255,.38)}
-.ma-bb.open{border-color:#6ea8ff;box-shadow:0 0 0 2px rgba(110,168,255,.16)}
-.ma-bb-n{flex:1;min-width:0}
-.ma-bb-n b{display:block;font:700 12px/1.25 Arial,sans-serif;color:#eef3ff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.ma-bb-n small{display:block;color:#7c88ad;font-size:10.5px;line-height:1.3;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.ma-bb-n small .st-ok{color:#8ee6a8}.ma-bb-n small .st-warn{color:#ffd978}.ma-bb-n small .st-cap{color:#8fb7a0}.ma-bb-n small .st-blue{color:#9fc1ff}.ma-bb-n small .st-err{color:#ff9aa6}
-.ma-bb-n small .capv{color:#aeb9dc;font-weight:700}
-/* the editor of an open boss */
-.ma-ed{grid-column:1/-1;margin:1px 0 3px;padding:9px 11px 10px;background:#0b1120;border:1px solid rgba(110,168,255,.28);border-radius:16px}
-.ma-ed-h{display:flex;align-items:center;gap:8px;margin-bottom:6px}.ma-ed-h b{flex:1;min-width:0;font:800 12px Arial,sans-serif;color:#fff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.ma-ed-sub{color:#7c88ad;font-size:11px;margin:-2px 2px 5px}
-.ma-capline{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.ma-capline .ma-capinfo{color:#7c88ad;font-size:11px}
-.ma-tiers{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:5px;margin-top:6px}
-.ma-tier{display:flex;align-items:center;gap:8px;min-width:0;text-align:left;background:#0d1322;border:1px solid #27324f;color:#aeb9dc;border-radius:12px;padding:5px 10px;cursor:pointer;transition:.15s}
-.ma-tier b{flex:0 0 auto;min-width:34px;font:800 12px Arial,sans-serif;color:#e8edff}
-.ma-tier span{flex:1;min-width:0;font-size:10.5px;color:#7c88ad;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.ma-tier:hover{border-color:#4b5f94;background:#111a30}
-.ma-tier.on{background:rgba(75,115,224,.2);border-color:#6ea8ff}.ma-tier.on b{color:#fff}.ma-tier.on span{color:#b9c9f0}
-.ma-tier.exp b{color:#c9a8ff}
-.ma-ld{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:6px;margin-top:2px}
-.ma-ld label{display:block;font:800 9.5px Arial,sans-serif;color:#6e7a9c;text-transform:uppercase;letter-spacing:.06em;margin:0 3px 2px}
-.ma-ld select{width:100%}
-.ma-sched{margin-top:8px;padding:7px 10px;background:#0a0f1c;border:1px solid rgba(255,255,255,.06);border-radius:14px}
-.ma-sub-h{display:flex;align-items:center;gap:8px;color:#c4cdeb;font:700 11.5px Arial,sans-serif;margin-bottom:4px}.ma-sub-h .sp{flex:1}.ma-sub-h small{font-weight:400;color:#6e7a9c}
-.ma-srow{display:flex;align-items:center;gap:7px;margin:4px 0}.ma-srow .arrow{color:#53608a}
-.ma-time{display:inline-flex;align-items:stretch;height:28px;border:1px solid rgba(255,255,255,.12);border-radius:10px;overflow:hidden;background:#0d1322;flex:0 0 auto}
-.ma-time input{border:none;background:transparent;color:#eef3ff;font:12.5px Arial,sans-serif;font-variant-numeric:tabular-nums;width:22px;padding:0 2px;text-align:center}
+.ma-fch{color:#6e7a9c;font-size:11px;transition:.15s;width:10px}.ma-fold.open>.ma-fold-h>.ma-fch{transform:rotate(90deg)}
+.ma-fold-t{flex:1;min-width:0;font:800 12.5px Arial,sans-serif;color:#e8edff;display:flex;align-items:center;gap:8px}
+.ma-fold-t small{font:400 11.5px Arial,sans-serif;color:#6e7a9c}
+.ma-fold-b{padding:2px 13px 12px}
+.ma-fold.sub .ma-fold-h{padding:9px 12px}.ma-fold.sub .ma-fold-t{font-size:12px}
+.ma-link{background:none;border:none;color:#7fa6ff;font:700 11px Arial,sans-serif;cursor:pointer;padding:2px 4px}.ma-link:hover{color:#b5ccff;text-decoration:underline}
+.ma-pill{display:inline-flex;align-items:center;font:800 10px Arial,sans-serif;letter-spacing:.03em;text-transform:uppercase;padding:2px 8px;border-radius:999px;border:1px solid rgba(255,255,255,.12);color:#8b97bd;white-space:nowrap}
+.ma-pill.ok{color:#8ee6a8;border-color:rgba(46,204,113,.35);background:rgba(46,204,113,.1)}.ma-pill.warn{color:#ffd978;border-color:rgba(227,179,65,.35);background:rgba(227,179,65,.08)}
+.ma-pill.err{color:#ff9aa6;border-color:rgba(255,107,122,.35);background:rgba(255,107,122,.08)}.ma-pill.cap{color:#8fb7a0;border-color:rgba(143,183,160,.3)}.ma-pill.blue{color:#9fc1ff;border-color:rgba(110,168,255,.35);background:rgba(110,168,255,.1)}
+/* boss entries */
+.ma-wave{color:#6e7a9c;font:800 10px Arial,sans-serif;text-transform:uppercase;letter-spacing:.07em;margin:10px 2px 4px}
+.ma-ent{border-radius:11px;margin-top:4px;border:1px solid transparent}
+.ma-ent.on{background:rgba(75,115,224,.07);border-color:rgba(75,115,224,.22)}
+.ma-ent-h{display:flex;align-items:center;gap:10px;padding:8px 8px 8px 9px;cursor:pointer;border-radius:11px}.ma-ent-h:hover{background:rgba(255,255,255,.035)}
+.ma-ent-n{flex:1;min-width:0}.ma-ent-n b{display:block;font:700 12.5px/1.3 Arial,sans-serif;color:#eef3ff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ma-ent-n small{display:block;color:#7c88ad;font-size:11px;margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ma-ech{color:#6e7a9c;font-size:11px;flex:0 0 auto;width:10px;text-align:center}
+.ma-ed{margin:2px 10px 12px 10px;padding:4px 12px 12px;background:#0d1322;border:1px solid rgba(255,255,255,.06);border-radius:12px}
+.ma-sub-h{display:flex;align-items:center;gap:8px;color:#c4cdeb;font:700 11.5px Arial,sans-serif;margin-bottom:6px}.ma-sub-h .sp{flex:1}.ma-sub-h small{font-weight:400;color:#6e7a9c}
+.ma-sched{margin-top:10px;padding:10px;background:#0a0f1c;border:1px solid rgba(255,255,255,.06);border-radius:10px}
+.ma-srow{display:flex;align-items:center;gap:8px;margin:6px 0}.ma-srow .arrow{color:#53608a}
+.ma-time{display:inline-flex;align-items:stretch;height:30px;border:1px solid #27324f;border-radius:8px;overflow:hidden;background:#0d1322;flex:0 0 auto}
+.ma-time input{border:none;background:transparent;color:#eef3ff;font:13px Arial,sans-serif;font-variant-numeric:tabular-nums;width:24px;padding:0 2px;text-align:center}
 .ma-time input:focus{outline:none;background:rgba(75,115,224,.2)}.ma-time span{display:flex;align-items:center;color:#6e7a9c}
-.ma-ampm{border:none;border-left:1px solid rgba(255,255,255,.12);background:transparent;color:#9fb0e0;font:800 10px Arial,sans-serif;padding:0 8px;cursor:pointer;letter-spacing:.03em}.ma-ampm:hover{background:#18213b;color:#fff}
-.ma-x{background:transparent;border:none;color:#6e7a9c;cursor:pointer;width:24px;height:24px;border-radius:50%;font-size:11px;flex:0 0 auto}.ma-x:hover{background:#1c2644;color:#ff9aa6}
-.ma-add{width:100%;margin-top:3px;background:transparent;border:1px dashed #33406a;color:#9fb0e0;border-radius:12px;padding:5px 0;font:700 11px Arial,sans-serif;cursor:pointer}.ma-add:hover{border-color:#6ea8ff;color:#fff}
+.ma-ampm{border:none;border-left:1px solid #27324f;background:transparent;color:#9fb0e0;font:800 10px Arial,sans-serif;padding:0 8px;cursor:pointer;letter-spacing:.03em}.ma-ampm:hover{background:#18213b;color:#fff}
+.ma-x{background:transparent;border:none;color:#6e7a9c;cursor:pointer;width:26px;height:26px;border-radius:7px;font-size:12px;flex:0 0 auto}.ma-x:hover{background:#1c2644;color:#ff9aa6}
+.ma-add{width:100%;margin-top:4px;background:transparent;border:1px dashed #33406a;color:#9fb0e0;border-radius:9px;padding:6px 0;font:700 11.5px Arial,sans-serif;cursor:pointer}.ma-add:hover{border-color:#4b73e0;color:#fff}
+.ma-mini{border:none;cursor:pointer;color:#fff;background:#222d49;width:26px;height:26px;border-radius:8px;font:700 12px Arial,sans-serif;padding:0;transition:.15s}.ma-mini:hover{background:#2e3c63}.ma-mini:disabled{opacity:.3;cursor:default}
+.ma-rank{flex:0 0 auto;width:22px;height:22px;border-radius:7px;background:rgba(110,168,255,.14);color:#9fc1ff;font:800 11px/22px Arial,sans-serif;text-align:center}
 /* avatars */
-.ma-av-wrap{position:relative;flex:0 0 auto;width:32px;height:32px}.ma-av-wrap.lg{width:46px;height:46px}.ma-av-wrap.xs{width:26px;height:26px}
-.ma-av,.ma-av-fb{width:100%;height:100%;border-radius:11px;display:block}.ma-av-wrap.lg .ma-av,.ma-av-wrap.lg .ma-av-fb{border-radius:13px}
-.ma-av{object-fit:cover;background:#0d1322;border:1px solid rgba(255,255,255,.1);box-sizing:border-box}
+.ma-av-wrap{position:relative;flex:0 0 auto;width:34px;height:34px}.ma-av-wrap.lg{width:50px;height:50px}.ma-av-wrap.xs{width:26px;height:26px}
+.ma-av,.ma-av-fb{width:100%;height:100%;border-radius:10px;display:block}.ma-av-wrap.lg .ma-av,.ma-av-wrap.lg .ma-av-fb{border-radius:13px}
+.ma-av{object-fit:cover;background:#0d1322;border:1px solid rgba(255,255,255,.08);box-sizing:border-box}
 .ma-av-fb{display:flex;align-items:center;justify-content:center;font:800 14px Arial,sans-serif;color:#fff}.ma-av-wrap.lg .ma-av-fb{font-size:18px}.ma-av-wrap.xs .ma-av-fb{font-size:11px;border-radius:8px}
-.ma-crown{position:absolute;bottom:-3px;right:-3px;width:14px;height:14px;border-radius:50%;background:#e3b341;border:2px solid #11192d;color:#3a2c04;font:900 7px/10px Arial,sans-serif;text-align:center}
-.ma-bb .ma-crown{border-color:#0f1628}
-.ma-bb .ma-dot{position:absolute;top:-2px;left:-2px;width:10px;height:10px;border:2px solid #0f1628;box-shadow:none}
+.ma-crown{position:absolute;bottom:-3px;right:-3px;width:15px;height:15px;border-radius:50%;background:#e3b341;border:2px solid #11192d;color:#3a2c04;font:900 8px/11px Arial,sans-serif;text-align:center}
 /* overview */
-.ma-hero{padding:10px 12px;border-radius:18px;background:linear-gradient(135deg,#17233f,#11192d);border:1px solid rgba(110,168,255,.22);margin-bottom:7px}
-.ma-hero-top{display:flex;align-items:center;gap:11px}
+.ma-hero{padding:16px;border-radius:16px;background:linear-gradient(135deg,#17233f,#11192d);border:1px solid rgba(110,168,255,.2);margin-bottom:10px}
+.ma-hero-top{display:flex;align-items:center;gap:14px}
 .ma-hero-t{flex:1;min-width:0}
-.ma-state{display:flex;align-items:center;gap:6px;font:800 10px Arial,sans-serif;text-transform:uppercase;letter-spacing:.07em;color:#8b97bd}
-.ma-hero-name{font:800 14.5px/1.25 Arial,sans-serif;color:#fff;margin-top:2px;overflow-wrap:anywhere}
-.ma-hero-sub{color:#9aa7cf;font-size:11.5px;margin-top:2px}
-.ma-dot{width:8px;height:8px;border-radius:50%;background:#ff6b7a;flex:0 0 auto}.ma-dot.running{background:#33b57f;box-shadow:0 0 0 3px rgba(51,181,127,.2)}.ma-dot.waiting{background:#e3b341}.ma-dot.follower{background:#6e7a8c}
-.ma-dot.s-ok{background:#33b57f}.ma-dot.s-warn{background:#e3b341}.ma-dot.s-cap{background:#6e8f7c}.ma-dot.s-blue{background:#6ea8ff}.ma-dot.s-err{background:#ff6b7a}
-.ma-bar{height:6px;border-radius:99px;background:#0a0f1c;border:1px solid rgba(255,255,255,.05);overflow:hidden}.ma-bar i{display:block;height:100%;border-radius:99px;background:linear-gradient(90deg,#3657a7,#6ea8ff);transition:width .3s}
+.ma-state{display:flex;align-items:center;gap:7px;font:800 10.5px Arial,sans-serif;text-transform:uppercase;letter-spacing:.07em;color:#8b97bd}
+.ma-hero-name{font:800 16px/1.25 Arial,sans-serif;color:#fff;margin-top:3px;overflow-wrap:anywhere}
+.ma-hero-sub{color:#9aa7cf;font-size:12px;margin-top:3px}
+.ma-dot{width:9px;height:9px;border-radius:50%;background:#ff6b7a;flex:0 0 auto}.ma-dot.running{background:#33b57f;box-shadow:0 0 0 3px rgba(51,181,127,.2)}.ma-dot.waiting{background:#e3b341}.ma-dot.follower{background:#6e7a8c}
+.ma-bar{height:7px;border-radius:99px;background:#0a0f1c;border:1px solid rgba(255,255,255,.05);overflow:hidden}.ma-bar i{display:block;height:100%;border-radius:99px;background:linear-gradient(90deg,#3657a7,#6ea8ff)}
 .ma-bar.done i{background:linear-gradient(90deg,#217f5b,#33b57f)}
-.ma-hero .ma-bar{margin-top:8px}
-.ma-vitals{display:grid;grid-template-columns:repeat(auto-fit,minmax(112px,1fr));gap:6px;margin-bottom:7px}
-.ma-meter{background:#11192d;border:1px solid rgba(255,255,255,.06);border-radius:14px;padding:6px 10px}
-.ma-meter-top{display:flex;justify-content:space-between;gap:6px;font-size:10px;color:#8b97bd;margin-bottom:4px;font-weight:700;text-transform:uppercase;letter-spacing:.04em}.ma-meter-top b{color:#fff;font-size:11px;text-transform:none;letter-spacing:0}
-.ma-meter .ma-bar{height:5px}
+.ma-hero .ma-bar{margin-top:12px}
+.ma-vitals{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px}
+.ma-meter{background:#11192d;border:1px solid rgba(255,255,255,.06);border-radius:12px;padding:9px 11px}
+.ma-meter-top{display:flex;justify-content:space-between;gap:6px;font-size:11px;color:#8b97bd;margin-bottom:6px;font-weight:700;text-transform:uppercase;letter-spacing:.04em}.ma-meter-top b{color:#fff;font-size:12px;text-transform:none;letter-spacing:0}
+.ma-meter .ma-bar{height:6px}
 .ma-meter.hp i{background:linear-gradient(90deg,#b4465c,#ff6b7a)}.ma-meter.st i{background:linear-gradient(90deg,#b08a1d,#e3b341)}.ma-meter.mp i{background:linear-gradient(90deg,#3657a7,#6ea8ff)}.ma-meter.xp i{background:linear-gradient(90deg,#7a4fc4,#a371f7)}
-.ma-q{display:flex;align-items:center;gap:9px;padding:5px 6px;border-radius:14px;cursor:pointer}.ma-q:hover{background:rgba(255,255,255,.035)}
-.ma-q-n{flex:1;min-width:0}.ma-q-n b{display:block;font:700 12px Arial,sans-serif;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.ma-q-n .ma-bar{height:4px;margin-top:3px}
-.ma-q small{color:#7c88ad;font-size:10.5px;margin-top:2px;display:block}
-.ma-stats{display:flex;gap:5px;flex-wrap:wrap;margin:2px 0 6px}
-.ma-stat{background:#0d1322;border:1px solid rgba(255,255,255,.06);border-radius:999px;padding:4px 10px;font-size:11px;color:#9aa7cf}.ma-stat b{color:#fff;margin-left:4px}
-.ma-actions{display:flex;gap:6px;flex-wrap:wrap;margin:0 0 8px}.ma-actions .core-btn{padding:6px 12px;font-size:11.5px}
-/* graveyard */
-.ma-lc{display:flex;align-items:center;gap:10px;padding:7px 10px;border-radius:16px;background:#11192d;border:1px solid rgba(255,255,255,.06);margin-bottom:5px}
-.ma-lc-n{flex:1;min-width:0}.ma-lc-n b{display:block;font:700 12.5px/1.3 Arial,sans-serif}.ma-lc-n small{display:block;color:#7c88ad;font-size:11px}
-.ma-claim{background:linear-gradient(135deg,#217f5b,#33b57f)!important;box-shadow:0 6px 14px rgba(33,127,91,.28)!important;padding:6px 13px!important;font-size:11.5px!important}
+.ma-q{display:flex;align-items:center;gap:10px;padding:8px 6px;border-radius:10px;cursor:pointer}.ma-q:hover{background:rgba(255,255,255,.035)}
+.ma-q-n{flex:1;min-width:0}.ma-q-n b{display:block;font:700 12.5px Arial,sans-serif;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.ma-q-n .ma-bar{height:4px;margin-top:5px}
+.ma-q small{color:#7c88ad;font-size:10.5px;margin-top:3px;display:block}
+.ma-stats{display:flex;gap:6px;flex-wrap:wrap;margin:2px 0 10px}
+.ma-stat{background:#11192d;border:1px solid rgba(255,255,255,.06);border-radius:10px;padding:6px 10px;font-size:11.5px;color:#9aa7cf}.ma-stat b{color:#fff;margin-left:4px}
+.ma-actions{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 12px}.ma-actions .core-btn{padding:8px 13px;font-size:12px}
+/* loot */
+.ma-lc{display:flex;align-items:center;gap:11px;padding:9px 11px;border-radius:12px;background:#11192d;border:1px solid rgba(255,255,255,.06);margin-bottom:6px}
+.ma-lc-n{flex:1;min-width:0}.ma-lc-n b{display:block;font:700 12.5px/1.3 Arial,sans-serif}.ma-lc-n small{display:block;color:#7c88ad;font-size:11px;margin-top:1px}
+.ma-claim{background:linear-gradient(135deg,#217f5b,#33b57f)!important;box-shadow:0 6px 14px rgba(33,127,91,.25)!important;padding:7px 13px!important;font-size:11.5px!important}
 /* activity */
-.ma-log{display:flex;flex-direction:column;gap:4px;max-height:460px;overflow-y:auto;padding-right:2px}
-.ma-log::-webkit-scrollbar{width:6px}.ma-log::-webkit-scrollbar-thumb{background:#2b3859;border-radius:4px}
-.ma-ll{padding:5px 10px;border-radius:12px;border-left:3px solid #2b3859;background:#0d1322;font:11.5px/1.4 Arial,sans-serif;color:#c9d4f5;overflow-wrap:anywhere}
-.ma-ll b{color:#6e7a8c;font-weight:400;margin-right:7px;font-variant-numeric:tabular-nums}
-.ma-ll.ok{border-left-color:#33b57f;color:#8ee6a8}.ma-ll.warn{border-left-color:#e3b341;color:#ffd978}.ma-ll.err{border-left-color:#e5484d;color:#ff9a9a}
-.ma-ll.dmg{border-left-color:#e3b341;color:#ffe3a3}.ma-ll.skill{border-left-color:#a371f7;color:#d9c4ff}.ma-ll.info{border-left-color:#6ea8ff;color:#c9e6ff}
-.ma-ctl{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-/* footer: status + Start / Stop, always visible */
-.ma-foot{position:sticky;bottom:0;z-index:2;display:flex;align-items:center;gap:10px;margin:8px -14px 0;padding:9px 14px 12px;background:#0e1422;border-top:1px solid rgba(255,255,255,.08);border-radius:0 0 24px 24px}
-.ma-foot-st{flex:1;min-width:0}.ma-foot-st b{display:flex;align-items:center;gap:7px;font:800 11.5px Arial,sans-serif;color:#eef3ff;text-transform:uppercase;letter-spacing:.04em}
-.ma-foot-st span{display:block;color:#8b97bd;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.ma-foot .core-btn{padding:8px 18px;font-size:12.5px;border-radius:12px}
-.ma-foot .core-btn-success{box-shadow:0 8px 18px rgba(33,127,91,.3)}.ma-foot .core-btn-danger{box-shadow:0 8px 18px rgba(180,70,92,.3)}
-.ma-kv{display:flex;justify-content:space-between;gap:10px;padding:3px 2px;font-size:11.5px;color:#aeb9dc}.ma-kv b{color:#fff}
-@media (max-width:560px){.ma-two,.ma-tiers,.ma-grid{grid-template-columns:1fr}.ma-tab{padding:7px 7px}.ma-wv{grid-template-columns:1fr}.ma-wv-l{flex-direction:row;align-items:baseline;gap:8px;padding:2px 4px}}
-`;
+.ma-log{background:#0a0f1c;border:1px solid rgba(255,255,255,.06);border-radius:12px;padding:6px;max-height:430px;overflow-y:auto;font:11.5px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.ma-log::-webkit-scrollbar{width:7px}.ma-log::-webkit-scrollbar-thumb{background:#27324f;border-radius:4px}
+.ma-ll{padding:3px 8px;border-left:2px solid #27324f;color:#bcc7ea;overflow-wrap:anywhere;margin-bottom:1px}.ma-ll b{color:#566186;font-weight:400;margin-right:7px}
+.ma-ll.ok{border-left-color:#33b57f;color:#8ee6a8}.ma-ll.warn{border-left-color:#e3b341;color:#ffd978}.ma-ll.err{border-left-color:#e5484d;color:#ff9aa6}.ma-ll.dmg{border-left-color:#c79a2e;color:#f1d68f}.ma-ll.skill{border-left-color:#a371f7;color:#d9c4ff}.ma-ll.info{border-left-color:#4b73e0;color:#b9d2ff}
+/* footer */
+.ma-foot{position:sticky;bottom:-22px;z-index:2;display:flex;align-items:center;gap:12px;margin:14px -22px -22px;padding:13px 22px;background:#0e1422;border-top:1px solid rgba(255,255,255,.08);border-radius:0 0 22px 22px}
+.ma-foot-st{flex:1;min-width:0}.ma-foot-st b{display:flex;align-items:center;gap:8px;font:800 12px Arial,sans-serif;color:#eef3ff;text-transform:uppercase;letter-spacing:.04em}
+.ma-foot-st span{display:block;color:#8b97bd;font-size:11.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px}
+.ma-foot .core-btn{padding:10px 20px;font-size:12.5px}
+.ma-kv{display:flex;justify-content:space-between;gap:10px;padding:5px 2px;font-size:12px;color:#aeb9dc}.ma-kv b{color:#fff}
+@media (max-width:560px){.ma-two,.ma-vitals{grid-template-columns:1fr}.ma-tab{padding:8px 9px}}`;
     document.head.appendChild(s);
   })();
 
-  /* ---- tiny form helpers ---- */
+  /* ---- building blocks ---- */
   const ago = (t) => (t ? fmtDur(Date.now() - t) + ' ago' : 'never');
-  const pill = (txt, kind) => h('span', { class: 'core-pill' + (kind ? ' core-pill-' + kind : '') }, txt);
-  const card = (k, v) => h('div', { class: 'ma-card' }, h('div', { class: 'ma-k' }, k), h('div', { class: 'ma-v' }, v));
-  const sec = (t) => h('div', { class: 'ma-sec' }, t);
-  const fld = (label, el) => h('label', { class: 'ma-fld' }, h('span', { class: 'core-dim' }, label), el);
-  const changed = (fn) => (e) => { fn(e.target); saveCfg(); };
-  const check = (label, get, set) => h('label', { class: 'ma-chk' }, h('input', { type: 'checkbox', checked: get() ? true : null, onchange: changed((el) => set(el.checked)) }), label);
-  const sel = (opts, cur, set, w) => h('select', { class: 'core-input', style: w ? { width: w + 'px' } : null, onchange: changed((el) => set(el.value)) },
-    opts.map(([v, l]) => h('option', Object.assign({ value: v }, String(v) === String(cur) ? { selected: true } : {}), l)));
-  const intIn = (obj, key, w, label) => fld(label, h('input', { class: 'core-input', style: { width: (w || 80) + 'px' }, value: obj[key], onchange: changed((el) => { const n = parseCap(el.value); if (n != null) obj[key] = n; else el.value = obj[key]; }) }));
-  const pctIn = (obj, key, w, label) => fld(label, h('input', { class: 'core-input', style: { width: (w || 70) + 'px' }, value: obj[key], onchange: changed((el) => { const n = parseFloat(el.value); if (Number.isFinite(n) && n >= 0 && n <= 100) obj[key] = n; else el.value = obj[key]; }) }));
-  const textIn = (obj, key, w, label, ph) => fld(label, h('input', { class: 'core-input', style: { width: (w || 140) + 'px' }, value: obj[key] || '', placeholder: ph || '', onchange: changed((el) => { obj[key] = el.value.trim(); }) }));
-  const redraw = () => draw();
-
-  /* ---- header (always visible) ---- */
-  function header() {
-    const st = Status.get(), cur = Engine.current(), run = Run.wanted() && !Run.paused();
-    const kind = /FIGHT|RUN/.test(st) ? 'ok' : /STOP|PAUSE|NO |DEAD|FOLLOW/.test(st) ? 'error' : 'loading';
-    return h('div', { class: 'ma-head' }, pill(st, kind), h('span', { class: 'core-dim' }, cur ? '🎯 ' + cur.name : (Tab.isMain() ? 'no target' : 'another tab is running it')),
-      h('span', { style: { flex: '1 1 auto' } }),
-      run ? btn('⏹ Stop', 'danger', () => { Run.stop('stopped from the panel'); draw(); }) : btn('▶ Start', 'success', () => { Run.start(); draw(); }));
+  const hueOf = (s) => { let x = 0; for (const c of String(s)) x = (x * 31 + c.charCodeAt(0)) >>> 0; return `hsl(${x % 360} 48% 40%)`; };
+  const iconUrl = (i) => { if (!i) return null; try { return new URL(i, BASE).href; } catch (_) { return null; } };
+  function avatar(name, icon, o = {}) {
+    const bg = hueOf(String(name || '?').toLowerCase()), letter = (String(name || '?').trim().charAt(0) || '?').toUpperCase();
+    const fb = () => h('div', { class: 'ma-av-fb', style: { background: bg } }, letter), src = iconUrl(icon);
+    const inner = src ? h('img', { class: 'ma-av', src, loading: 'lazy', alt: '', onerror: (e) => e.target.replaceWith(fb()) }) : fb();
+    return h('span', { class: 'ma-av-wrap' + (o.size ? ' ' + o.size : '') }, inner, o.boss ? h('span', { class: 'ma-crown', title: 'Boss' }, '♛') : null);
   }
-  function tabsBar() { return h('div', { class: 'ma-tabs' }, TABS.map(([id, label]) => h('button', { type: 'button', class: 'ma-tab' + (id === tab ? ' on' : ''), onclick: () => { tab = id; saveUi(); draw(); } }, label))); }
+  const stop = (e) => e.stopPropagation();
+  const sw = (get, set, o = {}) => h('label', { class: 'ma-sw' + (o.sm ? ' sm' : ''), onclick: stop },
+    h('input', { type: 'checkbox', checked: get() ? true : null, onclick: stop, onchange: (e) => { set(e.target.checked); saveCfg(); if (o.redraw !== false) draw(); } }), h('span', { class: 'ma-sl' }));
+  const seg = (opts, cur, set, o = {}) => h('div', { class: 'ma-seg' + (o.full ? ' full' : '') }, opts.map(([v, label, tip]) =>
+    h('button', { type: 'button', title: tip || null, class: 'ma-seg-btn' + (String(v) === String(cur) ? ' on' : ''), onclick: (e) => { stop(e); if (String(v) !== String(cur)) { set(v); saveCfg(); draw(); } } }, label)));
+  const chips = (opts, cur, set) => h('div', { class: 'ma-chips' }, opts.map(([v, label]) => h('button', { type: 'button', class: 'ma-chip' + (String(v) === String(cur) ? ' on' : ''), onclick: (e) => { stop(e); set(v); saveCfg(); draw(); } }, label)));
+  const dropdown = (opts, cur, set) => h('select', { class: 'ma-in', onclick: stop, onchange: (e) => { set(e.target.value); saveCfg(); draw(); } },
+    opts.map(([v, l]) => h('option', Object.assign({ value: v }, String(v) === String(cur) ? { selected: true } : {}), l)));
+  const num = (get, set, o = {}) => h('span', { class: 'ma-num' }, h('input', { class: 'ma-in', inputmode: 'decimal', style: o.w ? { width: o.w + 'px' } : null, value: o.fmt ? o.fmt(get()) : get(), onclick: stop,
+    onchange: (e) => { const n = (o.parse || parseCap)(e.target.value); if (n != null && Number.isFinite(n) && (o.min == null || n >= o.min) && (o.max == null || n <= o.max)) { set(n); saveCfg(); e.target.value = o.fmt ? o.fmt(n) : n; } else e.target.value = o.fmt ? o.fmt(get()) : get(); } }),
+    o.unit ? h('i', {}, o.unit) : null);
+  const setting = (title, desc, ctl) => h('div', { class: 'ma-set' }, h('div', { class: 'ma-set-t' }, h('b', {}, title), desc ? h('small', {}, desc) : null), ctl);
+  const field = (label, hint, ...kids) => h('div', { class: 'ma-fld' }, h('div', { class: 'ma-lbl' }, label, hint ? h('small', {}, hint) : null), ...kids);
+  const caption = (t) => h('div', { class: 'ma-cap' }, t);
+  const note = (t) => h('div', { class: 'ma-note' }, t);
+  const pill = (txt, kind) => h('span', { class: 'ma-pill' + (kind ? ' ' + kind : '') }, txt);
+  const fold = (key, dflt, head, body, o = {}) => {
+    const op = o.force || isOpen(key, dflt);
+    return h('div', { class: 'ma-fold' + (op ? ' open' : '') + (o.sub ? ' sub' : '') },
+      h('div', { class: 'ma-fold-h', onclick: () => { ui.open[key] = !op; saveUi(); draw(); } }, h('span', { class: 'ma-fch' }, '▸'), h('span', { class: 'ma-fold-t' }, ...[].concat(head)), ...(o.aside ? [].concat(o.aside) : [])),
+      op ? h('div', { class: 'ma-fold-b' }, ...[].concat(body())) : null);
+  };
+  const card = (icon, title, desc, on, setOn, body) => h('div', { class: 'ma-card' + (on ? '' : ' off') },
+    h('div', { class: 'ma-card-h' }, h('span', { class: 'ma-ico' }, icon), h('div', { class: 'ma-card-t' }, h('b', {}, title), h('small', {}, desc)), sw(() => on, setOn)),
+    on && body ? h('div', { class: 'ma-card-b' }, ...[].concat(body)) : null);
 
-  /* ---- STATUS ---- */
+  /* ---- time helpers (server clock) ---- */
+  const toMin = (at) => { const [hr, mi] = String(at || '00:00').split(':').map(Number); return (hr || 0) * 60 + (mi || 0); };
+  const fmtClock = (mins) => { const hr = Math.floor(mins / 60) % 24, mi = mins % 60; return `${(hr % 12) || 12}:${String(mi).padStart(2, '0')} ${hr >= 12 ? 'PM' : 'AM'}`; };
+  const hhmm = (mins) => String(Math.floor(mins / 60) % 24).padStart(2, '0') + ':' + String(mins % 60).padStart(2, '0');
+  function timePicker(at, onSet) {
+    const hr = Math.floor(toMin(at) / 60), mi0 = toMin(at) % 60;
+    let st = { h12: (hr % 12) || 12, mi: mi0, pm: hr >= 12 };
+    const hi = h('input', { maxlength: 2, inputmode: 'numeric', value: String(st.h12).padStart(2, '0'), onclick: (e) => { stop(e); e.target.select(); } });
+    const mi = h('input', { maxlength: 2, inputmode: 'numeric', value: String(st.mi).padStart(2, '0'), onclick: (e) => { stop(e); e.target.select(); } });
+    const commit = () => {
+      let a = parseInt(hi.value, 10), b = parseInt(mi.value, 10);
+      if (!(a >= 1 && a <= 12)) a = st.h12; if (!(b >= 0 && b <= 59)) b = st.mi;
+      st = { h12: a, mi: b, pm: st.pm }; onSet(String((a % 12) + (st.pm ? 12 : 0)).padStart(2, '0') + ':' + String(b).padStart(2, '0'));
+    };
+    hi.addEventListener('change', commit); mi.addEventListener('change', commit);
+    return h('div', { class: 'ma-time' }, hi, h('span', {}, ':'), mi, h('button', { type: 'button', class: 'ma-ampm', title: 'Toggle AM / PM', onclick: (e) => { stop(e); st.pm = !st.pm; commit(); } }, st.pm ? 'PM' : 'AM'));
+  }
+
+  /* ---- boss helpers ---- */
+  const ovr = (low) => cfg.bosses[low] || (cfg.bosses[low] = {});
+  const baseCap = (low) => { const d = Roster.get(low), o = cfg.bosses[low] || {}; return o.cap != null ? o.cap : (d && d.defaultCap != null ? d.defaultCap : cfg.defaultBossCap); };
+  const isOn = (def) => Roster.members(def).some((m) => cfg.targets.includes(m.low));
+  const iconOfBoss = (low) => { const e = Board.get(low); return e && e.icon; };
+  const waveOf = (def) => { const l = bossLoc(def.low); return l ? l.wave : 0; };
   function bossState(low) {
-    const def = Roster.get(low), e = Board.get(low), cap = bossCap(low); if (!def) return ['?', 'error'];
-    if (cap <= 0) return ['cap 0 (disabled)', ''];
-    if (!e || !e.seenAt) return ['not scanned yet', 'loading'];
-    if (def.kind === 'dungeon-swarm') return [`${(e.swarm || []).length} under cap / ${e.totalAlive || 0} alive`, (e.swarm || []).length ? 'ok' : ''];
-    if (e.alive) { if (e.needsDuel) return ['needs Phase Duel', 'loading']; return (e.userDmg || 0) >= cap ? ['capped', ''] : ['alive', 'ok']; }
-    if (e.locked) return ['locked / sealed', 'loading'];
-    if (e.noInstance) return ['no open dungeon', ''];
-    if (e.nextTs && e.nextTs * 1000 > Date.now()) return ['respawns in ' + fmtDur(e.nextTs * 1000 - Date.now()), ''];
+    const def = Roster.get(low), e = Board.get(low), cap = bossCap(low); if (!def) return ['?', 'err'];
+    if (cap <= 0) return ['skipped', ''];
+    if (!e || !e.seenAt) return ['not scanned', 'warn'];
+    if (def.kind === 'dungeon-swarm') return [`${(e.swarm || []).length} open`, (e.swarm || []).length ? 'ok' : ''];
+    if (e.alive) { if (e.needsDuel) return ['needs duel', 'warn']; return (e.userDmg || 0) >= cap ? ['capped', 'cap'] : ['alive', 'ok']; }
+    if (e.locked) return ['locked', 'warn'];
+    if (e.noInstance) return ['no dungeon', ''];
+    if (e.nextTs && e.nextTs * 1000 > Date.now()) return ['respawn ' + fmtDur(e.nextTs * 1000 - Date.now()), 'blue'];
     return ['not up', ''];
   }
-  function tStatus() {
-    const m = Core.me.get() || {}, e = m.exp, cls = effectiveClass();
-    const out = [h('div', { class: 'ma-grid' },
-      card('Role', Tab.isMain() ? 'main tab (works)' : 'follower'), card('Stamina', Me.stamKnown() ? `${fmtNum(Me.stam())} / ${fmtNum(Me.maxStam())}` : '?'),
-      card('HP', Me.hpKnown ? `${fmtNum(Me.hp)} / ${fmtNum(Me.maxHp)}` : '?'), card('MP', Me.mpKnown ? `${fmtNum(Me.mp)} / ${fmtNum(Me.maxMp)}` : '?'),
-      card('Level · EXP', `${Me.level() || '?'} · ${Me.expPct() != null ? Me.expPct().toFixed(1) + '%' : '?'}`), card('Class', cls || 'unknown'),
-      card('Hits · damage', `${stats.hits} · ${fmtNum(stats.dmg)}`), card('Potions used', `stam ${stats.stamA + stats.stamB} · hp ${stats.hpUses} · mana ${stats.mpRefills}`),
-      card('Presets applied', Presets.summary()))];
-    const conf = Conflicts.list(); if (conf.length) out.push(h('div', { class: 'core-err' }, '⛔ ' + conf.join(' · ')));
-    const gi = Guard.info(); if (gi.faulted || gi.lastInfo) out.push(h('div', { class: 'core-err' }, '🔒 ' + (gi.lastInfo || gi.faulted) + (gi.lastInfo === 'unconfigured' ? ' — add a login source (Account Switcher) or sign in by hand' : '')));
-    if (!Tab.isMain()) out.push(h('div', { class: 'core-row' }, h('span', { class: 'core-dim' }, 'Another tab is the main one and does the attacking.'), btn('Take over this tab', 'soft', () => { Tab.takeOver(); })));
-    out.push(h('div', { class: 'core-row' }, btn('🔄 Refresh bosses', 'soft', () => Engine.scanNow()), btn('Clear skips', 'soft', () => { Engine.clearSkips(); Diag.clear(); draw(); })));
-    if (!cfg.targets.length) out.push(h('div', { class: 'core-empty' }, 'No bosses selected — tick the ones to farm in the Bosses tab, then press Start.'));
-    else out.push(h('table', { class: 'ma-table' }, h('thead', {}, h('tr', {}, ['#', 'Boss', 'State', 'Your damage', 'Cap'].map((t) => h('th', {}, t)))),
-      h('tbody', {}, cfg.targets.map((low, i) => {
-        const [txt, kind] = bossState(low), ev = Board.get(low) || {}, def = Roster.get(low);
-        const dealt = def && def.kind === 'dungeon-swarm' ? '—' : fmtNum(ev.userDmg || 0);
-        return h('tr', {}, h('td', {}, i + 1), h('td', {}, bossName(low)), h('td', {}, pill(txt, kind)), h('td', {}, dealt), h('td', {}, fmtNum(bossCap(low))));
-      }))));
+  function entryState(def) {   // the phase that is actually up, else the first
+    const ms = Roster.members(def), live = ms.find((m) => { const e = Board.get(m.low); return e && e.alive; });
+    return bossState((live || ms[0]).low);
+  }
+  function nextChange(low) {
+    const o = cfg.bosses[low]; if (!o || !Array.isArray(o.schedule) || !o.schedule.length) return null;
+    const now = serverMinutes(); if (now == null) return null;
+    return o.schedule.map((b) => ({ t: toMin(b.at), cap: b.cap })).sort((a, b) => a.t - b.t).find((b) => b.t > now) || null;
+  }
+  function setMany(defs, on) {
+    defs.forEach((def) => {
+      const ms = Roster.members(def);
+      if (on) ms.forEach((m) => { if (!cfg.targets.includes(m.low)) cfg.targets.push(m.low); });
+      else cfg.targets = cfg.targets.filter((l) => !ms.some((m) => m.low === l));
+    });
+    saveCfg(); Engine.poke(true); draw();
+  }
+  const orderEntries = () => { const seen = new Set(), out = []; cfg.targets.forEach((low) => { const d = Roster.get(low); if (!d) return; const c = Roster.canon(d); if (!seen.has(c.low)) { seen.add(c.low); out.push(c); } }); return out; };
+  function moveEntry(c, dir) {
+    const es = orderEntries(), i = es.indexOf(c), j = i + dir; if (i < 0 || j < 0 || j >= es.length) return;
+    [es[i], es[j]] = [es[j], es[i]];
+    const nt = []; es.forEach((e) => Roster.members(e).forEach((m) => { if (cfg.targets.includes(m.low) && !nt.includes(m.low)) nt.push(m.low); }));
+    cfg.targets.forEach((l) => { if (!nt.includes(l)) nt.push(l); });
+    cfg.targets = nt; saveCfg(); Engine.poke(true); draw();
+  }
+
+  /* ---- footer (always visible): status + Start / Stop ---- */
+  const STATE_TXT = { FIGHTING: 'Fighting', RUNNING: 'Running', WAITING: 'Waiting for a boss', 'NO STAMINA': 'Out of stamina', DUEL: 'Phase duel', PAUSED: 'Paused', STOPPED: 'Stopped', FOLLOWER: 'Another tab is running it' };
+  const dotOf = (st) => (!Tab.isMain() ? 'follower' : /FIGHT|RUN|DUEL/.test(st) ? 'running' : /WAIT|STAMINA/.test(st) ? 'waiting' : /PAUSE/.test(st) ? 'follower' : '');
+  function footer() {
+    const st = Status.get(), cur = Engine.current(), run = Run.wanted() && !Run.paused();
+    const sub = cur ? '🎯 ' + cur.name : (Tab.isMain() ? (cfg.targets.length ? 'no target right now' : 'no bosses selected') : 'this tab is following');
+    return h('div', { class: 'ma-foot' },
+      h('div', { class: 'ma-foot-st' }, h('b', {}, h('i', { class: 'ma-dot ' + dotOf(st) }), STATE_TXT[st] || st), h('span', { title: sub }, sub)),
+      run ? btn('⏹ Stop', 'danger', () => { Run.stop('stopped from the panel'); draw(); }) : btn('▶ Start', 'success', () => { Run.start(); draw(); }));
+  }
+  const go = (t) => { tab = t; ui.tab = t; saveUi(); draw(); };
+  const tabsBar = () => h('div', { class: 'ma-tabs' }, TABS.map(([id, label, ico]) => h('button', { type: 'button', class: 'ma-tab' + (id === tab ? ' on' : ''), onclick: () => go(id) }, ico + ' ' + label)));
+
+  /* =================================================== OVERVIEW =================================================== */
+  const meter = (label, cur, max, cls, known, txt) => {
+    const pct = known && max > 0 ? Math.min(100, cur / max * 100) : 0;
+    return h('div', { class: 'ma-meter ' + cls }, h('div', { class: 'ma-meter-top' }, h('span', {}, label), h('b', {}, known ? (txt || `${fmtNum(cur)} / ${fmtNum(max)}`) : '—')), h('div', { class: 'ma-bar' }, h('i', { style: { width: pct.toFixed(1) + '%' } })));
+  };
+  function tHome() {
+    const st = Status.get(), cur = Engine.current(), out = [];
+    const conf = Conflicts.list(); if (conf.length) out.push(h('div', { class: 'ma-alert' }, '⛔ ' + conf.join(' · ')));
+    const gi = Guard.info(); if (gi.faulted || gi.lastInfo) out.push(h('div', { class: 'ma-alert' }, '🔒 ' + (gi.lastInfo || gi.faulted) + (gi.lastInfo === 'unconfigured' ? ' — add a login source (Account Switcher) or sign in by hand' : '')));
+    if (!Tab.isMain()) out.push(h('div', { class: 'ma-alert info' }, 'Another tab is the main one and does the attacking. This tab only shows what it is doing.', h('div', {}, btn('Take over this tab', 'soft', () => { Tab.takeOver(); }))));
+
+    // hero
+    let nextIn = null; try { const n = Scan.nextDueIn(); if (Number.isFinite(n)) nextIn = n; } catch (_) { /* */ }
+    if (cur) {
+      const ev = Board.get(cur.low) || {}, cap = bossCap(cur.low), dmg = Math.max(ev.userDmg || 0, cur.userDmg || 0), pct = cap > 0 ? Math.min(100, dmg / cap * 100) : 0;
+      out.push(h('div', { class: 'ma-hero' }, h('div', { class: 'ma-hero-top' }, avatar(cur.name, ev.icon, { size: 'lg', boss: true }),
+        h('div', { class: 'ma-hero-t' }, h('div', { class: 'ma-state' }, h('i', { class: 'ma-dot ' + dotOf(st) }), STATE_TXT[st] || st), h('div', { class: 'ma-hero-name' }, cur.name), h('div', { class: 'ma-hero-sub' }, `${fmtNum(dmg)} of ${fmtNum(cap)} damage · ${pct.toFixed(0)}%`))),
+        h('div', { class: 'ma-bar' + (pct >= 100 ? ' done' : '') }, h('i', { style: { width: pct.toFixed(1) + '%' } }))));
+    } else {
+      const l = Diag.last(), why = l.reason ? `${l.reason}${l.detail ? ' — ' + l.detail : ''}` : '';
+      out.push(h('div', { class: 'ma-hero' }, h('div', { class: 'ma-hero-top' }, h('span', { class: 'ma-ico', style: { width: '50px', height: '50px', fontSize: '24px', borderRadius: '13px' } }, Run.wanted() ? '⏳' : '💤'),
+        h('div', { class: 'ma-hero-t' }, h('div', { class: 'ma-state' }, h('i', { class: 'ma-dot ' + dotOf(st) }), STATE_TXT[st] || st),
+          h('div', { class: 'ma-hero-name' }, !cfg.targets.length ? 'No bosses selected' : Run.wanted() ? 'No target right now' : 'Ready when you are'),
+          h('div', { class: 'ma-hero-sub' }, !cfg.targets.length ? 'Pick what to farm in the Bosses tab.' : Run.wanted() && nextIn != null ? 'Next check in ' + fmtDur(nextIn) + (why ? ' · last skip: ' + why : '') : (why ? 'Last skip: ' + why : 'Press Start to begin.'))))));
+    }
+
+    // vitals
+    const xp = Me.expPct();
+    out.push(h('div', { class: 'ma-vitals' },
+      meter('HP', Me.hp, Me.maxHp, 'hp', Me.hpKnown), meter('Stamina', Me.stam(), Me.maxStam(), 'st', Me.stamKnown()),
+      meter('Mana', Me.mp, Me.maxMp, 'mp', Me.mpKnown), meter('EXP · Lv ' + (Me.level() || '?'), xp || 0, 100, 'xp', xp != null, xp != null ? xp.toFixed(1) + '%' : '')));
+
+    // queue
+    out.push(caption('Farm queue'));
+    if (!cfg.targets.length) out.push(h('div', { class: 'ma-empty' }, 'Nothing to farm yet.', h('div', {}, btn('Choose bosses', '', () => go('bosses')))));
+    else out.push(h('div', { class: 'ma-card', style: { padding: '6px' } }, orderEntries().map((def, i) => {
+      const low = (Roster.members(def).find((m) => { const e = Board.get(m.low); return e && e.alive; }) || def).low, [txt, kind] = entryState(def), ev = Board.get(low) || {}, cap = bossCap(low), dmg = ev.userDmg || 0, swarm = def.kind === 'dungeon-swarm';
+      return h('div', { class: 'ma-q', onclick: () => go('bosses') }, h('span', { class: 'ma-rank' }, i + 1), avatar(def.name, ev.icon || iconOfBoss(def.low), { boss: true }),
+        h('div', { class: 'ma-q-n' }, h('b', {}, def.name), swarm ? null : h('div', { class: 'ma-bar' + (cap > 0 && dmg >= cap ? ' done' : '') }, h('i', { style: { width: (cap > 0 ? Math.min(100, dmg / cap * 100) : 0).toFixed(1) + '%' } })), swarm ? null : h('small', {}, `${fmtNum(dmg)} / ${fmtNum(cap)}`)), pill(txt, kind));
+    })));
+
+    // numbers
+    const up = Date.now() - (stats.started || Date.now());
+    out.push(caption('This session'));
+    out.push(h('div', { class: 'ma-stats' }, [['⚔️ Hits', stats.hits], ['💥 Damage', fmtNum(stats.dmg)], ['🧪 Stamina', stats.stamA + stats.stamB], ['💊 HP', stats.hpUses], ['💧 Mana', stats.mpRefills], ['⏱ Up', fmtDur(up)]].map(([k, v]) => h('div', { class: 'ma-stat' }, k, h('b', {}, v)))));
+    const ap = Presets.summary(); if (ap && ap !== '—') out.push(note('🎒 Equipped by Automator: ' + ap));
+    out.push(h('div', { class: 'ma-actions', style: { marginTop: '10px' } }, btn('🔎 Scan now', 'soft', () => Engine.scanNow()), btn('Clear skips', 'soft', () => { Engine.clearSkips(); Diag.clear(); draw(); })));
     return out;
   }
 
-  /* ---- Bosses UI helpers: small controls shared by the bubble editor ------------------------------------------ */
-  const ovr = (low) => cfg.bosses[low] || (cfg.bosses[low] = {});
-  const toMin = (v) => { const s = parseClock(v); if (!s) return 0; const p = s.split(':').map(Number); return p[0] * 60 + p[1]; };
-  const hhmm = (v) => { let m = Math.max(0, Math.floor(Number(v) || 0)) % 1440; return String(Math.floor(m / 60)).padStart(2, '0') + ':' + String(m % 60).padStart(2, '0'); };
-  const fmtClock = (v) => hhmm(v);
-  const stop = (e) => { if (e && e.stopPropagation) e.stopPropagation(); };
-  const short = (n) => fmtNum(Number(n) || 0).replace(/\.0([TBMK])$/, '$1');
-  const note = (txt) => h('div', { class: 'ma-note' }, txt);
-  const field = (label, sub, ...kids) => h('div', { class: 'ma-fld' },
-    h('div', { class: 'ma-fld-h' }, h('b', {}, label), sub ? h('small', {}, sub) : null), ...kids);
-  const chips = (items, current, set) => h('div', { class: 'ma-chips' }, items.map(([value, label]) => h('button', {
-    type: 'button', class: 'ma-chip' + (Number(value) === Number(current) ? ' on' : ''),
-    onclick: (e) => { stop(e); set(value); saveCfg(); Engine.poke(true); draw(); }
-  }, label)));
-  const dropdown = (items, current, set) => h('select', { class: 'ma-in dropdown', value: current == null ? '' : String(current),
-    onchange: (e) => { set(e.target.value); saveCfg(); Presets.forget(); Engine.poke(true); draw(); }
-  }, items.map(([v, label]) => h('option', { value: String(v), selected: String(v) === String(current == null ? '' : current) ? true : null }, label)));
-  const num = (get, set, opt = {}) => h('span', { class: 'ma-num' }, h('input', {
-    class: 'ma-in', style: { width: (opt.w || 100) + 'px' }, value: (opt.fmt || fmtNum)(Number(get()) || 0), inputMode: 'decimal',
-    onchange: (e) => { const n = parseCap(e.target.value); if (n == null || n < 0) { e.target.value = (opt.fmt || fmtNum)(Number(get()) || 0); return; }
-      set(n); e.target.value = (opt.fmt || fmtNum)(n); saveCfg(); Engine.poke(true); }
-  }));
-  const timePicker = (v, set) => h('input', { class: 'ma-in ma-time-input', type: 'time', value: parseClock(v) || '12:00',
-    onchange: (e) => { const at = parseClock(e.target.value); if (at) set(at); }
-  });
-  const seg = (items, current, set, opt = {}) => h('div', { class: 'ma-seg' + (opt.full ? ' full' : '') }, items.map(([value, label, title]) => h('button', {
-    type: 'button', class: 'ma-seg-btn' + (String(value) === String(current) ? ' on' : ''), title: title || '',
-    onclick: (e) => { stop(e); set(value); draw(); }
-  }, label)));
-  const sw = (get, set, opt = {}) => h('label', { class: 'ma-sw' + (opt.sm ? ' sm' : ''), onclick: stop },
-    h('input', { type: 'checkbox', checked: get() ? true : null, onchange: (e) => { set(e.target.checked); if (opt.redraw !== false) draw(); } }),
-    h('span', { class: 'ma-sl' }));
-  function setMany(defs, enabled) {
-    const lows = new Set(); defs.forEach((d) => Roster.members(d).forEach((m) => lows.add(m.low)));
-    if (enabled) { cfg.targets.forEach((x) => lows.delete(x)); cfg.targets.push(...lows); }
-    else cfg.targets = cfg.targets.filter((low) => !lows.has(low));
-    saveCfg(); Engine.poke(true); draw();
-  }
-  const isOn = (def) => Roster.members(def).some((m) => cfg.targets.includes(m.low));
-  function entryState(def) {
-    const [txt, kind] = bossState(def.low);
-    if (/alive/.test(txt)) return [txt, 'ok'];
-    if (/capped|cap 0|disabled/.test(txt)) return [txt, 'cap'];
-    if (/not scanned|not up|no open|respawns|locked|sealed|Phase Duel/.test(txt)) return [txt, 'warn'];
-    return [txt, kind === 'error' ? 'err' : 'blue'];
-  }
-  function nextChange(low) {
-    const def = Roster.get(low), o = cfg.bosses[low] || {}, now = serverMinutes();
-    if (!def || def.kind === 'wave' || now == null) return null;
-    const list = Array.isArray(o.schedule) ? o.schedule : [];
-    let best = null, gap = Infinity;
-    list.forEach((x) => { const at = toMin(x.at); if (!Number.isFinite(Number(x.cap))) return; const d = (at - now + 1440) % 1440 || 1440; if (d < gap) { gap = d; best = { t: at, cap: Number(x.cap) }; } });
-    if (!best && o.switchAt && o.capAfterSwitch != null) { const at = toMin(o.switchAt); if (at > now) best = { t: at, cap: Number(o.capAfterSwitch) }; }
-    return best;
-  }
-  const rIdx = (low) => { const i = Roster.list.findIndex((d) => d.low === low); return i < 0 ? 1e9 : i; };
-  const iconOfBoss = (low) => { const n = bossName(low).toLowerCase(); return /poseidon|ocean|water|triton|tide|sea/.test(n) ? '🌊' : /hermes|apollo|zeus|ares|athena|artemis|hera|olymp|pan\b/.test(n) ? '🏛️' : /general|skarn|vessir|hrazz|drakzareth/.test(n) ? '⚔️' : '👹'; };
-  function avatar(name, icon, opt = {}) {
-    const initials = String(name || '?').split(/[\s,]+/).filter(Boolean).slice(0, 2).map((x) => x[0]).join('').toUpperCase();
-    return h('span', { class: 'ma-av-wrap' + (opt.size ? ' ' + opt.size : '') },
-      h('span', { class: 'ma-av-fb', style: { background: 'linear-gradient(135deg,#2a3c68,#17213b)' }, title: name }, icon || initials || '👹'),
-      opt.boss ? h('span', { class: 'ma-crown', title: 'Boss' }, '♛') : null,
-      opt.dot ? h('i', { class: 'ma-dot s-' + opt.dot }) : null);
-  }
-  function fold(key, defaultOpen, title, body, opt = {}) {
-    const expanded = opt.force || (ui.open[key] == null ? !!defaultOpen : !!ui.open[key]);
-    const aside = opt.aside || [];
-    return h('div', { class: 'ma-fold' + (expanded ? ' open' : '') },
-      h('div', { class: 'ma-fold-h', onclick: () => { if (!opt.force) { ui.open[key] = !expanded; saveUi(); draw(); } } },
-        h('span', { class: 'ma-fch' }, '▶'), h('div', { class: 'ma-fold-t' }, ...(Array.isArray(title) ? title : [title])),
-        h('span', { class: 'ma-fold-aside', onclick: stop }, ...aside)),
-      expanded ? h('div', { class: 'ma-fold-b' }, ...(typeof body === 'function' ? [].concat(body()) : [].concat(body))) : null);
-  }
-
-  /* ==================================================== BOSSES ==================================================== */
   /* ==================================================== BOSSES ==================================================== */
   function scheduleEditor(low) {
     const o = cfg.bosses[low] || {}, list = Array.isArray(o.schedule) ? o.schedule : [], now = serverMinutes();
@@ -2351,222 +2000,194 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
       h('button', { type: 'button', class: 'ma-add', onclick: (e) => { stop(e); const t = now != null ? hhmm((Math.floor(now / 60) + 1) * 60) : '12:00'; (ovr(low).schedule = ovr(low).schedule || []).push({ at: t, cap: bossCap(low) }); sortSave(); } }, '+ Add a cap change'));
   }
   function loadoutPick(kind, low) {
-    const list = Presets.list(kind), cur = (cfg.bosses[low] || {})[kind] || '';
-    return dropdown([['', '— keep current —'], ...list.map((p) => [p.id, p.name])], cur, (v) => { if (v) ovr(low)[kind] = v; else delete ovr(low)[kind]; });
+    const list = Presets.list(kind), cur = (cfg.bosses[low] || {})[kind] || '', dflt = (cfg.loadout || {})[kind], dn = dflt ? (list.find((p) => p.id === String(dflt)) || { name: dflt }).name : '';
+    return dropdown([['', dflt ? 'Default · ' + dn : 'Default · keep equipped'], ['__keep', 'Keep what is equipped'], ...list.map((p) => [p.id, p.name])], cur, (v) => { if (v) ovr(low)[kind] = v; else delete ovr(low)[kind]; });
   }
   const KIND_ICO = { gear: '⚔️', crystal: '💎', pet: '🐾' };
-  const cap1 = (s) => s.charAt(0).toUpperCase() + s.slice(1);
-  const itemsText = (items) => (items.length > 2 ? items.slice(0, 2).join(', ') + ' +' + (items.length - 2) : items.join(', '));
-  const lvTxt = (n) => 'Lv ' + Number(n).toLocaleString('en-US');
-
-  /* the cap field. Tapping a loot tier (or the EXP-cap damage) writes that number into the field and saves it. */
-  let flashCap = '';
-  function setCap(low, n) { ovr(low).cap = n; saveCfg(); flashCap = low; draw(); setTimeout(() => { flashCap = ''; }, 1000); }
-  function capField(low) {
-    const base = baseCap(low), tiers = LootData.tiers(low), info = LootData.get(low), mine = cfg.bosses[low] && cfg.bosses[low].cap != null;
-    const input = num(() => baseCap(low), (n) => { ovr(low).cap = n; }, { fmt: fmtNum, w: 100 });
-    if (flashCap === low) input.querySelector('input').classList.add('flash');
-    const bits = info ? [info.levelReq ? lvTxt(info.levelReq) : '', info.expCapPct != null ? `EXP cap ${info.expCapPct}%` : '', info.scannedAt ? 'scanned ' + ago(info.scannedAt) : ''].filter(Boolean) : [];
-    const kids = [h('div', { class: 'ma-capline' }, input,
-      mine && tiers.length ? h('button', { type: 'button', class: 'ma-link', title: 'forget my number and use the highest loot requirement', onclick: (e) => { stop(e); delete ovr(low).cap; saveCfg(); draw(); } }, '↺ top tier') : null,
-      bits.length ? h('span', { class: 'ma-capinfo' }, bits.join(' · ')) : null)];
-    const opts = tiers.slice().reverse().map((t) => ({ req: t.req, label: itemsText(t.items), full: t.items.join(', '), exp: false }));
-    if (info && info.expCapDmg > 0 && !tiers.some((t) => t.req === info.expCapDmg)) opts.push({ req: info.expCapDmg, label: 'EXP cap' + (info.expCapPct != null ? ' ' + info.expCapPct + '%' : ''), full: 'the damage that reaches the EXP cap', exp: true });
-    if (opts.length) kids.push(h('div', { class: 'ma-tiers' }, opts.map((t) => h('button', { type: 'button', class: 'ma-tier' + (t.req === base ? ' on' : '') + (t.exp ? ' exp' : ''), title: `${fmtNum(t.req)} damage: ${t.full}. Click to use it as the cap.`, onclick: (e) => { stop(e); setCap(low, t.req); } },
-      h('b', {}, short(t.req)), h('span', {}, t.label)))));
-    else kids.push(h('div', { style: { marginTop: '6px' } }, chips([[1e8, '100M'], [5e8, '500M'], [1e9, '1B'], [2e9, '2B'], [3e9, '3B'], [5e9, '5B']], base, (v) => { ovr(low).cap = v; })));
-    if (!info) kids.push(note(LootScan.available ? 'No loot data for this boss yet. Press Scan at the top to read it.' : 'No loot data for this boss yet.'));
-    if (base <= 0) kids.push(note('Cap 0 means this boss is skipped.'));
-    return field('Damage cap', opts.length ? 'tap a loot requirement to use it' : 'stop hitting once you have dealt this much', ...kids);
-  }
   function bossEditor(def) {
     const ms = Roster.members(def), idx = Math.min(phaseSel[def.low] || 0, ms.length - 1), m = ms[idx], low = m.low, out = [];
-    out.push(h('div', { class: 'ma-ed-h' }, h('b', { title: m.name }, m.name), h('button', { type: 'button', class: 'ma-x', title: 'Close', onclick: (e) => { stop(e); ui.open['boss:' + def.low] = false; saveUi(); draw(); } }, '✕')));
-    if (ms.length > 1) out.push(h('div', { style: { margin: '0 0 4px' } }, seg(ms.map((x, i) => [i, 'Phase ' + (i + 1), x.name]), idx, (v) => { phaseSel[def.low] = v; }, { full: true })));
-    out.push(capField(low));
-    if (m.kind !== 'wave') out.push(scheduleEditor(low));                       // timed cap changes: dungeon bosses only
+    if (ms.length > 1) out.push(h('div', { style: { margin: '10px 0 2px' } }, seg(ms.map((x, i) => [i, 'Phase ' + (i + 1), x.name]), idx, (v) => { phaseSel[def.low] = v; }, { full: true })), h('div', { class: 'ma-note', style: { margin: '6px 2px 0' } }, m.name));
+    const base = baseCap(low);
+    out.push(field('Damage cap', 'stop hitting once you have dealt this much',
+      h('div', { style: { display: 'flex', gap: '10px', alignItems: 'center', flexWrap: 'wrap' } }, num(() => baseCap(low), (n) => { ovr(low).cap = n; }, { fmt: fmtNum, w: 100 }),
+        chips([[1e8, '100M'], [5e8, '500M'], [1e9, '1B'], [2e9, '2B'], [3e9, '3B'], [5e9, '5B']], base, (v) => { ovr(low).cap = v; })),
+      base <= 0 ? note('Cap 0 means this boss is skipped.') : null));
+    out.push(scheduleEditor(low));
     const kinds = Presets.kinds();
-    if (kinds.length) out.push(h('div', { class: 'ma-ld', style: { marginTop: '8px' } }, kinds.map((k) => h('div', {}, h('label', {}, (KIND_ICO[k] || '🎒') + ' ' + cap1(k)), loadoutPick(k, low)))));
+    if (kinds.length) out.push(field('Loadout', 'what to equip before fighting this boss', ...kinds.map((k) => h('div', { class: 'ma-set', style: { padding: '4px 0', borderTop: 'none' } }, h('div', { class: 'ma-set-t' }, h('b', {}, (KIND_ICO[k] || '🎒') + ' ' + k.charAt(0).toUpperCase() + k.slice(1))), loadoutPick(k, low)))));
     if (cfg.sideMob.enabled) out.push(field('Shield targeting', 'for bosses that block the class skill', seg([['auto', 'Auto'], ['normal', 'Never divert'], ['shielded', 'Always divert']], SideMob.modeOf(low), (v) => { ovr(low).targeting = v; }, { full: true })));
-    if (cfg.bosses[low] && Object.keys(cfg.bosses[low]).length) out.push(h('div', { style: { marginTop: '6px' } }, h('button', { type: 'button', class: 'ma-link', onclick: () => { delete cfg.bosses[low]; saveCfg(); draw(); } }, '↺ Reset this boss to defaults')));
+    if (cfg.bosses[low] && Object.keys(cfg.bosses[low]).length) out.push(h('div', { style: { marginTop: '8px' } }, h('button', { type: 'button', class: 'ma-link', onclick: () => { delete cfg.bosses[low]; saveCfg(); draw(); } }, '↺ Reset this boss to defaults')));
     return h('div', { class: 'ma-ed' }, ...out);
   }
-  /* a boss as a bubble: avatar (dot = state), short name, cap · state, switch. Tap it to open its editor. */
-  function splitName(n) {
-    n = String(n || ''); const c = n.indexOf(',');
-    if (c > 0) return [n.slice(0, c).trim(), n.slice(c + 1).trim()];
-    const m = /^(.+?)\s+(the\s.+)$/i.exec(n);                         // "Oceanus The Water Titan" -> Oceanus | The Water Titan
-    return m && !/\bof$/i.test(m[1]) ? [m[1], m[2]] : [n, ''];
+  function entry(def) {
+    const on = isOn(def), key = 'boss:' + def.low, op = !!ui.open[key], ms = Roster.members(def), [txt, kind] = entryState(def), cap = bossCap(def.low), nx = nextChange(def.low), wv = waveOf(def);
+    const meta = [def.kind === 'wave' ? (wv ? 'Wave ' + wv : 'Wave') : '', cap > 0 ? 'cap ' + fmtNum(cap) : 'skipped', nx ? `→ ${fmtNum(nx.cap)} at ${fmtClock(nx.t)}` : '', ms.length > 1 ? ms.length + ' phases' : ''].filter(Boolean).join(' · ');
+    return h('div', { class: 'ma-ent' + (on ? ' on' : '') },
+      h('div', { class: 'ma-ent-h', onclick: () => { ui.open[key] = !op; saveUi(); draw(); } },
+        sw(() => on, (v) => setMany([def], v), { sm: true, redraw: false }), avatar(def.name, iconOfBoss(def.low), { boss: true }),
+        h('div', { class: 'ma-ent-n' }, h('b', { title: def.name }, def.name), h('small', { title: meta }, meta)), on ? pill(txt, kind) : null, h('span', { class: 'ma-ech' }, op ? '▾' : '▸')),
+      op ? bossEditor(def) : null);
   }
-  function bubble(def) {
-    const on = isOn(def), key = 'boss:' + def.low, op = !!ui.open[key], ms = Roster.members(def), cap = bossCap(def.low), [txt, kind] = entryState(def), nx = nextChange(def.low);
-    const loc = def.kind === 'wave' ? '' : def.locationId ? 'Loc ' + def.locationId : def.locationIds ? 'Loc ' + def.locationIds.join('/') : '';
-    const bits = [h('span', { class: 'capv' }, cap > 0 ? 'cap ' + short(cap) : 'skipped'), nx ? `→ ${short(nx.cap)} ${fmtClock(nx.t)}` : '', loc, ms.length > 1 ? ms.length + ' phases' : '', on ? h('span', { class: 'st-' + (kind || 'x') }, txt) : ''].filter(Boolean);
-    const sub = []; bits.forEach((b, i) => { if (i) sub.push(' · '); sub.push(b); });
-    return h('div', { class: 'ma-bb' + (on ? ' on' : '') + (op ? ' open' : ''), title: def.name, onclick: () => { ui.open[key] = !op; saveUi(); draw(); } },
-      avatar(def.name, iconOfBoss(def.low), { boss: true, dot: on ? kind || 'x' : '' }),
-      h('div', { class: 'ma-bb-n' }, h('b', {}, splitName(def.name)[0]), h('small', {}, ...sub)),
-      sw(() => on, (v) => setMany([def], v), { sm: true, redraw: false }));
+  function orderCard() {
+    const es = orderEntries();
+    return fold('order', true, ['📋 Farm order', h('small', {}, es.length ? es.length + ' selected' : '')], () => es.length
+      ? [note('Top to bottom: the first boss that is alive and under its cap gets attacked.'), ...es.map((def, i) => {
+        const [txt, kind] = entryState(def);
+        return h('div', { class: 'ma-q', style: { cursor: 'default' } }, h('span', { class: 'ma-rank' }, i + 1), avatar(def.name, iconOfBoss(def.low), { boss: true }),
+          h('div', { class: 'ma-q-n' }, h('b', { title: def.name }, def.name), h('small', {}, 'cap ' + fmtNum(bossCap(def.low)))), pill(txt, kind),
+          h('button', { class: 'ma-mini', type: 'button', title: 'Higher priority', disabled: i === 0 ? true : null, onclick: () => moveEntry(def, -1) }, '↑'),
+          h('button', { class: 'ma-mini', type: 'button', title: 'Lower priority', disabled: i === es.length - 1 ? true : null, onclick: () => moveEntry(def, 1) }, '↓'));
+      })]
+      : [h('div', { class: 'ma-empty', style: { margin: '6px 0' } }, 'Nothing selected. Switch bosses on below.')]);
   }
-  /* one wave = one row: "W12 Poseidon" + its bosses; an open boss's editor sits right under the row */
-  function rowOf(label, defs, wv) {
-    const open = defs.filter((d) => ui.open['boss:' + d.low]), all = defs.every(isOn);
-    const lab = wv ? h('div', { class: 'ma-wv-l' + (defs.some(isOn) ? ' on' : ''), title: `Switch every boss of this wave ${all ? 'off' : 'on'}`, onclick: () => setMany(defs, !all) }, h('b', {}, wv.wave ? 'W' + wv.wave : '?'), h('small', { title: label }, label)) : null;
-    return h('div', { class: 'ma-wv', style: wv ? null : { gridTemplateColumns: 'minmax(0,1fr)' } }, lab, h('div', { class: 'ma-grid' }, defs.map(bubble)), ...open.map(bossEditor));
+  function loadoutCard() {
+    const kinds = Presets.kinds(), set = kinds.filter((k) => (cfg.loadout || {})[k]);
+    return fold('loadout', false, ['🎒 Default loadout', h('small', {}, set.length ? set.length + ' set' : 'keep equipped')], () => [
+      note('Equipped before fighting any boss that has no loadout of its own. Open a boss to override it just for that boss.'),
+      ...kinds.map((k) => { const list = Presets.list(k); return h('div', { class: 'ma-set', style: { borderTop: 'none', padding: '5px 0' } }, h('div', { class: 'ma-set-t' }, h('b', {}, (KIND_ICO[k] || '🎒') + ' ' + k.charAt(0).toUpperCase() + k.slice(1))),
+        dropdown([['', 'Keep what is equipped'], ...list.map((p) => [p.id, p.name])], (cfg.loadout || {})[k] || '', (v) => { cfg.loadout = cfg.loadout || {}; if (v) cfg.loadout[k] = v; else delete cfg.loadout[k]; Presets.forget(); })); })]);
   }
-
-  function waveGroups(defs) {
-    const groups = new Map();
-    defs.forEach((def) => {
-      const l = bossLoc(def.low), w = WaveMap.of(l && l.gate, l && l.wave);
-      let g = groups.get(w.group.id); if (!g) groups.set(w.group.id, (g = Object.assign({}, w.group, { waves: new Map(), defs: [] })));
-      let wv = g.waves.get(w.key); if (!wv) g.waves.set(w.key, (wv = { gate: l && l.gate, wave: l && l.wave, label: w.label, defs: [] }));
-      wv.defs.push(def); g.defs.push(def);
-    });
-    return [...groups.values()].sort((a, b) => a.order - b.order).map((g) => {
-      const waves = [...g.waves.values()].sort((a, b) => (a.gate || 0) - (b.gate || 0) || (a.wave || 0) - (b.wave || 0)); waves.forEach((wv) => wv.defs.sort((a, b) => rIdx(a.low) - rIdx(b.low)));
-      const nums = waves.map((x) => x.wave).filter(Boolean);
-      const sub = g.id === 'other' ? g.sub : nums.length > 1 ? `${g.sub} · waves ${Math.min(...nums)}–${Math.max(...nums)}` : nums.length ? `${g.sub} · wave ${nums[0]}` : g.sub;
-      return Object.assign(g, { waves, sub });
-    });
-  }
-  function dungeonGroups(defs) {
-    const castle = defs.filter((d) => !(d.kind === 'dungeon-swarm' || d.dtype === 'easy')), shadow = defs.filter((d) => d.kind === 'dungeon-swarm' || d.dtype === 'easy');
-    const sort = (a) => a.slice().sort((x, y) => (x.locationId || (x.locationIds || [0])[0] || 0) - (y.locationId || (y.locationIds || [0])[0] || 0) || rIdx(x.low) - rIdx(y.low));
-    return [{ id: 'castle', title: 'Castle', ico: '🏰', sub: 'hard', defs: sort(castle) }, { id: 'shadow', title: 'Shadowbridge', ico: '🌉', sub: 'easy', defs: sort(shadow) }].filter((g) => g.defs.length);
-  }
-  function bossSections(sec) {
+  function bossSections() {
     const f = (ui.filter || '').trim().toLowerCase(), force = !!f;
     const match = (d) => !f || Roster.members(d).some((m) => m.name.toLowerCase().includes(f));
-    const canon = Roster.list.filter((d) => Roster.canon(d) === d && match(d));
-    const counts = (defs) => { const n = defs.filter(isOn).length; return h('span', { class: 'ma-pill' + (n ? ' blue' : '') }, n + '/' + defs.length); };
+    const all = Roster.list.filter((d) => Roster.canon(d) === d && match(d));
+    const waves = all.filter((d) => d.kind === 'wave'), dungs = all.filter((d) => d.kind !== 'wave');
+    const counts = (defs) => { const n = defs.filter(isOn).length; return h('span', { class: 'ma-pill' + (n ? ' blue' : '') }, n + ' / ' + defs.length + ' on'); };
     const bulk = (defs) => [h('button', { class: 'ma-link', type: 'button', onclick: (e) => { stop(e); setMany(defs, true); } }, 'All'), h('button', { class: 'ma-link', type: 'button', onclick: (e) => { stop(e); setMany(defs, false); } }, 'None')];
-    const mk = (g, body) => fold('grp:' + g.id, g.defs.some(isOn), [g.ico + ' ' + g.title, g.sub ? h('small', {}, g.sub) : null], body, { force, aside: [counts(g.defs), ...bulk(g.defs)] });
-    let out;
-    if (sec === 'dungeons') out = dungeonGroups(canon.filter((d) => d.kind !== 'wave')).map((g) => mk(g, () => { const rows = []; for (let i = 0; i < g.defs.length; i += 2) rows.push(rowOf('', g.defs.slice(i, i + 2), null)); return rows; }));
-    else out = waveGroups(canon.filter((d) => d.kind === 'wave')).map((g) => mk(g, () => g.waves.map((wv) => rowOf(wv.label, wv.defs, wv))));
-    if (!out.length) out = [h('div', { class: 'ma-empty' }, f ? `No ${sec === 'dungeons' ? 'dungeon' : 'wave'} boss matches “${ui.filter}”.` : 'No bosses known yet.')];
-    return out;
-  }
-
-  /* ---- loot scan strip (the buttons of PART 4b). Repainted on its own while a scan runs, so the tab does not redraw. ---- */
-  let scanBox = null, scanOpen = false;
-  function scanBar() {
-    const s = LootScan.state, n = Object.keys(LootData.all()).length, out = [];
-    if (s.running) {
-      const pct = s.total ? Math.min(100, Math.round(s.done / s.total * 100)) : 0;
-      out.push(h('div', { class: 'ma-scan' }, h('span', { class: 'ma-ico' }, '⏳'),
-        h('div', { class: 'ma-scan-t' }, h('b', {}, `Scanning loot… ${pct}%`), h('small', {}, (s.label || '') + (s.read ? ` · ${s.read} read` : '')), h('div', { class: 'ma-bar' }, h('i', { style: { width: pct + '%' } }))),
-        h('div', { class: 'ma-scan-b' }, btn('■ Stop', 'danger', () => LootScan.stop()))));
-      return out;
-    }
-    const sub = s.error ? '⚠ ' + s.error : n ? `${n} monsters · scanned ${ago(LootData.at())}` + (s.endedAt ? ` · last run read ${s.read}${s.added ? ', ' + s.added + ' new' : ''}` : '') : 'Reads every boss’s loot, level requirement and EXP cap.';
-    out.push(h('div', { class: 'ma-scan' }, h('span', { class: 'ma-ico' }, '🔎'), h('div', { class: 'ma-scan-t' }, h('b', {}, 'Loot scan'), h('small', { title: sub }, sub)),
-      h('div', { class: 'ma-scan-b' }, btn(n ? '↻ Rescan' : '🔎 Scan', 'soft', () => LootScan.run()), n ? btn('⬇ Export .txt', 'soft', () => LootScan.download()) : null)));
-    if (s.notes.length) {
-      out.push(h('div', { style: { margin: '-3px 4px 6px' } }, h('button', { type: 'button', class: 'ma-link', onclick: () => { scanOpen = !scanOpen; paintScan(); } }, `⚠ ${s.notes.length} thing${s.notes.length === 1 ? '' : 's'} could not be read ${scanOpen ? '▾' : '▸'}`)));
-      if (scanOpen) out.push(h('div', { class: 'ma-scan-n' }, s.notes.map((t) => h('div', {}, t))));
-    }
-    return out;
-  }
-  function paintScan() { if (scanBox) scanBox.replaceChildren(...scanBar()); }
-
-  function tBosses() {
+    const sub = (key, title, defs, withWaves) => {
+      if (!defs.length) return null;
+      return fold(key, defs.some(isOn), title, () => {
+        const out = []; let lastW = null;
+        defs.forEach((d) => { const w = waveOf(d); if (withWaves && w && w !== lastW) { out.push(h('div', { class: 'ma-wave' }, 'Wave ' + w)); lastW = w; } out.push(entry(d)); });
+        return out;
+      }, { sub: true, force, aside: [counts(defs), ...bulk(defs)] });
+    };
     const out = [];
-    if (LootScan.available) { scanBox = h('div', {}); paintScan(); out.push(scanBox); } else scanBox = null;
-    const canon = Roster.list.filter((d) => Roster.canon(d) === d), dunOn = Kernel.isOn('dungeons');
-    const sets = { waves: canon.filter((d) => d.kind === 'wave'), dungeons: dunOn ? canon.filter((d) => d.kind !== 'wave') : [] };
-    const sec = dunOn && ui.bsec === 'dungeons' ? 'dungeons' : 'waves';
-    const badge = (id) => { const f = (ui.filter || '').trim().toLowerCase(), defs = sets[id]; return f ? String(defs.filter((d) => Roster.members(d).some((m) => m.name.toLowerCase().includes(f))).length) : `${defs.filter(isOn).length}/${defs.length}`; };
-    const badges = {};
-    out.push(h('div', { class: 'ma-sec' }, [['waves', '🌊 Waves'], ...(dunOn ? [['dungeons', '🏰 Dungeons']] : [])].map(([id, label]) => h('button', { type: 'button', class: id === sec ? 'on' : '', onclick: () => { ui.bsec = id; saveUi(); draw(); } }, label, (badges[id] = h('i', {}, badge(id)))))));
-    const box = h('div', {}), fill = () => { box.replaceChildren(...bossSections(sec)); Object.keys(badges).forEach((id) => { badges[id].textContent = badge(id); }); };
-    out.push(h('div', { class: 'ma-tool' }, h('input', { class: 'ma-search', placeholder: '🔎 Filter bosses…', value: ui.filter || '', oninput: (e) => { ui.filter = e.target.value; saveUi(); fill(); } })));
+    if (waves.length) {
+      const gates = [...new Set(waves.map((d) => { const l = bossLoc(d.low); return l ? l.gate : 0; }))].sort((a, b) => a - b);
+      out.push(fold('sec:waves', true, '🌊 Waves', () => gates.map((g) => sub('gate:' + g, g ? 'Gate ' + g : 'Other', waves.filter((d) => { const l = bossLoc(d.low); return (l ? l.gate : 0) === g; }), true)), { force, aside: counts(waves) }));
+    }
+    if (dungs.length || !Kernel.isOn('dungeons')) {
+      out.push(fold('sec:dungeons', true, '🏰 Dungeons', () => Kernel.isOn('dungeons') ? [
+        sub('dg:castle', '🏰 Castle', dungs.filter((d) => d.kind === 'dungeon')), sub('dg:shadow', '🌉 Shadowbridge', dungs.filter((d) => d.kind === 'dungeon-swarm')),
+        sub('dg:other', 'Other', dungs.filter((d) => d.kind !== 'dungeon' && d.kind !== 'dungeon-swarm'))] : [note('The Dungeons module is switched off in Settings.')], { force, aside: Kernel.isOn('dungeons') ? counts(dungs) : pill('off', '') }));
+    }
+    if (!out.length) out.push(h('div', { class: 'ma-empty' }, 'No boss matches “' + ui.filter + '”.'));
+    return out;
+  }
+  function tBosses() {
+    const out = [orderCard()];
+    if (Presets.kinds().length) out.push(loadoutCard());
+    const box = h('div', {}), fill = () => box.replaceChildren(...bossSections());
+    out.push(h('input', { class: 'ma-search', placeholder: '🔎 Filter bosses…', value: ui.filter || '', oninput: (e) => { ui.filter = e.target.value; saveUi(); fill(); } }));
     fill(); out.push(box);
-
     return out;
   }
 
-  /* ---- POTIONS ---- */
-  function tPotions() {
-    const m = cfg.mana, A = cfg.stam.A, B = cfg.stam.B, S = cfg.stam.save, H = cfg.hp;
-    return [sec('Mana'),
-      h('div', {}, check('Refill mana automatically', () => m.enabled, (v) => { m.enabled = v; }), check('When max MP is 0 fill the bar', () => m.fullMaxAt0, (v) => { m.fullMaxAt0 = v; })),
-      h('div', {}, fld('potion size', sel([['S', 'S (20 MP)'], ['M', 'M (40 MP)'], ['L', 'L (60 MP)'], ['XL', 'XL (100 MP)']], m.type, (v) => { m.type = v; }, 120)), textIn(m, 'name', 170, 'exact item name (optional)', 'auto'), intIn(m, 'threshold', 60, 'refill at MP ≤'), intIn(m, 'fillTo', 60, 'fill up to MP')),
-      sec('Stamina (Core.potions: sidebar → remembered id → inventory)'),
-      h('div', {}, check('Potion A', () => A.enabled, (v) => { A.enabled = v; }), textIn(A, 'item', 190, 'item name'), check('Potion B (next)', () => B.enabled, (v) => { B.enabled = v; }), textIn(B, 'item', 190, 'item name')),
-      h('div', {}, check('Save stamina near the EXP cap', () => S.enabled, (v) => { S.enabled = v; }), pctIn(S, 'thresholdPct', 70, 'pause at EXP %')),
-      sec('HP'), h('div', {}, check('Drink an HP potion when low', () => H.enabled, (v) => { H.enabled = v; }), pctIn(H, 'thresholdPct', 70, 'at HP ≤ %'))];
+  /* =================================================== SUPPLIES =================================================== */
+  function tSupplies() {
+    const S = cfg.stam, H = cfg.hp, M = cfg.mana, SV = S.save;
+    return [
+      card('⚡', 'Stamina potion', 'Drinks one when you run out of stamina.', S.enabled, (v) => { S.enabled = v; }, [
+        field('Potion', null, seg([['Large Stamina Potion', 'Large'], ['Full Stamina Potion', 'Full']], S.item, (v) => { S.item = v; }, { full: true })),
+        setting('Save stamina near the EXP cap', 'Stop drinking once your EXP bar is nearly full.', sw(() => SV.enabled, (v) => { SV.enabled = v; })),
+        SV.enabled ? setting('Stop at EXP', null, num(() => SV.thresholdPct, (n) => { SV.thresholdPct = n; }, { parse: parseFloat, min: 0, max: 100, unit: '%', w: 70 })) : null]),
+      card('❤️', 'HP potion', 'Drinks one when your HP hits 0.', H.enabled, (v) => { H.enabled = v; H.thresholdPct = 0; }),
+      card('💧', 'Mana potion', 'Keeps enough mana for your class skill.', M.enabled, (v) => { M.enabled = v; }, [
+        field('Potion size', 'how much each one restores', seg([['S', 'S · 20'], ['M', 'M · 40'], ['L', 'L · 60'], ['XL', 'XL · 100']], M.type, (v) => { M.type = v; }, { full: true })),
+        h('div', { class: 'ma-two' }, field('Drink when MP is at or below', null, num(() => M.threshold, (n) => { M.threshold = n; }, { w: 80 })), field('Refill up to', null, num(() => M.fillTo, (n) => { M.fillTo = n; }, { w: 80 }))),
+        note('Mana is only used when your class skill needs it (Settings → Class skill).')])];
   }
 
-  /* ---- GRAVEYARD ---- */
-  function tGraveyard() {
+  /* ===================================================== LOOT ===================================================== */
+  function tLoot() {
     const L = cfg.autoLoot, s = Loot.state, groups = new Map();
-    s.rows.filter((r) => r.needsLoot !== false).forEach((r) => { const g = groups.get(r.nameLow) || { name: r.name, rows: [], boss: r.isBoss }; g.rows.push(r); groups.set(r.nameLow, g); });
+    s.rows.filter((r) => r.needsLoot !== false).forEach((r) => { const g = groups.get(r.nameLow) || { name: r.name, rows: [], boss: r.isBoss, icon: r.icon }; g.rows.push(r); if (!g.icon && r.icon) g.icon = r.icon; groups.set(r.nameLow, g); });
     const need = (() => { const m = Core.me.get(), e = m && m.exp; return e && e.max > 0 ? Math.max(0, e.max - e.cur) : null; })();
-    return [h('div', {}, check('Auto-loot when out of stamina', () => L.enabled, (v) => { L.enabled = v; }), fld('mode', sel([['toLevel', 'only what reaches the next level'], ['all', 'everything']], L.mode, (v) => { L.mode = v; }, 230)), intIn(L, 'scanMs', 80, 'scan every (ms)'), intIn(L, 'claimGapMs', 70, 'gap between claims (ms)')),
-      h('div', { class: 'core-row' }, btn(s.scanning ? 'Scanning…' : '🔎 Scan graveyard', 'soft', () => { Loot.scan(); }), btn(s.looting ? 'Looting…' : '🎒 Loot now (per mode)', 'success', () => { Loot.pass(); }),
-        h('span', { class: 'core-dim' }, `${[...groups.values()].reduce((n, g) => n + g.rows.length, 0)} lootable · last scan ${ago(s.lastScanAt)}${need != null ? ' · EXP to next level ' + fmtNum(need) : ''}`)),
-      groups.size ? h('table', { class: 'ma-table' }, h('thead', {}, h('tr', {}, ['Monster', 'Corpses', 'Known damage', ''].map((t) => h('th', {}, t)))),
-        h('tbody', {}, [...groups.entries()].map(([low, g]) => h('tr', {}, h('td', {}, g.name + (g.boss ? ' 👑' : '')), h('td', {}, g.rows.length), h('td', {}, fmtNum(g.rows.reduce((n, r) => n + (Number.isFinite(r.userDamage) ? r.userDamage : 0), 0))),
-          h('td', {}, btn(s.claiming.has(low) ? 'Claiming…' : 'Claim all', 'soft', () => { Loot.claimGroup(low); })))))) : h('div', { class: 'core-empty' }, s.lastScanAt ? 'Nothing lootable right now.' : 'Press Scan graveyard to look.')];
+    const list = [...groups.entries()].sort((a, b) => (b[1].boss - a[1].boss) || a[1].name.localeCompare(b[1].name)), total = list.reduce((n, [, g]) => n + g.rows.length, 0);
+    const lootCard = ([low, g]) => {
+      const dmg = g.rows.reduce((n, r) => n + (Number.isFinite(r.userDamage) ? r.userDamage : 0), 0), busy = s.claiming.has(low);
+      const b = btn(busy ? 'Claiming…' : 'Claim', 'soft', () => { Loot.claimGroup(low); }); b.classList.add('ma-claim');
+      return h('div', { class: 'ma-lc' }, avatar(g.name, g.icon, { boss: g.boss }), h('div', { class: 'ma-lc-n' }, h('b', {}, g.name), h('small', {}, `${g.rows.length} corpse${g.rows.length === 1 ? '' : 's'}${dmg ? ' · ' + fmtNum(dmg) + ' damage' : ''}`)), b);
+    };
+    const bosses = list.filter(([, g]) => g.boss), mobs = list.filter(([, g]) => !g.boss);
+    return [
+      card('🪦', 'Auto-loot', 'Claims corpses for you when you run out of stamina.', L.enabled, (v) => { L.enabled = v; }, [
+        field('Claim', null, seg([['toLevel', 'Only what levels me up'], ['all', 'Everything']], L.mode, (v) => { L.mode = v; }, { full: true }))]),
+      h('div', { class: 'ma-actions' }, btn(s.scanning ? 'Scanning…' : '🔎 Scan graveyard', 'soft', () => { Loot.scan(); }), btn(s.looting ? 'Looting…' : '🎒 Loot now', 'success', () => { Loot.pass(); })),
+      note(`${total} lootable · scanned ${ago(s.lastScanAt)}${need != null ? ' · ' + fmtNum(need) + ' EXP to next level' : ''}`),
+      ...(list.length ? [bosses.length ? caption('Bosses') : null, ...bosses.map(lootCard), mobs.length ? caption('Monsters') : null, ...mobs.map(lootCard)]
+        : [h('div', { class: 'ma-empty' }, s.lastScanAt ? 'Nothing lootable right now.' : 'Press Scan graveyard to look.')])];
   }
 
-  /* ---- LOG ---- */
-  function tLog() {
-    const f = cfg.logFilter || 'all', rows = Log.all().filter((r) => f === 'all' || r.k === f).slice(-160).reverse();
-    return [h('div', { class: 'core-row' }, sel([['all', 'all'], ['ok', 'ok'], ['warn', 'warnings'], ['err', 'errors'], ['dmg', 'hits'], ['skill', 'skills'], ['info', 'info']], f, (v) => { cfg.logFilter = v; draw(); }, 130), btn('Clear log', 'soft', () => Log.clear())),
-      rows.length ? h('div', {}, rows.map((r) => h('div', { class: 'ma-line ' + r.k }, h('b', {}, r.t + ' '), r.m.replace(/<[^>]+>/g, '')))) : h('div', { class: 'core-empty' }, 'Nothing logged yet.')];
-  }
-
-  /* ---- DIAGNOSTICS ---- */
-  function tDiag() {
-    const l = Diag.last(), counts = Object.entries(Diag.counts).sort((a, b) => b[1] - a[1]), au = Guard.info();
-    return [h('div', { class: 'ma-grid' }, card('Why isn’t it attacking?', l.reason ? `${l.reason}${l.detail ? ' — ' + l.detail : ''}` : 'nothing skipped'), card('Last skip', ago(l.at)),
-      card('Preset capabilities', Presets.note()),
-      card('Re-login', au.status ? (au.status.configured ? 'configured' : 'unconfigured') : 'Core.auth missing'), card('Shielded mobs known', SideMob.shielded()), card('Version', VERSION)),
-      h('div', { class: 'core-row' }, btn('Clear diagnostics', 'soft', () => Diag.clear()), btn('Forget shielded mobs', 'soft', () => { SideMob.forget(); draw(); })),
-      sec('Skip reasons (count)'), counts.length ? h('table', { class: 'ma-table' }, h('tbody', {}, counts.map(([k, n]) => h('tr', {}, h('td', {}, k), h('td', {}, n))))) : h('div', { class: 'core-dim' }, 'none'),
-      sec('Recent events'), Diag.events.length ? h('div', {}, Diag.events.slice(-40).reverse().map((e) => h('div', { class: 'ma-line' }, h('b', {}, e.t + ' '), e.reason + (e.detail ? ' — ' + e.detail : '')))) : h('div', { class: 'core-dim' }, 'none')];
-  }
-
-  /* ---- SETTINGS ---- */
+  /* =================================================== SETTINGS =================================================== */
   function tSettings() {
-    const tiers = TIER_CHAIN.slice(0, 4).map((t) => [t, SKILLS[t].label + ' (' + SKILLS[t].cost + ' stam)']);
-    return [sec('Attacks'),
-      h('div', {}, fld('highest skill tier', sel(tiers, cfg.maxTier, (v) => { cfg.maxTier = v; }, 220)), fld('class skill', sel([['auto', 'auto' + (cfg.detectedClass ? ' (' + cfg.detectedClass + ')' : '')], ['warrior', 'warrior'], ['cleric', 'cleric'], ['hunter', 'hunter'], ['mage', 'mage']], cfg.classOverride, (v) => { cfg.classOverride = v; }, 160)),
-        check('Use the class skill', () => cfg.useClassSkill, (v) => { cfg.useClassSkill = v; })),
-      h('div', {}, intIn(cfg, 'attackDelayMs', 70, 'wave swing gap (ms)'), intIn(cfg, 'dungeonAttackDelayMs', 70, 'dungeon swing gap (ms)'), intIn(cfg, 'minActionGapMs', 70, 'min gap between requests (ms)'), intIn(cfg, 'skillToAttackGapMs', 70, 'skill → attack gap (ms)')),
-      h('div', {}, intIn(cfg, 'defaultBossCap', 90, 'default boss cap'), intIn(cfg, 'fightScanMs', 70, 'rescan while fighting (ms)'), intIn(cfg, 'idleRecheckMs', 70, 'recheck idle boss (ms)'), intIn(cfg, 'dungeonPollMs', 70, 'dungeon poll (ms)')),
-      sec('Behaviour'),
-      h('div', {}, check('Pause the server auto-farm while fighting', () => cfg.autoFarmControl, (v) => { cfg.autoFarmControl = v; }), check('Fight Phase Duels automatically', () => cfg.autoDuel, (v) => { cfg.autoDuel = v; }),
-        check('Shield pierce on a side mob (only if a boss is shielded)', () => cfg.sideMob.enabled, (v) => { cfg.sideMob.enabled = v; draw(); })),
-      sec('Parts (switch one off and the rest keep working)'),
-      h('div', {}, [...Kernel.parts.values()].map((p) => check(`${p.icon || ''} ${p.name || p.id}`, () => Kernel.isOn(p.id), (v) => { cfg.parts[p.id] = v; Engine.poke(true); })))];
+    const tiers = TIER_CHAIN.slice(0, 4).map((t) => [t, SKILLS[t].label + ' · ' + SKILLS[t].cost + ' stamina']);
+    const au = Guard.info();
+    const timing = [['Wave swing gap', 'attackDelayMs'], ['Dungeon swing gap', 'dungeonAttackDelayMs'], ['Min gap between requests', 'minActionGapMs'], ['Skill → attack gap', 'skillToAttackGapMs']];
+    return [
+      card('⚔️', 'Attacks', 'How hard and how often it hits.', true, () => {}, [
+        field('Strongest skill to use', null, dropdown(tiers, cfg.maxTier, (v) => { cfg.maxTier = v; })),
+        field('Class', cfg.detectedClass ? 'detected: ' + cfg.detectedClass : null, seg([['auto', 'Auto'], ['warrior', 'Warrior'], ['cleric', 'Cleric'], ['hunter', 'Hunter'], ['mage', 'Mage']], cfg.classOverride, (v) => { cfg.classOverride = v; }, { full: true })),
+        setting('Use the class skill', 'Costs mana, hits harder.', sw(() => cfg.useClassSkill, (v) => { cfg.useClassSkill = v; }, { redraw: false }))]),
+      h('div', { class: 'ma-card' }, caption('Behaviour').cloneNode(true) && null,
+        setting('Pause the server auto-farm while fighting', 'So the two never fight over stamina.', sw(() => cfg.autoFarmControl, (v) => { cfg.autoFarmControl = v; }, { redraw: false })),
+        setting('Fight phase duels automatically', null, sw(() => cfg.autoDuel, (v) => { cfg.autoDuel = v; }, { redraw: false })),
+        setting('Shield pierce on a side mob', 'Only for bosses that block the class skill.', sw(() => cfg.sideMob.enabled, (v) => { cfg.sideMob.enabled = v; }))),
+      caption('Modules'),
+      h('div', { class: 'ma-card' }, [...Kernel.parts.values()].map((p) => setting(`${p.icon || ''} ${p.name || p.id}`, null, sw(() => Kernel.isOn(p.id), (v) => { cfg.parts[p.id] = v; Engine.poke(true); }, { redraw: false })))),
+      fold('adv', false, '🛠 Advanced timing', () => [note('Pause between requests, in milliseconds. The defaults are safe; lower numbers risk the server rejecting swings.'),
+        ...timing.map(([l, k]) => setting(l, null, num(() => cfg[k], (n) => { cfg[k] = n; }, { w: 76, unit: 'ms' }))),
+        setting('Graveyard scan every', null, num(() => cfg.autoLoot.scanMs, (n) => { cfg.autoLoot.scanMs = n; }, { w: 76, unit: 'ms' })),
+        setting('Gap between loot claims', null, num(() => cfg.autoLoot.claimGapMs, (n) => { cfg.autoLoot.claimGapMs = n; }, { w: 76, unit: 'ms' }))]),
+      caption('About'),
+      h('div', { class: 'ma-card' }, h('div', { class: 'ma-kv' }, h('span', {}, 'Version'), h('b', {}, VERSION)), h('div', { class: 'ma-kv' }, h('span', {}, 'Re-login'), h('b', {}, au.status ? (au.status.configured ? 'set up' : 'not set up') : 'Core.auth missing')),
+        h('div', { class: 'ma-kv' }, h('span', {}, 'Preset addons'), h('b', {}, Presets.note())), h('div', { class: 'ma-kv' }, h('span', {}, 'Shielded mobs remembered'), h('b', {}, SideMob.shielded())),
+        h('div', { class: 'ma-actions', style: { margin: '10px 0 0' } }, btn('Forget shielded mobs', 'soft', () => { SideMob.forget(); draw(); })))];
   }
 
-  const BUILD = { status: tStatus, bosses: tBosses, potions: tPotions, graveyard: tGraveyard, log: tLog, diag: tDiag, settings: tSettings };
+  /* =================================================== ACTIVITY =================================================== */
+  function tActivity() {
+    const f = cfg.logFilter || 'all', all = Log.all(), cnt = (k) => all.filter((r) => r.k === k).length, l = Diag.last(), nSkip = Object.values(Diag.counts).reduce((a, b) => a + b, 0);
+    const chipDefs = [['all', 'All', all.length], ['dmg', 'Hits', cnt('dmg')], ['skill', 'Skills', cnt('skill')], ['warn', 'Warnings', cnt('warn')], ['err', 'Errors', cnt('err')], ['skips', 'Skips', nSkip]];
+    const out = [h('div', { class: 'ma-alert info' }, l.reason ? h('span', {}, h('b', {}, 'Last skip: '), `${l.reason}${l.detail ? ' — ' + l.detail : ''} · ${ago(l.at)}`) : 'Nothing has been skipped. It attacks whenever a boss is up and under its cap.'),
+      h('div', { class: 'ma-chips', style: { margin: '0 0 10px' } }, chipDefs.map(([v, label, n]) => h('button', { type: 'button', class: 'ma-chip' + (v === f ? ' on' : ''), onclick: () => { cfg.logFilter = v; saveCfg(); draw(); } }, label, n ? h('i', {}, n) : null)))];
+    if (f === 'skips') {
+      const counts = Object.entries(Diag.counts).sort((a, b) => b[1] - a[1]);
+      out.push(counts.length ? h('div', { class: 'ma-chips', style: { marginBottom: '10px' } }, counts.map(([k, n]) => pill(`${k} · ${n}`, 'warn'))) : null);
+      out.push(Diag.events.length ? h('div', { class: 'ma-log' }, Diag.events.slice(-60).reverse().map((e) => h('div', { class: 'ma-ll warn' }, h('b', {}, e.t), e.reason + (e.detail ? ' — ' + e.detail : '')))) : h('div', { class: 'ma-empty' }, 'No skips recorded.'));
+      out.push(h('div', { class: 'ma-actions', style: { marginTop: '10px' } }, btn('Clear', 'soft', () => { Diag.clear(); draw(); })));
+    } else {
+      const rows = all.filter((r) => f === 'all' || r.k === f).slice(-200).reverse();
+      out.push(rows.length ? h('div', { class: 'ma-log' }, rows.map((r) => h('div', { class: 'ma-ll ' + r.k }, h('b', {}, r.t), r.m.replace(/<[^>]+>/g, '')))) : h('div', { class: 'ma-empty' }, 'Nothing logged yet.'));
+      out.push(h('div', { class: 'ma-actions', style: { marginTop: '10px' } }, btn('Clear log', 'soft', () => Log.clear())));
+    }
+    return out;
+  }
+
+  const BUILD = { home: tHome, bosses: tBosses, supplies: tSupplies, loot: tLoot, settings: tSettings, activity: tActivity };
   function scroller(el) { for (let n = el && el.parentElement; n; n = n.parentElement) { const o = getComputedStyle(n).overflowY; if ((o === 'auto' || o === 'scroll') && n.scrollHeight > n.clientHeight) return n; } return null; }
   function draw() {
-    if (!root || !open || !root.isConnected) return;
+    if (!root || !shown || !root.isConnected) return;
     const sc = scroller(root), top = sc ? sc.scrollTop : 0;
-    let body; try { body = BUILD[tab]() } catch (e) { body = [h('div', { class: 'core-err' }, 'panel error: ' + e.message)]; console.warn('[automator] panel', e); }
-    root.replaceChildren(header(), tabsBar(), h('div', { class: 'ma-body' }, ...[].concat(body)));
+    let body; try { body = BUILD[tab]() } catch (e) { body = [h('div', { class: 'ma-alert' }, 'panel error: ' + e.message)]; console.warn('[automator] panel', e); }
+    root.replaceChildren(tabsBar(), h('div', { class: 'ma-body' }, ...[].concat(body).filter(Boolean)), footer());
     if (sc) sc.scrollTop = top;
   }
   const typing = () => root && root.contains(document.activeElement) && /^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement.tagName);
   function schedule(ms) { if (drawT) return; drawT = setTimeout(() => { drawT = 0; if (typing()) schedule(1500); else draw(); }, ms || 400); }
-  if (typeof Core.on === 'function') Core.on('caps:changed', (d) => { if (open && d && (d.added || []).some((n) => n.startsWith('preset.'))) schedule(300); });   // a preset addon loaded late
-  UI.hook((what) => { if (!open) return; if (what === 'scan') { if (tab === 'bosses') paintScan(); return; } if (what === undefined || DIRTY_TAB[what] === tab || (what === 'loot' && tab === 'graveyard') || (what === 'status' && tab === 'status')) schedule(); });
+  if (typeof Core.on === 'function') Core.on('caps:changed', (d) => { if (shown && d && (d.added || []).some((n) => n.startsWith('preset.'))) schedule(300); });   // a preset addon loaded late
+  UI.hook((what) => { if (!shown) return; if (what === undefined || what === 'status' || DIRTY_TAB[what] === tab) schedule(); });
+  let beat = 0;
+  setInterval(() => { if (!shown || !root || !root.isConnected || document.hidden) return; if (++beat % 3 === 0 && (tab === 'home') && !typing()) draw(); }, 1000);   // overview: vitals + timers refresh every 3 s
 
   function register() {
-    Core.float.add({ id: ID, title: 'Automator', icon: '🤖', order: 40, width: 560,
-      render(el) { root = h('div', { class: 'ma-root' }); el.replaceChildren(root); open = true; draw(); },
-      onShow() { open = true; }, onHide() { open = false; } });
+    Core.float.add({ id: ID, title: 'Automator', icon: '🤖', order: 40, width: 620,
+      render(el) { root = h('div', { class: 'ma-root' }); el.replaceChildren(root); shown = true; draw(); },
+      onShow() { shown = true; }, onHide() { shown = false; } });
   }
   return { register, draw };
 })();
-
 /* ===================================================================================================================
  * PART 6 — BOOT
  * ================================================================================================================ */
@@ -2577,7 +2198,7 @@ Tab.join().catch((e) => log('❌ tab leadership: ' + e.message, 'err'));
 
 return {
   version: VERSION, cfg: () => cfg, board: Board.all, status: Status.get,
-  start: Run.start, stop: Run.stop, scanNow: Engine.scanNow, register: Kernel.register, loot: LootData.all, lootScan: LootScan,
+  start: Run.start, stop: Run.stop, scanNow: Engine.scanNow, register: Kernel.register,
 };
 
   },
