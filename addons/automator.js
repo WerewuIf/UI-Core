@@ -19,7 +19,7 @@
  * replies were retried instantly instead of honouring their delay.
  */
 Core.module({
-  id: 'automator', name: 'Automator', icon: '🤖', version: '1.2.0',
+  id: 'automator', name: 'Automator', icon: '🤖', version: '1.3.0',
   // Offered to other addons through Core capabilities (guides/CAPABILITIES.md):
   //   automator.status() -> the status string     automator.start() / automator.stop()     automator.scan() -> scan the bosses now
   provides: (api) => api && api.start ? {
@@ -30,7 +30,7 @@ Core.module({
   } : {},
   init(Core) {
 'use strict';
-const ID = 'automator', VERSION = '1.2.0';
+const ID = 'automator', VERSION = '1.3.0';
 if (window.__automatorLoaded) { console.warn('[automator] already loaded', window.__automatorLoaded); return null; }
 window.__automatorLoaded = VERSION;
 
@@ -76,9 +76,10 @@ const loadJSON = (k, fb) => { try { const r = localStorage.getItem(k); return r 
 const DEFAULT_CFG = {
   v: 1,
   targets: [],                         // nameLow list = enabled bosses, in priority order (first alive + uncapped wins)
-  bosses: {},                          // nameLow -> { cap, gate, wave, targeting:'auto|normal|shielded', <kind>:'' (one per preset kind that is offered: gear, crystal, pet, …), switchAt:'HH:MM', capAfterSwitch }
+  bosses: {},                          // nameLow -> { cap, targeting:'auto|normal|shielded', <kind>:'' | '__keep' | presetId (one per preset kind offered: gear, crystal, pet, …; '' = use the default loadout), schedule:[{ at:'HH:MM', cap }] (server time) }
+  loadout: {},                         // preset kind -> preset id applied on every boss without a pick of its own ('' = keep what is equipped)
   defaultBossCap: 3_000_000_000,
-  maxTier: 'LEGENDARY',
+  maxTier: 'WORLD_BREAKER',            // always the strongest; pickTier steps down only when less is left under the cap
   classOverride: 'auto', useClassSkill: true,
   attackDelayMs: 350,                  // between swings, WAVE bosses
   dungeonAttackDelayMs: 0,             // dungeon bosses chain swings back-to-back
@@ -86,10 +87,10 @@ const DEFAULT_CFG = {
   fightScanMs: 30000,                  // while fighting: rescan a target's wave page at least this often
   idleRecheckMs: 30000,                // not alive / capped: recheck this often (or at the known respawn time)
   maxIdleRecheckMs: 300000, spawnLeadMs: 5000,
-  dungeonPollMs: 45000,
-  mana: { enabled: true, type: 'S', name: '', threshold: 20, fillTo: 60, fullMaxAt0: true },
-  stam: { A: { enabled: false, item: 'Full Stamina Potion' }, B: { enabled: false, item: 'Large Stamina Potion' }, save: { enabled: false, thresholdPct: 93.5 } },
-  hp: { enabled: false, thresholdPct: 0 },
+  dungeonPollMs: 60000,
+  mana: { enabled: true, type: 'S', threshold: 20 },     // drink a mana potion when MP <= threshold (or below the class skill's cost)
+  stam: { enabled: false, item: 'Large Stamina Potion', save: { enabled: false, thresholdPct: 93.5 } },     // item: 'Large Stamina Potion' | 'Full Stamina Potion'
+  hp: { enabled: false, thresholdPct: 0 },                // drinks when the server says you are dead (HP 0)
   autoFarmControl: true,
   autoDuel: true,
   sideMob: { enabled: false, lockedKey: '' },          // shielded-boss side-mob targeting (off: it shouldn't be needed)
@@ -104,10 +105,25 @@ const logStore = Core.store(ID + '-log', { def: [] });
 function mergeCfg(saved) {
   const d = JSON.parse(JSON.stringify(DEFAULT_CFG)), s = saved && typeof saved === 'object' ? saved : {};
   const out = Object.assign(d, s);
-  for (const k of ['mana', 'hp', 'sideMob', 'autoLoot', 'parts']) out[k] = Object.assign({}, DEFAULT_CFG[k], s[k] || {});
-  out.stam = { A: Object.assign({}, DEFAULT_CFG.stam.A, (s.stam || {}).A), B: Object.assign({}, DEFAULT_CFG.stam.B, (s.stam || {}).B), save: Object.assign({}, DEFAULT_CFG.stam.save, (s.stam || {}).save) };
+  for (const k of ['mana', 'hp', 'sideMob', 'autoLoot']) out[k] = Object.assign({}, DEFAULT_CFG[k], s[k] || {});
+  out.parts = Object.assign({}, DEFAULT_CFG.parts); Object.keys(out.parts).forEach((k) => { out.parts[k] = true; });   // modules are always on
+  out.maxTier = 'WORLD_BREAKER';
+  // stamina: one potion (Large or Full). Older saves had two slots (A, then B): keep whichever was switched on.
+  const os = s.stam || {}, A = os.A || {}, B = os.B || {};
+  const on = os.enabled != null ? !!os.enabled : !!(A.enabled || B.enabled);
+  const item = os.item || (A.enabled ? A.item : B.enabled ? B.item : '') || DEFAULT_CFG.stam.item;
+  out.stam = { enabled: on, item: /full/i.test(item) ? 'Full Stamina Potion' : 'Large Stamina Potion', save: Object.assign({}, DEFAULT_CFG.stam.save, os.save) };
+  out.hp.thresholdPct = 0;
+  if (out.dungeonPollMs === 45000) out.dungeonPollMs = 60000;
+  delete out.mana.fullMaxAt0; delete out.mana.fillTo; delete out.mana.name;
+  out.loadout = s.loadout && typeof s.loadout === 'object' ? s.loadout : {};
   out.targets = Array.isArray(s.targets) ? s.targets.slice() : [];
   out.bosses = s.bosses && typeof s.bosses === 'object' ? s.bosses : {};
+  for (const o of Object.values(out.bosses)) {                               // one "switch cap at" pair -> the first cap change
+    if (!o) continue;
+    if (o.switchAt && o.capAfterSwitch != null && !Array.isArray(o.schedule)) o.schedule = [{ at: o.switchAt, cap: o.capAfterSwitch }];
+    delete o.switchAt; delete o.capAfterSwitch;
+  }
   return out;
 }
 let cfg = mergeCfg(cfgStore.get());
@@ -534,9 +550,13 @@ const bossName = (low) => { const d = Roster.get(low); return (d && d.name) || l
 function bossCap(low) {
   const def = Roster.get(low), o = cfg.bosses[low] || {};
   const base = o.cap != null ? o.cap : (def && def.defaultCap != null ? def.defaultCap : cfg.defaultBossCap);
-  if (o.switchAt && o.capAfterSwitch != null) {       // "from this SERVER time on, use this cap"
+  if (Array.isArray(o.schedule) && o.schedule.length) {      // "from this SERVER time on, use this cap" (latest row that has started; resets at midnight)
     const mins = serverMinutes();
-    if (mins != null) { const [h, m] = o.switchAt.split(':').map(Number); if (mins >= h * 60 + (m || 0)) return o.capAfterSwitch; }
+    if (mins != null) {
+      let best = null;
+      for (const b of o.schedule) { const [hr, mi] = String(b.at).split(':').map(Number), t = hr * 60 + (mi || 0); if (mins >= t && (!best || t >= best.t) && Number.isFinite(b.cap)) best = { t, cap: b.cap }; }
+      if (best) return best.cap;
+    }
   }
   return base;
 }
@@ -746,21 +766,20 @@ const Potions = (() => {
   let manaName = '', outUntil = 0, refilling = false, warnedAt = 0;
   const warn = (m) => { if (Date.now() - warnedAt > 30000) { warnedAt = Date.now(); log(m, 'warn'); } };
   async function resolveMana() {
-    if (cfg.mana.name) return cfg.mana.name;
     if (manaName) return manaName;
     for (const n of NAMES[cfg.mana.type] || NAMES.S) { const f = await Core.potions.find(n).catch(() => null); if (f) { manaName = n; return n; } }
     return '';
   }
-  async function refillMana(why) {
+  async function refillMana(why, minMp) {
     if (!cfg.mana.enabled || refilling || Date.now() < outUntil) return false;
     if (!Me.mpKnown) await Me.refresh(0);
     if (!Me.mpKnown) return false;
-    const target = cfg.mana.fullMaxAt0 && Me.mp <= 0 ? Me.maxMp : cfg.mana.fillTo;
+    let target = Math.max(cfg.mana.threshold + 1, minMp || 0); if (Me.maxMp > 0) target = Math.min(target, Me.maxMp);
     if (Me.mp >= target) return false;
     refilling = true;
     try {
       const name = await resolveMana();
-      if (!name) { outUntil = Date.now() + 60000; warn('⚠️ no Mana Potion found in sidebar/inventory — set its exact name in Potions'); return false; }
+      if (!name) { outUntil = Date.now() + 60000; warn('⚠️ no Mana Potion found in sidebar/inventory'); return false; }
       const need = Math.max(1, Math.ceil((target - Me.mp) / (MP_PER[cfg.mana.type] || 20))), before = Me.mp; let used = 0;
       for (let i = 0; i < need; i++) {
         const r = await Core.potions.use(name, { force: true });
@@ -780,16 +799,13 @@ const Potions = (() => {
     return true;
   }
   async function refillStamina() {
-    if (!canUseStam()) return false;
-    for (const slot of ['A', 'B']) {
-      const c = cfg.stam[slot]; if (!c.enabled) continue;
-      const r = await Core.potions.stamina({ item: c.item });
-      if (r.ok) {
-        try { await Core.me.sync(); } catch (_) { /* */ }
-        stats['stam' + slot]++; log(`🧪 ${esc(c.item)} ${r.used ? 'used' : 'covered by another script'} · stamina ${Me.stam()}/${Me.maxStam()}`, 'info'); return true;
-      }
-      if (r.reason === 'none-available') warn(`⚠️ no ${esc(c.item)} left`);
+    const c = cfg.stam; if (!c.enabled || !canUseStam()) return false;
+    const r = await Core.potions.stamina({ item: c.item });
+    if (r.ok) {
+      try { await Core.me.sync(); } catch (_) { /* */ }
+      stats.stamA++; log(`🧪 ${esc(c.item)} ${r.used ? 'used' : 'covered by another script'} · stamina ${Me.stam()}/${Me.maxStam()}`, 'info'); return true;
     }
+    if (r.reason === 'none-available') warn(`⚠️ no ${esc(c.item)} left`);
     return false;
   }
   async function heal(why) {
@@ -826,7 +842,7 @@ const effectiveClass = () => { const o = (cfg.classOverride || 'auto').toLowerCa
  */
 const Presets = (() => {
   const FIRST = ['gear', 'crystal', 'pet'];                                        // applied in this order; any other kind follows A-Z
-  const RESERVED = new Set(['cap', 'gate', 'wave', 'targeting', 'switchAt', 'capAfterSwitch']);   // boss fields a kind must not shadow
+  const RESERVED = new Set(['cap', 'gate', 'wave', 'targeting', 'schedule', 'switchAt', 'capAfterSwitch']);   // boss fields a kind must not shadow
   const applied = {}, failedAt = {};
   const haveCaps = () => typeof Core.caps === 'function' && typeof Core.call === 'function';
   const kinds = () => {
@@ -849,7 +865,8 @@ const Presets = (() => {
   async function ensure(low) {
     const o = cfg.bosses[low] || {};
     for (const kind of kinds()) {
-      const want = o[kind]; if (!want || applied[kind] === String(want)) continue;
+      const mine = o[kind], want = mine === '__keep' ? '' : (mine || (cfg.loadout || {})[kind]);   // the boss's own pick, else the default loadout
+      if (!want || applied[kind] === String(want)) continue;
       const key = kind + ':' + want;
       if (Date.now() - (failedAt[key] || 0) < 300000) continue;           // a failed apply is not retried for 5 min
       log(`🎒 applying ${kind} preset "${esc(nameOf(kind, want))}" for ${esc(bossName(low))}…`, 'info');
@@ -977,10 +994,12 @@ const Engine = (() => {
     if (jr.status === 0) warnOnce('⚠️ join request failed: ' + esc(jr.text));
 
     // 2) CLASS SKILL (optional bonus hit; mana is refilled first when it is low)
-    const cls = cfg.useClassSkill && cfg.mana.enabled ? effectiveClass() : null, cs = cls ? CLASS_SKILLS[cls] : null;
+    if (!Me.stamKnown()) { try { await Core.me.sync(); } catch (_) { /* */ } }
+    const cls = cfg.useClassSkill ? effectiveClass() : null, cs = cls ? CLASS_SKILLS[cls] : null;
+    const wb = pickTier(t.low, Math.max(0, cap - cur), cfg.maxTier, Me.stam()) === 'WORLD_BREAKER';   // the class skill is only cast before World Breaker
     let skillUsed = false;
-    if (cs && Date.now() >= skillOffUntil) {
-      if (Me.mpKnown && (Me.mp <= cfg.mana.threshold || Me.mp < cs.cost)) await Potions.refillMana('auto');
+    if (cs && wb && Date.now() >= skillOffUntil) {
+      if (Me.mpKnown && (Me.mp <= cfg.mana.threshold || Me.mp < cs.cost)) await Potions.refillMana('auto', cs.cost);
       if (!live(tk)) return { ok: false, reason: 'halt' };
       if (Me.mp >= cs.cost || !Me.mpKnown) {
         const eligible = SideMob.eligible(t);
@@ -1016,7 +1035,7 @@ const Engine = (() => {
         }
       } else Diag.skip('skill-skipped-low-mp', `${Me.mp}/${cs.cost}`);
     }
-    const attackGap = cs ? (skillUsed ? cfg.skillToAttackGapMs : 600) : 120;
+    const attackGap = skillUsed ? cfg.skillToAttackGapMs : (cs && wb ? 600 : 120);
 
     // 3) ATTACK (tier downgrade until the estimated hit fits what is left under the cap and the stamina on hand)
     if (!Me.stamKnown()) { try { await Core.me.sync(); } catch (_) { /* */ } }
@@ -1668,11 +1687,11 @@ Object.assign(Loot, (() => {
 
 /* ===================================================================================================================
  * PART 5 — PANEL (one Core.float button + panel)
- *   Overview   what it is doing now, your vitals, the farm queue
- *   Bosses     farm order, default loadout, bosses grouped into Waves / Dungeons (collapsible), per-boss cap + timed cap changes
- *   Supplies   stamina / HP / mana potions
- *   Loot       auto-loot + the graveyard
- *   Settings   skills, behaviour, modules, advanced timing
+ *   Overview   what it is doing now: vitals, bosses being farmed, session numbers (collapsible groups)
+ *   Bosses     bosses to farm in two collapsible lists (Waves / Dungeons), default loadout, per-boss cap + timed cap changes
+ *   Supplies   stamina potion (+ save near EXP cap, auto-loot when out), HP potion, mana potion
+ *   Loot       the graveyard
+ *   Settings   class skill, behaviour, advanced timing
  *   Activity   log + skip reasons in one place
  * Look: Cube Suite's building blocks (switches, segmented controls, chips, pills, collapsible blocks, h:m AM/PM time picker)
  * on Core's palette. Core's own classes (core-btn / core-pill / core-empty ...) where they fit, ma-* for the rest.
@@ -1812,10 +1831,13 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:6px}
 .ma-lc-n{flex:1;min-width:0}.ma-lc-n b{display:block;font:700 12.5px/1.3 Arial,sans-serif}.ma-lc-n small{display:block;color:#7c88ad;font-size:11px;margin-top:1px}
 .ma-claim{background:linear-gradient(135deg,#217f5b,#33b57f)!important;box-shadow:0 6px 14px rgba(33,127,91,.25)!important;padding:7px 13px!important;font-size:11.5px!important}
 /* activity */
-.ma-log{background:#0a0f1c;border:1px solid rgba(255,255,255,.06);border-radius:12px;padding:6px;max-height:430px;overflow-y:auto;font:11.5px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
-.ma-log::-webkit-scrollbar{width:7px}.ma-log::-webkit-scrollbar-thumb{background:#27324f;border-radius:4px}
-.ma-ll{padding:3px 8px;border-left:2px solid #27324f;color:#bcc7ea;overflow-wrap:anywhere;margin-bottom:1px}.ma-ll b{color:#566186;font-weight:400;margin-right:7px}
-.ma-ll.ok{border-left-color:#33b57f;color:#8ee6a8}.ma-ll.warn{border-left-color:#e3b341;color:#ffd978}.ma-ll.err{border-left-color:#e5484d;color:#ff9aa6}.ma-ll.dmg{border-left-color:#c79a2e;color:#f1d68f}.ma-ll.skill{border-left-color:#a371f7;color:#d9c4ff}.ma-ll.info{border-left-color:#4b73e0;color:#b9d2ff}
+.ma-log{display:flex;flex-direction:column;gap:5px;max-height:460px;overflow-y:auto;padding-right:2px}
+.ma-log::-webkit-scrollbar{width:7px}.ma-log::-webkit-scrollbar-thumb{background:#2b3859;border-radius:4px}
+.ma-ll{padding:8px 11px;border-radius:10px;border-left:3px solid #2b3859;background:#0d1322;font:12px/1.45 Arial,sans-serif;color:#c9d4f5;overflow-wrap:anywhere}
+.ma-ll b{color:#6e7a8c;font-weight:400;margin-right:7px;font-variant-numeric:tabular-nums}
+.ma-ll.ok{border-left-color:#33b57f;color:#8ee6a8}.ma-ll.warn{border-left-color:#e3b341;color:#ffd978}.ma-ll.err{border-left-color:#e5484d;color:#ff9a9a}
+.ma-ll.dmg{border-left-color:#e3b341;color:#ffe3a3}.ma-ll.skill{border-left-color:#a371f7;color:#d9c4ff}.ma-ll.info{border-left-color:#6ea8ff;color:#c9e6ff}
+.ma-ctl{display:flex;align-items:center;gap:10px}
 /* footer */
 .ma-foot{position:sticky;bottom:-22px;z-index:2;display:flex;align-items:center;gap:12px;margin:14px -22px -22px;padding:13px 22px;background:#0e1422;border-top:1px solid rgba(255,255,255,.08);border-radius:0 0 22px 22px}
 .ma-foot-st{flex:1;min-width:0}.ma-foot-st b{display:flex;align-items:center;gap:8px;font:800 12px Arial,sans-serif;color:#eef3ff;text-transform:uppercase;letter-spacing:.04em}
@@ -1859,8 +1881,8 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:6px}
       op ? h('div', { class: 'ma-fold-b' }, ...[].concat(body())) : null);
   };
   const card = (icon, title, desc, on, setOn, body) => h('div', { class: 'ma-card' + (on ? '' : ' off') },
-    h('div', { class: 'ma-card-h' }, h('span', { class: 'ma-ico' }, icon), h('div', { class: 'ma-card-t' }, h('b', {}, title), h('small', {}, desc)), sw(() => on, setOn)),
-    on && body ? h('div', { class: 'ma-card-b' }, ...[].concat(body)) : null);
+    h('div', { class: 'ma-card-h' }, h('span', { class: 'ma-ico' }, icon), h('div', { class: 'ma-card-t' }, h('b', {}, title), h('small', {}, desc)), setOn ? sw(() => on, setOn) : null),
+    body ? h('div', { class: 'ma-card-b' }, ...[].concat(body)) : null);
 
   /* ---- time helpers (server clock) ---- */
   const toMin = (at) => { const [hr, mi] = String(at || '00:00').split(':').map(Number); return (hr || 0) * 60 + (mi || 0); };
@@ -1906,22 +1928,17 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:6px}
     const now = serverMinutes(); if (now == null) return null;
     return o.schedule.map((b) => ({ t: toMin(b.at), cap: b.cap })).sort((a, b) => a.t - b.t).find((b) => b.t > now) || null;
   }
+  const rIdx = (low) => Roster.list.indexOf(Roster.get(low));
   function setMany(defs, on) {
     defs.forEach((def) => {
       const ms = Roster.members(def);
       if (on) ms.forEach((m) => { if (!cfg.targets.includes(m.low)) cfg.targets.push(m.low); });
       else cfg.targets = cfg.targets.filter((l) => !ms.some((m) => m.low === l));
     });
+    cfg.targets.sort((x, y) => rIdx(x) - rIdx(y));          // no manual ordering: strongest-listed first, same order as the Bosses tab
     saveCfg(); Engine.poke(true); draw();
   }
-  const orderEntries = () => { const seen = new Set(), out = []; cfg.targets.forEach((low) => { const d = Roster.get(low); if (!d) return; const c = Roster.canon(d); if (!seen.has(c.low)) { seen.add(c.low); out.push(c); } }); return out; };
-  function moveEntry(c, dir) {
-    const es = orderEntries(), i = es.indexOf(c), j = i + dir; if (i < 0 || j < 0 || j >= es.length) return;
-    [es[i], es[j]] = [es[j], es[i]];
-    const nt = []; es.forEach((e) => Roster.members(e).forEach((m) => { if (cfg.targets.includes(m.low) && !nt.includes(m.low)) nt.push(m.low); }));
-    cfg.targets.forEach((l) => { if (!nt.includes(l)) nt.push(l); });
-    cfg.targets = nt; saveCfg(); Engine.poke(true); draw();
-  }
+  const selectedEntries = () => { const seen = new Set(), out = []; cfg.targets.forEach((low) => { const d = Roster.get(low); if (!d) return; const c = Roster.canon(d); if (!seen.has(c.low)) { seen.add(c.low); out.push(c); } }); return out.sort((x, y) => rIdx(x.low) - rIdx(y.low)); };
 
   /* ---- footer (always visible): status + Start / Stop ---- */
   const STATE_TXT = { FIGHTING: 'Fighting', RUNNING: 'Running', WAITING: 'Waiting for a boss', 'NO STAMINA': 'Out of stamina', DUEL: 'Phase duel', PAUSED: 'Paused', STOPPED: 'Stopped', FOLLOWER: 'Another tab is running it' };
@@ -1947,7 +1964,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:6px}
     const gi = Guard.info(); if (gi.faulted || gi.lastInfo) out.push(h('div', { class: 'ma-alert' }, '🔒 ' + (gi.lastInfo || gi.faulted) + (gi.lastInfo === 'unconfigured' ? ' — add a login source (Account Switcher) or sign in by hand' : '')));
     if (!Tab.isMain()) out.push(h('div', { class: 'ma-alert info' }, 'Another tab is the main one and does the attacking. This tab only shows what it is doing.', h('div', {}, btn('Take over this tab', 'soft', () => { Tab.takeOver(); }))));
 
-    // hero
+    // hero: what it is doing right now
     let nextIn = null; try { const n = Scan.nextDueIn(); if (Number.isFinite(n)) nextIn = n; } catch (_) { /* */ }
     if (cur) {
       const ev = Board.get(cur.low) || {}, cap = bossCap(cur.low), dmg = Math.max(ev.userDmg || 0, cur.userDmg || 0), pct = cap > 0 ? Math.min(100, dmg / cap * 100) : 0;
@@ -1964,25 +1981,25 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:6px}
 
     // vitals
     const xp = Me.expPct();
-    out.push(h('div', { class: 'ma-vitals' },
+    out.push(fold('ov:vitals', true, '❤️ Vitals', () => [h('div', { class: 'ma-vitals', style: { marginTop: '8px', marginBottom: 0 } },
       meter('HP', Me.hp, Me.maxHp, 'hp', Me.hpKnown), meter('Stamina', Me.stam(), Me.maxStam(), 'st', Me.stamKnown()),
-      meter('Mana', Me.mp, Me.maxMp, 'mp', Me.mpKnown), meter('EXP · Lv ' + (Me.level() || '?'), xp || 0, 100, 'xp', xp != null, xp != null ? xp.toFixed(1) + '%' : '')));
+      meter('Mana', Me.mp, Me.maxMp, 'mp', Me.mpKnown), meter('EXP · Lv ' + (Me.level() || '?'), xp || 0, 100, 'xp', xp != null, xp != null ? xp.toFixed(1) + '%' : ''))]));
 
-    // queue
-    out.push(caption('Farm queue'));
-    if (!cfg.targets.length) out.push(h('div', { class: 'ma-empty' }, 'Nothing to farm yet.', h('div', {}, btn('Choose bosses', '', () => go('bosses')))));
-    else out.push(h('div', { class: 'ma-card', style: { padding: '6px' } }, orderEntries().map((def, i) => {
-      const low = (Roster.members(def).find((m) => { const e = Board.get(m.low); return e && e.alive; }) || def).low, [txt, kind] = entryState(def), ev = Board.get(low) || {}, cap = bossCap(low), dmg = ev.userDmg || 0, swarm = def.kind === 'dungeon-swarm';
-      return h('div', { class: 'ma-q', onclick: () => go('bosses') }, h('span', { class: 'ma-rank' }, i + 1), avatar(def.name, ev.icon || iconOfBoss(def.low), { boss: true }),
-        h('div', { class: 'ma-q-n' }, h('b', {}, def.name), swarm ? null : h('div', { class: 'ma-bar' + (cap > 0 && dmg >= cap ? ' done' : '') }, h('i', { style: { width: (cap > 0 ? Math.min(100, dmg / cap * 100) : 0).toFixed(1) + '%' } })), swarm ? null : h('small', {}, `${fmtNum(dmg)} / ${fmtNum(cap)}`)), pill(txt, kind));
-    })));
+    // bosses being farmed
+    const sel = selectedEntries();
+    out.push(fold('ov:targets', true, ['🎯 Bosses to farm', h('small', {}, sel.length ? sel.length + ' selected' : '')], () => !sel.length
+      ? [h('div', { class: 'ma-empty', style: { margin: '8px 0 0' } }, 'Nothing to farm yet.', h('div', {}, btn('Choose bosses', '', () => go('bosses'))))]
+      : sel.map((def) => {
+        const low = (Roster.members(def).find((m) => { const e = Board.get(m.low); return e && e.alive; }) || def).low, [txt, kind] = entryState(def), ev = Board.get(low) || {}, cap = bossCap(low), dmg = ev.userDmg || 0, swarm = def.kind === 'dungeon-swarm';
+        return h('div', { class: 'ma-q', onclick: () => go('bosses') }, avatar(def.name, ev.icon || iconOfBoss(def.low), { boss: true }),
+          h('div', { class: 'ma-q-n' }, h('b', {}, def.name), swarm ? null : h('div', { class: 'ma-bar' + (cap > 0 && dmg >= cap ? ' done' : '') }, h('i', { style: { width: (cap > 0 ? Math.min(100, dmg / cap * 100) : 0).toFixed(1) + '%' } })), swarm ? null : h('small', {}, `${fmtNum(dmg)} / ${fmtNum(cap)}`)), pill(txt, kind));
+      })));
 
     // numbers
-    const up = Date.now() - (stats.started || Date.now());
-    out.push(caption('This session'));
-    out.push(h('div', { class: 'ma-stats' }, [['⚔️ Hits', stats.hits], ['💥 Damage', fmtNum(stats.dmg)], ['🧪 Stamina', stats.stamA + stats.stamB], ['💊 HP', stats.hpUses], ['💧 Mana', stats.mpRefills], ['⏱ Up', fmtDur(up)]].map(([k, v]) => h('div', { class: 'ma-stat' }, k, h('b', {}, v)))));
-    const ap = Presets.summary(); if (ap && ap !== '—') out.push(note('🎒 Equipped by Automator: ' + ap));
-    out.push(h('div', { class: 'ma-actions', style: { marginTop: '10px' } }, btn('🔎 Scan now', 'soft', () => Engine.scanNow()), btn('Clear skips', 'soft', () => { Engine.clearSkips(); Diag.clear(); draw(); })));
+    const up = Date.now() - (stats.started || Date.now()), ap = Presets.summary();
+    out.push(fold('ov:session', false, '📊 This session', () => [h('div', { class: 'ma-stats', style: { marginTop: '8px' } }, [['⚔️ Hits', stats.hits], ['💥 Damage', fmtNum(stats.dmg)], ['🧪 Stamina', stats.stamA + stats.stamB], ['💊 HP', stats.hpUses], ['💧 Mana', stats.mpRefills], ['⏱ Up', fmtDur(up)]].map(([k, v]) => h('div', { class: 'ma-stat' }, k, h('b', {}, v)))),
+      ap && ap !== '—' ? note('🎒 Equipped by Automator: ' + ap) : null]));
+    out.push(h('div', { class: 'ma-actions', style: { marginTop: '12px' } }, btn('🔎 Scan now', 'soft', () => Engine.scanNow()), btn('Clear skips', 'soft', () => { Engine.clearSkips(); Diag.clear(); draw(); })));
     return out;
   }
 
@@ -2019,26 +2036,15 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:6px}
     if (cfg.bosses[low] && Object.keys(cfg.bosses[low]).length) out.push(h('div', { style: { marginTop: '8px' } }, h('button', { type: 'button', class: 'ma-link', onclick: () => { delete cfg.bosses[low]; saveCfg(); draw(); } }, '↺ Reset this boss to defaults')));
     return h('div', { class: 'ma-ed' }, ...out);
   }
+  const placeOf = (def) => { if (def.kind === 'wave') { const l = bossLoc(def.low); return l ? `Gate ${l.gate} · Wave ${l.wave}` : 'Wave'; } return def.kind === 'dungeon-swarm' ? 'Shadowbridge' : 'Castle'; };
   function entry(def) {
-    const on = isOn(def), key = 'boss:' + def.low, op = !!ui.open[key], ms = Roster.members(def), [txt, kind] = entryState(def), cap = bossCap(def.low), nx = nextChange(def.low), wv = waveOf(def);
-    const meta = [def.kind === 'wave' ? (wv ? 'Wave ' + wv : 'Wave') : '', cap > 0 ? 'cap ' + fmtNum(cap) : 'skipped', nx ? `→ ${fmtNum(nx.cap)} at ${fmtClock(nx.t)}` : '', ms.length > 1 ? ms.length + ' phases' : ''].filter(Boolean).join(' · ');
+    const on = isOn(def), key = 'boss:' + def.low, op = !!ui.open[key], ms = Roster.members(def), [txt, kind] = entryState(def), cap = bossCap(def.low), nx = nextChange(def.low);
+    const meta = [placeOf(def), cap > 0 ? 'cap ' + fmtNum(cap) : 'skipped', nx ? `→ ${fmtNum(nx.cap)} at ${fmtClock(nx.t)}` : '', ms.length > 1 ? ms.length + ' phases' : ''].filter(Boolean).join(' · ');
     return h('div', { class: 'ma-ent' + (on ? ' on' : '') },
       h('div', { class: 'ma-ent-h', onclick: () => { ui.open[key] = !op; saveUi(); draw(); } },
         sw(() => on, (v) => setMany([def], v), { sm: true, redraw: false }), avatar(def.name, iconOfBoss(def.low), { boss: true }),
         h('div', { class: 'ma-ent-n' }, h('b', { title: def.name }, def.name), h('small', { title: meta }, meta)), on ? pill(txt, kind) : null, h('span', { class: 'ma-ech' }, op ? '▾' : '▸')),
       op ? bossEditor(def) : null);
-  }
-  function orderCard() {
-    const es = orderEntries();
-    return fold('order', true, ['📋 Farm order', h('small', {}, es.length ? es.length + ' selected' : '')], () => es.length
-      ? [note('Top to bottom: the first boss that is alive and under its cap gets attacked.'), ...es.map((def, i) => {
-        const [txt, kind] = entryState(def);
-        return h('div', { class: 'ma-q', style: { cursor: 'default' } }, h('span', { class: 'ma-rank' }, i + 1), avatar(def.name, iconOfBoss(def.low), { boss: true }),
-          h('div', { class: 'ma-q-n' }, h('b', { title: def.name }, def.name), h('small', {}, 'cap ' + fmtNum(bossCap(def.low)))), pill(txt, kind),
-          h('button', { class: 'ma-mini', type: 'button', title: 'Higher priority', disabled: i === 0 ? true : null, onclick: () => moveEntry(def, -1) }, '↑'),
-          h('button', { class: 'ma-mini', type: 'button', title: 'Lower priority', disabled: i === es.length - 1 ? true : null, onclick: () => moveEntry(def, 1) }, '↓'));
-      })]
-      : [h('div', { class: 'ma-empty', style: { margin: '6px 0' } }, 'Nothing selected. Switch bosses on below.')]);
   }
   function loadoutCard() {
     const kinds = Presets.kinds(), set = kinds.filter((k) => (cfg.loadout || {})[k]);
@@ -2051,32 +2057,18 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:6px}
     const f = (ui.filter || '').trim().toLowerCase(), force = !!f;
     const match = (d) => !f || Roster.members(d).some((m) => m.name.toLowerCase().includes(f));
     const all = Roster.list.filter((d) => Roster.canon(d) === d && match(d));
-    const waves = all.filter((d) => d.kind === 'wave'), dungs = all.filter((d) => d.kind !== 'wave');
-    const counts = (defs) => { const n = defs.filter(isOn).length; return h('span', { class: 'ma-pill' + (n ? ' blue' : '') }, n + ' / ' + defs.length + ' on'); };
+    const gw = (d) => { const l = bossLoc(d.low); return l ? l.gate * 100 + l.wave : 0; };
+    const waves = all.filter((d) => d.kind === 'wave').sort((x, y) => gw(x) - gw(y) || rIdx(x.low) - rIdx(y.low)), dungs = all.filter((d) => d.kind !== 'wave');
+    const counts = (defs) => { const n = defs.filter(isOn).length; return h('span', { class: 'ma-pill' + (n ? ' blue' : '') }, n + ' / ' + defs.length); };
     const bulk = (defs) => [h('button', { class: 'ma-link', type: 'button', onclick: (e) => { stop(e); setMany(defs, true); } }, 'All'), h('button', { class: 'ma-link', type: 'button', onclick: (e) => { stop(e); setMany(defs, false); } }, 'None')];
-    const sub = (key, title, defs, withWaves) => {
-      if (!defs.length) return null;
-      return fold(key, defs.some(isOn), title, () => {
-        const out = []; let lastW = null;
-        defs.forEach((d) => { const w = waveOf(d); if (withWaves && w && w !== lastW) { out.push(h('div', { class: 'ma-wave' }, 'Wave ' + w)); lastW = w; } out.push(entry(d)); });
-        return out;
-      }, { sub: true, force, aside: [counts(defs), ...bulk(defs)] });
-    };
     const out = [];
-    if (waves.length) {
-      const gates = [...new Set(waves.map((d) => { const l = bossLoc(d.low); return l ? l.gate : 0; }))].sort((a, b) => a - b);
-      out.push(fold('sec:waves', true, '🌊 Waves', () => gates.map((g) => sub('gate:' + g, g ? 'Gate ' + g : 'Other', waves.filter((d) => { const l = bossLoc(d.low); return (l ? l.gate : 0) === g; }), true)), { force, aside: counts(waves) }));
-    }
-    if (dungs.length || !Kernel.isOn('dungeons')) {
-      out.push(fold('sec:dungeons', true, '🏰 Dungeons', () => Kernel.isOn('dungeons') ? [
-        sub('dg:castle', '🏰 Castle', dungs.filter((d) => d.kind === 'dungeon')), sub('dg:shadow', '🌉 Shadowbridge', dungs.filter((d) => d.kind === 'dungeon-swarm')),
-        sub('dg:other', 'Other', dungs.filter((d) => d.kind !== 'dungeon' && d.kind !== 'dungeon-swarm'))] : [note('The Dungeons module is switched off in Settings.')], { force, aside: Kernel.isOn('dungeons') ? counts(dungs) : pill('off', '') }));
-    }
+    if (waves.length) out.push(fold('sec:waves', true, '🌊 Waves', () => waves.map(entry), { force, aside: [counts(waves), ...bulk(waves)] }));
+    if (dungs.length || !Kernel.isOn('dungeons')) out.push(fold('sec:dungeons', true, '🏰 Dungeons', () => Kernel.isOn('dungeons') ? dungs.map(entry) : [note('The Dungeons module is switched off.')], { force, aside: Kernel.isOn('dungeons') ? [counts(dungs), ...bulk(dungs)] : null }));
     if (!out.length) out.push(h('div', { class: 'ma-empty' }, 'No boss matches “' + ui.filter + '”.'));
     return out;
   }
   function tBosses() {
-    const out = [orderCard()];
+    const out = [];
     if (Presets.kinds().length) out.push(loadoutCard());
     const box = h('div', {}), fill = () => box.replaceChildren(...bossSections());
     out.push(h('input', { class: 'ma-search', placeholder: '🔎 Filter bosses…', value: ui.filter || '', oninput: (e) => { ui.filter = e.target.value; saveUi(); fill(); } }));
@@ -2086,17 +2078,18 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:6px}
 
   /* =================================================== SUPPLIES =================================================== */
   function tSupplies() {
-    const S = cfg.stam, H = cfg.hp, M = cfg.mana, SV = S.save;
+    const S = cfg.stam, SV = S.save, H = cfg.hp, M = cfg.mana, L = cfg.autoLoot;
     return [
       card('⚡', 'Stamina potion', 'Drinks one when you run out of stamina.', S.enabled, (v) => { S.enabled = v; }, [
-        field('Potion', null, seg([['Large Stamina Potion', 'Large'], ['Full Stamina Potion', 'Full']], S.item, (v) => { S.item = v; }, { full: true })),
-        setting('Save stamina near the EXP cap', 'Stop drinking once your EXP bar is nearly full.', sw(() => SV.enabled, (v) => { SV.enabled = v; })),
-        SV.enabled ? setting('Stop at EXP', null, num(() => SV.thresholdPct, (n) => { SV.thresholdPct = n; }, { parse: parseFloat, min: 0, max: 100, unit: '%', w: 70 })) : null]),
+        setting('Potion', null, dropdown([['Large Stamina Potion', 'Large Stamina Potion'], ['Full Stamina Potion', 'Full Stamina Potion']], S.item, (v) => { S.item = v; })),
+        setting('Save potions above', 'Stops drinking once your EXP bar is past this, so a potion is not wasted on a level-up.', h('div', { class: 'ma-ctl' }, num(() => SV.thresholdPct, (n) => { SV.thresholdPct = n; }, { parse: parseFloat, min: 0, max: 100, unit: '% EXP', w: 64 }), sw(() => SV.enabled, (v) => { SV.enabled = v; }, { redraw: false }))),
+        caption('When out of stamina'),
+        setting('Auto-loot corpses', 'Runs when the potion is off, saving, or empty. Otherwise it drinks a potion first.', sw(() => L.enabled, (v) => { L.enabled = v; })),
+        L.enabled ? setting('Claim', null, dropdown([['toLevel', 'Only what levels me up'], ['all', 'Everything']], L.mode, (v) => { L.mode = v; })) : null]),
       card('❤️', 'HP potion', 'Drinks one when your HP hits 0.', H.enabled, (v) => { H.enabled = v; H.thresholdPct = 0; }),
-      card('💧', 'Mana potion', 'Keeps enough mana for your class skill.', M.enabled, (v) => { M.enabled = v; }, [
-        field('Potion size', 'how much each one restores', seg([['S', 'S · 20'], ['M', 'M · 40'], ['L', 'L · 60'], ['XL', 'XL · 100']], M.type, (v) => { M.type = v; }, { full: true })),
-        h('div', { class: 'ma-two' }, field('Drink when MP is at or below', null, num(() => M.threshold, (n) => { M.threshold = n; }, { w: 80 })), field('Refill up to', null, num(() => M.fillTo, (n) => { M.fillTo = n; }, { w: 80 }))),
-        note('Mana is only used when your class skill needs it (Settings → Class skill).')])];
+      card('💧', 'Mana potion', 'Drinks one when your mana drops to the number below, or can’t pay for the class skill.', M.enabled, (v) => { M.enabled = v; }, [
+        setting('Potion', null, dropdown([['S', 'Small · 20 MP'], ['M', 'Medium · 40 MP'], ['L', 'Large · 60 MP'], ['XL', 'XL · 100 MP']], M.type, (v) => { M.type = v; })),
+        setting('Drink when MP is at or below', null, num(() => M.threshold, (n) => { M.threshold = n; }, { w: 70 }))])];
   }
 
   /* ===================================================== LOOT ===================================================== */
@@ -2112,8 +2105,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:6px}
     };
     const bosses = list.filter(([, g]) => g.boss), mobs = list.filter(([, g]) => !g.boss);
     return [
-      card('🪦', 'Auto-loot', 'Claims corpses for you when you run out of stamina.', L.enabled, (v) => { L.enabled = v; }, [
-        field('Claim', null, seg([['toLevel', 'Only what levels me up'], ['all', 'Everything']], L.mode, (v) => { L.mode = v; }, { full: true }))]),
+      h('div', { class: 'ma-alert info' }, L.enabled ? 'Auto-loot is on: it claims these when you run out of stamina.' : 'Auto-loot is off.', ' ', h('button', { type: 'button', class: 'ma-link', onclick: () => go('supplies') }, 'Change in Supplies')),
       h('div', { class: 'ma-actions' }, btn(s.scanning ? 'Scanning…' : '🔎 Scan graveyard', 'soft', () => { Loot.scan(); }), btn(s.looting ? 'Looting…' : '🎒 Loot now', 'success', () => { Loot.pass(); })),
       note(`${total} lootable · scanned ${ago(s.lastScanAt)}${need != null ? ' · ' + fmtNum(need) + ' EXP to next level' : ''}`),
       ...(list.length ? [bosses.length ? caption('Bosses') : null, ...bosses.map(lootCard), mobs.length ? caption('Monsters') : null, ...mobs.map(lootCard)]
@@ -2122,20 +2114,16 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:6px}
 
   /* =================================================== SETTINGS =================================================== */
   function tSettings() {
-    const tiers = TIER_CHAIN.slice(0, 4).map((t) => [t, SKILLS[t].label + ' · ' + SKILLS[t].cost + ' stamina']);
-    const au = Guard.info();
+    const au = Guard.info(), cls = effectiveClass(), cs = cls ? CLASS_SKILLS[cls] : null;
     const timing = [['Wave swing gap', 'attackDelayMs'], ['Dungeon swing gap', 'dungeonAttackDelayMs'], ['Min gap between requests', 'minActionGapMs'], ['Skill → attack gap', 'skillToAttackGapMs']];
     return [
-      card('⚔️', 'Attacks', 'How hard and how often it hits.', true, () => {}, [
-        field('Strongest skill to use', null, dropdown(tiers, cfg.maxTier, (v) => { cfg.maxTier = v; })),
-        field('Class', cfg.detectedClass ? 'detected: ' + cfg.detectedClass : null, seg([['auto', 'Auto'], ['warrior', 'Warrior'], ['cleric', 'Cleric'], ['hunter', 'Hunter'], ['mage', 'Mage']], cfg.classOverride, (v) => { cfg.classOverride = v; }, { full: true })),
-        setting('Use the class skill', 'Costs mana, hits harder.', sw(() => cfg.useClassSkill, (v) => { cfg.useClassSkill = v; }, { redraw: false }))]),
-      h('div', { class: 'ma-card' }, caption('Behaviour').cloneNode(true) && null,
+      card('⚔️', 'Attacks', 'Always starts with World Breaker, and only steps down when less than that is left under the cap.', true, null, [
+        setting('Use class skill: ' + (cs ? cs.label : 'not detected yet'), 'Only cast right before a World Breaker slash.', sw(() => cfg.useClassSkill, (v) => { cfg.useClassSkill = v; }, { redraw: false })),
+        cs ? null : field('Class', 'could not be detected, pick yours', seg([['warrior', 'Warrior'], ['cleric', 'Cleric'], ['hunter', 'Hunter'], ['mage', 'Mage']], cfg.classOverride, (v) => { cfg.classOverride = v; }, { full: true }))]),
+      h('div', { class: 'ma-card' },
         setting('Pause the server auto-farm while fighting', 'So the two never fight over stamina.', sw(() => cfg.autoFarmControl, (v) => { cfg.autoFarmControl = v; }, { redraw: false })),
         setting('Fight phase duels automatically', null, sw(() => cfg.autoDuel, (v) => { cfg.autoDuel = v; }, { redraw: false })),
         setting('Shield pierce on a side mob', 'Only for bosses that block the class skill.', sw(() => cfg.sideMob.enabled, (v) => { cfg.sideMob.enabled = v; }))),
-      caption('Modules'),
-      h('div', { class: 'ma-card' }, [...Kernel.parts.values()].map((p) => setting(`${p.icon || ''} ${p.name || p.id}`, null, sw(() => Kernel.isOn(p.id), (v) => { cfg.parts[p.id] = v; Engine.poke(true); }, { redraw: false })))),
       fold('adv', false, '🛠 Advanced timing', () => [note('Pause between requests, in milliseconds. The defaults are safe; lower numbers risk the server rejecting swings.'),
         ...timing.map(([l, k]) => setting(l, null, num(() => cfg[k], (n) => { cfg[k] = n; }, { w: 76, unit: 'ms' }))),
         setting('Graveyard scan every', null, num(() => cfg.autoLoot.scanMs, (n) => { cfg.autoLoot.scanMs = n; }, { w: 76, unit: 'ms' })),
