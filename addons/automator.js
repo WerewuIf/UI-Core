@@ -2186,6 +2186,24 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
 .ma-ld{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:6px;margin-top:2px}
 .ma-ld label{display:block;font:800 9.5px Arial,sans-serif;color:#6e7a9c;text-transform:uppercase;letter-spacing:.06em;margin:0 3px 2px}
 .ma-ld select{width:100%}
+.ma-ed-h .ma-ed-t{flex:1;min-width:0}.ma-ed-h .ma-ed-t b{display:block;font-size:13px}.ma-ed-h .ma-ed-t small{display:block;color:#7c88ad;font-size:10.5px;margin-top:1px}
+.ma-edtabs{display:grid;grid-auto-flow:column;grid-auto-columns:1fr;gap:3px;margin:2px 0 10px;padding:3px;background:#080d19;border:1px solid #1d2742;border-radius:999px}
+.ma-edtab{position:relative;background:none;border:0;color:#8c98c0;font:700 11.5px Arial,sans-serif;padding:7px 4px;border-radius:999px;cursor:pointer;transition:.15s;white-space:nowrap}
+.ma-edtab:hover{color:#d6e5ff}.ma-edtab.on{background:rgba(75,115,224,.28);color:#fff;box-shadow:inset 0 0 0 1px #6ea8ff}
+.ma-edtab i{position:absolute;top:5px;right:8px;width:6px;height:6px;border-radius:50%;background:#6ea8ff}
+.ma-big{display:flex;align-items:center;gap:10px;margin-bottom:10px}.ma-big .ma-in{font:800 17px Arial,sans-serif;padding:7px 10px}.ma-big small{color:#7c88ad;font-size:11px;line-height:1.35}
+.ma-opts{display:flex;flex-direction:column;gap:5px}
+.ma-opt{display:flex;align-items:center;gap:10px;min-width:0;text-align:left;background:#0d1322;border:1px solid #27324f;color:#aeb9dc;border-radius:14px;padding:8px 12px;cursor:pointer;transition:.15s}
+.ma-opt:hover{border-color:#4b5f94;background:#111a30}
+.ma-opt .dot{flex:0 0 auto;width:14px;height:14px;border-radius:50%;border:2px solid #3b4a73;box-sizing:border-box}
+.ma-opt b{flex:0 0 auto;min-width:46px;font:800 14px Arial,sans-serif;color:#e8edff}
+.ma-opt span{flex:1;min-width:0;font-size:11px;color:#7c88ad;line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.ma-opt em{flex:0 0 auto;font:700 9.5px Arial,sans-serif;font-style:normal;color:#9fc1ff;background:rgba(75,115,224,.16);border-radius:999px;padding:2px 8px}
+.ma-opt.on{background:rgba(75,115,224,.2);border-color:#6ea8ff}.ma-opt.on .dot{border-color:#6ea8ff;background:radial-gradient(circle,#6ea8ff 0 38%,transparent 44%)}.ma-opt.on b{color:#fff}.ma-opt.on span{color:#b9c9f0}
+.ma-opt.exp b{color:#c9a8ff}
+.ma-lrow{display:flex;align-items:center;gap:10px;margin:7px 0}.ma-lrow label{flex:0 0 84px;font:800 11.5px Arial,sans-serif;color:#aeb9dc}.ma-lrow select{flex:1;min-width:0}
+.ma-edbody .ma-set{padding:2px 0 8px}.ma-edbody .ma-seg{margin-bottom:8px}
+.ma-foot{display:flex;justify-content:flex-end;margin-top:10px;padding-top:8px;border-top:1px solid rgba(255,255,255,.06)}
 .ma-sched{margin-top:8px;padding:7px 10px;background:#0a0f1c;border:1px solid rgba(255,255,255,.06);border-radius:14px}
 .ma-sub-h{display:flex;align-items:center;gap:8px;color:#c4cdeb;font:700 11.5px Arial,sans-serif;margin-bottom:4px}.ma-sub-h .sp{flex:1}.ma-sub-h small{font-weight:400;color:#6e7a9c}
 .ma-srow{display:flex;align-items:center;gap:7px;margin:4px 0}.ma-srow .arrow{color:#53608a}
@@ -2427,25 +2445,35 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   const itemsText = (items) => (items.length > 2 ? items.slice(0, 2).join(', ') + ' +' + (items.length - 2) : items.join(', '));
   const lvTxt = (n) => 'Lv ' + Number(n).toLocaleString('en-US');
 
-  /* the cap field. Tapping a loot tier (or the EXP-cap damage) writes that number into the field and saves it. */
+  /* ONE boss is selected at a time (ui.sel). Its editor is one panel with one section at a time: Damage · Timing · Gear · Shield. */
   let flashCap = '';
   function setCap(low, n) { ovr(low).cap = n; saveCfg(); flashCap = low; draw(); setTimeout(() => { flashCap = ''; }, 1000); }
-  function capField(low) {
+  Object.keys(ui.open).forEach((k) => { if (k.indexOf('boss:') === 0) delete ui.open[k]; });          // (the old "many editors open" flags)
+
+  /* DAMAGE: the number to stop at, and one tap on a loot requirement writes it into the field */
+  function damageTab(low) {
     const base = baseCap(low), tiers = LootData.tiers(low), info = LootData.get(low), mine = cfg.bosses[low] && cfg.bosses[low].cap != null;
-    const input = num(() => baseCap(low), (n) => { ovr(low).cap = n; }, { fmt: fmtNum, w: 100 });
+    const input = num(() => baseCap(low), (n) => { ovr(low).cap = n; }, { fmt: fmtNum, w: 118 });
     if (flashCap === low) input.querySelector('input').classList.add('flash');
+    const out = [h('div', { class: 'ma-big' }, input, h('small', {}, base <= 0 ? 'Cap 0 means this boss is skipped.' : 'Stop hitting once you have dealt this much damage.'))];
+    const top = tiers.length ? tiers[tiers.length - 1].req : null;
+    const opts = tiers.slice().reverse().map((t) => ({ req: t.req, label: t.items.join(', '), tag: t.req === top ? 'default' : '', exp: false }));
+    if (info && info.expCapDmg > 0 && !tiers.some((t) => t.req === info.expCapDmg)) opts.push({ req: info.expCapDmg, label: 'Reaches the EXP cap' + (info.expCapPct != null ? ' (' + info.expCapPct + '%)' : ''), tag: '', exp: true });
+    if (opts.length) {
+      out.push(h('div', { class: 'ma-lbl', style: { margin: '2px 0 5px' } }, 'Or tap a loot requirement', h('small', { style: { marginLeft: '8px' } }, 'the damage a drop needs')));
+      out.push(h('div', { class: 'ma-opts' }, opts.map((t) => h('button', { type: 'button', class: 'ma-opt' + (t.req === base ? ' on' : '') + (t.exp ? ' exp' : ''), title: `${fmtNum(t.req)} damage: ${t.label}`, onclick: (e) => { stop(e); setCap(low, t.req); } },
+        h('i', { class: 'dot' }), h('b', {}, short(t.req)), h('span', {}, t.label), t.tag ? h('em', {}, t.tag) : null))));
+      if (mine) out.push(h('div', { style: { marginTop: '7px' } }, h('button', { type: 'button', class: 'ma-link', onclick: (e) => { stop(e); delete ovr(low).cap; saveCfg(); draw(); } }, '↺ back to the default (highest requirement)')));
+    } else out.push(chips([[1e8, '100M'], [5e8, '500M'], [1e9, '1B'], [2e9, '2B'], [3e9, '3B'], [5e9, '5B']], base, (v) => { ovr(low).cap = v; }));
     const bits = info ? [info.levelReq ? lvTxt(info.levelReq) : '', info.expCapPct != null ? `EXP cap ${info.expCapPct}%` : '', info.scannedAt ? 'scanned ' + ago(info.scannedAt) : ''].filter(Boolean) : [];
-    const kids = [h('div', { class: 'ma-capline' }, input,
-      mine && tiers.length ? h('button', { type: 'button', class: 'ma-link', title: 'forget my number and use the highest loot requirement', onclick: (e) => { stop(e); delete ovr(low).cap; saveCfg(); draw(); } }, '↺ top tier') : null,
-      bits.length ? h('span', { class: 'ma-capinfo' }, bits.join(' · ')) : null)];
-    const opts = tiers.slice().reverse().map((t) => ({ req: t.req, label: itemsText(t.items), full: t.items.join(', '), exp: false }));
-    if (info && info.expCapDmg > 0 && !tiers.some((t) => t.req === info.expCapDmg)) opts.push({ req: info.expCapDmg, label: 'EXP cap' + (info.expCapPct != null ? ' ' + info.expCapPct + '%' : ''), full: 'the damage that reaches the EXP cap', exp: true });
-    if (opts.length) kids.push(h('div', { class: 'ma-tiers' }, opts.map((t) => h('button', { type: 'button', class: 'ma-tier' + (t.req === base ? ' on' : '') + (t.exp ? ' exp' : ''), title: `${fmtNum(t.req)} damage: ${t.full}. Click to use it as the cap.`, onclick: (e) => { stop(e); setCap(low, t.req); } },
-      h('b', {}, short(t.req)), h('span', {}, t.label)))));
-    else kids.push(h('div', { style: { marginTop: '6px' } }, chips([[1e8, '100M'], [5e8, '500M'], [1e9, '1B'], [2e9, '2B'], [3e9, '3B'], [5e9, '5B']], base, (v) => { ovr(low).cap = v; })));
-    if (!info) kids.push(note(LootScan.available ? 'No loot data for this boss yet. Press Scan at the top to read it.' : 'No loot data for this boss yet.'));
-    if (base <= 0) kids.push(note('Cap 0 means this boss is skipped.'));
-    return field('Damage cap', opts.length ? 'tap a loot requirement to use it' : 'stop hitting once you have dealt this much', ...kids);
+    if (bits.length) out.push(h('div', { class: 'ma-capinfo', style: { marginTop: '8px' } }, bits.join(' · ')));
+    if (!info) out.push(note(LootScan.available ? 'No loot data for this boss yet. Press Scan at the top to read it.' : 'No loot data for this boss yet.'));
+    return out;
+  }
+  /* GEAR: what gets equipped before this boss */
+  function gearTab(low) {
+    return [...Presets.kinds().map((k) => h('div', { class: 'ma-lrow' }, h('label', {}, (KIND_ICO[k] || '🎒') + ' ' + cap1(k)), loadoutPick(k, low))),
+      note('“Default” is the default loadout (the 🎒 Loadout button above the list). Pick one here to change it just for this boss.')];
   }
   /* the shield pierce, spelled out: what it does for this boss and which mob it would use right now */
   const sideSeen = {};                                              // boss -> 'loading' | { mob, src } | { none: true }
@@ -2460,17 +2488,31 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
       draw();
     }), res));
   }
+  /* SHIELD: the switch lives here too (the same one as Settings), then how it behaves for this boss and which mob it would use */
+  function shieldTab(low) {
+    const out = [setting('Use a side mob for the class skill', 'only when this boss blocks it (divine shield)', sw(() => cfg.sideMob.enabled, (v) => { cfg.sideMob.enabled = v; }))];
+    if (cfg.sideMob.enabled) {
+      out.push(seg([['auto', 'Auto'], ['normal', 'Never'], ['shielded', 'Always']], SideMob.modeOf(low), (v) => { ovr(low).targeting = v; }, { full: true }));
+      out.push(sideMobInfo(low));
+    } else out.push(note('Off: a shielded boss is simply attacked directly.'));
+    return out;
+  }
+  const EDTABS = [['dmg', '🎯 Damage'], ['time', '⏰ Timing'], ['gear', '🎒 Gear'], ['shield', '🛡 Shield']];
   function bossEditor(def) {
-    const ms = Roster.members(def), idx = Math.min(phaseSel[def.low] || 0, ms.length - 1), m = ms[idx], low = m.low, out = [];
-    out.push(h('div', { class: 'ma-ed-h' }, h('b', { title: m.name }, m.name), h('button', { type: 'button', class: 'ma-x', title: 'Close', onclick: (e) => { stop(e); ui.open['boss:' + def.low] = false; saveUi(); draw(); } }, '✕')));
-    if (ms.length > 1) out.push(h('div', { style: { margin: '0 0 4px' } }, seg(ms.map((x, i) => [i, 'Phase ' + (i + 1), x.name]), idx, (v) => { phaseSel[def.low] = v; }, { full: true })));
-    out.push(capField(low));
-    if (m.kind !== 'wave') out.push(scheduleEditor(low));                       // timed cap changes: dungeon bosses only
-    const kinds = Presets.kinds();
-    if (kinds.length) out.push(h('div', { class: 'ma-ld', style: { marginTop: '8px' } }, kinds.map((k) => h('div', {}, h('label', {}, (KIND_ICO[k] || '🎒') + ' ' + cap1(k)), loadoutPick(k, low)))));
-    if (cfg.sideMob.enabled) { out.push(field('Shield targeting', 'for bosses that block the class skill', seg([['auto', 'Auto'], ['normal', 'Never divert'], ['shielded', 'Always divert']], SideMob.modeOf(low), (v) => { ovr(low).targeting = v; }, { full: true }))); out.push(sideMobInfo(low)); } else out.push(note('Shield pierce on a side mob is off (Settings → Attacks): a shielded boss is simply attacked directly.'));
-    if (cfg.bosses[low] && Object.keys(cfg.bosses[low]).length) out.push(h('div', { style: { marginTop: '6px' } }, h('button', { type: 'button', class: 'ma-link', onclick: () => { delete cfg.bosses[low]; saveCfg(); draw(); } }, '↺ Reset this boss to defaults')));
-    return h('div', { class: 'ma-ed' }, ...out);
+    const ms = Roster.members(def), idx = Math.min(phaseSel[def.low] || 0, ms.length - 1), m = ms[idx], low = m.low, o = cfg.bosses[low] || {}, kinds = Presets.kinds(), l = bossLoc(low);
+    const tabs = EDTABS.filter(([k]) => (k !== 'time' || m.kind !== 'wave') && (k !== 'gear' || kinds.length));       // timed cap changes: dungeon bosses only
+    const cur = tabs.some((t) => t[0] === ui.edTab) ? ui.edTab : 'dmg';
+    const dot = { dmg: o.cap != null, time: Array.isArray(o.schedule) && o.schedule.length > 0, gear: kinds.some((k) => o[k]), shield: o.targeting === 'normal' || o.targeting === 'shielded' };
+    const place = m.kind === 'wave' ? (l ? `Gate ${l.gate} · Wave ${l.wave}` : '') : (m.dtype === 'easy' || m.kind === 'dungeon-swarm' ? 'Shadowbridge' : 'Castle') + (m.locationId ? ' · location ' + m.locationId : '');
+    const body = cur === 'time' ? [scheduleEditor(low)] : cur === 'gear' ? gearTab(low) : cur === 'shield' ? shieldTab(low) : damageTab(low);
+    return h('div', { class: 'ma-ed' },
+      h('div', { class: 'ma-ed-h' }, h('div', { class: 'ma-ed-t' }, h('b', { title: m.name }, m.name), place ? h('small', {}, place) : null),
+        sw(() => isOn(def), (v) => setMany([def], v), { sm: true }),
+        h('button', { type: 'button', class: 'ma-x', title: 'Close', onclick: (e) => { stop(e); ui.sel = ''; saveUi(); draw(); } }, '✕')),
+      ms.length > 1 ? h('div', { style: { margin: '0 0 7px' } }, seg(ms.map((x, i) => [i, 'Phase ' + (i + 1), x.name]), idx, (v) => { phaseSel[def.low] = v; }, { full: true })) : null,
+      h('div', { class: 'ma-edtabs' }, tabs.map(([k, label]) => h('button', { type: 'button', class: 'ma-edtab' + (k === cur ? ' on' : ''), onclick: (e) => { stop(e); ui.edTab = k; saveUi(); draw(); } }, label, dot[k] ? h('i', { title: 'changed for this boss' }) : null))),
+      h('div', { class: 'ma-edbody' }, ...body),
+      Object.keys(o).length ? h('div', { class: 'ma-foot' }, h('button', { type: 'button', class: 'ma-link', onclick: () => { delete cfg.bosses[low]; saveCfg(); draw(); } }, '↺ Reset this boss to defaults')) : null);
   }
   function loadoutCard() {
     const kinds = Presets.kinds();
@@ -2479,7 +2521,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
         dropdown([['', 'Keep what is equipped'], ...Presets.list(k).map((p) => [p.id, p.name])], (cfg.loadout || {})[k] || '', (v) => { cfg.loadout = cfg.loadout || {}; if (v) cfg.loadout[k] = v; else delete cfg.loadout[k]; Presets.forget(); })))));
   }
 
-  /* a boss as a bubble: avatar (dot = state), short name, cap · state, switch. Tap it to open its editor. */
+  /* a boss as a bubble: avatar (dot = state), short name, cap · state, switch. Tap it to select it (one at a time) and open its editor. */
   function splitName(n) {
     n = String(n || ''); const c = n.indexOf(',');
     if (c > 0) return [n.slice(0, c).trim(), n.slice(c + 1).trim()];
@@ -2487,18 +2529,18 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     return m && !/\bof$/i.test(m[1]) ? [m[1], m[2]] : [n, ''];
   }
   function bubble(def) {
-    const on = isOn(def), key = 'boss:' + def.low, op = !!ui.open[key], ms = Roster.members(def), cap = bossCap(def.low), [txt, kind] = entryState(def), nx = nextChange(def.low);
+    const on = isOn(def), op = ui.sel === def.low, ms = Roster.members(def), cap = bossCap(def.low), [txt, kind] = entryState(def), nx = nextChange(def.low);
     const loc = def.kind === 'wave' ? '' : def.locationId ? 'Loc ' + def.locationId : def.locationIds ? 'Loc ' + def.locationIds.join('/') : '';
     const bits = [h('span', { class: 'capv' }, cap > 0 ? 'cap ' + short(cap) : 'skipped'), nx ? `→ ${short(nx.cap)} ${fmtClock(nx.t)}` : '', loc, ms.length > 1 ? ms.length + ' phases' : '', on ? h('span', { class: 'st-' + (kind || 'x') }, txt) : ''].filter(Boolean);
     const sub = []; bits.forEach((b, i) => { if (i) sub.push(' · '); sub.push(b); });
-    return h('div', { class: 'ma-bb' + (on ? ' on' : '') + (op ? ' open' : ''), title: def.name, onclick: () => { ui.open[key] = !op; saveUi(); draw(); } },
+    return h('div', { class: 'ma-bb' + (on ? ' on' : '') + (op ? ' open' : ''), title: def.name, onclick: () => { ui.sel = op ? '' : def.low; saveUi(); draw(); if (!op) setTimeout(() => { const e = root && root.querySelector('.ma-ed'); if (e && e.scrollIntoView) e.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); }, 40); } },
       avatar(def.name, iconOfBoss(def.low), { boss: true, dot: on ? kind || 'x' : '' }),
       h('div', { class: 'ma-bb-n' }, h('b', {}, splitName(def.name)[0]), h('small', {}, ...sub)),
       sw(() => on, (v) => setMany([def], v), { sm: true, redraw: false }));
   }
   /* one wave = one row: "W12 Poseidon" + its bosses; an open boss's editor sits right under the row */
   function rowOf(label, defs, wv) {
-    const open = defs.filter((d) => ui.open['boss:' + d.low]), all = defs.every(isOn);
+    const open = defs.filter((d) => ui.sel === d.low), all = defs.every(isOn);
     const lab = wv ? h('div', { class: 'ma-wv-l' + (defs.some(isOn) ? ' on' : ''), title: `Switch every boss of this wave ${all ? 'off' : 'on'}`, onclick: () => setMany(defs, !all) }, h('b', {}, wv.wave ? 'W' + wv.wave : '?'), h('small', { title: label }, label)) : null;
     return h('div', { class: 'ma-wv', style: wv ? null : { gridTemplateColumns: 'minmax(0,1fr)' } }, lab, h('div', { class: 'ma-grid' }, defs.map(bubble)), ...open.map(bossEditor));
   }
