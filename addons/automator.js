@@ -24,7 +24,7 @@
  * replies were retried instantly instead of honouring their delay.
  */
 Core.module({
-  id: 'automator', name: 'Automator', icon: '🤖', version: '1.6.0',
+  id: 'automator', name: 'Automator', icon: '🤖', version: '1.6.1',
   // Offered to other addons through Core capabilities (guides/CAPABILITIES.md):
   //   automator.status() -> the status string     automator.start() / automator.stop()     automator.scan() -> scan the bosses now
   provides: (api) => api && api.start ? {
@@ -35,7 +35,7 @@ Core.module({
   } : {},
   init(Core) {
 'use strict';
-const ID = 'automator', VERSION = '1.6.0';
+const ID = 'automator', VERSION = '1.6.1';
 if (window.__automatorLoaded) { console.warn('[automator] already loaded', window.__automatorLoaded); return null; }
 window.__automatorLoaded = VERSION;
 
@@ -125,6 +125,7 @@ function mergeCfg(saved) {
   out.loadout = s.loadout && typeof s.loadout === 'object' ? s.loadout : {};
   out.targets = Array.isArray(s.targets) ? s.targets.slice() : [];
   out.bosses = s.bosses && typeof s.bosses === 'object' ? s.bosses : {};
+  out.ignored = Array.isArray(s.ignored) ? s.ignored.filter((x) => typeof x === 'string') : [];      // monsters you removed: the loot scan never adds them back
   for (const o of Object.values(out.bosses)) {                               // one "switch cap at" pair -> the first cap change
     if (!o) continue;
     if (o.switchAt && o.capAfterSwitch != null && !Array.isArray(o.schedule)) o.schedule = [{ at: o.switchAt, cap: o.capAfterSwitch }];
@@ -513,7 +514,13 @@ const Roster = (() => {
     if (members(parent).some((m) => cfg.targets.includes(m.low)) && !cfg.targets.includes(low)) { cfg.targets.push(low); saveCfg(); }
     return p2;
   }
-  return { list, add, get, members, canon, groupOf, addPhase, namesMatch, looksLikePhase2Of };
+  function remove(low) {                                             // only for entries the loot scan added (the built-in list is never edited)
+    const d = byLow.get(String(low || '').toLowerCase()); if (!d) return false;
+    const g = d.group && groups.get(d.group); if (g) { const k = g.indexOf(d); if (k >= 0) g.splice(k, 1); }
+    const k = list.indexOf(d); if (k >= 0) list.splice(k, 1);
+    byLow.delete(d.low); return true;
+  }
+  return { list, add, get, remove, members, canon, groupOf, addPhase, namesMatch, looksLikePhase2Of };
 })();
 
 (function seedWaveRoster() {
@@ -619,14 +626,14 @@ const LootData = (() => {
   function apply() {
     let added = 0;
     for (const [low, e] of Object.entries(d.bosses)) {
-      if (!e || !e.name || Roster.get(low)) continue;
+      if (!e || !e.name || Roster.get(low) || cfg.ignored.includes(low)) continue;
       const cap = top(low);
       if (e.kind === 'wave' && e.isBoss && e.gate > 0 && e.wave > 0) {                                  // (a wave monster the scan did not mark as a boss is never added)
         const sib = /duelist/i.test(e.name) && !/\b(herald|sovereign)\b/i.test(e.name) && Roster.list.find((x) => x.kind === 'wave' && x.gate === e.gate && x.wave === e.wave && Roster.canon(x) === x && Roster.looksLikePhase2Of(x, e.name));   // (phase 2 names are the "... Duelist ..." ones; two bosses that merely share a first name stay separate)
-        if (sib) Roster.addPhase(sib, e.name); else Roster.add({ name: e.name, defaultCap: cap != null ? cap : cfg.defaultBossCap, gate: e.gate, wave: e.wave });
+        if (sib) Roster.addPhase(sib, e.name); else Roster.add({ name: e.name, defaultCap: cap != null ? cap : cfg.defaultBossCap, gate: e.gate, wave: e.wave, fromScan: true });
         added++;
       } else if (e.kind === 'dungeon' && e.boss && e.locationId > 0 && e.dtype === 'hard') {
-        Roster.add({ name: e.name, defaultCap: cap != null ? cap : 2e9, kind: 'dungeon', locationId: e.locationId, dtype: 'hard' }); added++;
+        Roster.add({ name: e.name, defaultCap: cap != null ? cap : 2e9, kind: 'dungeon', locationId: e.locationId, dtype: 'hard', fromScan: true }); added++;
       }
     }
     return added;
@@ -640,8 +647,17 @@ const LootData = (() => {
     if (gone.length) { d = Object.assign({}, d, { bosses: keepB }); lootStore.set(d); }
     return gone;
   }
+  // remove a monster for good: out of the saved scan data, and onto the list the scan skips
+  function dismiss(low) {
+    low = String(low || '').toLowerCase();
+    if (!cfg.ignored.includes(low)) cfg.ignored.push(low);
+    if (d.bosses[low]) { const b = Object.assign({}, d.bosses); delete b[low]; d = Object.assign({}, d, { bosses: b }); lootStore.set(d); }
+    saveCfg();
+  }
+  const addedDefs = () => Roster.list.filter((x) => x.fromScan && Roster.canon(x) === x);          // bosses on the list only because a scan added them
+  function restore() { const n = cfg.ignored.length; cfg.ignored = []; saveCfg(); return n; }
   lootStore.watch((v) => { d = norm(v); const n = apply(); if (n) log(`🆕 loot scan added ${n} boss${n === 1 ? '' : 'es'} to the Bosses tab`, 'info'); UI.dirty(); });
-  return { get, tiers, top, apply, purge, isBossRecord, all: () => d.bosses, at: () => d.at || 0 };
+  return { get, tiers, top, apply, purge, dismiss, addedDefs, restore, isBossRecord, all: () => d.bosses, at: () => d.at || 0 };
 })();
 
 /* ---- board: what we KNOW about each boss right now. Only a validated page / confirmed reply may change it. -------- */
@@ -693,7 +709,7 @@ function candidates() {
 const targetKey = (t) => `${t.kind}:${t.instanceId || ''}:${t.monsterId}`;
 
 /* ---- slots the other parts fill in. Each has a harmless stub, so deleting PART 2 / 3 / 4 never breaks the wave bosses ---- */
-const Dungeons = { nextCheck: () => Infinity, refresh: async () => {}, sideMobs: null, terrName: () => '', corpses: null };   // PART 2 fills this
+const Dungeons = { nextCheck: () => Infinity, refresh: async () => {}, sideMobs: null, corpses: null };   // PART 2 fills this
 const Duels = { fight: null, bootPage: () => {} };                                                         // PART 3 fills this
 const Loot = { onStamStall: async () => {} };                                                              // PART 4 fills this
 const LootScan = { available: false, state: { running: false, stop: false, label: '', done: 0, total: 0, read: 0, added: 0, notes: [], error: '', startedAt: 0, endedAt: 0 }, run: async () => {}, stop() {}, download() {}, text: () => '' };   // PART 4b fills this
@@ -1355,25 +1371,16 @@ Object.assign(Dungeons, (() => {
     inst = { at: Date.now(), v, ended };
     return inst;
   }
-  /* territory names: read off the instance map pins (their label minus the "3/5" counter), remembered between sessions */
-  const terrStore = Core.store(ID + '-terr', { def: {} });
-  const terrMap = (() => { const v = terrStore.get(); return v && typeof v === 'object' ? v : {}; })();
-  const terrName = (type, loc) => terrMap[type + ':' + loc] || '';
-  const typeOfId = (id) => ['easy', 'hard'].find((t) => (inst.v[t] || []).includes(String(id)) || (inst.ended[t] || []).includes(String(id))) || '';
-  const tidy = (t) => String(t || '').replace(/\d+\s*\/\s*\d+/g, ' ').replace(/\bboss\b/gi, ' ').replace(/[·|:()\[\]–—-]+/g, ' ').replace(/\s+/g, ' ').trim();
   async function pins(id) {                                              // the instance map: one pin per location
     const r = await getDoc(`/guild_dungeon_instance.php?id=${id}`, 10000, 'ma:dinst:' + id); if (!r || !r.doc) return null;
-    const out = [], type = typeOfId(id); let changed = false;
+    const out = [];
     r.doc.querySelectorAll('a.pin').forEach((pin) => {
       const m = (pin.getAttribute('href') || '').match(/location_id=(\d+)/);
       const label = ((pin.querySelector('.label') || {}).textContent || '').replace(/\s+/g, ' ').trim();
       const cm = label.match(/(\d+)\s*\/\s*(\d+)/), done = cm ? parseInt(cm[1], 10) : null, total = cm ? parseInt(cm[2], 10) : null;
-      const loc = m ? parseInt(m[1], 10) : null, isBoss = /\bboss\b/i.test(label) || /\bboss\b/i.test(pin.getAttribute('title') || '');
-      const name = tidy(label) || tidy(pin.getAttribute('title'));
-      if (type && loc != null && name && terrMap[type + ':' + loc] !== name) { terrMap[type + ':' + loc] = name; changed = true; }
-      out.push({ locationId: loc, name, isLocked: pin.classList.contains('locked'), isBoss, isDone: done !== null && total > 0 && done >= total });
+      out.push({ locationId: m ? parseInt(m[1], 10) : null, isLocked: pin.classList.contains('locked'),
+        isBoss: /\bboss\b/i.test(label) || /\bboss\b/i.test(pin.getAttribute('title') || ''), isDone: done !== null && total > 0 && done >= total });
     });
-    if (changed) terrStore.set(terrMap);
     return out;
   }
   async function dmgOn(id, dgmid) {                                       // the server's own damage total for us on that monster
@@ -1516,7 +1523,7 @@ Object.assign(Dungeons, (() => {
     return out;
   }
 
-  return { nextCheck, refresh, sideMobs, terrName, instances, pins, deadMobs, dmgOn, pool, monName, dgmidOf };
+  return { nextCheck, refresh, sideMobs, instances, pins, deadMobs, dmgOn, pool, monName, dgmidOf };
 })());
 
 /* ===================================================================================================================
@@ -1792,14 +1799,10 @@ Object.assign(LootScan, (() => {
   let found = {};                                                // nameLow -> record, for this run
   const skipped = new Set();                                     // regular mobs seen and left alone, for this run
 
-  /* WHO COUNTS AS A BOSS (regular mobs are never saved): a monster the roster already knows (or the Gribble swarm), or one that
-   * the page itself marks as a boss: data-boss="1", or a party limit above the 10,000 of regular mobs (bosses show "n/30000"). */
+  /* WHO COUNTS AS A BOSS (regular mobs are never saved, and the scan only ADDS a monster it is sure about): a monster the roster already
+   * knows (or the Gribble swarm), or one the page itself marks as a boss with data-boss="1". Nothing you removed is ever read again. */
   const isKnown = (low, name) => !!Roster.get(low) || Roster.list.some((r) => r.swarmMatch && r.swarmMatch.test(name || low));
-  function bossish(card) {
-    if (card.dataset.boss === '1') return true;
-    const m = /players\s*joined[\s\S]{0,120}?(\d[\d,]*)\s*\/\s*(\d[\d,]*)/i.exec(card.textContent || '');
-    return !!m && Number(m[2].replace(/,/g, '')) > 10000;
-  }
+  const bossish = (card) => card.dataset.boss === '1';
 
   /* one GET through the action queue, validated. mode: 'all' shows dead monsters on wave pages (Core swaps the cookies under its lock) */
   async function page(url, where, mode) {
@@ -1881,7 +1884,7 @@ Object.assign(LootScan, (() => {
       if (aliveOnly && c.dataset.dead === '1') return;
       const name = clean((c.querySelector('h3,.monster-name,.name,h2') || {}).textContent) || clean(c.dataset.name);       // the visible title keeps its capitals; data-name is lowercase
       const id = Scan.cardId(c); if (!name || !id) return;
-      if (!isKnown(name.toLowerCase(), name) && !bossish(c)) { skipped.add(name.toLowerCase()); return; }          // a regular mob: not saved, its battle page is not even opened
+      if (cfg.ignored.includes(name.toLowerCase()) || (!isKnown(name.toLowerCase(), name) && !bossish(c))) { skipped.add(name.toLowerCase()); return; }          // a regular mob: not saved, its battle page is not even opened
       const e = names.get(name.toLowerCase()) || { name, ids: [] }; e.ids.push({ id, dead: c.dataset.dead === '1' }); names.set(name.toLowerCase(), e);
     });
     return names;
@@ -1935,7 +1938,7 @@ Object.assign(LootScan, (() => {
         for (const card of cards) {
           const name = Dungeons.monName(card), dgmid = Dungeons.dgmidOf(card), low = clean(name).toLowerCase();
           if (!name || !dgmid || seen.has(low) || read >= 60) continue; seen.add(low);
-          if (!isKnown(low, name) && !(pin.isBoss && lone)) { skipped.add(low); continue; }                 // a regular dungeon mob: left alone
+          if (cfg.ignored.includes(low) || (!isKnown(low, name) && !(pin.isBoss && lone))) { skipped.add(low); continue; }                 // a regular dungeon mob: left alone
           try {
             const b = await readBattle(`/battle.php?dgmid=${encodeURIComponent(dgmid)}&instance_id=${encodeURIComponent(id)}`, name);
             if (hasData(b)) { keep(name, { kind: 'dungeon', dtype: type, locationId: pin.locationId, boss: !!pin.isBoss }, b); read++; }
@@ -2037,8 +2040,8 @@ Object.assign(LootScan, (() => {
  * PART 5 — PANEL (one Core.float button + panel)
  *   Overview   what it is doing now: vitals, bosses being farmed, session numbers (collapsible groups)
  *   Bosses     loot scan strip, Waves | Dungeons switch; waves grouped by area (Generals / Ocean / Olympus), one row per wave with its bosses as
- *              bubbles. Dungeons: Gribbles in their own section, then normal and hard dungeon grouped by territory. Tapping a boss opens
- *              its picker under the row (one at a time, no tabs): loadout chips, damage cap, timed cap (dungeon bosses)
+ *              bubbles (dungeons: Castle / Shadowbridge by location). Tapping a boss opens its picker under the row (one at a time, no tabs):
+ *              Gear / Crystal / Pet dropdowns, damage cap (number + loot chips), timed cap (dungeon bosses)
  *   Supplies   stamina potion (+ save near EXP cap, auto-loot when out), HP potion, mana potion
  *   Loot       the graveyard
  *   Settings   class skill, behaviour, advanced timing
@@ -2169,30 +2172,16 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
 .ma-bb-n small .st-ok{color:#8ee6a8}.ma-bb-n small .st-warn{color:#ffd978}.ma-bb-n small .st-cap{color:#8fb7a0}.ma-bb-n small .st-blue{color:#9fc1ff}.ma-bb-n small .st-err{color:#ff9aa6}
 .ma-bb-n small .capv{color:#aeb9dc;font-weight:700}
 /* the editor of an open boss */
-.ma-capline{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.ma-capline .ma-capinfo{color:#7c88ad;font-size:11px}
-.ma-tiers{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:5px;margin-top:6px}
-.ma-tier{display:flex;align-items:center;gap:8px;min-width:0;text-align:left;background:#0d1322;border:1px solid #27324f;color:#aeb9dc;border-radius:12px;padding:5px 10px;cursor:pointer;transition:.15s}
-.ma-tier b{flex:0 0 auto;min-width:34px;font:800 12px Arial,sans-serif;color:#e8edff}
-.ma-tier span{flex:1;min-width:0;font-size:10.5px;color:#7c88ad;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.ma-tier:hover{border-color:#4b5f94;background:#111a30}
-.ma-tier.on{background:rgba(75,115,224,.2);border-color:#6ea8ff}.ma-tier.on b{color:#fff}.ma-tier.on span{color:#b9c9f0}
-.ma-tier.exp b{color:#c9a8ff}
-.ma-big{display:flex;align-items:center;gap:10px;margin-bottom:10px}.ma-big .ma-in{font:800 17px Arial,sans-serif;padding:7px 10px}.ma-big small{color:#7c88ad;font-size:11px;line-height:1.35}
-.ma-opts{display:flex;flex-direction:column;gap:5px}
-.ma-opt{display:flex;align-items:center;gap:10px;min-width:0;text-align:left;background:#0d1322;border:1px solid #27324f;color:#aeb9dc;border-radius:14px;padding:8px 12px;cursor:pointer;transition:.15s}
-.ma-opt:hover{border-color:#4b5f94;background:#111a30}
-.ma-opt .dot{flex:0 0 auto;width:14px;height:14px;border-radius:50%;border:2px solid #3b4a73;box-sizing:border-box}
-.ma-opt b{flex:0 0 auto;min-width:46px;font:800 14px Arial,sans-serif;color:#e8edff}
-.ma-opt span{flex:1;min-width:0;font-size:11px;color:#7c88ad;line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
-.ma-opt em{flex:0 0 auto;font:700 9.5px Arial,sans-serif;font-style:normal;color:#9fc1ff;background:rgba(75,115,224,.16);border-radius:999px;padding:2px 8px}
-.ma-opt.on{background:rgba(75,115,224,.2);border-color:#6ea8ff}.ma-opt.on .dot{border-color:#6ea8ff;background:radial-gradient(circle,#6ea8ff 0 38%,transparent 44%)}.ma-opt.on b{color:#fff}.ma-opt.on span{color:#b9c9f0}
-.ma-opt.exp b{color:#c9a8ff}
-.ma-lrow{margin:0 0 9px}.ma-lrow label{display:block;font:800 11px Arial,sans-serif;color:#9caad0;margin:0 3px 5px}
+.ma-big{display:flex;align-items:center;gap:10px;margin-bottom:7px}.ma-big .ma-in{font:800 17px Arial,sans-serif;padding:7px 10px}.ma-big small{color:#7c88ad;font-size:11px;line-height:1.35}
 .ma-ed{grid-column:1/-1;margin:1px 0 3px;padding:9px 11px 10px;background:#0b1120;border:1px solid rgba(110,168,255,.28);border-radius:16px}
 .ma-ed-h{display:flex;align-items:center;gap:8px;margin-bottom:4px}.ma-ed-t{flex:1;min-width:0}.ma-ed-t b{display:block;font:800 13px Arial,sans-serif;color:#fff;overflow-wrap:anywhere}
 .ma-ed-t small{display:flex;align-items:center;gap:6px;flex-wrap:wrap;color:#7c88ad;font-size:10.5px;margin-top:1px}
-.ma-reset{display:flex;justify-content:flex-end;margin-top:10px;padding-top:8px;border-top:1px solid rgba(255,255,255,.06)}
-/* a boss's own page (replaces the list while open) */
+.ma-ld{display:grid;grid-template-columns:repeat(auto-fit,minmax(96px,1fr));gap:6px;margin:2px 0 2px}
+.ma-ld label{display:block;font:800 9.5px Arial,sans-serif;color:#6e7a9c;text-transform:uppercase;letter-spacing:.06em;margin:0 3px 3px}
+.ma-ld select{width:100%;text-overflow:ellipsis}
+.ma-what{margin:7px 3px 0;color:#7c88ad;font-size:11px;line-height:1.35;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.ma-reset{display:flex;align-items:center;gap:4px;flex-wrap:wrap;margin-top:9px;padding-top:6px;border-top:1px solid rgba(255,255,255,.06)}.ma-reset .sp{flex:1}
+.ma-link.warn{color:#ff9b9b}.ma-link.warn:hover{color:#ffc4c4;background:rgba(255,120,120,.1)}
 .ma-sched{margin-top:8px;padding:7px 10px;background:#0a0f1c;border:1px solid rgba(255,255,255,.06);border-radius:14px}
 .ma-sub-h{display:flex;align-items:center;gap:8px;color:#c4cdeb;font:700 11.5px Arial,sans-serif;margin-bottom:4px}.ma-sub-h .sp{flex:1}.ma-sub-h small{font-weight:400;color:#6e7a9c}
 .ma-srow{display:flex;align-items:center;gap:7px;margin:4px 0}.ma-srow .arrow{color:#53608a}
@@ -2425,65 +2414,67 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
       rows.length ? rows : h('div', { class: 'ma-note', style: { margin: '2px 0 6px' } }, 'The cap stays the same all day. Add a change to raise or lower it from a set server time (it starts over at midnight).'),
       h('button', { type: 'button', class: 'ma-add', onclick: (e) => { stop(e); const t = now != null ? hhmm((Math.floor(now / 60) + 1) * 60) : '12:00'; (ovr(low).schedule = ovr(low).schedule || []).push({ at: t, cap: bossCap(low) }); sortSave(); } }, '+ Add a cap change'));
   }
-  function loadoutPick(kind, low) {                                  // the boss's own pick for one kind: tap a chip to switch
-    const list = Presets.list(kind), cur = (cfg.bosses[low] || {})[kind] || '', dflt = (cfg.loadout || {})[kind], dn = dflt ? (list.find((p) => p.id === String(dflt)) || { name: dflt }).name : 'keep equipped';
-    return chips([['', 'Default · ' + dn], ['__keep', 'Keep equipped'], ...list.map((p) => [p.id, p.name])], cur, (v) => { if (v) ovr(low)[kind] = v; else delete ovr(low)[kind]; });
-  }
+  /* ---- the picker under a boss row: ONE flat card, no tabs, nothing to scroll through.
+   *      Gear / Crystal / Pet = three dropdowns side by side (one tap to switch), then the damage cap: the number, one chip per loot requirement. ---- */
   const KIND_ICO = { gear: '⚔️', crystal: '💎', pet: '🐾' };
   const cap1 = (s) => s.charAt(0).toUpperCase() + s.slice(1);
-  const itemsText = (items) => (items.length > 2 ? items.slice(0, 2).join(', ') + ' +' + (items.length - 2) : items.join(', '));
   const lvTxt = (n) => 'Lv ' + Number(n).toLocaleString('en-US');
-
-  /* ONE boss picker is open at a time (ui.sel), under its row. */
-  let flashCap = '';
-  function setCap(low, n) { ovr(low).cap = n; saveCfg(); flashCap = low; draw(); setTimeout(() => { flashCap = ''; }, 1000); }
-  Object.keys(ui.open).forEach((k) => { if (k.indexOf('boss:') === 0) delete ui.open[k]; });          // (the old "many editors open" flags)
-
-  /* DAMAGE: the number to stop at, and one tap on a loot requirement writes it into the field */
-  function damageTab(low) {
-    const base = baseCap(low), tiers = LootData.tiers(low), info = LootData.get(low), mine = cfg.bosses[low] && cfg.bosses[low].cap != null;
-    const input = num(() => baseCap(low), (n) => { ovr(low).cap = n; }, { fmt: fmtNum, w: 118 });
-    if (flashCap === low) input.querySelector('input').classList.add('flash');
-    const out = [h('div', { class: 'ma-big' }, input, h('small', {}, base <= 0 ? 'Cap 0 means this boss is skipped.' : 'Stop hitting once you have dealt this much damage.'))];
-    const top = tiers.length ? tiers[tiers.length - 1].req : null;
-    const opts = tiers.slice().reverse().map((t) => ({ req: t.req, label: t.items.join(', '), tag: t.req === top ? 'default' : '', exp: false }));
-    if (info && info.expCapDmg > 0 && !tiers.some((t) => t.req === info.expCapDmg)) opts.push({ req: info.expCapDmg, label: 'Reaches the EXP cap' + (info.expCapPct != null ? ' (' + info.expCapPct + '%)' : ''), tag: '', exp: true });
-    if (opts.length) {
-      out.push(h('div', { class: 'ma-lbl', style: { margin: '2px 0 5px' } }, 'Or tap a loot requirement', h('small', { style: { marginLeft: '8px' } }, 'the damage a drop needs')));
-      out.push(h('div', { class: 'ma-opts' }, opts.map((t) => h('button', { type: 'button', class: 'ma-opt' + (t.req === base ? ' on' : '') + (t.exp ? ' exp' : ''), title: `${fmtNum(t.req)} damage: ${t.label}`, onclick: (e) => { stop(e); setCap(low, t.req); } },
-        h('i', { class: 'dot' }), h('b', {}, short(t.req)), h('span', {}, t.label), t.tag ? h('em', {}, t.tag) : null))));
-      if (mine) out.push(h('div', { style: { marginTop: '7px' } }, h('button', { type: 'button', class: 'ma-link', onclick: (e) => { stop(e); delete ovr(low).cap; saveCfg(); draw(); } }, '↺ back to the default (highest requirement)')));
-    } else out.push(chips([[1e8, '100M'], [5e8, '500M'], [1e9, '1B'], [2e9, '2B'], [3e9, '3B'], [5e9, '5B']], base, (v) => { ovr(low).cap = v; }));
-    const bits = info ? [info.levelReq ? lvTxt(info.levelReq) : '', info.expCapPct != null ? `EXP cap ${info.expCapPct}%` : '', info.scannedAt ? 'scanned ' + ago(info.scannedAt) : ''].filter(Boolean) : [];
-    if (bits.length) out.push(h('div', { class: 'ma-capinfo', style: { marginTop: '8px' } }, bits.join(' · ')));
-    if (!info) out.push(note(LootScan.available ? 'No loot data for this boss yet. Press Scan at the top to read it.' : 'No loot data for this boss yet.'));
-    return out;
+  const presetOpts = (k) => Presets.list(k).map((p) => [p.id, p.name]);
+  const loadoutGrid = (pick) => h('div', { class: 'ma-ld' }, Presets.kinds().map((k) => h('div', {}, h('label', {}, (KIND_ICO[k] || '🎒') + ' ' + cap1(k)), pick(k))));
+  function bossLoadout(low) {                                        // this boss's own pick; "Default" = the default loadout (🎒 Loadout above the list)
+    const o = cfg.bosses[low] || {};
+    return loadoutGrid((k) => {
+      const d = (cfg.loadout || {})[k], dp = d ? Presets.list(k).find((x) => x.id === String(d)) : null;
+      return dropdown([['', d ? 'Default · ' + (dp ? dp.name : d) : 'Default'], ['__keep', 'Keep equipped'], ...presetOpts(k)], o[k] || '', (v) => { if (v) ovr(low)[k] = v; else delete ovr(low)[k]; });
+    });
   }
-  /* GEAR: what gets equipped before this boss */
-  const loadoutRows = (low) => Presets.kinds().map((k) => h('div', { class: 'ma-lrow' }, h('label', {}, (KIND_ICO[k] || '🎒') + ' ' + cap1(k)), loadoutPick(k, low)));
+
+  function damageBlock(low) {
+    const base = baseCap(low), tiers = LootData.tiers(low), info = LootData.get(low), mine = cfg.bosses[low] && cfg.bosses[low].cap != null;
+    const top = tiers.length ? tiers[tiers.length - 1].req : null;
+    const opts = tiers.map((t) => [t.req, short(t.req)]);
+    if (info && info.expCapDmg > 0 && !tiers.some((t) => t.req === info.expCapDmg)) { opts.push([info.expCapDmg, short(info.expCapDmg) + ' EXP']); opts.sort((a, b) => a[0] - b[0]); }
+    const bits = info ? [info.levelReq ? lvTxt(info.levelReq) : '', info.expCapPct != null ? `EXP cap ${info.expCapPct}%` : ''].filter(Boolean) : [];
+    const at = tiers.find((t) => t.req === base);
+    const what = base <= 0 ? 'Cap 0: this boss is skipped.' : !info ? (LootScan.available ? 'No loot data yet. Press Scan at the top to read it.' : 'No loot data for this boss yet.')
+      : at ? `${short(base)} gets: ${at.items.join(', ')}${base === top && !mine ? ' (default)' : ''}` : info.expCapDmg === base ? 'Reaches the EXP cap' : '';
+    return [
+      h('div', { class: 'ma-big' }, num(() => baseCap(low), (n) => { ovr(low).cap = n; }, { fmt: fmtNum, w: 108 }), bits.length ? h('small', {}, bits.join(' · ')) : null),
+      chips(opts.length ? opts : [[1e8, '100M'], [5e8, '500M'], [1e9, '1B'], [2e9, '2B'], [3e9, '3B'], [5e9, '5B']], base, (v) => { ovr(low).cap = v; }),
+      what ? h('div', { class: 'ma-what', title: what }, what) : null];
+  }
   function placeOf(m) {
     if (m.kind === 'wave') { const l = bossLoc(m.low); return l ? `Gate ${l.gate} · Wave ${l.wave}` : ''; }
-    const easy = m.dtype === 'easy' || m.kind === 'dungeon-swarm', loc = m.locationId || (m.locationIds || [])[0] || 0, tn = loc ? Dungeons.terrName(easy ? 'easy' : 'hard', loc) : '';
-    return (easy ? 'Normal dungeon' : 'Hard dungeon') + (m.locationIds ? ' · Loc ' + m.locationIds.join('/') : loc ? ' · Loc ' + loc : '') + (tn ? ' · ' + tn : '');
+    return (m.dtype === 'easy' || m.kind === 'dungeon-swarm' ? 'Shadowbridge' : 'Castle') + (m.locationId ? ' · location ' + m.locationId : '');
   }
-  /* The picker that opens under a boss's row (one at a time, no tabs): loadout, damage cap, and for dungeon bosses a timed cap. */
+  /* a boss the loot scan added (not in the built-in list): remove it, and the scan will not bring it back */
+  function removeAdded(defs) {
+    defs.forEach((def) => Roster.members(def).slice().forEach((m) => {
+      LootData.dismiss(m.low); Roster.remove(m.low);
+      cfg.targets = cfg.targets.filter((l) => l !== m.low); delete cfg.bosses[m.low];
+    }));
+    if (ui.sel && !Roster.get(ui.sel)) { ui.sel = ''; saveUi(); }
+    saveCfg(); Engine.poke(true); draw();
+  }
   function bossEditor(def) {
     const ms = Roster.members(def), idx = Math.min(phaseSel[def.low] || 0, ms.length - 1), m = ms[idx], low = m.low, o = cfg.bosses[low] || {}, kinds = Presets.kinds();
-    const sched = Array.isArray(o.schedule) && o.schedule.length > 0, tOpen = isOpen('time', sched), place = placeOf(m), [txt, kind] = entryState(def);
+    const sched = Array.isArray(o.schedule) && o.schedule.length > 0, tOpen = isOpen('time', sched), [txt, kind] = entryState(def), place = placeOf(m);
+    const timedBtn = m.kind !== 'wave' ? h('button', { type: 'button', class: 'ma-link', onclick: () => { ui.open.time = !tOpen; saveUi(); draw(); } }, (tOpen ? '▾ ' : '▸ ') + '⏰ Timed cap' + (sched ? ' (' + o.schedule.length + ')' : '')) : null;
+    const resetBtn = Object.keys(o).length ? h('button', { type: 'button', class: 'ma-link', onclick: () => { delete cfg.bosses[low]; saveCfg(); draw(); } }, '↺ Reset') : null;
+    const removeBtn = def.fromScan ? h('button', { type: 'button', class: 'ma-link warn', title: 'The loot scan added this boss. Remove it from the list (a rescan will not bring it back).', onclick: (e) => { stop(e); removeAdded([def]); } }, '🗑 Remove') : null;
     return h('div', { class: 'ma-ed' },
       h('div', { class: 'ma-ed-h' }, h('div', { class: 'ma-ed-t' }, h('b', { title: m.name }, m.name), h('small', {}, place, pill(txt, kind))),
         sw(() => isOn(def), (v) => setMany([def], v), { sm: true }),
         h('button', { type: 'button', class: 'ma-x', title: 'Close', onclick: (e) => { stop(e); ui.sel = ''; saveUi(); draw(); } }, '✕')),
       ms.length > 1 ? h('div', { style: { margin: '0 0 6px' } }, seg(ms.map((x, i) => [i, 'Phase ' + (i + 1), x.name]), idx, (v) => { phaseSel[def.low] = v; }, { full: true })) : null,
-      kinds.length ? caption('🎒 Loadout') : null, ...(kinds.length ? loadoutRows(low) : []),
-      caption('🎯 Damage cap'), ...damageTab(low),
-      m.kind !== 'wave' ? h('div', { style: { marginTop: '9px' } }, h('button', { type: 'button', class: 'ma-link', onclick: () => { ui.open.time = !tOpen; saveUi(); draw(); } }, (tOpen ? '▾ ' : '▸ ') + '⏰ Timed cap changes' + (sched ? ' (' + o.schedule.length + ')' : '')), tOpen ? scheduleEditor(low) : null) : null,
-      Object.keys(o).length ? h('div', { class: 'ma-reset' }, h('button', { type: 'button', class: 'ma-link', onclick: () => { delete cfg.bosses[low]; saveCfg(); draw(); } }, '↺ Reset this boss to defaults')) : null);
+      kinds.length ? bossLoadout(low) : null,
+      caption('🎯 Damage cap'), ...damageBlock(low),
+      timedBtn || resetBtn || removeBtn ? h('div', { class: 'ma-reset' }, timedBtn, h('span', { class: 'sp' }), resetBtn, removeBtn) : null,
+      m.kind !== 'wave' && tOpen ? scheduleEditor(low) : null);
   }
   function loadoutCard() {
     return h('div', { class: 'ma-card' }, h('div', { class: 'ma-card-h' }, h('span', { class: 'ma-ico' }, '🎒'), h('div', { class: 'ma-card-t' }, h('b', {}, 'Default loadout'), h('small', {}, 'Equipped before any boss that has no pick of its own. Open a boss to change it just for that boss.'))),
-      h('div', { style: { marginTop: '9px' } }, Presets.kinds().map((k) => h('div', { class: 'ma-lrow' }, h('label', {}, (KIND_ICO[k] || '🎒') + ' ' + cap1(k)),
-        chips([['', 'Keep equipped'], ...Presets.list(k).map((p) => [p.id, p.name])], (cfg.loadout || {})[k] || '', (v) => { cfg.loadout = cfg.loadout || {}; if (v) cfg.loadout[k] = v; else delete cfg.loadout[k]; Presets.forget(); })))));
+      h('div', { style: { marginTop: '9px' } }, loadoutGrid((k) => dropdown([['', 'Keep equipped'], ...presetOpts(k)], (cfg.loadout || {})[k] || '', (v) => { cfg.loadout = cfg.loadout || {}; if (v) cfg.loadout[k] = v; else delete cfg.loadout[k]; Presets.forget(); }))));
   }
 
   /* a boss as a bubble: avatar (dot = state), short name, cap · state, switch. Tap it to select it (one at a time) and open its editor. */
@@ -2495,7 +2486,8 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   }
   function bubble(def) {
     const on = isOn(def), op = ui.sel === def.low, ms = Roster.members(def), cap = bossCap(def.low), [txt, kind] = entryState(def), nx = nextChange(def.low);
-    const bits = [h('span', { class: 'capv' }, cap > 0 ? 'cap ' + short(cap) : 'skipped'), nx ? `→ ${short(nx.cap)} ${fmtClock(nx.t)}` : '', ms.length > 1 ? ms.length + ' phases' : '', on ? h('span', { class: 'st-' + (kind || 'x') }, txt) : ''].filter(Boolean);
+    const loc = def.kind === 'wave' ? '' : def.locationId ? 'Loc ' + def.locationId : def.locationIds ? 'Loc ' + def.locationIds.join('/') : '';
+    const bits = [h('span', { class: 'capv' }, cap > 0 ? 'cap ' + short(cap) : 'skipped'), nx ? `→ ${short(nx.cap)} ${fmtClock(nx.t)}` : '', loc, ms.length > 1 ? ms.length + ' phases' : '', on ? h('span', { class: 'st-' + (kind || 'x') }, txt) : ''].filter(Boolean);
     const sub = []; bits.forEach((b, i) => { if (i) sub.push(' · '); sub.push(b); });
     return h('div', { class: 'ma-bb' + (on ? ' on' : '') + (op ? ' open' : ''), title: def.name, onclick: () => { ui.sel = op ? '' : def.low; saveUi(); draw(); if (!op) setTimeout(() => { const e = root && root.querySelector('.ma-ed'); if (e && e.scrollIntoView) e.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); }, 40); } },
       avatar(def.name, iconOfBoss(def.low), { boss: true, dot: on ? kind || 'x' : '' }),
@@ -2505,7 +2497,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   /* one row = a label (W12 for a wave, L6 for a dungeon territory) + its bosses as bubbles */
   function rowOf(label, defs, wv) {
     const open = defs.filter((d) => ui.sel === d.low), all = defs.every(isOn);
-    const lab = wv ? h('div', { class: 'ma-wv-l' + (defs.some(isOn) ? ' on' : ''), title: `Switch every boss here ${all ? 'off' : 'on'}`, onclick: () => setMany(defs, !all) }, h('b', {}, wv.tag || (wv.wave ? 'W' + wv.wave : '?')), h('small', { title: label }, label)) : null;
+    const lab = wv ? h('div', { class: 'ma-wv-l' + (defs.some(isOn) ? ' on' : ''), title: `Switch every boss of this wave ${all ? 'off' : 'on'}`, onclick: () => setMany(defs, !all) }, h('b', {}, wv.wave ? 'W' + wv.wave : '?'), h('small', { title: label }, label)) : null;
     return h('div', { class: 'ma-wv', style: wv ? null : { gridTemplateColumns: 'minmax(0,1fr)' } }, lab, h('div', { class: 'ma-grid' }, defs.map(bubble)), ...open.map(bossEditor));
   }
 
@@ -2524,18 +2516,10 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
       return Object.assign(g, { waves, sub });
     });
   }
-  /* Dungeons: Gribbles in their own section, then the normal dungeon and the hard dungeon, each grouped by territory (location) */
   function dungeonGroups(defs) {
-    const locOf = (d) => d.locationId || (d.locationIds || [0])[0] || 0;
-    const sort = (a) => a.slice().sort((x, y) => locOf(x) - locOf(y) || rIdx(x.low) - rIdx(y.low));
-    const swarm = defs.filter((d) => d.kind === 'dungeon-swarm'), rest = defs.filter((d) => d.kind !== 'dungeon-swarm');
-    const normal = rest.filter((d) => d.dtype === 'easy'), hard = rest.filter((d) => d.dtype !== 'easy');
-    const rowsOf = (type, list) => { const by = new Map(); sort(list).forEach((d) => { const l = locOf(d); if (!by.has(l)) by.set(l, []); by.get(l).push(d); }); return [...by].map(([l, ds]) => ({ tag: l ? 'L' + l : '?', label: (l && Dungeons.terrName(type, l)) || (l ? 'Territory ' + l : ''), defs: ds })); };
-    return [
-      { id: 'gribble', title: 'Gribbles', ico: '🦠', sub: 'own section', defs: swarm, rows: swarm.length ? [{ plain: true, label: '', defs: swarm }] : [] },
-      { id: 'shadow', title: 'Normal dungeon', ico: '🌉', sub: 'Shadowbridge · by territory', defs: normal, rows: rowsOf('easy', normal) },
-      { id: 'castle', title: 'Hard dungeon', ico: '🏰', sub: 'Castle · by territory', defs: hard, rows: rowsOf('hard', hard) },
-    ].filter((g) => g.defs.length);
+    const castle = defs.filter((d) => !(d.kind === 'dungeon-swarm' || d.dtype === 'easy')), shadow = defs.filter((d) => d.kind === 'dungeon-swarm' || d.dtype === 'easy');
+    const sort = (a) => a.slice().sort((x, y) => (x.locationId || (x.locationIds || [0])[0] || 0) - (y.locationId || (y.locationIds || [0])[0] || 0) || rIdx(x.low) - rIdx(y.low));
+    return [{ id: 'castle', title: 'Castle', ico: '🏰', sub: 'hard', defs: sort(castle) }, { id: 'shadow', title: 'Shadowbridge', ico: '🌉', sub: 'easy', defs: sort(shadow) }].filter((g) => g.defs.length);
   }
   function bossSections(sec) {
     const f = (ui.filter || '').trim().toLowerCase(), force = !!f;
@@ -2545,7 +2529,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     const bulk = (defs) => [h('button', { class: 'ma-link', type: 'button', onclick: (e) => { stop(e); setMany(defs, true); } }, 'All'), h('button', { class: 'ma-link', type: 'button', onclick: (e) => { stop(e); setMany(defs, false); } }, 'None')];
     const mk = (g, body) => fold('grp:' + g.id, g.defs.some(isOn), [g.ico + ' ' + g.title, g.sub ? h('small', {}, g.sub) : null], body, { force, aside: [counts(g.defs), ...bulk(g.defs)] });
     let out;
-    if (sec === 'dungeons') out = dungeonGroups(canon.filter((d) => d.kind !== 'wave')).map((g) => mk(g, () => g.rows.map((r) => rowOf(r.label, r.defs, r.plain ? null : { tag: r.tag }))));
+    if (sec === 'dungeons') out = dungeonGroups(canon.filter((d) => d.kind !== 'wave')).map((g) => mk(g, () => { const rows = []; for (let i = 0; i < g.defs.length; i += 2) rows.push(rowOf('', g.defs.slice(i, i + 2), null)); return rows; }));
     else out = waveGroups(canon.filter((d) => d.kind === 'wave')).map((g) => mk(g, () => g.waves.map((wv) => rowOf(wv.label, wv.defs, wv))));
     if (!out.length) out = [h('div', { class: 'ma-empty' }, f ? `No ${sec === 'dungeons' ? 'dungeon' : 'wave'} boss matches “${ui.filter}”.` : 'No bosses known yet.')];
     return out;
@@ -2565,6 +2549,10 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     const sub = s.error ? '⚠ ' + s.error : n ? `${n} monsters · scanned ${ago(LootData.at())}` + (s.endedAt ? ` · last run read ${s.read}${s.added ? ', ' + s.added + ' new' : ''}${s.skipped ? ' · ' + s.skipped + ' regular mob' + (s.skipped === 1 ? '' : 's') + ' left out' : ''}` : '') : 'Reads every boss’s loot, level requirement and EXP cap.';
     out.push(h('div', { class: 'ma-scan' }, h('span', { class: 'ma-ico' }, '🔎'), h('div', { class: 'ma-scan-t' }, h('b', {}, 'Loot scan'), h('small', { title: sub }, sub)),
       h('div', { class: 'ma-scan-b' }, btn(n ? '↻ Rescan' : '🔎 Scan', 'soft', () => LootScan.run()), n ? btn('⬇ Export .txt', 'soft', () => LootScan.download()) : null)));
+    const added = LootData.addedDefs(), gone = cfg.ignored.length;           // bosses on the list only because a scan added them, and ones you removed
+    if (added.length || gone) out.push(h('div', { style: { margin: '-3px 4px 6px', display: 'flex', gap: '6px', flexWrap: 'wrap' } },
+      added.length ? h('button', { type: 'button', class: 'ma-link warn', title: added.map((d) => d.name).join('\n'), onclick: () => { if (confirm(`Remove the ${added.length} boss${added.length === 1 ? '' : 'es'} the loot scan added to the list?\n\n` + added.map((d) => '• ' + d.name).join('\n') + '\n\nA rescan will not add them back.')) removeAdded(added); } }, `🗑 Remove the ${added.length} added by a scan`) : null,
+      gone ? h('button', { type: 'button', class: 'ma-link', onclick: () => { LootData.restore(); draw(); } }, `↺ Allow the ${gone} removed again`) : null));
     if (s.notes.length) {
       out.push(h('div', { style: { margin: '-3px 4px 6px' } }, h('button', { type: 'button', class: 'ma-link', onclick: () => { scanOpen = !scanOpen; paintScan(); } }, `⚠ ${s.notes.length} thing${s.notes.length === 1 ? '' : 's'} could not be read ${scanOpen ? '▾' : '▸'}`)));
       if (scanOpen) out.push(h('div', { class: 'ma-scan-n' }, s.notes.map((t) => h('div', {}, t))));
