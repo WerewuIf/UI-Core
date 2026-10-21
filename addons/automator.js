@@ -1668,34 +1668,62 @@ Object.assign(Loot, (() => {
 
 /* ===================================================================================================================
  * PART 5 — PANEL (one Core.float button + panel: Status, Bosses, Potions, Graveyard, Log, Diagnostics, Settings)
- * Core's own classes (core-btn / core-input / core-row / core-dim / core-pill) plus a few ma-* ones. No dragging, no skins.
- * Forms are never redrawn while you are typing in them.
+ * Same look as Gear / Crystal / Pet Presets and Account Switcher: Core's own classes (core-btn / core-input / core-footer /
+ * core-empty / core-pill / core-dim) plus a few ma-* ones that copy the preset addons' card rows (#11192d, 14px corners).
+ * One scroller (Core's modal), no nested scroll areas. Forms are never redrawn while you are typing in them.
  * ================================================================================================================ */
 const Panel = (() => {
   const { h, btn } = Core.ui;
   const TABS = [['status', 'Status'], ['bosses', 'Bosses'], ['potions', 'Potions'], ['graveyard', 'Graveyard'], ['log', 'Log'], ['diag', 'Diagnostics'], ['settings', 'Settings']];
   const DIRTY_TAB = { status: 'status', log: 'log', diag: 'diag', loot: 'graveyard' };
   let root = null, tab = 'status', open = false, drawT = 0;
+  const openOpts = new Set();   // bosses whose "Options" are expanded (kept across redraws)
 
   (function css() {
     if (document.getElementById('ma-css')) return;
     const s = document.createElement('style'); s.id = 'ma-css';
     s.textContent = `
-.ma-head{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px}
-.ma-tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px}
-.ma-tab{border:1px solid #2b3859;background:#101830;color:#9caad0;padding:6px 12px;border-radius:10px;font:700 12px Arial,sans-serif;cursor:pointer}
-.ma-tab.on{background:linear-gradient(135deg,#3657a7,#4b6dd0);color:#fff;border-color:transparent}
-.ma-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px;margin-bottom:12px}
-.ma-card{background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.08);border-radius:12px;padding:8px 11px}
-.ma-k{color:#9caad0;font-size:10px;text-transform:uppercase;letter-spacing:.05em}.ma-v{font:700 15px Arial,sans-serif;color:#eef3ff;overflow-wrap:anywhere}
-.ma-table{width:100%;border-collapse:collapse;font-size:12.5px;color:#dbe4ff}
-.ma-table th{text-align:left;color:#9caad0;font-weight:700;padding:5px 7px;border-bottom:1px solid rgba(255,255,255,.12)}
-.ma-table td{padding:5px 7px;border-bottom:1px solid rgba(255,255,255,.05);vertical-align:middle}
-.ma-fld{display:inline-flex;flex-direction:column;gap:2px;margin:0 10px 8px 0}.ma-chk{display:inline-flex;gap:6px;align-items:center;color:#dbe4ff;font-size:13px;margin:0 14px 8px 0}
-.ma-sec{font:800 12px Arial,sans-serif;color:#9fc1ff;text-transform:uppercase;letter-spacing:.05em;margin:14px 0 8px}
-.ma-line{font:12px/1.55 monospace;color:#c9d4f5;overflow-wrap:anywhere}.ma-line b{color:#7f8fb8;font-weight:400}
+.ma-hero{display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:12px 14px;margin-bottom:12px;background:#11192d;border:1px solid rgba(255,255,255,.06);border-radius:16px}
+.ma-hero-main{flex:1 1 220px;min-width:0}
+.ma-hero-top{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.ma-hero-target{margin-top:6px;font:800 14px Arial,sans-serif;color:#eef3ff;overflow-wrap:anywhere}
+.ma-tabs{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px}
+.ma-tab{padding:7px 12px}
+.ma-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px;margin-bottom:12px}
+.ma-card{background:#11192d;border:1px solid rgba(255,255,255,.06);border-radius:14px;padding:10px 12px;min-width:0}
+.ma-k{font:700 11px Arial,sans-serif;color:#9caad0;text-transform:uppercase;letter-spacing:.03em;margin-bottom:4px}
+.ma-v{font:800 14px Arial,sans-serif;color:#eef3ff;overflow-wrap:anywhere}
+.ma-panel{background:#11192d;border:1px solid rgba(255,255,255,.06);border-radius:14px;padding:12px 14px;margin-bottom:10px}
+.ma-sec{font:800 12px Arial,sans-serif;color:#9fc1ff;text-transform:uppercase;letter-spacing:.05em;margin:0 0 10px}
+.ma-sec.out{margin:14px 0 8px}
+.ma-note{color:#9caad0;font-size:12px;margin:0 0 12px}
+.ma-row{display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:12px;margin-bottom:10px;background:#11192d;border:1px solid rgba(255,255,255,.06);border-radius:14px}
+.ma-row.on{border-color:rgba(51,181,127,.45);background:linear-gradient(180deg,#132a22,#11192d 70%)}
+.ma-row-main{flex:1 1 200px;min-width:0}
+.ma-row-name{font-weight:800;color:#eef3ff;overflow-wrap:anywhere}
+.ma-row-meta{color:#9caad0;font-size:12px;margin-top:2px;overflow-wrap:anywhere}
+.ma-row-actions{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+.ma-row-actions .core-btn{padding:6px 10px;font-size:12px}
+.ma-num{flex:0 0 auto;width:28px;height:28px;border-radius:10px;background:#18223a;color:#cfd8f7;font:800 12px Arial,sans-serif;display:flex;align-items:center;justify-content:center}
+.ma-tick,.ma-chk input{accent-color:#4b6dd0;width:17px;height:17px;margin:0;cursor:pointer;flex:0 0 auto}
+.ma-bar{height:5px;border-radius:999px;background:#0d1322;margin-top:8px;overflow:hidden}
+.ma-bar i{display:block;height:100%;border-radius:999px;background:linear-gradient(90deg,#3657a7,#4b6dd0)}
+.ma-bar.full i{background:linear-gradient(90deg,#217f5b,#33b57f)}
+.ma-fields{display:flex;flex-wrap:wrap;align-items:flex-end}
+.ma-fields:has(.ma-fld) .ma-chk{min-height:33px}
+.ma-fld{display:inline-flex;flex-direction:column;gap:6px;margin:0 12px 10px 0;vertical-align:top}
+.ma-fld.in-row{margin:0}
+.ma-fl{font:700 11px Arial,sans-serif;color:#9caad0;letter-spacing:.02em}
+.ma-chk{display:inline-flex;gap:8px;align-items:center;margin:0 18px 10px 0;color:#dbe4ff;font:13px Arial,sans-serif;cursor:pointer}
+.ma-det{flex:1 1 100%;min-width:0;border-top:1px solid rgba(255,255,255,.06);padding-top:8px}
+.ma-det summary{cursor:pointer;color:#9caad0;font:700 12px Arial,sans-serif}
+.ma-det summary:hover{color:#eef3ff}
+.ma-opts{padding-top:12px}
+.ma-log{background:#0d1322;border:1px solid rgba(255,255,255,.06);border-radius:14px;padding:10px 12px}
+.ma-line{font:12px/1.6 monospace;color:#c9d4f5;overflow-wrap:anywhere}.ma-line b{color:#7f8fb8;font-weight:400}
 .ma-line.err{color:#ff8a97}.ma-line.warn{color:#ffd978}.ma-line.ok{color:#8ee6a8}.ma-line.dmg{color:#9fc1ff}.ma-line.skill{color:#d6a8ff}
-.ma-det summary{cursor:pointer;color:#9caad0;font-size:12px}.ma-det{margin-top:4px}`;
+.ma-kv{display:flex;justify-content:space-between;gap:12px;padding:6px 0;border-bottom:1px solid rgba(255,255,255,.05);font-size:13px;color:#dbe4ff}
+.ma-kv:last-child{border-bottom:none}.ma-kv span:last-child{color:#9caad0}`;
     document.head.appendChild(s);
   })();
 
@@ -1703,8 +1731,10 @@ const Panel = (() => {
   const ago = (t) => (t ? fmtDur(Date.now() - t) + ' ago' : 'never');
   const pill = (txt, kind) => h('span', { class: 'core-pill' + (kind ? ' core-pill-' + kind : '') }, txt);
   const card = (k, v) => h('div', { class: 'ma-card' }, h('div', { class: 'ma-k' }, k), h('div', { class: 'ma-v' }, v));
-  const sec = (t) => h('div', { class: 'ma-sec' }, t);
-  const fld = (label, el) => h('label', { class: 'ma-fld' }, h('span', { class: 'core-dim' }, label), el);
+  const sec = (t, out) => h('div', { class: 'ma-sec' + (out ? ' out' : '') }, t);
+  const box = (...kids) => h('div', { class: 'ma-panel' }, kids);
+  const foot = (...kids) => h('div', { class: 'core-footer' }, kids);
+  const fld = (label, el, inRow) => h('label', { class: 'ma-fld' + (inRow ? ' in-row' : '') }, h('span', { class: 'ma-fl' }, label), el);
   const changed = (fn) => (e) => { fn(e.target); saveCfg(); };
   const check = (label, get, set) => h('label', { class: 'ma-chk' }, h('input', { type: 'checkbox', checked: get() ? true : null, onchange: changed((el) => set(el.checked)) }), label);
   const sel = (opts, cur, set, w) => h('select', { class: 'core-input', style: w ? { width: w + 'px' } : null, onchange: changed((el) => set(el.value)) },
@@ -1718,11 +1748,13 @@ const Panel = (() => {
   function header() {
     const st = Status.get(), cur = Engine.current(), run = Run.wanted() && !Run.paused();
     const kind = /FIGHT|RUN/.test(st) ? 'ok' : /STOP|PAUSE|NO |DEAD|FOLLOW/.test(st) ? 'error' : 'loading';
-    return h('div', { class: 'ma-head' }, pill(st, kind), h('span', { class: 'core-dim' }, cur ? '🎯 ' + cur.name : (Tab.isMain() ? 'no target' : 'another tab is running it')),
-      h('span', { style: { flex: '1 1 auto' } }),
+    return h('div', { class: 'ma-hero' },
+      h('div', { class: 'ma-hero-main' },
+        h('div', { class: 'ma-hero-top' }, pill(st, kind), h('span', { class: 'core-dim' }, Tab.isMain() ? 'main tab' : 'follower tab')),
+        h('div', { class: 'ma-hero-target' }, cur ? '🎯 ' + cur.name : (Tab.isMain() ? 'No target right now' : 'Another tab is running it'))),
       run ? btn('⏹ Stop', 'danger', () => { Run.stop('stopped from the panel'); draw(); }) : btn('▶ Start', 'success', () => { Run.start(); draw(); }));
   }
-  function tabsBar() { return h('div', { class: 'ma-tabs' }, TABS.map(([id, label]) => h('button', { type: 'button', class: 'ma-tab' + (id === tab ? ' on' : ''), onclick: () => { tab = id; draw(); } }, label))); }
+  function tabsBar() { return h('div', { class: 'ma-tabs' }, TABS.map(([id, label]) => h('button', { type: 'button', class: 'core-btn ma-tab' + (id === tab ? '' : ' core-btn-soft'), onclick: () => { tab = id; draw(); } }, label))); }
 
   /* ---- STATUS ---- */
   function bossState(low) {
@@ -1736,6 +1768,17 @@ const Panel = (() => {
     if (e.nextTs && e.nextTs * 1000 > Date.now()) return ['respawns in ' + fmtDur(e.nextTs * 1000 - Date.now()), ''];
     return ['not up', ''];
   }
+  function statusRow(low, i) {
+    const [txt, kind] = bossState(low), ev = Board.get(low) || {}, def = Roster.get(low), cap = bossCap(low);
+    const swarm = !!(def && def.kind === 'dungeon-swarm'), dealt = ev.userDmg || 0, pct = cap > 0 ? Math.min(100, dealt / cap * 100) : 0;
+    return h('div', { class: 'ma-row' + (kind === 'ok' ? ' on' : '') },
+      h('div', { class: 'ma-num' }, i + 1),
+      h('div', { class: 'ma-row-main' },
+        h('div', { class: 'ma-row-name' }, bossName(low)),
+        h('div', { class: 'ma-row-meta' }, swarm ? 'cap ' + fmtNum(cap) + ' per mob' : `${fmtNum(dealt)} / ${fmtNum(cap)} damage`),
+        swarm || !(cap > 0) ? null : h('div', { class: 'ma-bar' + (pct >= 100 ? ' full' : '') }, h('i', { style: { width: pct.toFixed(1) + '%' } }))),
+      pill(txt, kind));
+  }
   function tStatus() {
     const m = Core.me.get() || {}, e = m.exp, cls = effectiveClass();
     const out = [h('div', { class: 'ma-grid' },
@@ -1744,17 +1787,13 @@ const Panel = (() => {
       card('Level · EXP', `${Me.level() || '?'} · ${Me.expPct() != null ? Me.expPct().toFixed(1) + '%' : '?'}`), card('Class', cls || 'unknown'),
       card('Hits · damage', `${stats.hits} · ${fmtNum(stats.dmg)}`), card('Potions used', `stam ${stats.stamA + stats.stamB} · hp ${stats.hpUses} · mana ${stats.mpRefills}`),
       card('Presets applied', Presets.summary()))];
-    const conf = Conflicts.list(); if (conf.length) out.push(h('div', { class: 'core-err' }, '⛔ ' + conf.join(' · ')));
-    const gi = Guard.info(); if (gi.faulted || gi.lastInfo) out.push(h('div', { class: 'core-err' }, '🔒 ' + (gi.lastInfo || gi.faulted) + (gi.lastInfo === 'unconfigured' ? ' — add a login source (Account Switcher) or sign in by hand' : '')));
-    if (!Tab.isMain()) out.push(h('div', { class: 'core-row' }, h('span', { class: 'core-dim' }, 'Another tab is the main one and does the attacking.'), btn('Take over this tab', 'soft', () => { Tab.takeOver(); })));
-    out.push(h('div', { class: 'core-row' }, btn('🔎 Scan now', 'soft', () => Engine.scanNow()), btn('Clear skips', 'soft', () => { Engine.clearSkips(); Diag.clear(); draw(); })));
+    const conf = Conflicts.list(); if (conf.length) out.push(h('div', { class: 'core-err', style: { marginBottom: '10px' } }, '⛔ ' + conf.join(' · ')));
+    const gi = Guard.info(); if (gi.faulted || gi.lastInfo) out.push(h('div', { class: 'core-err', style: { marginBottom: '10px' } }, '🔒 ' + (gi.lastInfo || gi.faulted) + (gi.lastInfo === 'unconfigured' ? ' — add a login source (Account Switcher) or sign in by hand' : '')));
+    if (!Tab.isMain()) out.push(h('div', { class: 'ma-row' }, h('div', { class: 'ma-row-main core-dim' }, 'Another tab is the main one and does the attacking.'), btn('Take over this tab', 'soft', () => { Tab.takeOver(); })));
+    out.push(sec('Bosses', true));
     if (!cfg.targets.length) out.push(h('div', { class: 'core-empty' }, 'No bosses selected — tick the ones to farm in the Bosses tab, then press Start.'));
-    else out.push(h('table', { class: 'ma-table' }, h('thead', {}, h('tr', {}, ['#', 'Boss', 'State', 'Your damage', 'Cap'].map((t) => h('th', {}, t)))),
-      h('tbody', {}, cfg.targets.map((low, i) => {
-        const [txt, kind] = bossState(low), ev = Board.get(low) || {}, def = Roster.get(low);
-        const dealt = def && def.kind === 'dungeon-swarm' ? '—' : fmtNum(ev.userDmg || 0);
-        return h('tr', {}, h('td', {}, i + 1), h('td', {}, bossName(low)), h('td', {}, pill(txt, kind)), h('td', {}, dealt), h('td', {}, fmtNum(bossCap(low))));
-      }))));
+    else out.push(h('div', {}, cfg.targets.map(statusRow)));
+    out.push(foot(btn('🔎 Scan now', 'soft', () => Engine.scanNow()), btn('Clear skips', 'soft', () => { Engine.clearSkips(); Diag.clear(); draw(); })));
     return out;
   }
 
@@ -1773,35 +1812,43 @@ const Panel = (() => {
   }
   function bossRow(def) {
     const low = def.low, on = cfg.targets.includes(low), o = cfg.bosses[low] || {}, loc = bossLoc(low), swarm = def.kind === 'dungeon-swarm';
-    const opts = h('details', { class: 'ma-det' }, h('summary', {}, 'options'),
-      cfg.sideMob.enabled ? fld('shield targeting', sel([['auto', 'auto'], ['normal', 'normal (never divert)'], ['shielded', 'shielded (always divert)']], SideMob.modeOf(low), (v) => { ovr(low).targeting = v; }, 190)) : null,
-      ...Presets.kinds().map((k) => presetSel(k, low)),
-      Presets.kinds().length ? null : h('div', { class: 'core-dim' }, 'no preset addon loaded (gear / crystal / pet presets show up here when they are)'),
-      fld('switch cap at (server time)', h('input', { class: 'core-input', style: { width: '70px' }, value: o.switchAt || '', placeholder: 'HH:MM', onchange: changed((el) => { const v = parseClock(el.value); if (!el.value.trim()) delete ovr(low).switchAt; else if (v) { ovr(low).switchAt = v; el.value = v; } else el.value = o.switchAt || ''; }) })),
-      fld('cap after switch', h('input', { class: 'core-input', style: { width: '90px' }, value: o.capAfterSwitch != null ? fmtNum(o.capAfterSwitch) : '', onchange: changed((el) => { if (!el.value.trim()) delete ovr(low).capAfterSwitch; else { const n = parseCap(el.value); if (n != null) ovr(low).capAfterSwitch = n; } }) })),
-      def.kind === 'wave' ? fld('gate / wave', h('span', {}, h('input', { class: 'core-input', style: { width: '48px' }, value: loc ? loc.gate : '', onchange: changed((el) => { const n = parseInt(el.value, 10); if (n > 0) ovr(low).gate = n; }) }), ' ', h('input', { class: 'core-input', style: { width: '48px' }, value: loc ? loc.wave : '', onchange: changed((el) => { const n = parseInt(el.value, 10); if (n > 0) ovr(low).wave = n; }) }))) : null);
-    return h('tr', {},
-      h('td', {}, h('input', { type: 'checkbox', checked: on ? true : null, onchange: (e) => toggle(low, e.target.checked) })),
-      h('td', {}, h('div', {}, bossName(low), ' ', pill(def.kind === 'wave' ? `wave ${loc ? loc.gate + '/' + loc.wave : '?'}` : swarm ? 'dungeon · swarm' : 'dungeon', '')), h('div', {}, ...(def.group && Roster.canon(def) !== def ? [h('span', { class: 'core-dim' }, 'phase of ' + Roster.canon(def).name)] : [])), opts),
-      h('td', {}, h('input', { class: 'core-input', style: { width: '84px' }, value: fmtNum(bossCap(low)), title: 'damage cap for this boss (5B, 750M, 2,000,000,000 …); 0 = skip', onchange: changed((el) => { const n = parseCap(el.value); if (n != null) { ovr(low).cap = n; el.value = fmtNum(n); } else el.value = fmtNum(bossCap(low)); }) })),
-      h('td', {}, on ? h('span', {}, btn('↑', 'soft', () => move(low, -1)), ' ', btn('↓', 'soft', () => move(low, 1)), ' ', h('span', { class: 'core-dim' }, '#' + (cfg.targets.indexOf(low) + 1))) : ''));
+    const phaseOf = def.group && Roster.canon(def) !== def ? 'phase of ' + Roster.canon(def).name : '';
+    const opts = h('details', { class: 'ma-det', open: openOpts.has(low) ? true : null, ontoggle: (e) => { if (e.target.open) openOpts.add(low); else openOpts.delete(low); } }, h('summary', {}, 'Options'),
+      h('div', { class: 'ma-opts ma-fields' },
+        cfg.sideMob.enabled ? fld('shield targeting', sel([['auto', 'auto'], ['normal', 'normal (never divert)'], ['shielded', 'shielded (always divert)']], SideMob.modeOf(low), (v) => { ovr(low).targeting = v; }, 190)) : null,
+        ...Presets.kinds().map((k) => presetSel(k, low)),
+        Presets.kinds().length ? null : h('div', { class: 'ma-note' }, 'No preset addon loaded — gear / crystal / pet presets show up here when they are.'),
+        fld('switch cap at (server time)', h('input', { class: 'core-input', style: { width: '90px' }, value: o.switchAt || '', placeholder: 'HH:MM', onchange: changed((el) => { const v = parseClock(el.value); if (!el.value.trim()) delete ovr(low).switchAt; else if (v) { ovr(low).switchAt = v; el.value = v; } else el.value = o.switchAt || ''; }) })),
+        fld('cap after switch', h('input', { class: 'core-input', style: { width: '100px' }, value: o.capAfterSwitch != null ? fmtNum(o.capAfterSwitch) : '', onchange: changed((el) => { if (!el.value.trim()) delete ovr(low).capAfterSwitch; else { const n = parseCap(el.value); if (n != null) ovr(low).capAfterSwitch = n; } }) })),
+        def.kind === 'wave' ? fld('gate / wave', h('span', {}, h('input', { class: 'core-input', style: { width: '56px' }, value: loc ? loc.gate : '', onchange: changed((el) => { const n = parseInt(el.value, 10); if (n > 0) ovr(low).gate = n; }) }), ' ', h('input', { class: 'core-input', style: { width: '56px' }, value: loc ? loc.wave : '', onchange: changed((el) => { const n = parseInt(el.value, 10); if (n > 0) ovr(low).wave = n; }) }))) : null));
+    return h('div', { class: 'ma-row' + (on ? ' on' : '') },
+      h('input', { type: 'checkbox', class: 'ma-tick', title: on ? 'Farming this boss' : 'Tick to farm this boss', checked: on ? true : null, onchange: (e) => toggle(low, e.target.checked) }),
+      h('div', { class: 'ma-row-main' },
+        h('div', { class: 'ma-row-name' }, bossName(low), ' ', pill(def.kind === 'wave' ? `wave ${loc ? loc.gate + '/' + loc.wave : '?'}` : swarm ? 'dungeon · swarm' : 'dungeon', '')),
+        phaseOf ? h('div', { class: 'ma-row-meta' }, phaseOf) : null),
+      h('div', { class: 'ma-row-actions' },
+        fld('cap', h('input', { class: 'core-input', style: { width: '90px' }, value: fmtNum(bossCap(low)), title: 'damage cap for this boss (5B, 750M, 2,000,000,000 …); 0 = skip', onchange: changed((el) => { const n = parseCap(el.value); if (n != null) { ovr(low).cap = n; el.value = fmtNum(n); } else el.value = fmtNum(bossCap(low)); }) }), true),
+        on ? h('span', { class: 'ma-row-actions' }, btn('↑', 'soft', () => move(low, -1)), btn('↓', 'soft', () => move(low, 1)), h('span', { class: 'core-dim' }, '#' + (cfg.targets.indexOf(low) + 1))) : null),
+      opts);
   }
   function tBosses() {
     const on = cfg.targets.map((l) => Roster.get(l)).filter(Boolean), off = Roster.list.filter((d) => !cfg.targets.includes(d.low) && (d.kind === 'wave' || Kernel.isOn('dungeons')));
-    return [h('div', { class: 'core-dim', style: { marginBottom: '8px' } }, 'The first alive boss that is still under its cap is attacked, in the order below (↑ ↓). Phases of one boss are ticked together.'),
-      h('table', { class: 'ma-table' }, h('thead', {}, h('tr', {}, ['On', 'Boss', 'Cap', 'Priority'].map((t) => h('th', {}, t)))), h('tbody', {}, [...on, ...off].map(bossRow)))];
+    return [h('div', { class: 'ma-note' }, 'The first alive boss that is still under its cap is attacked, in the order below (↑ ↓). Phases of one boss are ticked together.'),
+      h('div', {}, [...on, ...off].map(bossRow))];
   }
 
   /* ---- POTIONS ---- */
   function tPotions() {
     const m = cfg.mana, A = cfg.stam.A, B = cfg.stam.B, S = cfg.stam.save, H = cfg.hp;
-    return [sec('Mana'),
-      h('div', {}, check('Refill mana automatically', () => m.enabled, (v) => { m.enabled = v; }), check('When max MP is 0 fill the bar', () => m.fullMaxAt0, (v) => { m.fullMaxAt0 = v; })),
-      h('div', {}, fld('potion size', sel([['S', 'S (20 MP)'], ['M', 'M (40 MP)'], ['L', 'L (60 MP)'], ['XL', 'XL (100 MP)']], m.type, (v) => { m.type = v; }, 120)), textIn(m, 'name', 170, 'exact item name (optional)', 'auto'), intIn(m, 'threshold', 60, 'refill at MP ≤'), intIn(m, 'fillTo', 60, 'fill up to MP')),
-      sec('Stamina (Core.potions: sidebar → remembered id → inventory)'),
-      h('div', {}, check('Potion A', () => A.enabled, (v) => { A.enabled = v; }), textIn(A, 'item', 190, 'item name'), check('Potion B (next)', () => B.enabled, (v) => { B.enabled = v; }), textIn(B, 'item', 190, 'item name')),
-      h('div', {}, check('Save stamina near the EXP cap', () => S.enabled, (v) => { S.enabled = v; }), pctIn(S, 'thresholdPct', 70, 'pause at EXP %')),
-      sec('HP'), h('div', {}, check('Drink an HP potion when low', () => H.enabled, (v) => { H.enabled = v; }), pctIn(H, 'thresholdPct', 70, 'at HP ≤ %'))];
+    return [
+      box(sec('Mana'),
+        h('div', { class: 'ma-fields' }, check('Refill mana automatically', () => m.enabled, (v) => { m.enabled = v; }), check('When max MP is 0 fill the bar', () => m.fullMaxAt0, (v) => { m.fullMaxAt0 = v; })),
+        h('div', { class: 'ma-fields' }, fld('potion size', sel([['S', 'S (20 MP)'], ['M', 'M (40 MP)'], ['L', 'L (60 MP)'], ['XL', 'XL (100 MP)']], m.type, (v) => { m.type = v; }, 130)), textIn(m, 'name', 180, 'exact item name (optional)', 'auto'), intIn(m, 'threshold', 70, 'refill at MP ≤'), intIn(m, 'fillTo', 70, 'fill up to MP'))),
+      box(sec('Stamina'), h('div', { class: 'ma-note' }, 'Uses Core.potions: sidebar first, then the remembered id, then your inventory.'),
+        h('div', { class: 'ma-fields' }, check('Potion A', () => A.enabled, (v) => { A.enabled = v; }), textIn(A, 'item', 200, 'item name')),
+        h('div', { class: 'ma-fields' }, check('Potion B (next)', () => B.enabled, (v) => { B.enabled = v; }), textIn(B, 'item', 200, 'item name')),
+        h('div', { class: 'ma-fields' }, check('Save stamina near the EXP cap', () => S.enabled, (v) => { S.enabled = v; }), pctIn(S, 'thresholdPct', 80, 'pause at EXP %'))),
+      box(sec('HP'), h('div', { class: 'ma-fields' }, check('Drink an HP potion when low', () => H.enabled, (v) => { H.enabled = v; }), pctIn(H, 'thresholdPct', 80, 'at HP ≤ %')))];
   }
 
   /* ---- GRAVEYARD ---- */
@@ -1809,19 +1856,23 @@ const Panel = (() => {
     const L = cfg.autoLoot, s = Loot.state, groups = new Map();
     s.rows.filter((r) => r.needsLoot !== false).forEach((r) => { const g = groups.get(r.nameLow) || { name: r.name, rows: [], boss: r.isBoss }; g.rows.push(r); groups.set(r.nameLow, g); });
     const need = (() => { const m = Core.me.get(), e = m && m.exp; return e && e.max > 0 ? Math.max(0, e.max - e.cur) : null; })();
-    return [h('div', {}, check('Auto-loot when out of stamina', () => L.enabled, (v) => { L.enabled = v; }), fld('mode', sel([['toLevel', 'only what reaches the next level'], ['all', 'everything']], L.mode, (v) => { L.mode = v; }, 230)), intIn(L, 'scanMs', 80, 'scan every (ms)'), intIn(L, 'claimGapMs', 70, 'gap between claims (ms)')),
-      h('div', { class: 'core-row' }, btn(s.scanning ? 'Scanning…' : '🔎 Scan graveyard', 'soft', () => { Loot.scan(); }), btn(s.looting ? 'Looting…' : '🎒 Loot now (per mode)', 'success', () => { Loot.pass(); }),
-        h('span', { class: 'core-dim' }, `${[...groups.values()].reduce((n, g) => n + g.rows.length, 0)} lootable · last scan ${ago(s.lastScanAt)}${need != null ? ' · EXP to next level ' + fmtNum(need) : ''}`)),
-      groups.size ? h('table', { class: 'ma-table' }, h('thead', {}, h('tr', {}, ['Monster', 'Corpses', 'Known damage', ''].map((t) => h('th', {}, t)))),
-        h('tbody', {}, [...groups.entries()].map(([low, g]) => h('tr', {}, h('td', {}, g.name + (g.boss ? ' 👑' : '')), h('td', {}, g.rows.length), h('td', {}, fmtNum(g.rows.reduce((n, r) => n + (Number.isFinite(r.userDamage) ? r.userDamage : 0), 0))),
-          h('td', {}, btn(s.claiming.has(low) ? 'Claiming…' : 'Claim all', 'soft', () => { Loot.claimGroup(low); })))))) : h('div', { class: 'core-empty' }, s.lastScanAt ? 'Nothing lootable right now.' : 'Press Scan graveyard to look.')];
+    const lootable = [...groups.values()].reduce((n, g) => n + g.rows.length, 0);
+    return [
+      box(sec('Auto-loot'), h('div', { class: 'ma-fields' }, check('Auto-loot when out of stamina', () => L.enabled, (v) => { L.enabled = v; })),
+        h('div', { class: 'ma-fields' }, fld('mode', sel([['toLevel', 'only what reaches the next level'], ['all', 'everything']], L.mode, (v) => { L.mode = v; }, 250)), intIn(L, 'scanMs', 90, 'scan every (ms)'), intIn(L, 'claimGapMs', 90, 'gap between claims (ms)'))),
+      h('div', { class: 'ma-note' }, `${lootable} lootable · last scan ${ago(s.lastScanAt)}${need != null ? ' · EXP to next level ' + fmtNum(need) : ''}`),
+      groups.size ? h('div', {}, [...groups.entries()].map(([low, g]) => h('div', { class: 'ma-row' },
+        h('div', { class: 'ma-row-main' }, h('div', { class: 'ma-row-name' }, g.name + (g.boss ? ' 👑' : '')),
+          h('div', { class: 'ma-row-meta' }, `${g.rows.length} corpse${g.rows.length === 1 ? '' : 's'} · known damage ${fmtNum(g.rows.reduce((n, r) => n + (Number.isFinite(r.userDamage) ? r.userDamage : 0), 0))}`)),
+        h('div', { class: 'ma-row-actions' }, btn(s.claiming.has(low) ? 'Claiming…' : 'Claim all', 'soft', () => { Loot.claimGroup(low); }))))) : h('div', { class: 'core-empty' }, s.lastScanAt ? 'Nothing lootable right now.' : 'Press Scan graveyard to look.'),
+      foot(btn(s.scanning ? 'Scanning…' : '🔎 Scan graveyard', 'soft', () => { Loot.scan(); }), h('div', { class: 'core-spacer' }), btn(s.looting ? 'Looting…' : '🎒 Loot now (per mode)', 'success', () => { Loot.pass(); }))];
   }
 
   /* ---- LOG ---- */
   function tLog() {
     const f = cfg.logFilter || 'all', rows = Log.all().filter((r) => f === 'all' || r.k === f).slice(-160).reverse();
-    return [h('div', { class: 'core-row' }, sel([['all', 'all'], ['ok', 'ok'], ['warn', 'warnings'], ['err', 'errors'], ['dmg', 'hits'], ['skill', 'skills'], ['info', 'info']], f, (v) => { cfg.logFilter = v; draw(); }, 130), btn('Clear log', 'soft', () => Log.clear())),
-      rows.length ? h('div', {}, rows.map((r) => h('div', { class: 'ma-line ' + r.k }, h('b', {}, r.t + ' '), r.m.replace(/<[^>]+>/g, '')))) : h('div', { class: 'core-empty' }, 'Nothing logged yet.')];
+    return [h('div', { class: 'core-row' }, sel([['all', 'all'], ['ok', 'ok'], ['warn', 'warnings'], ['err', 'errors'], ['dmg', 'hits'], ['skill', 'skills'], ['info', 'info']], f, (v) => { cfg.logFilter = v; draw(); }, 140), h('div', { class: 'core-spacer' }), btn('Clear log', 'soft', () => Log.clear())),
+      rows.length ? h('div', { class: 'ma-log' }, rows.map((r) => h('div', { class: 'ma-line ' + r.k }, h('b', {}, r.t + ' '), r.m.replace(/<[^>]+>/g, '')))) : h('div', { class: 'core-empty' }, 'Nothing logged yet.')];
   }
 
   /* ---- DIAGNOSTICS ---- */
@@ -1830,24 +1881,26 @@ const Panel = (() => {
     return [h('div', { class: 'ma-grid' }, card('Why isn’t it attacking?', l.reason ? `${l.reason}${l.detail ? ' — ' + l.detail : ''}` : 'nothing skipped'), card('Last skip', ago(l.at)),
       card('Preset capabilities', Presets.note()),
       card('Re-login', au.status ? (au.status.configured ? 'configured' : 'unconfigured') : 'Core.auth missing'), card('Shielded mobs known', SideMob.shielded()), card('Version', VERSION)),
-      h('div', { class: 'core-row' }, btn('Clear diagnostics', 'soft', () => Diag.clear()), btn('Forget shielded mobs', 'soft', () => { SideMob.forget(); draw(); })),
-      sec('Skip reasons (count)'), counts.length ? h('table', { class: 'ma-table' }, h('tbody', {}, counts.map(([k, n]) => h('tr', {}, h('td', {}, k), h('td', {}, n))))) : h('div', { class: 'core-dim' }, 'none'),
-      sec('Recent events'), Diag.events.length ? h('div', {}, Diag.events.slice(-40).reverse().map((e) => h('div', { class: 'ma-line' }, h('b', {}, e.t + ' '), e.reason + (e.detail ? ' — ' + e.detail : '')))) : h('div', { class: 'core-dim' }, 'none')];
+      box(sec('Skip reasons (count)'), counts.length ? h('div', {}, counts.map(([k, n]) => h('div', { class: 'ma-kv' }, h('span', {}, k), h('span', {}, n)))) : h('div', { class: 'core-dim' }, 'none')),
+      box(sec('Recent events'), Diag.events.length ? h('div', {}, Diag.events.slice(-40).reverse().map((e) => h('div', { class: 'ma-line' }, h('b', {}, e.t + ' '), e.reason + (e.detail ? ' — ' + e.detail : '')))) : h('div', { class: 'core-dim' }, 'none')),
+      foot(btn('Clear diagnostics', 'soft', () => Diag.clear()), btn('Forget shielded mobs', 'soft', () => { SideMob.forget(); draw(); }))];
   }
 
   /* ---- SETTINGS ---- */
   function tSettings() {
     const tiers = TIER_CHAIN.slice(0, 4).map((t) => [t, SKILLS[t].label + ' (' + SKILLS[t].cost + ' stam)']);
-    return [sec('Attacks'),
-      h('div', {}, fld('highest skill tier', sel(tiers, cfg.maxTier, (v) => { cfg.maxTier = v; }, 220)), fld('class skill', sel([['auto', 'auto' + (cfg.detectedClass ? ' (' + cfg.detectedClass + ')' : '')], ['warrior', 'warrior'], ['cleric', 'cleric'], ['hunter', 'hunter'], ['mage', 'mage']], cfg.classOverride, (v) => { cfg.classOverride = v; }, 160)),
-        check('Use the class skill', () => cfg.useClassSkill, (v) => { cfg.useClassSkill = v; })),
-      h('div', {}, intIn(cfg, 'attackDelayMs', 70, 'wave swing gap (ms)'), intIn(cfg, 'dungeonAttackDelayMs', 70, 'dungeon swing gap (ms)'), intIn(cfg, 'minActionGapMs', 70, 'min gap between requests (ms)'), intIn(cfg, 'skillToAttackGapMs', 70, 'skill → attack gap (ms)')),
-      h('div', {}, intIn(cfg, 'defaultBossCap', 90, 'default boss cap'), intIn(cfg, 'fightScanMs', 70, 'rescan while fighting (ms)'), intIn(cfg, 'idleRecheckMs', 70, 'recheck idle boss (ms)'), intIn(cfg, 'dungeonPollMs', 70, 'dungeon poll (ms)')),
-      sec('Behaviour'),
-      h('div', {}, check('Pause the server auto-farm while fighting', () => cfg.autoFarmControl, (v) => { cfg.autoFarmControl = v; }), check('Fight Phase Duels automatically', () => cfg.autoDuel, (v) => { cfg.autoDuel = v; }),
-        check('Shield pierce on a side mob (only if a boss is shielded)', () => cfg.sideMob.enabled, (v) => { cfg.sideMob.enabled = v; draw(); })),
-      sec('Parts (switch one off and the rest keep working)'),
-      h('div', {}, [...Kernel.parts.values()].map((p) => check(`${p.icon || ''} ${p.name || p.id}`, () => Kernel.isOn(p.id), (v) => { cfg.parts[p.id] = v; Engine.poke(true); })))];
+    return [
+      box(sec('Attacks'),
+        h('div', { class: 'ma-fields' }, fld('highest skill tier', sel(tiers, cfg.maxTier, (v) => { cfg.maxTier = v; }, 230)), fld('class skill', sel([['auto', 'auto' + (cfg.detectedClass ? ' (' + cfg.detectedClass + ')' : '')], ['warrior', 'warrior'], ['cleric', 'cleric'], ['hunter', 'hunter'], ['mage', 'mage']], cfg.classOverride, (v) => { cfg.classOverride = v; }, 170))),
+        h('div', { class: 'ma-fields' }, check('Use the class skill', () => cfg.useClassSkill, (v) => { cfg.useClassSkill = v; }))),
+      box(sec('Timing'),
+        h('div', { class: 'ma-fields' }, intIn(cfg, 'attackDelayMs', 90, 'wave swing gap (ms)'), intIn(cfg, 'dungeonAttackDelayMs', 90, 'dungeon swing gap (ms)'), intIn(cfg, 'minActionGapMs', 90, 'min gap between requests (ms)'), intIn(cfg, 'skillToAttackGapMs', 90, 'skill → attack gap (ms)')),
+        h('div', { class: 'ma-fields' }, intIn(cfg, 'defaultBossCap', 100, 'default boss cap'), intIn(cfg, 'fightScanMs', 90, 'rescan while fighting (ms)'), intIn(cfg, 'idleRecheckMs', 90, 'recheck idle boss (ms)'), intIn(cfg, 'dungeonPollMs', 90, 'dungeon poll (ms)'))),
+      box(sec('Behaviour'),
+        h('div', { class: 'ma-fields' }, check('Pause the server auto-farm while fighting', () => cfg.autoFarmControl, (v) => { cfg.autoFarmControl = v; }), check('Fight Phase Duels automatically', () => cfg.autoDuel, (v) => { cfg.autoDuel = v; }),
+          check('Shield pierce on a side mob (only if a boss is shielded)', () => cfg.sideMob.enabled, (v) => { cfg.sideMob.enabled = v; draw(); }))),
+      box(sec('Parts'), h('div', { class: 'ma-note' }, 'Switch one off and the rest keep working.'),
+        h('div', { class: 'ma-fields' }, [...Kernel.parts.values()].map((p) => check(`${p.icon || ''} ${p.name || p.id}`, () => Kernel.isOn(p.id), (v) => { cfg.parts[p.id] = v; Engine.poke(true); }))))];
   }
 
   const BUILD = { status: tStatus, bosses: tBosses, potions: tPotions, graveyard: tGraveyard, log: tLog, diag: tDiag, settings: tSettings };
@@ -1865,7 +1918,7 @@ const Panel = (() => {
   UI.hook((what) => { if (!open) return; if (what === undefined || DIRTY_TAB[what] === tab || (what === 'status' && tab === 'status')) schedule(); });
 
   function register() {
-    Core.float.add({ id: ID, title: 'Automator', icon: '🤖', order: 40, width: 940,
+    Core.float.add({ id: ID, title: 'Automator', icon: '🤖', order: 40,
       render(el) { root = h('div', {}); el.replaceChildren(root); open = true; draw(); },
       onShow() { open = true; }, onHide() { open = false; } });
   }
