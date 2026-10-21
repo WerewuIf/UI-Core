@@ -620,7 +620,7 @@ const LootData = (() => {
     for (const [low, e] of Object.entries(d.bosses)) {
       if (!e || !e.name || Roster.get(low)) continue;
       const cap = top(low);
-      if (e.kind === 'wave' && e.gate > 0 && e.wave > 0) {
+      if (e.kind === 'wave' && e.isBoss && e.gate > 0 && e.wave > 0) {                                  // (a wave monster the scan did not mark as a boss is never added)
         const sib = /duelist/i.test(e.name) && !/\b(herald|sovereign)\b/i.test(e.name) && Roster.list.find((x) => x.kind === 'wave' && x.gate === e.gate && x.wave === e.wave && Roster.canon(x) === x && Roster.looksLikePhase2Of(x, e.name));   // (phase 2 names are the "... Duelist ..." ones; two bosses that merely share a first name stay separate)
         if (sib) Roster.addPhase(sib, e.name); else Roster.add({ name: e.name, defaultCap: cap != null ? cap : cfg.defaultBossCap, gate: e.gate, wave: e.wave });
         added++;
@@ -630,8 +630,17 @@ const LootData = (() => {
     }
     return added;
   }
+  // a saved record is a boss when the roster knows it (or the Gribble swarm), the scan marked it (isBoss / a dungeon boss pin)
+  const isBossRecord = (low, e) => !!(e && (e.isBoss || e.boss || Roster.get(low) || Roster.list.some((r) => r.swarmMatch && r.swarmMatch.test(e.name || low))));
+  // older scans saved every monster on the page: take the regular mobs back out (returns their names)
+  function purge() {
+    const keepB = {}, gone = [];
+    Object.entries(d.bosses).forEach(([low, e]) => { if (isBossRecord(low, e)) keepB[low] = e; else gone.push(low); });
+    if (gone.length) { d = Object.assign({}, d, { bosses: keepB }); lootStore.set(d); }
+    return gone;
+  }
   lootStore.watch((v) => { d = norm(v); const n = apply(); if (n) log(`🆕 loot scan added ${n} boss${n === 1 ? '' : 'es'} to the Bosses tab`, 'info'); UI.dirty(); });
-  return { get, tiers, top, apply, all: () => d.bosses, at: () => d.at || 0 };
+  return { get, tiers, top, apply, purge, isBossRecord, all: () => d.bosses, at: () => d.at || 0 };
 })();
 
 /* ---- board: what we KNOW about each boss right now. Only a validated page / confirmed reply may change it. -------- */
@@ -1011,7 +1020,18 @@ const SideMob = (() => {
     return r.ok;
   }
   const isRejoin = (m) => /removed due to inactivity|rejoin the battle/i.test(String(m || ''));
-  return { isShieldMsg, eligible, isShielded, mark, find, forgetCache, join, isRejoin, targetFields, keyOf, modeOf, shielded: () => shielded.size, forget: () => { shielded.clear(); saveSh(); cache = null; } };
+  // what find() would pick, same order, without caching it, logging it or joining anything
+  async function preview(low) {
+    const lk = cfg.sideMob.locked;
+    if (lk && lk.monsterId && lk.instanceId) return { mob: { name: lk.name || 'locked side mob' }, src: 'the mob you locked' };
+    let mob = null;
+    try { if (Dungeons.sideMobs) mob = await Dungeons.sideMobs('', shielded); } catch (_) { /* then a wave mob */ }
+    if (mob) return { mob, src: `Shadowbridge · location ${mob.locationId}` };
+    const loc = bossLoc(low); mob = await waveMob({ low, monsterId: '' });
+    return mob ? { mob, src: loc ? `Gate ${loc.gate} · Wave ${loc.wave} page` : 'a wave page' } : null;
+  }
+  const lockedName = () => { const lk = cfg.sideMob.locked; return lk && lk.monsterId && lk.instanceId ? (lk.name || 'a locked mob') : ''; };
+  return { preview, lockedName, isShieldMsg, eligible, isShielded, mark, find, forgetCache, join, isRejoin, targetFields, keyOf, modeOf, shielded: () => shielded.size, forget: () => { shielded.clear(); saveSh(); cache = null; } };
 })();
 
 /* ---- the attack engine -------------------------------------------------------------------------------------------
@@ -1774,6 +1794,16 @@ Object.assign(LootScan, (() => {
   const step = (label) => { st.label = label; UI.dirty('scan'); };
   const check = () => { if (st.stop) throw new Halt('stopped'); };
   let found = {};                                                // nameLow -> record, for this run
+  const skipped = new Set();                                     // regular mobs seen and left alone, for this run
+
+  /* WHO COUNTS AS A BOSS (regular mobs are never saved): a monster the roster already knows (or the Gribble swarm), or one that
+   * the page itself marks as a boss: data-boss="1", or a party limit above the 10,000 of regular mobs (bosses show "n/30000"). */
+  const isKnown = (low, name) => !!Roster.get(low) || Roster.list.some((r) => r.swarmMatch && r.swarmMatch.test(name || low));
+  function bossish(card) {
+    if (card.dataset.boss === '1') return true;
+    const m = /players\s*joined[\s\S]{0,120}?(\d[\d,]*)\s*\/\s*(\d[\d,]*)/i.exec(card.textContent || '');
+    return !!m && Number(m[2].replace(/,/g, '')) > 10000;
+  }
 
   /* one GET through the action queue, validated. mode: 'all' shows dead monsters on wave pages (Core swaps the cookies under its lock) */
   async function page(url, where, mode) {
@@ -1812,7 +1842,7 @@ Object.assign(LootScan, (() => {
   function keep(name, extra, b) {
     const low = clean(name).toLowerCase(), old = LootData.get(low);
     // a page that shows no loot panel this time must not wipe loot we already know
-    const rec = Object.assign({ name: clean(name), scannedAt: Date.now() }, extra, b);
+    const rec = Object.assign({ name: clean(name), scannedAt: Date.now() }, extra, { isBoss: true }, b);
     if (!rec.loot.length && old && Array.isArray(old.loot) && old.loot.length) rec.loot = old.loot;
     found[low] = rec; st.read = Object.keys(found).length; UI.dirty('scan');
   }
@@ -1855,6 +1885,7 @@ Object.assign(LootScan, (() => {
       if (aliveOnly && c.dataset.dead === '1') return;
       const name = clean((c.querySelector('h3,.monster-name,.name,h2') || {}).textContent) || clean(c.dataset.name);       // the visible title keeps its capitals; data-name is lowercase
       const id = Scan.cardId(c); if (!name || !id) return;
+      if (!isKnown(name.toLowerCase(), name) && !bossish(c)) { skipped.add(name.toLowerCase()); return; }          // a regular mob: not saved, its battle page is not even opened
       const e = names.get(name.toLowerCase()) || { name, ids: [] }; e.ids.push({ id, dead: c.dataset.dead === '1' }); names.set(name.toLowerCase(), e);
     });
     return names;
@@ -1904,10 +1935,11 @@ Object.assign(LootScan, (() => {
         step(`${label} · location ${pin.locationId}`);
         let doc; try { doc = await page(`/guild_dungeon_location.php?instance_id=${id}&location_id=${pin.locationId}`, `${label} location ${pin.locationId}`); } catch (e) { if (e instanceof Halt) throw e; note(e.message); continue; }
         if (/route is still sealed/i.test((doc.body && doc.body.textContent) || '')) { note(`${label} location ${pin.locationId}: sealed, skipped`); continue; }
-        const seen = new Set();
-        for (const card of doc.querySelectorAll('.mon')) {
+        const seen = new Set(), cards = Array.from(doc.querySelectorAll('.mon')), lone = new Set(cards.map((c) => clean(Dungeons.monName(c)).toLowerCase())).size === 1;
+        for (const card of cards) {
           const name = Dungeons.monName(card), dgmid = Dungeons.dgmidOf(card), low = clean(name).toLowerCase();
           if (!name || !dgmid || seen.has(low) || read >= 60) continue; seen.add(low);
+          if (!isKnown(low, name) && !(pin.isBoss && lone)) { skipped.add(low); continue; }                 // a regular dungeon mob: left alone
           try {
             const b = await readBattle(`/battle.php?dgmid=${encodeURIComponent(dgmid)}&instance_id=${encodeURIComponent(id)}`, name);
             if (hasData(b)) { keep(name, { kind: 'dungeon', dtype: type, locationId: pin.locationId, boss: !!pin.isBoss }, b); read++; }
@@ -1920,15 +1952,15 @@ Object.assign(LootScan, (() => {
   /* ---- run / stop ---- */
   function save() {
     const rows = Object.keys(found); if (!rows.length) return 0;
-    const prev = (() => { const o = lootStore.get(); return o && o.bosses && typeof o.bosses === 'object' ? o.bosses : {}; })();
+    const prev = (() => { const o = lootStore.get(), b = o && o.bosses && typeof o.bosses === 'object' ? o.bosses : {}, out = {}; Object.keys(b).forEach((k) => { if (LootData.isBossRecord(k, b[k])) out[k] = b[k]; }); return out; })();     // (regular mobs saved by an earlier scan are dropped here too)
     st.added = rows.filter((k) => !Roster.get(k) && !prev[k]).length;
     lootStore.set({ v: 1, at: Date.now(), bosses: Object.assign({}, prev, found) });
     return rows.length;
   }
   async function run() {
     if (st.running) return;
-    Object.assign(st, { running: true, stop: false, label: 'Starting…', done: 0, total: 0, read: 0, added: 0, notes: [], error: '', startedAt: Date.now(), endedAt: 0 });
-    found = {}; UI.dirty('scan'); log('🔎 loot scan started (read-only)', 'info');
+    Object.assign(st, { running: true, stop: false, label: 'Starting…', done: 0, total: 0, read: 0, added: 0, notes: [], error: '', skipped: 0, startedAt: Date.now(), endedAt: 0 });
+    found = {}; skipped.clear(); UI.dirty('scan'); log('🔎 loot scan started (read-only)', 'info');
     try {
       const waves = await discoverWaves();
       st.total = waves.length + 1; UI.dirty('scan');
@@ -1941,10 +1973,11 @@ Object.assign(LootScan, (() => {
       st.done++;
     } catch (e) { st.error = e instanceof Halt ? (e.message === 'stopped' ? '' : e.message) : String((e && e.message) || e); }
     finally {
+      st.skipped = skipped.size;
       let n = 0; try { n = save(); } catch (e) { st.error = 'could not save: ' + e.message; }
       st.running = false; st.endedAt = Date.now(); st.label = '';
       if (!n) { if (!st.error) st.error = 'nothing was read. Are you signed in?'; }
-      log(`${st.error ? '⚠️' : '✅'} loot scan ${st.stop ? 'stopped' : 'finished'}: ${n} monster${n === 1 ? '' : 's'} read${st.added ? ', ' + st.added + ' new' : ''}${st.notes.length ? ', ' + st.notes.length + ' note' + (st.notes.length === 1 ? '' : 's') : ''}${st.error ? ' — ' + st.error : ''}`, st.error ? 'warn' : 'ok');
+      log(`${st.error ? '⚠️' : '✅'} loot scan ${st.stop ? 'stopped' : 'finished'}: ${n} monster${n === 1 ? '' : 's'} read${st.added ? ', ' + st.added + ' new' : ''}${st.skipped ? ', ' + st.skipped + ' regular mob' + (st.skipped === 1 ? '' : 's') + ' left out' : ''}${st.notes.length ? ', ' + st.notes.length + ' note' + (st.notes.length === 1 ? '' : 's') : ''}${st.error ? ' — ' + st.error : ''}`, st.error ? 'warn' : 'ok');
       UI.dirty('scan'); UI.dirty('loot');
     }
   }
@@ -2105,7 +2138,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
 .ma-pill.err{color:#ff9aa6;border-color:rgba(255,107,122,.35);background:rgba(255,107,122,.1)}.ma-pill.cap{color:#8fb7a0;border-color:rgba(143,183,160,.3)}.ma-pill.blue{color:#9fc1ff;border-color:rgba(110,168,255,.35);background:rgba(110,168,255,.12)}
 /* loot scan strip (top of Bosses) */
 .ma-scan{display:flex;align-items:center;gap:9px;padding:8px 10px;margin-bottom:7px;border-radius:16px;background:linear-gradient(135deg,#17233f,#11192d);border:1px solid rgba(110,168,255,.2)}
-.ma-scan-t{flex:1;min-width:0}.ma-scan-t b{display:block;font:800 12px Arial,sans-serif;color:#fff}.ma-scan-t small{display:block;color:#9aa7cf;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ma-scan-t{flex:1;min-width:0}.ma-scan-t b{display:block;font:800 12px Arial,sans-serif;color:#fff}.ma-scan-t small{display:block;color:#9aa7cf;font-size:11px;line-height:1.35}
 .ma-scan .ma-bar{margin-top:5px;height:5px}
 .ma-scan-b{display:flex;gap:5px;flex:0 0 auto}.ma-scan-b .core-btn{padding:6px 11px}
 .ma-scan-n{margin:-3px 4px 7px;padding:6px 10px;border-radius:12px;background:rgba(227,179,65,.07);border:1px solid rgba(227,179,65,.2);color:#ffd978;font-size:11px;line-height:1.45}
@@ -2414,6 +2447,19 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     if (base <= 0) kids.push(note('Cap 0 means this boss is skipped.'));
     return field('Damage cap', opts.length ? 'tap a loot requirement to use it' : 'stop hitting once you have dealt this much', ...kids);
   }
+  /* the shield pierce, spelled out: what it does for this boss and which mob it would use right now */
+  const sideSeen = {};                                              // boss -> 'loading' | { mob, src } | { none: true }
+  function sideMobInfo(low) {
+    const mode = SideMob.modeOf(low), loc = bossLoc(low), r = sideSeen[low], lk = SideMob.lockedName();
+    const what = { auto: 'Hits the boss itself. Only if the server says it is shielded, the class skill moves to a side mob.', normal: 'Never uses a side mob: the class skill is cast on the boss.', shielded: 'The class skill is always cast on a side mob. The damage swings still hit the boss.' }[mode];
+    const lines = [h('div', {}, what), h('div', {}, lk ? ['Side mob: ', h('b', {}, lk), ' (locked).'] : `Side mob = a live regular mob, never a boss: first one in an open Shadowbridge, else one from ${loc ? `this boss’s wave page (Gate ${loc.gate} · Wave ${loc.wave})` : 'a wave page'}.`)];
+    const res = r === 'loading' ? h('span', {}, ' looking…') : r ? (r.none ? h('span', {}, ' none found right now (all empty, shielded or locked)') : h('span', {}, ' ', h('b', {}, r.mob.name), ' · ' + r.src)) : null;
+    return h('div', { class: 'ma-note' }, ...lines, h('div', { style: { marginTop: '4px' } }, btn('Show which mob', 'soft', async () => {
+      sideSeen[low] = 'loading'; draw();
+      try { const x = await SideMob.preview(low); sideSeen[low] = x || { none: true }; } catch (_) { sideSeen[low] = { none: true }; }
+      draw();
+    }), res));
+  }
   function bossEditor(def) {
     const ms = Roster.members(def), idx = Math.min(phaseSel[def.low] || 0, ms.length - 1), m = ms[idx], low = m.low, out = [];
     out.push(h('div', { class: 'ma-ed-h' }, h('b', { title: m.name }, m.name), h('button', { type: 'button', class: 'ma-x', title: 'Close', onclick: (e) => { stop(e); ui.open['boss:' + def.low] = false; saveUi(); draw(); } }, '✕')));
@@ -2422,7 +2468,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     if (m.kind !== 'wave') out.push(scheduleEditor(low));                       // timed cap changes: dungeon bosses only
     const kinds = Presets.kinds();
     if (kinds.length) out.push(h('div', { class: 'ma-ld', style: { marginTop: '8px' } }, kinds.map((k) => h('div', {}, h('label', {}, (KIND_ICO[k] || '🎒') + ' ' + cap1(k)), loadoutPick(k, low)))));
-    if (cfg.sideMob.enabled) out.push(field('Shield targeting', 'for bosses that block the class skill', seg([['auto', 'Auto'], ['normal', 'Never divert'], ['shielded', 'Always divert']], SideMob.modeOf(low), (v) => { ovr(low).targeting = v; }, { full: true })));
+    if (cfg.sideMob.enabled) { out.push(field('Shield targeting', 'for bosses that block the class skill', seg([['auto', 'Auto'], ['normal', 'Never divert'], ['shielded', 'Always divert']], SideMob.modeOf(low), (v) => { ovr(low).targeting = v; }, { full: true }))); out.push(sideMobInfo(low)); } else out.push(note('Shield pierce on a side mob is off (Settings → Attacks): a shielded boss is simply attacked directly.'));
     if (cfg.bosses[low] && Object.keys(cfg.bosses[low]).length) out.push(h('div', { style: { marginTop: '6px' } }, h('button', { type: 'button', class: 'ma-link', onclick: () => { delete cfg.bosses[low]; saveCfg(); draw(); } }, '↺ Reset this boss to defaults')));
     return h('div', { class: 'ma-ed' }, ...out);
   }
@@ -2502,7 +2548,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
         h('div', { class: 'ma-scan-b' }, btn('■ Stop', 'danger', () => LootScan.stop()))));
       return out;
     }
-    const sub = s.error ? '⚠ ' + s.error : n ? `${n} monsters · scanned ${ago(LootData.at())}` + (s.endedAt ? ` · last run read ${s.read}${s.added ? ', ' + s.added + ' new' : ''}` : '') : 'Reads every boss’s loot, level requirement and EXP cap.';
+    const sub = s.error ? '⚠ ' + s.error : n ? `${n} monsters · scanned ${ago(LootData.at())}` + (s.endedAt ? ` · last run read ${s.read}${s.added ? ', ' + s.added + ' new' : ''}${s.skipped ? ' · ' + s.skipped + ' regular mob' + (s.skipped === 1 ? '' : 's') + ' left out' : ''}` : '') : 'Reads every boss’s loot, level requirement and EXP cap.';
     out.push(h('div', { class: 'ma-scan' }, h('span', { class: 'ma-ico' }, '🔎'), h('div', { class: 'ma-scan-t' }, h('b', {}, 'Loot scan'), h('small', { title: sub }, sub)),
       h('div', { class: 'ma-scan-b' }, btn(n ? '↻ Rescan' : '🔎 Scan', 'soft', () => LootScan.run()), n ? btn('⬇ Export .txt', 'soft', () => LootScan.download()) : null)));
     if (s.notes.length) {
@@ -2577,7 +2623,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
       h('div', { class: 'ma-card' },
         setting('Pause the server auto-farm while fighting', 'So the two never fight over stamina.', sw(() => cfg.autoFarmControl, (v) => { cfg.autoFarmControl = v; }, { redraw: false })),
         setting('Fight phase duels automatically', null, sw(() => cfg.autoDuel, (v) => { cfg.autoDuel = v; }, { redraw: false })),
-        setting('Shield pierce on a side mob', 'Only for bosses that block the class skill.', sw(() => cfg.sideMob.enabled, (v) => { cfg.sideMob.enabled = v; }))),
+        setting('Shield pierce on a side mob', 'If a boss blocks the class skill (divine shield), only the class skill is cast on another live regular mob: first one in an open Shadowbridge, else a regular mob on the boss’s wave page. Never a boss. The damage swings still hit the boss. Pick the mob per boss in its settings.', sw(() => cfg.sideMob.enabled, (v) => { cfg.sideMob.enabled = v; }))),
       fold('adv', false, '🛠 Advanced timing', () => [note('Pause between requests, in milliseconds. The defaults are safe; lower numbers risk the server rejecting swings.'),
         ...timing.map(([l, k]) => setting(l, null, num(() => cfg[k], (n) => { cfg[k] = n; }, { w: 76, unit: 'ms' }))),
         setting('Graveyard scan every', null, num(() => cfg.autoLoot.scanMs, (n) => { cfg.autoLoot.scanMs = n; }, { w: 76, unit: 'ms' })),
@@ -2634,6 +2680,13 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
  * PART 6 — BOOT
  * ================================================================================================================ */
 Kernel.register({ id: 'bosses', name: 'Wave bosses', icon: '🌊' });
+(function dropRegularMobs() {
+  const gone = LootData.purge(); if (!gone.length) return;
+  const set = new Set(gone); let t = 0;
+  cfg.targets = cfg.targets.filter((x) => { if (set.has(x)) { t++; return false; } return true; });
+  gone.forEach((l) => { delete cfg.bosses[l]; });
+  saveCfg(); log(`🧹 removed ${gone.length} regular mob${gone.length === 1 ? '' : 's'} that an earlier loot scan had saved${t ? ' (and ' + t + ' target tick' + (t === 1 ? '' : 's') + ')' : ''}`, 'info');
+})();
 LootData.apply();
 Panel.register();
 Duels.bootPage().catch((e) => log('❌ duel page: ' + e.message, 'err'));
