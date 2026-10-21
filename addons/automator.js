@@ -98,7 +98,7 @@ const DEFAULT_CFG = {
   hp: { enabled: false, thresholdPct: 0 },                // drinks when the server says you are dead (HP 0)
   autoFarmControl: true,
   autoDuel: true,
-  sideMob: { enabled: false, source: 'auto' },         // shielded-boss side-mob targeting (off: it shouldn't be needed). source: 'auto' | 'gribble' | 'easy:<location>' | 'hard:<location>'
+  sideMob: { enabled: false },                         // shield pierce on a side mob: automatic once switched on (off: it shouldn't be needed)
   autoLoot: { enabled: false, mode: 'toLevel', scanMs: 60000, claimGapMs: 500 },
   parts: { bosses: true, dungeons: true, duels: true, loot: true },
   logFilter: 'all',
@@ -111,8 +111,7 @@ function mergeCfg(saved) {
   const d = JSON.parse(JSON.stringify(DEFAULT_CFG)), s = saved && typeof saved === 'object' ? saved : {};
   const out = Object.assign(d, s);
   for (const k of ['mana', 'hp', 'sideMob', 'autoLoot']) out[k] = Object.assign({}, DEFAULT_CFG[k], s[k] || {});
-  delete out.sideMob.locked; delete out.sideMob.lockedKey;      // (the old single locked mob: sources replace it)
-  if (!/^(auto|gribble|(easy|hard):\d+)$/.test(String(out.sideMob.source))) out.sideMob.source = 'auto';
+  delete out.sideMob.locked; delete out.sideMob.lockedKey; delete out.sideMob.source;      // (old picks: the pierce is automatic now)
   out.parts = Object.assign({}, DEFAULT_CFG.parts); Object.keys(out.parts).forEach((k) => { out.parts[k] = true; });   // modules are always on
   out.maxTier = 'WORLD_BREAKER';
   // stamina: one potion (Large or Full). Older saves had two slots (A, then B): keep whichever was switched on.
@@ -694,7 +693,7 @@ function candidates() {
 const targetKey = (t) => `${t.kind}:${t.instanceId || ''}:${t.monsterId}`;
 
 /* ---- slots the other parts fill in. Each has a harmless stub, so deleting PART 2 / 3 / 4 never breaks the wave bosses ---- */
-const Dungeons = { nextCheck: () => Infinity, refresh: async () => {}, sideMobs: null, catalog: null, terrName: () => '', corpses: null };   // PART 2 fills this
+const Dungeons = { nextCheck: () => Infinity, refresh: async () => {}, sideMobs: null, terrName: () => '', corpses: null };   // PART 2 fills this
 const Duels = { fight: null, bootPage: () => {} };                                                         // PART 3 fills this
 const Loot = { onStamStall: async () => {} };                                                              // PART 4 fills this
 const LootScan = { available: false, state: { running: false, stop: false, label: '', done: 0, total: 0, read: 0, added: 0, notes: [], error: '', startedAt: 0, endedAt: 0 }, run: async () => {}, stop() {}, download() {}, text: () => '' };   // PART 4b fills this
@@ -963,12 +962,11 @@ const Presets = (() => {
   return { kinds, available, list, ensure, summary, note, applied: () => Object.assign({}, applied), forget: () => { Object.keys(applied).forEach((k) => delete applied[k]); } };
 })();
 
-/* ---- side-mob / shielded-boss support (TOGGLE, off by default: it should not be needed) ------------------------------
- * A shielded boss rejects the class skill ("divine shield" / "couldn't pierce"). With the toggle on we remember that, and cast
- * ONLY the class skill on a live DUNGEON mob (never a boss, never a wave mob: wave pages are not fetched for this any more);
- * the damage attack always goes to the real boss. Per boss: targeting normal (never divert) | shielded (always divert) | auto
- * (divert once the server says so). Where the mob comes from is one global choice (cfg.sideMob.source): Auto (first live mob of
- * an open normal dungeon) | Gribbles | one normal-dungeon territory | one hard-dungeon territory.
+/* ---- side-mob / shielded-boss support (TOGGLE in Settings, off by default: it should not be needed) --------------------
+ * A shielded boss rejects the class skill ("divine shield" / "couldn't pierce"). With the toggle on this is fully automatic:
+ * we remember the boss is shielded and cast ONLY the class skill on a live regular mob (never a boss): first one in an open
+ * normal dungeon (Shadowbridge), else one on the boss's wave page. The damage attack always goes to the real boss.
+ * No per-boss setting, no picker.
  */
 const SideMob = (() => {
   const shStore = Core.store(ID + '-shielded', { def: [] });
@@ -977,32 +975,35 @@ const SideMob = (() => {
   const SHIELD_RE = /divine shield|couldn'?t pierce|cannot pierce/i;
   const isShieldMsg = (m) => SHIELD_RE.test(String(m == null ? '' : m));
   const keyOf = (t) => (t.kind || 'wave') + ':' + t.monsterId + (t.instanceId ? ':' + t.instanceId : '');
-  const modeOf = (low) => { const m = (cfg.bosses[low] || {}).targeting; return m === 'normal' || m === 'shielded' ? m : 'auto'; };
+  const modeOf = () => 'auto';                                      // always: divert once the server says the boss is shielded
   const eligible = (t) => !!cfg.sideMob.enabled && modeOf(t.low) !== 'normal';
   const isShielded = (t) => shielded.has(keyOf(t));
   const mark = (t) => { const k = keyOf(t); if (!shielded.has(k)) { shielded.add(k); saveSh(); } };
   let cache = null; const joined = new Map();
 
-  const srcLabel = (src) => {
-    const m = /^(easy|hard):(\d+)$/.exec(src || '');
-    if (m) { const n = Dungeons.terrName ? Dungeons.terrName(m[1], +m[2]) : ''; return `${m[1] === 'hard' ? 'Hard dungeon' : 'Normal dungeon'} · Loc ${m[2]}${n ? ' ' + n : ''}`; }
-    return src === 'gribble' ? 'Gribbles' : 'Auto (normal dungeon)';
-  };
-  // the mob for `src`; a picked source that is empty right now falls back to Auto once (and says so)
-  async function pick(excludeKey, src) {
-    if (!Dungeons.sideMobs) return { mob: null, used: src };
-    let mob = null;
-    try { mob = await Dungeons.sideMobs(excludeKey, shielded, src); } catch (_) { /* none */ }
-    if (!mob && src !== 'auto') { try { mob = await Dungeons.sideMobs(excludeKey, shielded, 'auto'); } catch (_) { /* none */ } if (mob) return { mob, used: 'auto', fell: true }; }
-    return { mob, used: src };
+  async function waveMob(t) {
+    const loc = bossLoc(t.low); if (!loc) return null;
+    let html; try { html = await Core.net.fetchText(`/active_wave.php?gate=${loc.gate}&wave=${loc.wave}`, { ttl: 15000, key: `ma:wave:${loc.gate}:${loc.wave}`, via: (run) => Core.cookies.withMode('alive', run) }); } catch (_) { return null; }
+    const doc = parseHtml(html); if (Guard.pageState(doc) !== 'ok') return null;
+    for (const card of doc.querySelectorAll('.monster-container .monster-card, .monster-card')) {
+      if (!Scan.cardAlive(card)) continue;
+      const id = Scan.cardId(card); if (!id || String(id) === String(t.monsterId)) continue;
+      const name = (card.dataset.name || '').trim().toLowerCase();
+      if (!name || Roster.get(name)) continue;                          // never a boss
+      const mob = { kind: 'wave', monsterId: String(id), name: card.dataset.name || 'wave mob', low: name };
+      if (!shielded.has(keyOf(mob))) return mob;
+    }
+    return null;
   }
   async function find(t) {
-    const now = Date.now(), src = cfg.sideMob.source || 'auto';
-    if (cache && cache.exp > now && cache.src === src && keyOf(cache.mob) !== keyOf(t) && !shielded.has(keyOf(cache.mob))) return cache.mob;
-    const r = await pick(keyOf(t), src);
-    if (r.mob) { cache = { mob: r.mob, exp: now + 30000, src }; if (r.fell) log(`↪ no live mob in ${esc(srcLabel(src))} — using ${esc(r.mob.name)} from the normal dungeon`, 'info'); }
-    else log('⚠️ no usable side mob (no live dungeon mob that is free, not shielded and not a boss)', 'warn');
-    return r.mob;
+    const now = Date.now();
+    if (cache && cache.exp > now && keyOf(cache.mob) !== keyOf(t) && !shielded.has(keyOf(cache.mob))) return cache.mob;
+    let mob = null;
+    try { if (Dungeons.sideMobs) mob = await Dungeons.sideMobs(keyOf(t), shielded); } catch (_) { /* fall back to a wave mob */ }
+    if (!mob) { mob = await waveMob(t); if (mob) log(`🌊 no dungeon mob for the pierce — using wave mob ${esc(mob.name)}`, 'info'); }
+    if (mob) cache = { mob, exp: now + 30000 };
+    else log('⚠️ no usable side mob (all dungeon / wave mobs empty, shielded or locked)', 'warn');
+    return mob;
   }
   const forgetCache = () => { cache = null; };
   const targetFields = (m) => (m.kind === 'dungeon' ? { dgmid: m.monsterId, instance_id: m.instanceId, location_id: m.locationId } : { monster_id: m.monsterId });
@@ -1017,12 +1018,7 @@ const SideMob = (() => {
     return r.ok;
   }
   const isRejoin = (m) => /removed due to inactivity|rejoin the battle/i.test(String(m || ''));
-  // what find() would pick, same order, without caching it, logging it or joining anything
-  async function preview() {
-    const r = await pick('', cfg.sideMob.source || 'auto');
-    return r.mob ? { mob: r.mob, src: `${srcLabel(r.used)} · Loc ${r.mob.locationId}` } : null;
-  }
-  return { preview, label: srcLabel, isShieldMsg, eligible, isShielded, mark, find, forgetCache, join, isRejoin, targetFields, keyOf, modeOf, shielded: () => shielded.size, forget: () => { shielded.clear(); saveSh(); cache = null; } };
+  return { isShieldMsg, eligible, isShielded, mark, find, forgetCache, join, isRejoin, targetFields, keyOf, modeOf, shielded: () => shielded.size, forget: () => { shielded.clear(); saveSh(); cache = null; } };
 })();
 
 /* ---- the attack engine -------------------------------------------------------------------------------------------
@@ -1291,7 +1287,7 @@ const Engine = (() => {
 
 /* ===================================================================================================================
  * PART 2 — DUNGEONS (swappable: switch the part off, or delete this block, and the wave bosses keep working)
- * Castle of the Fallen Prince bosses (+ Khaal's second phase), the Shadowbridge Gribble swarm, the dungeon-mob catalogue for the shield pierce,
+ * Castle of the Fallen Prince bosses (+ Khaal's second phase), the Shadowbridge Gribble swarm, mobs for the shield pierce,
  * and the dungeon pages the graveyard reads. NOT the cube / Polyhedral Crucible: Cube Suite owns it completely.
  * ================================================================================================================ */
 (function seedDungeonRoster() {
@@ -1484,68 +1480,20 @@ Object.assign(Dungeons, (() => {
     }
   }
 
-  /* ---- dungeon mobs for the shield pierce: one location page -> its live mobs; never a boss, never the cube ---- */
-  const GRIBBLE = /gribble/i, FALLBACK_LOCS = { easy: [1, 2, 3, 4], hard: [] };
-  const isBossName = (n) => !!Roster.get(String(n || '').toLowerCase());
-  async function scanLoc(id, loc) {                                    // null = fetch failed, undefined = login / maintenance page
-    const r = await getDoc(`${LOC}?instance_id=${id}&location_id=${loc}`, 8000, `ma:dloc:${id}:${loc}`);
-    if (!r) return null; if (!r.doc) return undefined;
-    const sealed = /route is still sealed/i.test(r.html) || Array.from(r.doc.querySelectorAll('.wrap .row .pill')).map((x) => (x.textContent || '').trim().toLowerCase()).includes('locked');
-    if (sealed) return { sealed: true, mobs: [] };
-    const mobs = [];
-    for (const card of r.doc.querySelectorAll('.mon')) {
-      if (card.classList.contains('dead')) continue;
-      const name = monName(card), dgmid = dgmidOf(card); if (!dgmid) continue;
-      mobs.push({ name: name || 'dungeon mob', dgmid });
-    }
-    return { sealed: false, mobs };
-  }
-  async function places(type, id) {                                    // the locations of an instance (the pins; a fixed list if the map cannot be read)
-    const p = await pins(id); if (p) return p.filter((x) => x.locationId != null);
-    return (FALLBACK_LOCS[type] || []).map((l) => ({ locationId: l, name: '', isBoss: false, isLocked: false }));
-  }
-  const mobOf = (type, id, loc, c) => ({ kind: 'dungeon', monsterId: c.dgmid, instanceId: String(id), locationId: loc, dtype: type, name: c.name, low: c.name.toLowerCase() });
-  /* the first usable live mob for `source`: 'gribble' | 'easy:<loc>' | 'hard:<loc>' | 'auto' (normal dungeon, first live mob, Gribbles included) */
-  async function sideMobs(excludeKey, shielded, source) {
-    const ins = await instances(), m = /^(easy|hard):(\d+)$/.exec(source || ''), src = m ? 'terr' : source === 'gribble' ? 'gribble' : 'auto';
-    const swarm = Roster.list.find((d) => d.kind === 'dungeon-swarm');
-    const plan = src === 'gribble' ? { type: 'easy', locs: (swarm && swarm.locationIds) || [2, 4] } : src === 'terr' ? { type: m[1], locs: [+m[2]] } : { type: 'easy', locs: [1, 3, 2, 4] };
-    for (const id of ins.v[plan.type] || []) for (const loc of plan.locs) {
-      const s = await scanLoc(id, loc); if (!s || s.sealed) continue;
-      for (const c of s.mobs) {
-        const g = GRIBBLE.test(c.name);
-        if (src === 'gribble' ? !g : src === 'terr' ? g : false) continue;           // Gribbles are their own section: never inside a territory
-        if (isBossName(c.name)) continue;
-        const mob = mobOf(plan.type, id, loc, c), key = `dungeon:${c.dgmid}:${id}`;
-        if (key === excludeKey || (shielded && shielded.has(key))) continue;
-        return mob;
+  /* ---- a live regular (non-boss) dungeon mob for the shield pierce: Shadowbridge first; the cube is never used ---- */
+  async function sideMobs(excludeKey, shielded) {
+    const ins = await instances();
+    for (const id of ins.v.easy || []) for (const loc of [1, 3, 2, 4]) {
+      const r = await getDoc(`${LOC}?instance_id=${id}&location_id=${loc}`, 8000, `ma:dloc:${id}:${loc}`);
+      if (!r || !r.doc || /route is still sealed/i.test(r.html)) continue;
+      for (const card of r.doc.querySelectorAll('.mon')) {
+        if (card.classList.contains('dead')) continue;
+        const name = monName(card), dgmid = dgmidOf(card); if (!dgmid || Roster.get(name.toLowerCase())) continue;
+        const key = `dungeon:${dgmid}:${id}`; if (key === excludeKey || (shielded && shielded.has(key))) continue;
+        return { kind: 'dungeon', monsterId: dgmid, instanceId: String(id), locationId: loc, name: name || 'dungeon mob', low: name.toLowerCase() };
       }
     }
     return null;
-  }
-  /* everything a side mob can come from, for the picker: Gribbles on their own, then normal and hard dungeon grouped by territory */
-  let cat = null;
-  async function catalog(force) {
-    if (!force && cat && Date.now() - cat.at < 20000) return cat;
-    const ins = await instances(!!force), out = { at: Date.now(), gribble: [], easy: [], hard: [], open: { easy: (ins.v.easy || []).length, hard: (ins.v.hard || []).length } };
-    for (const type of ['easy', 'hard']) {
-      const terrs = new Map(), jobs = [];
-      for (const id of ins.v[type] || []) for (const p of await places(type, id)) {
-        if (p.isBoss) continue;                                         // a boss location holds the boss, not mobs
-        let t = terrs.get(p.locationId); if (!t) terrs.set(p.locationId, (t = { type, loc: p.locationId, name: p.name || terrName(type, p.locationId), mobs: [], open: false }));
-        if (!p.isLocked) jobs.push({ t, id, loc: p.locationId });
-      }
-      let halted = false;
-      await pool(jobs, async (j) => {
-        if (halted) return;
-        const s = await scanLoc(j.id, j.loc); if (s === undefined) { halted = true; return; } if (!s || s.sealed) return;
-        j.t.open = true;
-        for (const c of s.mobs) { if (isBossName(c.name)) continue; (GRIBBLE.test(c.name) ? out.gribble : j.t.mobs).push(mobOf(type, j.id, j.loc, c)); }
-      }, 3);
-      if (halted) return cat || out;                                    // the guard has taken over: nothing to show
-      out[type] = [...terrs.values()].map((t) => Object.assign(t, { name: t.name || terrName(type, t.loc), sealed: !t.open })).sort((a, b) => a.loc - b.loc);
-    }
-    cat = out; return out;
   }
 
   /* ---- for the graveyard (PART 4): finished-but-lootable corpses of a location ---- */
@@ -1568,7 +1516,7 @@ Object.assign(Dungeons, (() => {
     return out;
   }
 
-  return { nextCheck, refresh, sideMobs, catalog, terrName, instances, pins, deadMobs, dmgOn, pool, monName, dgmidOf };
+  return { nextCheck, refresh, sideMobs, terrName, instances, pins, deadMobs, dmgOn, pool, monName, dgmidOf };
 })());
 
 /* ===================================================================================================================
@@ -2090,7 +2038,7 @@ Object.assign(LootScan, (() => {
  *   Overview   what it is doing now: vitals, bosses being farmed, session numbers (collapsible groups)
  *   Bosses     loot scan strip, Waves | Dungeons switch; waves grouped by area (Generals / Ocean / Olympus), one row per wave with its bosses as
  *              bubbles. Dungeons: Gribbles in their own section, then normal and hard dungeon grouped by territory. Tapping a boss opens
- *              ITS OWN PAGE (the list is hidden meanwhile, ‹ › step to the next boss): one section at a time: Damage · Timing · Gear · Shield
+ *              ITS OWN PAGE (the list is hidden meanwhile, ‹ › step to the next boss): one section at a time: Damage · Timing · Gear
  *   Supplies   stamina potion (+ save near EXP cap, auto-loot when out), HP potion, mana potion
  *   Loot       the graveyard
  *   Settings   class skill, behaviour, advanced timing
@@ -2506,7 +2454,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   const itemsText = (items) => (items.length > 2 ? items.slice(0, 2).join(', ') + ' +' + (items.length - 2) : items.join(', '));
   const lvTxt = (n) => 'Lv ' + Number(n).toLocaleString('en-US');
 
-  /* ONE boss is open at a time (ui.sel), on its own page, one section at a time: Damage · Timing · Gear · Shield. */
+  /* ONE boss is open at a time (ui.sel), on its own page, one section at a time: Damage · Timing · Gear. */
   let flashCap = '';
   function setCap(low, n) { ovr(low).cap = n; saveCfg(); flashCap = low; draw(); setTimeout(() => { flashCap = ''; }, 1000); }
   Object.keys(ui.open).forEach((k) => { if (k.indexOf('boss:') === 0) delete ui.open[k]; });          // (the old "many editors open" flags)
@@ -2536,62 +2484,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     return [...Presets.kinds().map((k) => h('div', { class: 'ma-lrow' }, h('label', {}, (KIND_ICO[k] || '🎒') + ' ' + cap1(k)), loadoutPick(k, low))),
       note('“Default” is the default loadout (the 🎒 Loadout button above the list). Pick one here to change it just for this boss.')];
   }
-  /* SHIELD: the switch (the same one as Settings), how this boss behaves, and where the side mob comes from. Never a wave mob. */
-  const sideSeen = { v: null };                                    // 'loading' | { mob, src } | { none: true }
-  let sideCat = null, sideBusy = false, sideTried = false;         // what a side mob can come from (fetched on demand)
-  async function loadSideCat(force) {
-    if (sideBusy || !Dungeons.catalog) return; sideBusy = true; draw();
-    try { sideCat = (await Dungeons.catalog(!!force)) || sideCat; } catch (_) { /* keep what we had */ }
-    sideBusy = false; draw();
-  }
-  const mobSummary = (mobs) => { const c = new Map(); mobs.forEach((m) => c.set(m.name, (c.get(m.name) || 0) + 1)); return [...c].map(([n, k]) => (k > 1 ? `${n} ×${k}` : n)).join(', '); };
-  const SRC_RE = /^(easy|hard):(\d+)$/;
-  function setSource(src) { cfg.sideMob.source = src; SideMob.forgetCache(); sideSeen.v = null; saveCfg(); draw(); }
-  function sidePicker() {
-    const src = cfg.sideMob.source || 'auto', cm = SRC_RE.exec(src), curGrp = cm ? cm[1] : src;
-    const grp = ['auto', 'gribble', 'easy', 'hard'].includes(ui.sideGrp) ? ui.sideGrp : curGrp;
-    if (!sideCat && !sideBusy && !sideTried && Dungeons.catalog) { sideTried = true; setTimeout(() => loadSideCat(false), 0); }
-    const out = [h('div', { class: 'ma-note', style: { margin: '2px 3px 7px' } }, 'Using: ', h('b', { style: { color: '#fff' } }, SideMob.label(src)))];
-    out.push(seg([['auto', 'Auto'], ['gribble', '🦠 Gribbles'], ['easy', '🌉 Normal'], ['hard', '🏰 Hard']], grp, (v) => { ui.sideGrp = v; if (v === 'auto' || v === 'gribble') { cfg.sideMob.source = v; SideMob.forgetCache(); sideSeen.v = null; } saveUi(); }, { full: true }));
-    const age = sideCat ? 'fetched ' + ago(sideCat.at) : '';
-    const body = [];
-    if (grp === 'auto') body.push(note('Takes the first live mob it finds in an open normal dungeon (Gribbles included). Hard-dungeon mobs are only used when you pick a hard territory.'));
-    else if (!sideCat) body.push(note(sideBusy ? '⏳ Looking for dungeon mobs…' : 'Dungeon mobs are not loaded yet.'));
-    else if (grp === 'gribble') {
-      const g = sideCat.gribble, locs = [...new Set(g.map((m) => m.locationId))].join(', ');
-      body.push(h('div', { class: 'ma-opts' }, h('button', { type: 'button', class: 'ma-opt' + (src === 'gribble' ? ' on' : ''), onclick: (e) => { stop(e); setSource('gribble'); } },
-        h('i', { class: 'dot' }), h('b', {}, '🦠'), h('span', {}, g.length ? `${g.length} live Gribble${g.length === 1 ? '' : 's'}${locs ? ' · Loc ' + locs : ''}` : sideCat.open.easy ? 'No live Gribble right now' : 'No open normal dungeon right now'))));
-      body.push(note('Only Gribbles are used. If none is alive when it is needed, Auto takes over for that cast.'));
-    } else {
-      const list = sideCat[grp] || [], word = grp === 'hard' ? 'hard' : 'normal';
-      if (!sideCat.open[grp]) body.push(h('div', { class: 'ma-empty' }, `No open ${word} dungeon right now.`));
-      else if (!list.length) body.push(h('div', { class: 'ma-empty' }, 'No territories could be read.'));
-      else body.push(h('div', { class: 'ma-opts' }, list.map((t) => {
-        const key = `${grp}:${t.loc}`, live = t.mobs.length;
-        return h('button', { type: 'button', class: 'ma-opt' + (src === key ? ' on' : '') + (t.sealed ? ' sealed' : ''), title: t.sealed ? 'Still sealed' : null, onclick: (e) => { stop(e); setSource(key); } },
-          h('i', { class: 'dot' }), h('b', {}, 'Loc ' + t.loc), h('span', {}, [t.name, t.sealed ? 'sealed' : live ? `${live} live: ${mobSummary(t.mobs)}` : 'no live mobs'].filter(Boolean).join(' · ')));
-      })));
-    }
-    out.push(...body);
-    const r = sideSeen.v;
-    out.push(h('div', { class: 'ma-src-top' },
-      btn('Which mob now?', 'soft', async () => { sideSeen.v = 'loading'; draw(); try { sideSeen.v = (await SideMob.preview()) || { none: true }; } catch (_) { sideSeen.v = { none: true }; } draw(); }),
-      btn('↻ Refresh mobs', 'soft', () => loadSideCat(true)), h('span', { class: 'sp' }), age ? h('small', { style: { color: '#6e7a9c', fontSize: '11px' } }, age) : null));
-    if (r) out.push(h('div', { class: 'ma-note' }, r === 'loading' ? 'looking…' : r.none ? 'None found right now (all empty, shielded or locked).' : ['Would use ', h('b', { style: { color: '#fff' } }, r.mob.name), ' · ' + r.src]));
-    return out;
-  }
-  function shieldTab(low) {
-    const out = [setting('Use a side mob for the class skill', 'only when this boss blocks it (divine shield)', sw(() => cfg.sideMob.enabled, (v) => { cfg.sideMob.enabled = v; }))];
-    if (!cfg.sideMob.enabled) { out.push(note('Off: a shielded boss is simply attacked directly.')); return out; }
-    const mode = SideMob.modeOf(low);
-    out.push(caption('For this boss'));
-    out.push(seg([['auto', 'Auto'], ['normal', 'Never'], ['shielded', 'Always']], mode, (v) => { ovr(low).targeting = v; }, { full: true }));
-    out.push(note({ auto: 'Hits the boss itself. Only if the server says it is shielded, the class skill moves to a side mob.', normal: 'Never uses a side mob: the class skill is cast on the boss.', shielded: 'The class skill is always cast on a side mob. The damage swings still hit the boss.' }[mode]));
-    out.push(caption('Side mob comes from (same for every boss)'));
-    out.push(...sidePicker());
-    return out;
-  }
-  const EDTABS = [['dmg', '🎯 Damage'], ['time', '⏰ Timing'], ['gear', '🎒 Gear'], ['shield', '🛡 Shield']];
+  const EDTABS = [['dmg', '🎯 Damage'], ['time', '⏰ Timing'], ['gear', '🎒 Gear']];
   /* the order the list shows bosses in, so ‹ › on a boss's page walk the same list */
   function navOrder(def) {
     const canon = Roster.list.filter((d) => Roster.canon(d) === d);
@@ -2605,13 +2498,13 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   }
   function openBoss(low) { const sc = scroller(root); ui.listTop = sc ? sc.scrollTop : 0; ui.sel = low; nextTop = 0; saveUi(); draw(); }
   function closeBoss() { ui.sel = ''; nextTop = ui.listTop || 0; saveUi(); draw(); }
-  /* ONE boss page at a time: the list is hidden while it is open. Header (back, ‹ ›, name, switch), then one section: Damage · Timing · Gear · Shield */
+  /* ONE boss page at a time: the list is hidden while it is open. Header (back, ‹ ›, name, switch), then one section: Damage · Timing · Gear */
   function bossPage(def) {
     const ms = Roster.members(def), idx = Math.min(phaseSel[def.low] || 0, ms.length - 1), m = ms[idx], low = m.low, o = cfg.bosses[low] || {}, kinds = Presets.kinds();
     const tabs = EDTABS.filter(([k]) => (k !== 'time' || m.kind !== 'wave') && (k !== 'gear' || kinds.length));       // timed cap changes: dungeon bosses only
     const cur = tabs.some((t) => t[0] === ui.edTab) ? ui.edTab : 'dmg';
-    const dot = { dmg: o.cap != null, time: Array.isArray(o.schedule) && o.schedule.length > 0, gear: kinds.some((k) => o[k]), shield: o.targeting === 'normal' || o.targeting === 'shielded' };
-    const body = cur === 'time' ? [scheduleEditor(low)] : cur === 'gear' ? gearTab(low) : cur === 'shield' ? shieldTab(low) : damageTab(low);
+    const dot = { dmg: o.cap != null, time: Array.isArray(o.schedule) && o.schedule.length > 0, gear: kinds.some((k) => o[k]) };
+    const body = cur === 'time' ? [scheduleEditor(low)] : cur === 'gear' ? gearTab(low) : damageTab(low);
     const order = navOrder(def), pos = order.findIndex((d) => d.low === def.low), prev = pos > 0 ? order[pos - 1] : null, next = pos >= 0 && pos < order.length - 1 ? order[pos + 1] : null;
     const step = (d) => { ui.sel = d.low; nextTop = 0; saveUi(); draw(); };
     const arrow = (txt, d, title) => h('button', { type: 'button', class: 'ma-nav', title, disabled: d ? null : true, onclick: () => { if (d) step(d); } }, txt);
@@ -2788,7 +2681,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
       h('div', { class: 'ma-card' },
         setting('Pause the server auto-farm while fighting', 'So the two never fight over stamina.', sw(() => cfg.autoFarmControl, (v) => { cfg.autoFarmControl = v; }, { redraw: false })),
         setting('Fight phase duels automatically', null, sw(() => cfg.autoDuel, (v) => { cfg.autoDuel = v; }, { redraw: false })),
-        setting('Shield pierce on a side mob', 'If a boss blocks the class skill (divine shield), only the class skill is cast on a live dungeon mob (never a boss, never a wave mob). The damage swings still hit the boss. Choose where the mob comes from, and whether a boss uses it, in the boss’s Shield section.', sw(() => cfg.sideMob.enabled, (v) => { cfg.sideMob.enabled = v; }))),
+        setting('Shield pierce on a side mob', 'Automatic. If a boss blocks the class skill (divine shield), only the class skill is cast on a live regular mob: first one in an open normal dungeon, else one on the boss’s wave page. Never a boss. The damage swings still hit the boss.', sw(() => cfg.sideMob.enabled, (v) => { cfg.sideMob.enabled = v; }))),
       fold('adv', false, '🛠 Advanced timing', () => [note('Pause between requests, in milliseconds. The defaults are safe; lower numbers risk the server rejecting swings.'),
         ...timing.map(([l, k]) => setting(l, null, num(() => cfg[k], (n) => { cfg[k] = n; }, { w: 76, unit: 'ms' }))),
         setting('Graveyard scan every', null, num(() => cfg.autoLoot.scanMs, (n) => { cfg.autoLoot.scanMs = n; }, { w: 76, unit: 'ms' })),
