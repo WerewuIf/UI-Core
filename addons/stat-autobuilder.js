@@ -1,1183 +1,1601 @@
-/* Gear Presets + Inventory Helper — Core addon (migrated from the standalone userscript).
- * Loaded by core.user.js; `Core` is in scope. No @require / header needed.
- * Floating ⚔️ button + panel (the site's own ⚔️ Quick Sets button is hidden so there's only one); toasts via Core.ui.toast; inventory.php reads via Core.net.
+/* stat-autobuilder.js - Veyra Stat Auto-Builder 18.9.5 as a Core addon.
+ *
+ * The planner, safety checks, journal and run logic are the userscript's, unchanged. Only the plumbing moved to Core:
+ *   button + panel  -> Core.float        settings + journal -> Core.store (same localStorage keys as before)
+ *   stats page read -> Core.pages.stats  cross-tab lock     -> Core.lock
+ * Turn the old standalone userscript OFF in Tampermonkey (it would otherwise be a second copy).
  */
-
-/* ===========================================================================
- * v3.0.0 — what changed vs the old "inventory Helper" (v2.0.0):
- *
- * - @match broadened from inventory.php-only to the whole site. Module 1
- *   below is unchanged and stays inert everywhere except inventory.php
- *   (its click handler only reacts to onclick attributes that only exist
- *   on that page), so this is safe.
- * - Added MODULE 2: Gear Presets. This is a new, separate feature built the
- *   same way the "Power Crystals — Presets" script works: named loadouts
- *   saved in localStorage (per-account), captured from and restored to any
- *   of the 3 equipment sets (PvE Attack / PvP Attack / PvP Defense) via the
- *   same equip_item / unequip_item AJAX calls the page itself uses. It
- *   replaces the confusing numbered "Quick Set 1-10" apply flow with named
- *   presets you pick by name, and reads/writes state honestly instead of
- *   guessing — same "trust the server's data, don't hand-roll it" approach
- *   the crystal script takes.
- * - (v3.2.2: panel footer matches Crystal Presets: Refresh + Legacy on the left, + New Preset / Capture on the right.)
- * - (v3.2.1: the native ⚔️ button is now hidden instead of repointed, because Core's
- *   dock already has its own ⚔️ and the two were duplicates. Item pickers are also
- *   hover-select cards now — no "Choose" button.)
- * - The bottom-right ⚔️ "Quick Sets" button was originally repointed at the new Gear
- *   Presets panel instead of the native drawer. The native drawer (and its
- *   Pet quick sets, which this script doesn't touch — no visibility into
- *   pets.php's markup to build against) is still reachable via a "legacy"
- *   link inside the new panel.
- * ========================================================================= */
-
-/* ===========================================================================
- * MODULE 1: Equip / Unequip AJAX Helper (inventory.php only, in practice)
- *
- * WHAT WAS BROKEN IN v1 (kept as a changelog — delete if you don't need it):
- *
- * 1. (@match confirmed correct — not the issue, left as-is.)
- *
- * 2. The "Equip" button on every card calls showEquipModal(...), NOT
- *    equipItem(...). The real equipItem()/assignQuickItem() calls only
- *    exist on buttons showEquipModal() injects into #equip-modal-content,
- *    a node that lives OUTSIDE every .slot-box/.crystal-card. So
- *    btn.closest('.slot-box, .crystal-card') always returned null for
- *    the action that matters, and the modal was never closed after a
- *    successful equip.
- *
- * 3. Most equips call equipItem(invId, 0) — slot 0 means "server picks."
- *    The server's plain "OK" response never says which slot it picked,
- *    so there was no honest way to hand-patch the right card except for
- *    the two hardcoded ring slots (6/9).
- *
- * 4. The "Equipped Items" cards never carry an inv-id anywhere in the DOM
- *    (no data-inv-id, only unequipItem(slotId)). So even successful
- *    lookups had invId === null, and the "flip button back to Equip"
- *    logic silently did nothing — stale button + stale badge forever.
- *
- * 5. doEquip/doUnequip never sent `set`, even though the page's own
- *    equipItem()/unequipItem() always send set=<current tab>. Without it
- *    the backend has no idea which loadout (PvE/PvP Attack/PvP Defense)
- *    you meant to change.
- *
- * 6. Quick-set assignment read window.currentSet / window.currentQuickSet,
- *    which don't exist — the page declares those with `const` in a
- *    classic <script>, and top-level const/let never become window
- *    properties. Every quick-set assignment silently fell back to
- *    set_number=1, target_set='attack'.
- *
- * FIX: do the AJAX call to stay snappy (no full navigation), then
- * re-fetch the current URL and swap in the server's own fresh HTML for
- * each tagged section (data-section-key already exists for this in the
- * markup). That's the one source of truth that's always correct,
- * including server-decided slots and ring slots.
- * --------------------------------------------------------------------- */
-
 (function () {
   'use strict';
 
-  const BADGE_CLASS = 'tm-equipped-pill';
-  const CARD_SEL = '.slot-box, .crystal-card';
-  const SECTION_SEL = '.section[data-section-key]';
+  // The standalone userscript sets this same flag, so whichever runs first wins and the two never both run.
+  if (window.__veyraStatAutoBuilderLoaded) {
+    console.warn('[stat-autobuilder] the standalone Veyra Stat Auto-Builder userscript is already running - turn it off in Tampermonkey.');
+    Core.ui.toast('Stat Auto-Builder: turn off the old standalone userscript, then reload.', false, 8000);
+    return;
+  }
+  window.__veyraStatAutoBuilderLoaded = true;
 
-  const style = document.createElement('style');
-  style.textContent = `
-    .slot-box, .crystal-card { position: relative !important; }
-    .${BADGE_CLASS} {
-      position: absolute; top: 8px; right: 8px; z-index: 50;
-      background: #2ecc71; color: #fff; font-size: 11px; font-weight: 800;
-      padding: 3px 8px; border-radius: 999px; letter-spacing: .02em;
-      box-shadow: 0 2px 8px rgba(0,0,0,.35);
-      pointer-events: none; user-select: none; white-space: nowrap;
+  // ---------------------------------------------------------------------
+  // CONSTANTS
+  // ---------------------------------------------------------------------
+
+  const STORAGE_KEY = 'veyra_stat_autobuilder_v9';
+  const ALLOCATE_URL = '/stats_ajax.php';
+
+  // The stats page only ever sends 1 / 5 / 50 / 100 / all. Every request this script sends is built
+  // from the first four, so it is always a request the page itself could have produced. 'all' is never
+  // used: it spends whatever the server holds, not what the plan says.
+  const ALLOWED_AMOUNTS = [100, 50, 5, 1];
+  const JOURNAL_KEY = 'veyra_stat_autobuilder_journal';
+  const LOCK_NAME = 'veyra_stat_autobuilder_lock';
+  const ID = 'stat-autobuilder';
+  // `key` keeps the userscript's own localStorage keys, so saved settings and any interrupted allocation carry over.
+  const settings = Core.store(ID, { key: STORAGE_KEY });
+  const journalStore = Core.store(ID + '-journal', { key: JOURNAL_KEY });
+
+  const POLL_MIN_SECONDS = 20;
+  const REQUEST_DELAY_MS = 350;
+  const POINTS_PER_LEVEL = 5;
+  // v18.9: Level targets are planned to stay met ONE level-up ahead. A level-up adds 5 to the Level-ratio
+  // denominator at once, so a plan that lands exactly on the line would dip below it until the next check.
+  // Costs about (ratio * 5) extra ATK/DEF once. Fixed - it is no longer a setting.
+  const LEVEL_UP_BUFFER = 1;
+  const SCHEMA = 3; // settings schema; 3 = v18.9 (one Level + one Pet pick, no spare/buffer settings)
+
+  const STATS = ['attack', 'defense', 'stamina'];
+  const SHORT = { attack: 'ATK', defense: 'DEF', stamina: 'STA' };
+  const NAME = { attack: 'Attack', defense: 'Defense', stamina: 'Stamina' };
+  const ICON = { attack: '⚔', defense: '🛡', stamina: '⚡' };
+
+  // Things you can maintain / see in the advisor.
+  //  level: (ATK + DEF) / ((Level - 1) * 5) must be at least t          (EXP + penetration bonus)
+  //  pet  : ATK + DEF must be MORE than t of your total stats (ATK + DEF + STM)   (ATK/DEF Pet tiers)
+  // lc / pc are your own thresholds (their `t` and `label` follow the settings, see applyCustom()).
+  const TARGETS = {
+    l08: { label: 'Level 0.8', kind: 'level', t: 0.8, bonus: '+15% EXP, +15% pet & equipment penetration' },
+    l06: { label: 'Level 0.6', kind: 'level', t: 0.6, bonus: '+10% EXP, +10% pet & equipment penetration' },
+    p60: { label: 'Pet 0.6', kind: 'pet', t: 0.6, bonus: 'ATK/DEF Pet: bonus damage' },
+    p40: { label: 'Pet 0.4', kind: 'pet', t: 0.4, bonus: 'ATK/DEF Pet: second tier' },
+    lc: { label: 'Level 0.70', kind: 'level', t: 0.7, bonus: 'Your own Level ratio', custom: true },
+    pc: { label: 'Pet 0.50', kind: 'pet', t: 0.5, bonus: 'Your own Pet ratio', custom: true }
+  };
+  const TARGET_ORDER = ['l08', 'l06', 'lc', 'p60', 'p40', 'pc'];
+
+  // v18.9: one pick per group. A higher Level (or Pet) tier already includes the lower ones, so picking two
+  // from the same group would be redundant. One Level AND one Pet can be held together.
+  const GROUPS = [
+    { id: 'lvl', name: 'Level', keys: ['l08', 'l06', 'lc'], note: '(ATK + DEF) ÷ ((Level − 1) × 5) must be at least the ratio' },
+    { id: 'pet', name: 'Pet', keys: ['p60', 'p40', 'pc'], note: 'Pet ratio = (ATK + DEF) ÷ all your stats; it must be MORE than this' }
+  ];
+
+  // ---------------------------------------------------------------------
+  // SMALL HELPERS
+  // ---------------------------------------------------------------------
+
+  function toInt(v) {
+    const n = parseInt(String(v == null ? '0' : v).replace(/[^0-9-]/g, ''), 10);
+    return Number.isFinite(n) ? n : 0;
+  }
+
+  const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
+  const fmt = (n) => Number(n || 0).toLocaleString();
+  const sleep = Core.sleep;
+
+  // ---------------------------------------------------------------------
+  // SETTINGS
+  // ---------------------------------------------------------------------
+
+  //   mode         - 'manual' (spend exactly the amounts you set) | 'target' (reach and hold targets for you)
+  //   lvl / pet    - the Level target and the Pet target to maintain (null = none). At least one is set.
+  //   combat       - maintain only: where the ATK/DEF points go - 'attack' | 'defense' | 'build'
+  //   pattern      - manual only: points per stat
+  //   customLevel  - threshold for the custom Level target (0.05 - 0.99)
+  //   customPet    - threshold for the custom Pet target   (0.05 - 0.99)
+  const DEFAULTS = {
+    enabled: false,
+    mode: 'target',
+    lvl: 'l08',
+    pet: null,
+    combat: 'build',
+    pattern: { attack: 4, defense: 0, stamina: 1 },
+    pollSeconds: 60,
+    customLevel: 0.7,
+    customPet: 0.5,
+    customKind: 'level',
+    carry: {},
+    carrySig: '',
+    schema: SCHEMA
+  };
+
+  const cleanPoints = (v) => clamp(toInt(v), 0, 9999);
+  const cleanRatio = (v, fallback) => {
+    const n = parseFloat(v);
+    return Number.isFinite(n) ? clamp(Math.round(n * 100) / 100, 0.05, 0.99) : fallback;
+  };
+
+  function loadState() {
+    const saved = settings.get() || null;
+    const sv = saved && typeof saved === 'object' ? saved : {};
+    const s = Object.assign({}, DEFAULTS, sv);
+    s.enabled = !!s.enabled;
+    s.mode = s.mode === 'manual' ? 'manual' : 'target';
+    s.customLevel = cleanRatio(s.customLevel, DEFAULTS.customLevel);
+    s.customPet = cleanRatio(s.customPet, DEFAULTS.customPet);
+    s.customKind = s.customKind === 'pet' ? 'pet' : 'level';
+
+    // Targets: v18.9 keeps one Level and one Pet. Older saves held a list; keep the STRICTEST of each group
+    // (holding the strictest one already holds the looser ones).
+    const val = (k) => (k === 'lc' ? s.customLevel : k === 'pc' ? s.customPet : TARGETS[k].t);
+    const strictest = (keys) => keys.slice().sort((a, b) => val(b) - val(a))[0] || null;
+    if ('lvl' in sv || 'pet' in sv) {
+      s.lvl = GROUPS[0].keys.includes(sv.lvl) ? sv.lvl : null;
+      s.pet = GROUPS[1].keys.includes(sv.pet) ? sv.pet : null;
+    } else {
+      const wanted = Array.isArray(sv.targets) ? sv.targets : sv.target ? [sv.target] : [];
+      s.lvl = strictest(GROUPS[0].keys.filter((k) => wanted.includes(k)));
+      s.pet = strictest(GROUPS[1].keys.filter((k) => wanted.includes(k)));
     }
-  `;
-  document.head.appendChild(style);
+    if (!s.lvl && !s.pet) s.lvl = DEFAULTS.lvl;
+    // Settings that no longer exist.
+    ['targets', 'target', 'buffer', 'staminaUntil'].forEach((k) => delete s[k]);
 
-  const toast = (msg, ok = true) => Core.ui.toast(msg, ok, 2200);
-
-  // ---- read the *actual* current view from the URL instead of the
-  //      page's unreachable `const` globals ----
-  function getUrlParam(name, fallback) {
-    const v = new URLSearchParams(location.search).get(name);
-    return v === null ? fallback : v;
-  }
-  function getCurrentSet() {
-    const raw = getUrlParam('set', 'attack').toLowerCase();
-    if (['defense', 'def', 'deff', 'pvp_defense', 'pvp_def'].includes(raw)) return 'defense';
-    if (['pvp_attack', 'pvpattack', 'attack_pvp', 'pvp'].includes(raw)) return 'pvp_attack';
-    return 'attack';
-  }
-  function getCurrentQuickSet() {
-    return parseInt(getUrlParam('qset', '1'), 10) || 1;
+    if (!['attack', 'defense', 'build'].includes(s.combat)) s.combat = DEFAULTS.combat;
+    const pat = Object.assign({}, DEFAULTS.pattern, s.pattern || {});
+    s.pattern = {};
+    STATS.forEach((k) => (s.pattern[k] = cleanPoints(pat[k])));
+    s.pollSeconds = Math.max(POLL_MIN_SECONDS, toInt(s.pollSeconds) || 60);
+    s.schema = SCHEMA;
+    s.carry = s.carry && typeof s.carry === 'object' ? s.carry : {};
+    s.carrySig = String(s.carrySig || '');
+    return s;
   }
 
-  function parseArgs(onclick, fnName) {
-    const m = String(onclick || '').match(new RegExp(`${fnName}\\s*\\(([^)]*)\\)`));
-    if (!m) return [];
-    return m[1].split(',').map((s) => s.trim().replace(/^['"]|['"]$/g, '')).filter(Boolean);
+  let state = loadState();
+
+  const heldKeys = (s) => [s.lvl, s.pet].filter(Boolean);
+
+  // The custom targets read their ratio from the settings.
+  function applyCustom() {
+    TARGETS.lc.t = state.customLevel;
+    TARGETS.lc.label = 'Level ' + state.customLevel.toFixed(2);
+    TARGETS.pc.t = state.customPet;
+    TARGETS.pc.label = 'Pet ' + state.customPet.toFixed(2);
+  }
+  applyCustom();
+
+  function saveState() {
+    settings.set(state);
   }
 
-  function findActionButton(target) {
-    if (!(target instanceof Element)) return null;
-    return target.closest('button, a, input[type="button"], input[type="submit"]');
+  // ---------------------------------------------------------------------
+  // THE PLANNER (pure maths - no DOM, no network)
+  // ---------------------------------------------------------------------
+
+  const sumAtkDef = (st) => (st.attack || 0) + (st.defense || 0);
+  const allStats = (st) => (st.attack || 0) + (st.defense || 0) + (st.stamina || 0);
+  const totalEarned = (st) => Math.max(0, (st.level || 0) - 1) * POINTS_PER_LEVEL;
+  const tkOf = (t) => Math.round(t * 1000); // thousandths: integer maths, so exact boundaries behave
+  const patternSum = (s) => STATS.reduce((a, k) => a + s.pattern[k], 0);
+
+  const levelRatio = (st) => (totalEarned(st) > 0 ? sumAtkDef(st) / totalEarned(st) : 0);
+  const petShare = (st) => (allStats(st) > 0 ? sumAtkDef(st) / allStats(st) : 0);
+
+  // Does `st` meet the target right now?
+  function meets(T, st) {
+    const tk = tkOf(T.t);
+    return T.kind === 'level' ? totalEarned(st) > 0 && 1000 * sumAtkDef(st) >= tk * totalEarned(st) : allStats(st) > 0 && 1000 * sumAtkDef(st) > tk * allStats(st);
   }
 
-  function getActionFromButton(btn) {
-    const onclick = btn?.getAttribute('onclick') || '';
-    if (/equipItem\s*\(/i.test(onclick)) return { kind: 'equip', fn: 'equipItem' };
-    if (/unequipItem\s*\(/i.test(onclick)) return { kind: 'unequip', fn: 'unequipItem' };
-    if (/assignQuickItem\s*\(/i.test(onclick)) return { kind: 'quick', fn: 'assignQuickItem' };
+  // Fewest ATK/DEF points that must go in, out of x points spent right now (the rest go to Stamina),
+  // for the target to be met afterwards.
+  function needFor(T, st, x) {
+    const tk = tkOf(T.t);
+    const c = sumAtkDef(st);
+    if (T.kind === 'level') {
+      const num = tk * totalEarned(st) - 1000 * c;
+      return num > 0 ? Math.ceil(num / 1000 - 1e-9) : 0;
+    }
+    const num = tk * (allStats(st) + x) - 1000 * c;
+    return num < 0 ? 0 : Math.floor(num / 1000) + 1;
+  }
+
+  // Split n whole points across `keys` by weight. The rounding error is carried to the next
+  // plan, so a small share still gets its turn.
+  function distribute(keys, weights, n, carryIn) {
+    const out = {};
+    const carryOut = {};
+    keys.forEach((k) => {
+      out[k] = 0;
+      carryOut[k] = 0;
+    });
+    if (n <= 0 || !keys.length) {
+      keys.forEach((k) => (carryOut[k] = carryIn[k] || 0));
+      return { out, carryOut };
+    }
+
+    let active = keys.filter((k) => weights[k] > 0);
+    const w = {};
+    if (active.length) active.forEach((k) => (w[k] = weights[k]));
+    else {
+      active = keys.slice();
+      active.forEach((k) => (w[k] = 1));
+    }
+    const W = active.reduce((a, k) => a + w[k], 0);
+    const eff = {};
+    keys.forEach((k) => (eff[k] = 0));
+    active.forEach((k) => (eff[k] = (n * w[k]) / W + (carryIn[k] || 0)));
+
+    // Largest-remainder rounding so the total is always exactly n.
+    const base = {};
+    let S = 0;
+    keys.forEach((k) => {
+      base[k] = Math.max(0, Math.floor(eff[k] + 1e-9));
+      S += base[k];
+    });
+    const frac = (k) => eff[k] - base[k];
+    const desc = keys.slice().sort((a, b) => frac(b) - frac(a) || (w[b] || 0) - (w[a] || 0));
+    for (let i = 0; S < n; i++, S++) base[desc[i % desc.length]]++;
+    const asc = keys.slice().sort((a, b) => frac(a) - frac(b));
+    for (let i = 0, guard = 0; S > n && guard++ < 1000; i++) {
+      const k = asc[i % asc.length];
+      if (base[k] > 0) {
+        base[k]--;
+        S--;
+      }
+    }
+
+    keys.forEach((k) => {
+      out[k] = base[k];
+      carryOut[k] = clamp(eff[k] - base[k], -2, 2);
+    });
+    return { out, carryOut };
+  }
+
+  // MANUAL: spend x points by exactly the amounts the user set.
+  function planSpend(pattern, x, carryIn) {
+    const r = distribute(STATS, pattern, Math.max(0, Math.floor(x)), carryIn || {});
+    return { attack: r.out.attack, defense: r.out.defense, stamina: r.out.stamina, x, short: 0, forced: false, needs: [], nextCarry: r.carryOut };
+  }
+
+  // MAINTAIN: keep every chosen target met using the FEWEST ATK/DEF points that does it; everything else
+  // goes to Stamina. Stamina never lowers the Level ratio (the denominator is points earned, not where they
+  // went) and it dilutes the Pet share, so when you are over the targets the extra batch can go to Stamina and
+  // the ratios just drift down until the tightest one reaches its line. At the line it spends only what holding
+  // it takes (0.8 -> ~4 of 5 per level, 0.6 -> ~3 of 5). If you are behind, everything goes to ATK/DEF until
+  // you catch up.
+  //
+  // Each target gives a minimum number of ATK/DEF points; with a Level and a Pet target the plan takes the
+  // larger of the two, which satisfies both (more ATK/DEF never hurts either). `needs` lists each target's own
+  // minimum so the UI can show which one decides. Level targets are also kept met LEVEL_UP_BUFFER level-ups
+  // ahead (see the constant). The Level ratio ignores where points go, but the Pet share does not, so a Pet
+  // target is what stops a huge Stamina dump from breaking it.
+  // `weights` ({attack, defense}) divides the ATK/DEF part.
+  function planMaintain(st, targetKeys, weights, xIn, carryIn) {
+    const keys = (Array.isArray(targetKeys) ? targetKeys : [targetKeys]).filter((k) => TARGETS[k]);
+    const carry = carryIn || {};
+    const x = Math.max(0, Math.floor(xIn));
+    const out = { attack: 0, defense: 0, stamina: 0 };
+    const nextCarry = Object.assign({}, carry);
+    const needs = [];
+    let need = 0;
+    if (x > 0) {
+      let want = 0;
+      keys.forEach((k) => {
+        const T = TARGETS[k];
+        const nowNeed = needFor(T, st, x);
+        const ahead = T.kind === 'level' ? Object.assign({}, st, { level: st.level + LEVEL_UP_BUFFER }) : st;
+        const bufNeed = needFor(T, ahead, x);
+        need = Math.max(need, nowNeed);
+        want = Math.max(want, bufNeed);
+        needs.push({ key: k, need: Math.max(nowNeed, bufNeed) });
+      });
+      const c = Math.min(Math.max(need, want), x);
+      const r = distribute(['attack', 'defense'], weights, c, carry);
+      out.attack = r.out.attack;
+      out.defense = r.out.defense;
+      nextCarry.attack = r.carryOut.attack;
+      nextCarry.defense = r.carryOut.defense;
+      out.stamina = x - c;
+    }
+    return { attack: out.attack, defense: out.defense, stamina: out.stamina, x, short: Math.max(0, need - x), forced: need > 0, needs, nextCarry };
+  }
+
+  // Weights for dividing the ATK/DEF part of a maintain plan.
+  function combatWeights(combat, st) {
+    if (combat === 'attack') return { attack: 1, defense: 0 };
+    if (combat === 'defense') return { attack: 0, defense: 1 };
+    const a = (st && st.attack) || 0;
+    const d = (st && st.defense) || 0;
+    return a + d > 0 ? { attack: a, defense: d } : { attack: 1, defense: 0 };
+  }
+
+  // THE one planning entry point. The Allocate button, the info line and "If I spend at once" all call this,
+  // so what the preview shows is what a real run would send.
+  //   cfg = { maintain, targets, combat, pattern, carry }
+  function planFor(st, x, cfg) {
+    return cfg.maintain ? planMaintain(st, cfg.targets, combatWeights(cfg.combat, st), x, cfg.carry) : planSpend(cfg.pattern, x, cfg.carry);
+  }
+
+  // SAFETY CHECK (pure): apply `plan` to `st` and return the keys of the targets that would NOT be met
+  // right after. Used before anything is sent (the plan is refused if it would break a target it claims to
+  // hold) and after spending (read back from the server's own numbers).
+  function verifyPlan(st, plan, keys) {
+    const after = Object.assign({}, st, {
+      attack: (st.attack || 0) + (plan.attack || 0),
+      defense: (st.defense || 0) + (plan.defense || 0),
+      stamina: (st.stamina || 0) + (plan.stamina || 0),
+      points: Math.max(0, (st.points || 0) - (plan.x || 0))
+    });
+    return keys.filter((k) => TARGETS[k] && !meets(TARGETS[k], after));
+  }
+
+  // FORECAST (pure): what happens to ONE target if every point from now on is spent in the proportions
+  // of `pat` - your unspent points first, then 5 more per level-up. Exact integer maths, no simulation.
+  //   ok      - is the target met after your unspent points are spent that way
+  //   kind    - 'holds' (stays met for good) | 'drops' (met now, breaks later) |
+  //             'reaches' (not met now, gets there) | 'never' (not met, never gets there)
+  //   n       - level-ups from now until the change ('drops': the first level-up where it is broken)
+  //   atLevel - your level at that point
+  //   f       - long-run share of points going to ATK/DEF (the ratio the pattern converges to)
+  // Both ratios move linearly in the number of level-ups n, so   value(n) = b + m * n   and the
+  // answer is where that crosses zero.
+  function projectPattern(T, st, pat) {
+    const a = (pat.attack || 0) + (pat.defense || 0);
+    const S = a + (pat.stamina || 0);
+    if (S <= 0) return null;
+    const tk = tkOf(T.t);
+    const u = st.points || 0;
+    const c = sumAtkDef(st);
+    const spent = 1000 * (S * c + u * a);
+    const m = 5 * (1000 * a - tk * S);
+    const b = T.kind === 'level' ? spent - tk * S * totalEarned(st) : spent - tk * S * (allStats(st) + u);
+    const good = (v) => (T.kind === 'level' ? v >= 0 : v > 0);
+    const f = a / S;
+    const level = st.level || 0;
+    let kind;
+    let n = 0;
+    if (good(b)) {
+      if (m >= 0) kind = 'holds';
+      else {
+        kind = 'drops';
+        const q = b / -m;
+        n = T.kind === 'level' ? Math.floor(q) + 1 : Math.ceil(q);
+        if (T.kind === 'pet' && n < 1) n = 1;
+      }
+    } else if (m > 0) {
+      kind = 'reaches';
+      const q = -b / m;
+      n = T.kind === 'level' ? Math.ceil(q) : Math.floor(q) + 1;
+      if (n < 1) n = 1;
+    } else {
+      kind = 'never';
+    }
+    return { ok: good(b), kind, n, atLevel: level + n, f };
+  }
+
+  // ADVISOR (read-only): one row per target.
+  //  reached  - met right now
+  //  need     - ATK/DEF points still missing (if not reached)
+  //  levels   - not reached: level-ups needed if everything from now on goes to ATK/DEF (0 = your unspent points get you there)
+  //  free     - reached: of your unspent points, how many can go to Stamina and it is still met. Level targets are kept
+  //             one level-up ahead (LEVEL_UP_BUFFER), exactly like a real plan, so this matches what Allocate does.
+  //  runTo    - reached: if ALL future points went to Stamina, the last level at which it is still met (null = never breaks)
+  function advise(st) {
+    const u = st.points || 0;
+    const c = sumAtkDef(st);
+    const rows = TARGET_ORDER.map((key) => {
+      const T = TARGETS[key];
+      const tk = tkOf(T.t);
+      const reached = meets(T, st);
+      let need = 0;
+      let free = 0;
+      let levels = 0;
+      let runTo = null;
+      if (!reached) {
+        need = T.kind === 'level' ? Math.ceil((tk * totalEarned(st) - 1000 * c) / 1000 - 1e-9) : Math.floor((tk * allStats(st) - 1000 * c) / (1000 - tk)) + 1;
+        const p = projectPattern(T, st, { attack: 1, defense: 0, stamina: 0 });
+        if (p && p.kind === 'reaches') levels = p.n;
+      } else {
+        if (u > 0) {
+          const ahead = T.kind === 'level' ? Object.assign({}, st, { level: st.level + LEVEL_UP_BUFFER }) : st;
+          free = u - Math.min(Math.max(needFor(T, st, u), needFor(T, ahead, u)), u);
+        }
+        const p = projectPattern(T, st, { attack: 0, defense: 0, stamina: 1 });
+        if (p && p.ok && p.kind === 'drops') runTo = (st.level || 0) + p.n - 1;
+      }
+      return { key, label: T.label, bonus: T.bonus, kind: T.kind, reached, need, free, levels, runTo };
+    });
+    return { rows, levelRatio: levelRatio(st), petShare: petShare(st) };
+  }
+
+  // WHAT-IF (pure): you spend `n` points in one go. Runs the SAME planFor() a real run uses, then reports for
+  // each held target the value right after, whether it is met, and whether it is still met one level-up later.
+  //   cfg = { maintain, targets, combat, pattern, carry }
+  function whatIf(st, n, cfg) {
+    // Unspent points come from level-ups (5 each), and every level-up also adds 5 to the Level-ratio
+    // denominator. So "n points at once" means (n - what you hold) / 5 more levels: the level goes up and the
+    // ratio drops, which is exactly what makes the planner put ATK/DEF in once the batch is big enough.
+    // n is rounded up to a whole number of level-ups. n <= what you hold = a plain spend, level unchanged.
+    const held = st.points || 0;
+    const gained = Math.ceil(Math.max(0, n - held) / POINTS_PER_LEVEL);
+    const total = gained > 0 ? held + gained * POINTS_PER_LEVEL : n;
+    const hypo = Object.assign({}, st, { level: (st.level || 0) + gained, points: total });
+    const plan = planFor(hypo, total, cfg);
+    const after = Object.assign({}, st, {
+      level: hypo.level,
+      attack: (st.attack || 0) + plan.attack,
+      defense: (st.defense || 0) + plan.defense,
+      stamina: (st.stamina || 0) + plan.stamina,
+      points: 0
+    });
+    const checks = cfg.targets.map((key) => {
+      const T = TARGETS[key];
+      const now = meets(T, after);
+      const ahead = T.kind === 'level' ? meets(T, Object.assign({}, after, { level: (after.level || 0) + LEVEL_UP_BUFFER })) : now;
+      const nd = (plan.needs || []).find((z) => z.key === key);
+      return { key, label: T.label, kind: T.kind, now, ahead, value: T.kind === 'level' ? levelRatio(after) : petShare(after), need: nd ? nd.need : null };
+    });
+    // Targets you did NOT pick that are met now but would be lost by this spend (e.g. a big Stamina dump
+    // breaking a Pet tier you are not holding). cfg.watch = the targets worth watching.
+    const lost = (cfg.watch || []).filter((k) => TARGETS[k] && !cfg.targets.includes(k) && meets(TARGETS[k], st) && !meets(TARGETS[k], after)).map((k) => TARGETS[k].label);
+    return { plan, after, checks, lost, gained, total };
+  }
+
+  const configSig = (s) => JSON.stringify([s.mode, s.lvl, s.pet, s.combat, s.pattern, s.customLevel, s.customPet]);
+  const targetLabels = (s) => heldKeys(s).map((k) => TARGETS[k].label).join(' + ');
+  const cfgFromState = (carry) => ({ maintain: state.mode === 'target', targets: heldKeys(state), watch: visibleKeys(), combat: state.combat, pattern: state.pattern, carry });
+  const previewCarry = () => (state.carrySig === configSig(state) ? state.carry : {});
+
+  if (window.__VEYRA_TEST__) {
+    window.__VEYRA_TEST__.api = { planSpend, planMaintain, planFor, projectPattern, whatIf, verifyPlan, combatWeights, advise, meets, needFor, levelRatio, petShare, configSig, TARGETS, DEFAULTS, applyCustom, LEVEL_UP_BUFFER };
+  }
+
+  // ---------------------------------------------------------------------
+  // LIVE DATA (read from stats.php)
+  // ---------------------------------------------------------------------
+
+  const tokens = { csrf: '', view: '' };
+  let latest = null; // { points, attack, defense, stamina, level }
+  let lastFetchAt = 0;
+
+  function readLevel(doc) {
+    for (const sel of ['.small-level', '.gtb-level', '#sidebar-level']) {
+      const el = doc.querySelector(sel);
+      if (!el) continue;
+      const m = String(el.textContent || '').match(/LV\s*([0-9,]+)/i);
+      if (m) return toInt(m[1]);
+    }
+    const m = String(doc.body ? doc.body.textContent : '').match(/\bLV\s*([0-9,]+)/i);
+    return m ? toInt(m[1]) : 0;
+  }
+
+  function parseStatsDoc(doc) {
+    let out = null;
+
+    // The page embeds its own state: user numbers plus the csrf / view tokens.
+    const node = doc.getElementById('stats-state');
+    if (node) {
+      try {
+        const st = JSON.parse(node.textContent);
+        if (st && st.user) {
+          out = {
+            points: toInt(st.user.STAT_POINTS),
+            attack: toInt(st.user.ATTACK),
+            defense: toInt(st.user.DEFENSE),
+            stamina: toInt(st.user.MAX_STAMINA),
+            level: 0
+          };
+          if (st.csrf) tokens.csrf = String(st.csrf);
+          if (st.view) tokens.view = String(st.view);
+        }
+      } catch (_e) {
+        out = null;
+      }
+    }
+
+    // Fallback: the rendered numbers (no tokens this way, so spending is refused until they load).
+    if (!out) {
+      const read = (k) => {
+        const el = doc.querySelector('[data-value="' + k + '"]');
+        return el ? toInt(el.textContent) : null;
+      };
+      const points = read('points');
+      const attack = read('attack');
+      if (points != null && attack != null) {
+        out = { points, attack, defense: read('defense') || 0, stamina: read('stamina') || 0, level: 0 };
+      }
+    }
+
+    if (!out) return null;
+    out.level = readLevel(doc) || (latest ? latest.level : 0);
+    return out;
+  }
+
+  async function fetchStats() {
+    const doc = await Core.pages.stats({ fetch: true, force: true }); // always a fresh fetch, even on stats.php itself
+    const parsed = parseStatsDoc(doc);
+    if (!parsed) throw new Error('Could not read stats (logged out, or the page layout changed).');
+    latest = parsed;
+    lastFetchAt = Date.now();
+    return parsed;
+  }
+
+  // ---------------------------------------------------------------------
+  // NETWORK: spend points (mirrors what the stats page itself sends)
+  // ---------------------------------------------------------------------
+
+  function rejected(msg) {
+    const e = new Error(msg);
+    e.isRejection = true;
+    return e;
+  }
+
+  function newRequestId() {
+    const a = new Uint8Array(24);
+    crypto.getRandomValues(a);
+    return Array.from(a, (n) => n.toString(16).padStart(2, '0')).join('');
+  }
+
+  function fatal(msg) {
+    const e = new Error(msg);
+    e.fatal = true;
+    return e;
+  }
+
+  // ---- journal: the one in-flight request, written BEFORE it is sent --------------------------
+  function readJournal() {
+    try {
+      const j = journalStore.get();
+      if (j && typeof j.id === 'string' && STATS.includes(j.stat) && ALLOWED_AMOUNTS.includes(j.amount) && j.before && typeof j.csrf === 'string' && typeof j.view === 'string') return j;
+    } catch (_e) {
+      /* unreadable journal counts as no journal */
+    }
     return null;
   }
-
-  // ---- badge helpers ----
-  function getCardButton(card) {
-    return card?.querySelector('button[onclick], a[onclick], input[type="button"], input[type="submit"]') || null;
+  function writeJournal(j) {
+    journalStore.set(j);
+    // Core.store swallows write errors, so read it back: no journal on disk means nothing gets spent.
+    const back = journalStore.get();
+    return !!back && back.id === j.id;
   }
-  function isEquippedCard(card) {
-    const btn = getCardButton(card);
-    if (!btn) return false;
-    return /unequipItem\s*\(/i.test(btn.getAttribute('onclick') || '');
-  }
-  function getCardItemName(card) {
-    const img = card.querySelector('img[alt]');
-    return img ? img.alt.trim() : '';
-  }
-  function collectEquippedNames() {
-    const names = new Set();
-    document.querySelectorAll(CARD_SEL).forEach((card) => {
-      if (isEquippedCard(card)) {
-        const name = getCardItemName(card);
-        if (name) names.add(name);
-      }
-    });
-    return names;
-  }
-  function refreshBadges() {
-    const equippedNames = collectEquippedNames();
-    document.querySelectorAll(CARD_SEL).forEach((card) => {
-      card.querySelector(`:scope > .${BADGE_CLASS}`)?.remove();
-      const directlyEquipped = isEquippedCard(card);
-      const name = getCardItemName(card);
-      const nameMatched = !directlyEquipped && name && equippedNames.has(name);
-      if (directlyEquipped || nameMatched) {
-        const badge = document.createElement('div');
-        badge.className = BADGE_CLASS;
-        badge.textContent = 'EQUIPPED';
-        card.appendChild(badge);
-      }
-    });
+  function clearJournal() {
+    journalStore.set(null); // readJournal() treats this as "no journal"
   }
 
-  // ---- network calls ----
-  async function postAjax(body) {
-    const res = await fetch('inventory_ajax.php', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: body.toString(),
-    });
-    const raw = await res.text();
-    if (raw.trim() === 'OK') return true;
-    throw new Error(raw.slice(0, 200) || 'Request failed');
-  }
-  function doEquip(invId, slotId) {
-    const b = new URLSearchParams();
-    b.set('action', 'equip_item');
-    b.set('inv_id', invId);
-    b.set('slot_id', slotId);
-    b.set('set', getCurrentSet());
-    return postAjax(b);
-  }
-  function doUnequip(slotId) {
-    const b = new URLSearchParams();
-    b.set('action', 'unequip_item');
-    b.set('slot_id', slotId);
-    b.set('set', getCurrentSet());
-    return postAjax(b);
-  }
-  function doAssignQuick(invId, slotId) {
-    const b = new URLSearchParams();
-    b.set('action', 'assign_quick_item');
-    b.set('inv_id', invId);
-    b.set('slot_id', slotId);
-    b.set('set_number', String(getCurrentQuickSet()));
-    b.set('typee', 'equipment');
-    b.set('target_set', getCurrentSet());
-    return postAjax(b);
-  }
+  // Sends one journaled request. The same request_id is used for every attempt and for any later
+  // replay, so the server applies it at most once no matter how many times it is sent.
+  async function postAllocation(j) {
+    const body = new URLSearchParams({
+      action: 'allocate',
+      stat: j.stat,
+      amount: String(j.amount),
+      csrf: j.csrf,
+      view: j.view,
+      request_id: j.id
+    }).toString();
 
-  // ---- trust the server's own render instead of hand-rolling DOM state ----
-  async function smartRefresh() {
-    const html = await Core.net.fetchText(location.href, { force: true });
-    const doc = new DOMParser().parseFromString(html, 'text/html');
-
-    doc.querySelectorAll(SECTION_SEL).forEach((fresh) => {
-      const key = fresh.getAttribute('data-section-key');
-      const live = document.querySelector(`.section[data-section-key="${CSS.escape(key)}"]`);
-      if (live) live.replaceWith(fresh);
-    });
-
-    if (typeof window.initEquipmentSortFilter === 'function') window.initEquipmentSortFilter();
-    if (typeof window.makeInventorySectionsCollapsible === 'function') window.makeInventorySectionsCollapsible();
-
-    refreshBadges();
-  }
-
-  async function handleInventoryActionClick(e) {
-    const btn = findActionButton(e.target);
-    if (!btn) return;
-
-    const action = getActionFromButton(btn);
-    if (!action) return;
-
-    const args = parseArgs(btn.getAttribute('onclick') || '', action.fn);
-    if (!args.length) return;
-
-    e.preventDefault();
-    e.stopImmediatePropagation();
-
-    try {
-      btn.disabled = true;
-      if (action.kind === 'equip') await doEquip(args[0], args[1]);
-      else if (action.kind === 'unequip') await doUnequip(args[0]);
-      else if (action.kind === 'quick') await doAssignQuick(args[0], args[1]);
-
-      const modal = document.getElementById('equip-modal');
-      if (modal) modal.style.display = 'none';
-
-      await smartRefresh();
-      toast('Saved', true);
-    } catch (err) {
-      toast(err?.message || 'Action failed', false);
-    } finally {
-      btn.disabled = false;
-    }
-  }
-
-  // NEW in v3: let Module 2 (Gear Presets) trigger a live DOM refresh after
-  // it applies a preset to whichever set is currently on screen. Harmless
-  // to expose site-wide — it only does anything useful when called on
-  // inventory.php, and Module 2 only calls it in that situation.
-  window.__invHelperSmartRefresh = smartRefresh;
-
-  document.addEventListener('click', handleInventoryActionClick, true);
-  refreshBadges();
-})();
-
-/* ===========================================================================
- * MODULE 2: Gear Presets
- *
- * Mirrors the Power Crystals presets script: named loadouts saved in
- * localStorage per-account, captured from and restored to any of the 3
- * equipment sets via the same equip_item/unequip_item AJAX calls the page
- * itself uses. Runs site-wide (like the crystal script's presets panel) so
- * you can capture/apply from anywhere, fetching inventory.php in the
- * background when you're not already on it.
- *
- * Equip slots, from the "Equipped Items" markup (unequipItem(N)):
- *   1 weapon, 2 helmet, 3 armor, 4 boots, 5 gloves, 6 ring, 7 amulet,
- *   9 ring 2, 10 class weapon. (Slot 8 doesn't appear anywhere — skipped.)
- *
- * Restore is two-phase (unequip everything that needs to change, THEN
- * equip everything that needs to change) — same order the crystal script
- * uses for freeing/placing crystals. For gear this is stricter than it
- * might need to be (equipping over an occupied slot may well auto-replace
- * on this site), but there's no way to verify that without live-testing
- * against the real backend, so this plays it safe instead of assuming.
- * --------------------------------------------------------------------- */
-
-(function () {
-  'use strict';
-
-  const SLOT_DEFS = [
-    { id: '1', label: 'Weapon', type: 'weapon' },
-    { id: '2', label: 'Helmet', type: 'helmet' },
-    { id: '3', label: 'Armor', type: 'armor' },
-    { id: '4', label: 'Boots', type: 'boots' },
-    { id: '5', label: 'Gloves', type: 'gloves' },
-    { id: '6', label: 'Ring 1', type: 'ring' },
-    { id: '7', label: 'Amulet', type: 'amulet' },
-    { id: '9', label: 'Ring 2', type: 'ring' },
-    { id: '10', label: 'Class Weapon', type: 'class-weapon' },
-  ];
-  const GEAR_TYPES = new Set(['weapon', 'helmet', 'armor', 'boots', 'gloves', 'ring', 'amulet', 'class-weapon']);
-  const SET_LABELS = { attack: 'PvE Attack', pvp_attack: 'PvP Attack', defense: 'PvP Defense' };
-  const SET_KEYS = ['attack', 'pvp_attack', 'defense'];
-
-  let presetOpBusy = false;
-  let activeApplyPreset = null;
-  let gpMenuMountedFor = null;
-
-  // ---------- small shared utilities ----------
-
-  function notify(msg, ok = true) {
-    if (typeof window.showNotification === 'function') {
-      window.showNotification(msg, ok ? 'success' : 'error');
-      return;
-    }
-    Core.ui.toast(msg, ok, 3000);
-  }
-
-  // ---------- apply progress: ONE toast line + Cancel ----------
-  let cancelRun = false;      // set by Cancel while a preset is applying; checked before every request
-  let runToastTimer = null;
-  let runPresetId = null;
-  const requestCancel = () => { cancelRun = true; syncRunButtons(); showRunToast('Cancelling after this step\u2026', true, 0); };
-  // The Apply button of the preset being applied turns into a red Cancel until the run ends.
-  function syncRunButtons() {
-    document.querySelectorAll('#gpList .gp-row[data-preset-id]').forEach((row) => {
-      const b = row.querySelector('[data-run-btn]');
-      if (!b) return;
-      const on = presetOpBusy && row.getAttribute('data-preset-id') === runPresetId;
-      b.className = 'gp-btn ' + (on ? 'gp-btn-cancel' : 'gp-btn-success');
-      b.textContent = on ? (cancelRun ? 'Cancelling\u2026' : '\u2716 Cancel') : '\u25b6 Apply';
-      b.disabled = on && cancelRun;
-    });
-  }
-
-  function runToastEl() {
-    let el = document.getElementById('notification') || document.getElementById('gp-toast');
-    if (!el) {
-      el = document.createElement('div');
-      el.id = 'gp-toast';
-      el.style.cssText = 'position:fixed;top:20px;right:20px;z-index:2147483001;padding:12px 20px;' +
-        'border-radius:10px;color:#fff;font:600 15px Arial,sans-serif;box-shadow:0 4px 12px rgba(0,0,0,.4);';
-      document.body.appendChild(el);
-    }
-    return el;
-  }
-  function hideRunToast() {
-    clearTimeout(runToastTimer);
-    const el = runToastEl();
-    el.style.display = 'none'; el.style.whiteSpace = ''; el.style.maxWidth = ''; el.style.cursor = ''; el.onclick = null;
-  }
-  // holdMs 0 = stay until the next update.
-  function showRunToast(msg, ok, holdMs) {
-    const el = runToastEl();
-    clearTimeout(runToastTimer);
-    el.textContent = msg;
-    el.style.background = ok ? '#2ecc71' : '#e74c3c';
-    el.style.whiteSpace = 'normal'; el.style.maxWidth = '460px'; el.style.cursor = 'pointer'; el.style.display = 'block';
-    el.onclick = hideRunToast;
-    if (holdMs) runToastTimer = setTimeout(hideRunToast, holdMs);
-  }
-  const say = (msg, ok = true) => { showRunToast(msg, ok, ok ? 10000 : 20000); };
-
-  function escapeHtml(str) { return Core.esc(str); }
-
-  function isInventoryPage() {
-    return location.pathname.replace(/\/+$/, '') === '/inventory.php';
-  }
-  function normalizeSetKey(raw) {
-    raw = (raw || 'attack').toLowerCase();
-    if (['defense', 'def', 'deff', 'pvp_defense', 'pvp_def'].includes(raw)) return 'defense';
-    if (['pvp_attack', 'pvpattack', 'attack_pvp', 'pvp'].includes(raw)) return 'pvp_attack';
-    return 'attack';
-  }
-  function getUrlSet() {
-    return normalizeSetKey(new URLSearchParams(location.search).get('set') || 'attack');
-  }
-
-  // ---------- storage ----------
-
-  function getPlayerId() { return Core.player.id(); }
-  const STORAGE_KEY = 'gearPresets_' + getPlayerId();
-
-  function loadPresets() {
-    try { return JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]'); }
-    catch (_) { return []; }
-  }
-  function savePresets(list) {
-    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(list)); } catch (_) { /* ignore */ }
-  }
-  function makePresetId() {
-    return 'g_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
-  }
-
-  // ---------- network ----------
-
-  async function postAjaxInventory(body) {
-    const res = await fetch('/inventory_ajax.php', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: body.toString(),
-      credentials: 'include',
-    });
-    const raw = await res.text();
-    if (raw.trim() === 'OK') return true;
-    throw new Error(raw.slice(0, 200) || 'Request failed');
-  }
-  function equipItemToSet(invId, slotArg, setKey) {
-    const b = new URLSearchParams();
-    b.set('action', 'equip_item');
-    b.set('inv_id', invId);
-    b.set('slot_id', slotArg);
-    b.set('set', setKey);
-    return postAjaxInventory(b);
-  }
-  function unequipItemFromSet(slotId, setKey) {
-    const b = new URLSearchParams();
-    b.set('action', 'unequip_item');
-    b.set('slot_id', slotId);
-    b.set('set', setKey);
-    return postAjaxInventory(b);
-  }
-
-  // ---------- reading state ----------
-
-  // setKey -> parsed Document (cached; use the live document when it's the
-  // set currently on screen, otherwise fetch inventory.php?set=<setKey>).
-  const contextCache = {};
-  async function getContextDoc(setKey, forceRefresh = false) {
-    if (!forceRefresh && isInventoryPage() && getUrlSet() === setKey) return document;
-    if (!forceRefresh && contextCache[setKey]) return contextCache[setKey];
-    const html = await Core.net.fetchText('/inventory.php?set=' + encodeURIComponent(setKey), forceRefresh ? { force: true } : {});
-    const doc = new DOMParser().parseFromString(html, 'text/html');
-    contextCache[setKey] = doc;
-    return doc;
-  }
-  function invalidateContextCache(setKey) {
-    if (setKey) delete contextCache[setKey];
-    else Object.keys(contextCache).forEach((k) => delete contextCache[k]);
-  }
-
-  // {slotId: {name, image}} from whichever set's "Equipped Items" section.
-  function scanEquippedSnapshot(doc) {
-    const section = doc.querySelector('.section[data-section-key$="-equipped"]');
-    const snap = {};
-    if (!section) return snap;
-    section.querySelectorAll('.slot-box').forEach((card) => {
-      const btn = Array.from(card.querySelectorAll('button')).find((b) =>
-                                                                   /unequipItem\s*\(/i.test(b.getAttribute('onclick') || ''));
-      if (!btn) return;
-      const m = /unequipItem\s*\(\s*(\d+)\s*\)/i.exec(btn.getAttribute('onclick') || '');
-      if (!m) return;
-      const img = card.querySelector('img[alt]');
-      const name = img ? img.alt.trim() : '';
-      if (!name) return;
-      snap[m[1]] = { name, image: img.src };
-    });
-    return snap;
-  }
-
-  // name -> {name, invId, image, type} from the "Equipment" section. This
-  // list is the same regardless of which ?set= you fetched it with (it's
-  // just "everything you own"), so one fetch covers all 3 sets.
-  function scanEquipmentCatalog(doc) {
-    const section = doc.querySelector('.section[data-section-key$="-equipment"]');
-    const catalog = {};
-    if (!section) return catalog;
-    section.querySelectorAll('.slot-box[data-equip="1"]').forEach((card) => {
-      const type = (card.dataset.itemType || '').toLowerCase().trim();
-      if (!GEAR_TYPES.has(type)) return;
-      const img = card.querySelector('img[alt]');
-      const name = img ? img.alt.trim() : '';
-      if (!name) return;
-      catalog[name] = { name, invId: card.dataset.invId, image: img.src, type };
-    });
-    return catalog;
-  }
-
-  let catalogCache = null;
-  async function getCatalog(forceRefresh = false) {
-    if (!forceRefresh && catalogCache) return catalogCache;
-    const setKey = isInventoryPage() ? getUrlSet() : 'attack';
-    const doc = await getContextDoc(setKey, forceRefresh);
-    catalogCache = scanEquipmentCatalog(doc);
-    return catalogCache;
-  }
-
-  function slotsEqual(a, b) {
-    const keysA = Object.keys(a || {});
-    const keysB = Object.keys(b || {});
-    if (keysA.length !== keysB.length) return false;
-    return keysA.every((k) => b[k] && b[k].name === a[k].name);
-  }
-
-  // ---------- capture ----------
-
-  async function captureCurrentToPreset(setKey) {
-    let doc;
-    try {
-      doc = await getContextDoc(setKey, true);
-    } catch (err) {
-      notify('Could not reach the Inventory page to read current equipment.', false);
-      return;
-    }
-    const snap = scanEquippedSnapshot(doc);
-    if (!Object.keys(snap).length) {
-      notify(`Nothing is currently equipped in ${SET_LABELS[setKey]} — nothing to capture.`, false);
-      return;
-    }
-    const name = prompt('Name this gear preset:', `Preset ${loadPresets().length + 1}`);
-    if (name == null) return;
-    const preset = {
-      id: makePresetId(),
-      name: name.trim() || 'Untitled preset',
-      slots: snap,
-      sourceSet: setKey,
-      updatedAt: Date.now(),
-    };
-    const list = loadPresets();
-    list.push(preset);
-    savePresets(list);
-    renderPresetList();
-    notify(`Saved preset "${preset.name}" (from ${SET_LABELS[setKey]}).`, true);
-  }
-
-  // ---------- restore ----------
-
-  async function restorePresetToSet(preset, targetSetKey) {
-    // The result is RETURNED (not parked in a module-level variable), so two calls can never read each other's outcome.
-    let result = null;
-    const out = (msg, ok = true) => { result = { ok: ok !== false, message: msg }; say(msg, ok); };
-    if (presetOpBusy) { out('Please wait for the current action to finish.', false); return result; }
-    presetOpBusy = true; cancelRun = false; runPresetId = preset.id; syncRunButtons();
-    let done = 0, total = 0;
-    try {
-      let doc;
+    let lastErr = new Error('The server could not confirm this allocation.');
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const abort = new AbortController();
+      const timer = setTimeout(() => abort.abort(), 20000);
       try {
-        doc = await getContextDoc(targetSetKey, true);
-      } catch (err) {
-        out('Could not reach the Inventory page to read current equipment.', false);
-        return result;
-      }
-      const currentSnap = scanEquippedSnapshot(doc);
-      const catalog = scanEquipmentCatalog(doc);
-
-      const toUnequip = [];
-      const toEquip = [];
-      const missing = [];
-
-      SLOT_DEFS.forEach((def) => {
-        const desired = preset.slots[def.id];
-        const current = currentSnap[def.id];
-        const desiredName = desired ? desired.name : null;
-        const currentName = current ? current.name : null;
-        if (desiredName === currentName) return;
-
-        if (currentName) toUnequip.push(def.id);
-        if (desiredName) {
-          const cat = catalog[desiredName];
-          if (!cat) { missing.push(desiredName); return; }
-          const slotArg = (def.id === '6' || def.id === '9') ? def.id : '0';
-          toEquip.push({ slotId: def.id, invId: cat.invId, slotArg });
-        }
-      });
-
-      total = toUnequip.length + toEquip.length;
-      if (!total) {
-        out(missing.length
-               ? `Already matches (${missing.length} saved item(s) no longer owned).`
-               : `Already matches this preset in ${SET_LABELS[targetSetKey]}.`, true);
-        return result;
-      }
-
-      const progress = () => showRunToast(`Applying "${preset.name}"\u2026 (${done}/${total})`, true, 0);
-      const checkCancel = () => { if (cancelRun) throw new Error('Cancelled'); };
-      progress();
-      for (const slotId of toUnequip) {
-        checkCancel();
-        await unequipItemFromSet(slotId, targetSetKey);
-        done++;
-        progress();
-      }
-      for (const item of toEquip) {
-        checkCancel();
-        await equipItemToSet(item.invId, item.slotArg, targetSetKey);
-        done++;
-        progress();
-      }
-
-      invalidateContextCache(targetSetKey);
-      if (isInventoryPage() && getUrlSet() === targetSetKey && typeof window.__invHelperSmartRefresh === 'function') {
-        await window.__invHelperSmartRefresh();
-      }
-      out(missing.length
-             ? `Preset "${preset.name}" applied to ${SET_LABELS[targetSetKey]}. Skipped: ${missing.join(', ')}`
-             : `Preset "${preset.name}" applied to ${SET_LABELS[targetSetKey]}.`, true);
-    } catch (err) {
-      if (cancelRun) {
-        out(`Cancelled "${preset.name}" \u2014 ${SET_LABELS[targetSetKey]} may be part-way` + (total ? ` (${done}/${total} steps done).` : '.'));
-        result.ok = false;
-        invalidateContextCache(targetSetKey);
+        const res = await fetch(ALLOCATE_URL, {
+          method: 'POST',
+          credentials: 'same-origin',
+          keepalive: true,
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body,
+          signal: abort.signal
+        });
+        let json = null;
         try {
-          if (isInventoryPage() && getUrlSet() === targetSetKey && typeof window.__invHelperSmartRefresh === 'function') await window.__invHelperSmartRefresh();
-        } catch (_) { /* the page just shows the old state */ }
-      } else out('Stopped: ' + (err?.message || 'action failed'), false);
-    } finally {
-      presetOpBusy = false; cancelRun = false; runPresetId = null; syncRunButtons();
+          json = await res.json();
+        } catch (_e) {
+          json = null;
+        }
+
+        if (res.status >= 500 || json == null) {
+          lastErr = new Error('The server could not confirm this allocation.');
+        } else if (!res.ok || !json.ok) {
+          const err = rejected(json.msg || 'Allocation was rejected.');
+          err.attempt = attempt;
+          throw err;
+        } else {
+          if (json.view) tokens.view = String(json.view);
+          const level = latest ? latest.level : 0;
+          if (json.user && json.user.STAT_POINTS != null) {
+            latest = {
+              points: toInt(json.user.STAT_POINTS),
+              attack: toInt(json.user.ATTACK),
+              defense: toInt(json.user.DEFENSE),
+              stamina: toInt(json.user.MAX_STAMINA),
+              level
+            };
+          } else {
+            await fetchStats();
+          }
+          syncUI();
+          return;
+        }
+      } catch (e) {
+        if (e.isRejection) throw e;
+        lastErr = e;
+      } finally {
+        clearTimeout(timer);
+      }
+      await sleep(1500);
     }
-    return result || { ok: false, message: 'no result' };
+    throw lastErr;
   }
 
-  // ---------- UI ----------
-
-  function injectStyles() {
-    const style = document.createElement('style');
-    style.textContent = `
-      .gp-modal{ position:fixed; inset:0; background:rgba(6,10,18,.74); display:none;
-        align-items:center; justify-content:center; padding:20px; z-index:300000; backdrop-filter:blur(7px); }
-      .gp-modal.show{ display:flex; }
-      .gp-modal-card{ width:min(760px, 100%); max-height:90vh; overflow:auto;
-        background:linear-gradient(180deg, rgba(24,34,56,.98), rgba(14,20,34,.98));
-        border:1px solid rgba(255,255,255,.08); border-radius:22px; box-shadow:0 26px 60px rgba(0,0,0,.38);
-        padding:22px; color:#eef3ff; font-family:Arial,sans-serif; }
-      .gp-modal-head{ display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:16px; }
-      .gp-modal-title{ margin:0; font-size:22px; }
-      .gp-close-btn{ width:38px; height:38px; border-radius:12px; border:none; background:#18223a; color:#fff; font-size:20px; cursor:pointer; }
-
-      .gp-btn{ border:none; cursor:pointer; text-decoration:none; color:#fff;
-        background:linear-gradient(135deg, #3657a7, #4b6dd0); padding:9px 14px; border-radius:12px;
-        font-weight:700; font-family:Arial,sans-serif; font-size:13px; box-shadow:0 8px 18px rgba(41,72,155,.28); }
-      .gp-btn:hover{ filter:brightness(1.06); }
-      .gp-btn-soft{ background:linear-gradient(135deg, #222d49, #2b3859); box-shadow:none; }
-      .gp-btn-success{ background:linear-gradient(135deg, #217f5b, #33b57f); }
-      .gp-btn-cancel{ background:linear-gradient(135deg,#a8283a,#e74c3c); }
-      .gp-btn-danger{ background:linear-gradient(135deg, #7b3040, #b4465c); }
-      .gp-btn:disabled{ opacity:.5; cursor:not-allowed; }
-
-      .gp-row{ display:flex; justify-content:space-between; align-items:center; gap:12px; padding:12px;
-        background:#11192d; border:1px solid rgba(255,255,255,.06); border-radius:14px; margin-bottom:10px; flex-wrap:wrap; }
-      .gp-row-name{ font-weight:800; }
-      .gp-row-meta{ color:#9caad0; font-size:12px; margin-top:2px; }
-      .gp-equipped-badge{ display:inline-block; font-size:10px; font-weight:800; letter-spacing:.03em; text-transform:uppercase;
-        color:#8ee6a8; background:rgba(46,204,113,.12); border:1px solid rgba(46,204,113,.35); border-radius:999px;
-        padding:2px 7px; vertical-align:middle; margin-left:6px; }
-      .gp-row-icons{ display:flex; gap:4px; margin-top:6px; flex-wrap:wrap; }
-      .gp-row-icons img{ width:24px; height:24px; border-radius:6px; object-fit:cover; border:1px solid rgba(255,255,255,.08); background:#0d1322; }
-      .gp-row-actions{ display:flex; gap:6px; flex-wrap:wrap; }
-      .gp-row-actions .gp-btn{ padding:6px 10px; font-size:12px; }
-
-      .gp-menu-btn{ width:32px; height:32px; padding:0; display:inline-flex; align-items:center; justify-content:center; font-size:17px; }
-      .gp-menu-dropdown{ position:fixed; z-index:300050; background:#171e33; border:1px solid rgba(255,255,255,.1);
-        border-radius:12px; box-shadow:0 12px 28px rgba(0,0,0,.45); min-width:150px; padding:6px; display:none; }
-      .gp-menu-dropdown.open{ display:block; }
-      .gp-menu-item{ display:block; width:100%; text-align:left; background:none; border:none; color:#e7ecff;
-        padding:8px 10px; border-radius:8px; font-size:13px; cursor:pointer; font-family:Arial,sans-serif; }
-      .gp-menu-item:hover{ background:rgba(255,255,255,.06); }
-      .gp-menu-item.danger{ color:#ff8a97; }
-
-      .gp-empty-state{ padding:30px 18px; text-align:center; color:#9caad0; background:rgba(255,255,255,.02);
-        border:1px dashed rgba(255,255,255,.08); border-radius:16px; }
-
-      .gp-editor-grid{ display:grid; grid-template-columns:repeat(auto-fit, minmax(150px, 1fr)); gap:12px; }
-      .gp-slot-card{ background:#11192d; border:1px solid rgba(255,255,255,.06); border-radius:14px; padding:10px; text-align:center; }
-      .gp-slot-label{ font-size:11px; color:#9caad0; margin-bottom:6px; text-transform:uppercase; letter-spacing:.03em; }
-      .gp-slot-icon{ width:64px; height:64px; margin:0 auto; border-radius:12px; background:#0d1322; overflow:hidden;
-        position:relative; cursor:pointer; border:1px solid rgba(255,255,255,.08); display:flex; align-items:center; justify-content:center; }
-      .gp-slot-icon img{ width:100%; height:100%; object-fit:cover; display:block; }
-      .gp-slot-icon.empty{ color:#5f6890; font-size:26px; font-weight:800; }
-      .gp-slot-remove{ position:absolute; top:2px; right:2px; width:16px; height:16px; border-radius:50%; border:none;
-        background:rgba(10,15,28,.85); color:#fff; font-size:11px; line-height:16px; padding:0; cursor:pointer; }
-      .gp-slot-remove:hover{ background:rgba(255,107,122,.9); }
-      .gp-slot-name{ margin-top:6px; font-size:12px; color:#cfd8f7; overflow-wrap:anywhere; }
-
-      .gp-picker-grid{ display:grid; grid-template-columns:repeat(auto-fit, minmax(150px, 1fr)); gap:12px; max-height:55vh; overflow:auto; }
-      /* scrolls, but no visible scrollbar */
-      .gp-modal-card, .gp-picker-grid{ scrollbar-width:none; -ms-overflow-style:none; }
-      .gp-modal-card::-webkit-scrollbar, .gp-picker-grid::-webkit-scrollbar{ display:none; width:0; height:0; }
-      /* The whole card is the button (no "Choose" button): same hover feel as the crystal equipment cards. */
-      .gp-picker-card{ background:#10182a; border:1px solid rgba(255,255,255,.06); border-radius:16px; padding:12px; text-align:center;
-        cursor:pointer; position:relative; outline:none;
-        transition: transform .15s ease, box-shadow .15s ease, border-color .15s ease, background .15s ease; }
-      .gp-picker-card:hover, .gp-picker-card:focus-visible{ transform:translateY(-2px); border-color:rgba(110,168,255,.3);
-        box-shadow:0 8px 20px rgba(0,0,0,.35); background:#141d38; }
-      .gp-picker-card:focus-visible{ box-shadow:0 0 0 2px rgba(110,168,255,.45) inset, 0 8px 20px rgba(0,0,0,.35); }
-      .gp-picker-card:active{ transform:translateY(0); }
-      .gp-picker-card .gp-picker-icon img{ transition:transform .15s ease; }
-      .gp-picker-card:hover .gp-picker-icon img{ transform:scale(1.05); }
-      .gp-picker-icon{ width:96px; height:96px; margin:0 auto; border-radius:14px; overflow:hidden; background:#0d1322; }
-      .gp-picker-icon img{ width:100%; height:100%; object-fit:cover; }
-      .gp-picker-name{ font-size:12px; color:#eef3ff; margin:8px 0 2px; overflow-wrap:anywhere; }
-
-      .gp-set-choice{ display:grid; gap:10px; }
-      .gp-set-choice .gp-btn{ width:100%; padding:12px; font-size:14px; }
-      .gp-modal-sub{ color:#9caad0; font-size:13px; margin-bottom:14px; }
-      .gp-footer{ display:flex; gap:8px; flex-wrap:wrap; margin-top:16px; align-items:center; }
-    `;
-    document.head.appendChild(style);
+  // After the server has answered with a rejection for a request that may already have been applied
+  // by an earlier attempt: read the real numbers and compare with the journal's snapshot.
+  async function settleJournal(j) {
+    const fresh = await fetchStats();
+    const delta = fresh[j.stat] - j.before[j.stat];
+    if (delta === j.amount) return 'applied';
+    if (delta === 0) return 'not-applied';
+    return 'unknown';
   }
 
-  function closeGpModal(id) {
-    document.getElementById(id)?.classList.remove('show');
-  }
-  function mkBtn(cls, label, onClick) {
-    const b = document.createElement('button');
-    b.type = 'button';
-    b.className = 'gp-btn ' + cls;
-    b.textContent = label;
-    b.addEventListener('click', onClick);
-    return b;
-  }
+  async function sendChunk(stat, amount) {
+    if (!tokens.csrf || !tokens.view) throw rejected('No session tokens yet - reload and try again.');
+    const j = {
+      id: newRequestId(),
+      stat,
+      amount,
+      csrf: tokens.csrf,
+      view: tokens.view,
+      t: Date.now(),
+      before: { points: latest.points, attack: latest.attack, defense: latest.defense, stamina: latest.stamina }
+    };
+    if (!writeJournal(j)) throw new Error('Could not write the safety journal - nothing was spent.');
 
-  function getGpMenuEl() {
-    let el = document.getElementById('gpSharedMenu');
-    if (!el) {
-      el = document.createElement('div');
-      el.id = 'gpSharedMenu';
-      el.className = 'gp-menu-dropdown';
-      document.body.appendChild(el);
-    }
-    return el;
-  }
-  // Mouse hover opens the preset menu (touch screens keep tap-to-open). It closes shortly after the
-  // pointer leaves both the button and the menu, so the cursor can travel from one to the other.
-  const HOVER_OK = !!(window.matchMedia && window.matchMedia('(hover: hover)').matches);
-  function attachHoverMenu(btn, preset) {
-    if (!HOVER_OK) return;
-    const menu = getGpMenuEl();
-    const stillHot = () => btn.matches(':hover') || menu.matches(':hover');
-    let timer = null;
-    const arm = () => { clearTimeout(timer); timer = setTimeout(() => { if (!stillHot()) { menu.classList.remove('open'); gpMenuMountedFor = null; } }, 220); };
-    btn.addEventListener('mouseenter', () => { clearTimeout(timer); toggleMenu(btn, preset, true); });
-    btn.addEventListener('mouseleave', arm);
-    if (!menu.dataset.hoverBound) {
-      menu.dataset.hoverBound = '1';
-      menu.addEventListener('mouseleave', () => setTimeout(() => {
-        if (!menu.matches(':hover') && !document.querySelector('.gp-menu-btn:hover')) { menu.classList.remove('open'); gpMenuMountedFor = null; }
-      }, 220));
-    }
-  }
-
-  function toggleMenu(anchorBtn, preset, keepOpen) {
-    const menu = getGpMenuEl();
-    const isOpenForThis = menu.classList.contains('open') && gpMenuMountedFor === preset.id;
-    if (isOpenForThis && keepOpen) return;   // hover already opened it: a click leaves it open
-    menu.classList.remove('open');
-    if (isOpenForThis) { gpMenuMountedFor = null; return; }
-
-    menu.innerHTML = '';
-    [
-      ['Edit', () => openEditor(preset)],
-      ['Rename', () => renamePreset(preset)],
-      ['Duplicate', () => duplicatePreset(preset)],
-      ['Delete', () => deletePreset(preset), true],
-    ].forEach(([label, fn, danger]) => {
-      const item = document.createElement('button');
-      item.type = 'button';
-      item.className = 'gp-menu-item' + (danger ? ' danger' : '');
-      item.textContent = label;
-      item.addEventListener('click', (e) => {
-        e.stopPropagation();
-        menu.classList.remove('open');
-        gpMenuMountedFor = null;
-        fn();
-      });
-      menu.appendChild(item);
-    });
-
-    const rect = anchorBtn.getBoundingClientRect();
-    menu.style.top = (rect.bottom + 6) + 'px';
-    menu.style.right = (window.innerWidth - rect.right) + 'px';
-    menu.style.left = 'auto';
-    menu.classList.add('open');
-    gpMenuMountedFor = preset.id;
-  }
-
-  function renamePreset(preset) {
-    const name = prompt('Rename preset:', preset.name);
-    if (name == null) return;
-    const list = loadPresets();
-    const target = list.find((p) => p.id === preset.id);
-    if (!target) return;
-    target.name = name.trim() || target.name;
-    target.updatedAt = Date.now();
-    savePresets(list);
-    renderPresetList();
-  }
-  function duplicatePreset(preset) {
-    const copy = JSON.parse(JSON.stringify(preset));
-    copy.id = makePresetId();
-    copy.name = preset.name + ' (copy)';
-    copy.updatedAt = Date.now();
-    const list = loadPresets();
-    list.push(copy);
-    savePresets(list);
-    renderPresetList();
-  }
-  function deletePreset(preset) {
-    if (!confirm(`Delete preset "${preset.name}"? This cannot be undone.`)) return;
-    savePresets(loadPresets().filter((p) => p.id !== preset.id));
-    renderPresetList();
-  }
-
-  async function renderPresetList() {
-    const wrap = document.getElementById('gpList');
-    const presets = loadPresets();
-    if (!presets.length) {
-      wrap.innerHTML = '<div class="gp-empty-state">No saved gear presets yet. Capture your current loadout or start a blank one.</div>';
-      return;
-    }
-
-    wrap.innerHTML = '';
-    const rowEls = {};
-    presets.forEach((preset) => {
-      const row = document.createElement('div');
-      row.className = 'gp-row';
-      row.setAttribute('data-preset-id', preset.id);
-      const itemCount = Object.keys(preset.slots).length;
-
-      const info = document.createElement('div');
-      info.innerHTML = `<div class="gp-row-name" data-gp-name>${escapeHtml(preset.name)}</div>
-        <div class="gp-row-meta">${itemCount} item(s)</div>`;
-      const icons = document.createElement('div');
-      icons.className = 'gp-row-icons';
-      Object.values(preset.slots).forEach((s) => {
-        const img = document.createElement('img');
-        img.src = s.image;
-        img.title = s.name;
-        icons.appendChild(img);
-      });
-      info.appendChild(icons);
-      row.appendChild(info);
-
-      const actions = document.createElement('div');
-      actions.className = 'gp-row-actions';
-      const runBtn = mkBtn('gp-btn-success', '▶ Apply', () => (presetOpBusy
-        ? (runPresetId === preset.id ? requestCancel() : notify('Please wait for the current action to finish.', false))
-        : openApplyModal(preset)));
-      runBtn.setAttribute('data-run-btn', '');
-      actions.appendChild(runBtn);
-      const menuBtn = mkBtn('gp-btn-soft gp-menu-btn', '⋯', (e) => { e.stopPropagation(); toggleMenu(menuBtn, preset, HOVER_OK); });
-      attachHoverMenu(menuBtn, preset);
-      actions.appendChild(menuBtn);
-      row.appendChild(actions);
-
-      wrap.appendChild(row);
-      rowEls[preset.id] = row;
-    });
-    syncRunButtons();
-
-    // Check every set, not just whichever one is on screen right now, so the
-    // badge shows up correctly no matter where this panel is opened from.
-    const snapshots = {};
-    await Promise.all(SET_KEYS.map(async (setKey) => {
-      try {
-        const doc = await getContextDoc(setKey);
-        snapshots[setKey] = scanEquippedSnapshot(doc);
-      } catch (_) { snapshots[setKey] = null; }
-    }));
-
-    presets.forEach((preset) => {
-      const matchedSets = SET_KEYS.filter((setKey) => snapshots[setKey] && slotsEqual(preset.slots, snapshots[setKey]));
-      if (!matchedSets.length) return;
-      const nameEl = rowEls[preset.id]?.querySelector('[data-gp-name]');
-      if (!nameEl) return;
-      const label = matchedSets.map((setKey) => SET_LABELS[setKey]).join(' · ');
-      nameEl.insertAdjacentHTML('beforeend', ` <span class="gp-equipped-badge">Equipped · ${label}</span>`);
-    });
-  }
-
-  // ---- editor ----
-
-  async function openEditor(preset) {
-    const modal = document.getElementById('gpEditorModal');
-    document.getElementById('gpEditorName').textContent = preset.name;
-    document.getElementById('gpEditorGrid').innerHTML = '<div class="gp-empty-state">Loading equipment catalog…</div>';
-    modal.classList.add('show');
-
-    const working = JSON.parse(JSON.stringify(preset));
-    let catalog;
     try {
-      catalog = await getCatalog();
-    } catch (err) {
-      document.getElementById('gpEditorGrid').innerHTML =
-        '<div class="gp-empty-state">Could not reach the Inventory page. Check your connection and try again.</div>';
+      await postAllocation(j);
+    } catch (e) {
+      // Refused on the very first send: the server did not apply it.
+      if (e.isRejection && e.attempt === 0) {
+        clearJournal();
+        throw e;
+      }
+      // Rejected after earlier attempts: the server has answered, so compare the real numbers.
+      if (e.isRejection) {
+        const outcome = await settleJournal(j);
+        if (outcome === 'applied') {
+          clearJournal();
+          return;
+        }
+        clearJournal();
+        if (outcome === 'not-applied') throw e;
+        throw fatal('Your ' + NAME[stat] + ' changed by an unexpected amount during allocation (something else spent points). Check your stats, then turn auto back on.');
+      }
+      // No answer at all (timeout, dropped connection, 5xx): the journal stays on disk. The next
+      // run replays this exact request_id before anything else is spent.
+      throw e;
+    }
+    clearJournal();
+  }
+
+  // Splits any amount into allowed chunks, one journaled request per chunk.
+  async function allocate(stat, amount) {
+    let left = Math.floor(amount);
+    for (const step of ALLOWED_AMOUNTS) {
+      while (left >= step) {
+        if (!latest || latest.points < step) throw new Error('Not enough unspent points for the next chunk - stopped before spending it.');
+        await sendChunk(stat, step);
+        left -= step;
+        if (left > 0) await sleep(REQUEST_DELAY_MS);
+      }
+    }
+  }
+
+  // Finishes a request left over from an interrupted run (page reload, closed tab, dropped connection).
+  // Returns true when nothing is pending any more, false when it could not be settled yet.
+  async function recoverJournal() {
+    const j = readJournal();
+    if (!j) return true;
+    setStatus('Finishing an interrupted allocation (' + j.amount + ' ' + SHORT[j.stat] + ')...');
+    try {
+      try {
+        await postAllocation(j);
+      } catch (e) {
+        if (!e.isRejection) throw e;
+        const outcome = await settleJournal(j);
+        if (outcome === 'unknown') {
+          clearJournal();
+          disableAuto('Stopped: your ' + NAME[j.stat] + ' changed by an unexpected amount around an interrupted allocation. Check your stats, then turn auto back on.');
+          return false;
+        }
+      }
+      clearJournal();
+      await fetchStats();
+      syncUI();
+      return true;
+    } catch (e) {
+      setStatus('Could not settle the interrupted allocation yet (' + e.message + '). Nothing else is spent until it is settled; trying again next check.');
+      return false;
+    }
+  }
+
+  // ---------------------------------------------------------------------
+  // RUN LOGIC
+  // ---------------------------------------------------------------------
+
+  let running = false;
+  let failStreak = 0;
+
+  function disableAuto(reason) {
+    state.enabled = false;
+    saveState();
+    if (els.auto) els.auto.checked = false;
+    if (reason) {
+      setStatus(reason);
+      Core.ui.toast(reason, false, 10000);
+    }
+    syncUI();
+  }
+
+  // The carried rounding error only makes sense for the choices it was built under.
+  function currentCarry() {
+    const sig = configSig(state);
+    if (state.carrySig !== sig) {
+      state.carry = {};
+      state.carrySig = sig;
+    }
+    return state.carry;
+  }
+
+  // manual = the Allocate button. In "My amounts" mode that spends exactly one round (auto spends every
+  // full round you have points for). In "Maintain" mode both spend all your unspent points.
+  async function runOnce(manual) {
+    if (running || (!manual && !state.enabled) || !latest) return;
+
+    if (!latest.level) {
+      setStatus('Level not found on the page - not spending anything.');
       return;
     }
-    renderEditorGrid(working, catalog);
 
-    document.getElementById('gpEditorSave').onclick = () => {
-      working.updatedAt = Date.now();
-      const list = loadPresets();
-      const idx = list.findIndex((p) => p.id === working.id);
-      if (idx >= 0) list[idx] = working; else list.push(working);
-      savePresets(list);
-      renderPresetList();
-      closeGpModal('gpEditorModal');
-      notify(`Saved preset "${working.name}".`, true);
+    const maintain = state.mode === 'target';
+    let spendable;
+    if (maintain) {
+      spendable = latest.points;
+      if (spendable < 1) {
+        setStatus('No unspent points.');
+        return;
+      }
+    } else {
+      const sum = patternSum(state);
+      if (sum <= 0) {
+        setStatus('Choose how many points go to each stat first.');
+        return;
+      }
+      spendable = manual ? sum : Math.floor(latest.points / sum) * sum;
+      if (spendable < 1 || latest.points < spendable) {
+        setStatus('Waiting for points: you have ' + fmt(latest.points) + ', need ' + fmt(sum) + '.');
+        return;
+      }
+    }
+
+    running = true;
+    try {
+      const cfg = cfgFromState(currentCarry());
+      const plan = planFor(latest, spendable, cfg);
+
+      // PRE-SPEND SAFETY CHECK. If the plan can reach every held target (short = 0) then applying it must
+      // leave them all met. If it somehow would not, refuse BEFORE sending anything. When the plan cannot
+      // reach a target at all (short > 0) it is the "catching up" case and is allowed.
+      if (maintain && plan.short === 0) {
+        const broken = verifyPlan(latest, plan, cfg.targets);
+        if (broken.length) throw new Error('Safety check: this plan would leave ' + broken.map((k) => TARGETS[k].label).join(' + ') + ' unmet - nothing was spent.');
+      }
+
+      let spent = 0;
+      const start = { attack: latest.attack, defense: latest.defense, stamina: latest.stamina };
+
+      // ATK/DEF first, Stamina last, so your ratios can never dip part-way through a plan.
+      for (const stat of ['attack', 'defense', 'stamina']) {
+        const amt = plan[stat];
+        if (!amt) continue;
+        const before = latest.points;
+        await allocate(stat, amt);
+        spent += amt;
+        if (latest.points >= before) throw new Error('Points did not go down after allocating - stopped to be safe.');
+        await sleep(REQUEST_DELAY_MS);
+      }
+
+      state.carry = plan.nextCarry;
+      state.carrySig = configSig(state);
+      saveState();
+      failStreak = 0;
+
+      // Report what the server really applied (read back from its own responses), not just the plan.
+      const actual = {};
+      STATS.forEach((k) => (actual[k] = latest[k] - start[k]));
+      let msg = 'Allocated ' + fmt(spent) + ' pts: ' + STATS.map((k) => SHORT[k] + ' ' + fmt(actual[k])).join(' · ') + '.';
+      if (STATS.some((k) => actual[k] !== plan[k])) msg += ' (Plan was ' + STATS.map((k) => SHORT[k] + ' ' + fmt(plan[k])).join(' · ') + ' - they differ, check your stats.)';
+      if (maintain && plan.short > 0) msg += ' Still ' + fmt(plan.short) + ' ATK/DEF short of ' + targetLabels(state) + '.';
+      // POST-SPEND CHECK on the server's own numbers.
+      if (maintain && plan.short === 0) {
+        const unmet = cfg.targets.filter((k) => !meets(TARGETS[k], latest));
+        if (unmet.length) msg += ' ⚠️ Not met right now: ' + unmet.map((k) => TARGETS[k].label).join(' + ') + ' - check your stats.';
+      }
+      setStatus(msg);
+    } catch (e) {
+      failStreak++;
+      try {
+        await fetchStats(); // refresh numbers and tokens from the server before anything else
+      } catch (_e) {
+        /* the next poll will try again */
+      }
+      if (e.fatal) disableAuto('Stopped: ' + e.message);
+      else if (manual) setStatus('Error: ' + e.message);
+      else if (failStreak >= 2) disableAuto('Stopped after repeated errors: ' + e.message);
+      else setStatus('Error: ' + e.message + ' - will re-check and try once more.');
+    } finally {
+      running = false;
+      syncUI();
+    }
+  }
+
+  // Only one tab at a time may recover or spend. Web Locks are atomic and are released by the browser
+  // the moment the tab reloads, closes or crashes, so there is no lease to expire.
+  // Core.lock.hold() answers true when THIS tab already holds the lock, so a flag keeps a second caller in the
+  // same tab out (the raw Web Lock did that by itself).
+  let exclusiveHeld = false;
+  async function withExclusive(fn) {
+    if (!Core.lock.available()) return fn();
+    if (exclusiveHeld) return { busy: true };
+    exclusiveHeld = true;
+    try {
+      if (!(await Core.lock.hold(LOCK_NAME, { ifAvailable: true }))) return { busy: true };
+      return await fn();
+    } finally {
+      exclusiveHeld = false;
+      Core.lock.release(LOCK_NAME);
+    }
+  }
+
+  let busyRetry = null;
+  async function exclusiveRun(manual) {
+    if (running) return;
+    try {
+      const out = await withExclusive(async () => {
+        if (!latest || Date.now() - lastFetchAt > 2000) await fetchStats(); // plan from the server's numbers, not a stale copy
+        if (!(await recoverJournal())) return;
+        await runOnce(manual);
+      });
+      if (out && out.busy) {
+        setStatus('Another tab is allocating - checking again in a few seconds.');
+        if (!manual && !busyRetry) {
+          busyRetry = setTimeout(() => {
+            busyRetry = null;
+            pollNow();
+          }, 5000);
+        }
+      }
+    } catch (e) {
+      setStatus('Error: ' + e.message);
+    }
+  }
+
+  // ---------------------------------------------------------------------
+  // POLLING
+  // ---------------------------------------------------------------------
+
+  let pollTimer = null;
+  let pollInFlight = false;
+
+  function clearPoll() {
+    if (pollTimer) {
+      clearTimeout(pollTimer);
+      pollTimer = null;
+    }
+  }
+
+  function schedulePoll() {
+    clearPoll();
+    pollTimer = setTimeout(pollStats, Math.max(POLL_MIN_SECONDS, state.pollSeconds) * 1000);
+  }
+
+  function pollNow() {
+    clearPoll();
+    pollStats();
+  }
+
+  async function pollStats() {
+    if (pollInFlight) return;
+    pollInFlight = true;
+    try {
+      await fetchStats();
+      syncUI();
+      if (state.enabled || readJournal()) await exclusiveRun(false);
+      else setStatus('Not running.');
+    } catch (e) {
+      setStatus('Check failed: ' + e.message);
+    } finally {
+      pollInFlight = false;
+      schedulePoll();
+    }
+  }
+
+  // ---------------------------------------------------------------------
+  // UI
+  // ---------------------------------------------------------------------
+
+  let els = {};
+  let whatN = null; // the "if I spend at once" box; null = empty = use your real unspent points (not saved)
+
+  function setStatus(msg) {
+    if (els.status) els.status.textContent = msg === 'Not running.' ? '' : msg; // the Off pill already says it
+  }
+
+  const isEditing = (el) => document.activeElement === el;
+  const lvText = (n) => (n > 99999 ? '100,000+' : fmt(n));
+
+  // My-amounts mode forecast line.
+  function projText(p) {
+    if (!p) return '—';
+    if (p.kind === 'holds') return 'holds';
+    if (p.kind === 'drops') return 'drops at LV ' + lvText(p.atLevel);
+    if (p.kind === 'reaches') return 'reached at LV ' + lvText(p.atLevel);
+    return 'never reached';
+  }
+
+  // Maintain-mode row text. "free" is only shown when NOT all of your unspent points can go to Stamina.
+  function advRowText(r, u) {
+    if (r.reached) {
+      const part = u > 0 && r.free < u ? (r.free > 0 ? fmt(r.free) + '/' + fmt(u) + ' free · ' : '→ ATK/DEF · ') : '';
+      return part + (r.runTo != null ? 'STA→LV ' + lvText(r.runTo) : 'ok');
+    }
+    return 'need ' + fmt(r.need) + (r.need > u && r.levels ? ' · ~' + fmt(r.levels) + ' lv' : '');
+  }
+
+  // Text of the "If I spend at once" box, in plain words. Pure: takes the whatIf() result.
+  function previewLines(s, n, w, maintain) {
+    const held = s.points || 0;
+    let head;
+    if (w.gained > 0) head = fmt(w.total) + ' pts = ' + (held > 0 ? fmt(held) + ' held + ' : '') + fmt(w.gained) + ' level-up' + (w.gained === 1 ? '' : 's') + ' (LV ' + fmt(w.after.level) + ')';
+    else head = n < held ? fmt(n) + ' of ' + fmt(held) + ' pts' : fmt(w.total) + ' pts';
+    const lines = [head, STATS.map((k) => SHORT[k] + ' ' + fmt(w.plan[k])).join(' · '), 'Level ratio ' + levelRatio(w.after).toFixed(3) + ' · Pet ratio ' + (petShare(w.after) * 100).toFixed(1) + '%'];
+    let decider = null;
+    if (maintain && w.checks.length > 1) {
+      const sorted = w.checks.slice().sort((a, b) => (b.need || 0) - (a.need || 0));
+      if ((sorted[0].need || 0) > (sorted[1].need || 0)) decider = sorted[0].key;
+    }
+    const marks = w.checks.map((c) => (!c.now ? '❌ ' + c.label + ' not met' : !c.ahead ? '⚠️ ' + c.label + ' breaks next lv' : '✅ ' + c.label + ' holds') + (c.key === decider ? ' (sets ATK/DEF)' : ''));
+    w.lost.forEach((label) => marks.push('⚠️ ' + label + ' lost (not held)'));
+    lines.push(marks.join(' · '));
+    if (maintain && w.plan.short > 0) lines.push('⚠️ ' + fmt(w.plan.short) + ' ATK/DEF short: all pts → ATK/DEF');
+    return lines;
+  }
+
+  // Presents previewLines() as: head line, one tile per stat, the two ratios, status pills. previewLines() itself is
+  // untouched (it is also what the test hook exposes); this only decides how its lines look.
+  function renderPreview(el, lines, w) {
+    const div = (cls, text) => {
+      const d = document.createElement('div');
+      d.className = cls;
+      if (text != null) d.textContent = text;
+      return d;
+    };
+    const tiles = div('sb-pv-tiles');
+    STATS.forEach((k) => {
+      const t = div('sb-pv-tile');
+      t.append(div('sb-pv-k', ICON[k] + ' ' + SHORT[k]), div('sb-pv-v', fmt(w.plan[k])));
+      tiles.appendChild(t);
+    });
+    const ratios = div('sb-pv-ratio');
+    (lines[2] || '').split(' · ').forEach((r) => ratios.appendChild(div('', r)));
+    const marks = div('sb-pv-marks');
+    (lines[3] || '').split(' · ').filter(Boolean).forEach((m) => {
+      marks.appendChild(div('core-pill ' + (m.startsWith('✅') ? 'core-pill-ok' : m.startsWith('❌') ? 'core-pill-error' : 'core-pill-loading'), m));
+    });
+    const kids = [div('sb-pv-head', 'Plan for ' + lines[0]), tiles, ratios, marks];
+    if (lines[4]) kids.push(div('sb-pv-warn', lines[4]));
+    el.replaceChildren(...kids);
+  }
+
+  // Rows shown in the Targets list: the four presets, plus a custom one only while it is the chosen one.
+  function visibleKeys() {
+    const held = heldKeys(state);
+    return TARGET_ORDER.filter((k) => !TARGETS[k].custom || held.includes(k));
+  }
+
+  function syncUI() {
+    if (!els.drawer) return;
+    const s = latest || { points: 0, attack: 0, defense: 0, stamina: 0, level: 0 };
+    const maintain = state.mode === 'target';
+    const sum = patternSum(state);
+    const rows = {};
+    if (s.level > 1) advise(s).rows.forEach((r) => (rows[r.key] = r));
+
+    els.badge.textContent = s.points > 999 ? '999+' : String(s.points);
+    els.points.textContent = fmt(s.points);
+    els.level.textContent = s.level ? 'LV ' + fmt(s.level) : 'LV --';
+    els.ratio.textContent = s.level > 1 ? levelRatio(s).toFixed(3) : '—';
+    els.share.textContent = allStats(s) > 0 ? (petShare(s) * 100).toFixed(1) + '%' : '—';
+    if (tipFor) {
+      renderTip();
+      placeTip();
+    }
+
+    // Mode + inputs.
+    els.modeBtns.forEach((b) => b.classList.toggle('active', b.dataset.mode === state.mode));
+    els.manualRows.style.display = maintain ? 'none' : 'flex';
+    els.combatBox.style.display = maintain ? 'block' : 'none';
+    els.combatBtns.forEach((b) => b.classList.toggle('active', b.dataset.combat === state.combat));
+    els.combatText.textContent = state.combat === 'build' ? 'Split like your stats (' + fmt(s.attack) + ' : ' + fmt(s.defense) + ')' : '';
+    STATS.forEach((k) => {
+      els['cur_' + k].textContent = fmt(s[k]);
+      if (!isEditing(els['p_' + k])) els['p_' + k].value = state.pattern[k];
+    });
+
+    // Targets list: Level rows and Pet rows, one pick each. Tap a row to hold it (tap it again to drop it).
+    els.advLabel.title = maintain
+      ? 'Tap a row to hold that target - one Level and one Pet at most (0.8 already includes 0.6, Pet 0.6 includes 0.4).\nHighlighted = held · 40/85 free = 40 of your 85 unspent points can go to Stamina and it still holds (hidden when all can)\nSTA→LV = last level reachable with every point in Stamina'
+      : 'Forecast if every point from now on is spent as set above (' + (sum > 0 ? (((state.pattern.attack + state.pattern.defense) / sum) * 100).toFixed(0) : 0) + '% to ATK/DEF)\n✅/❌ = after your unspent points are spent that way';
+    const ck = state.customKind === 'pet' ? 'pc' : 'lc';
+    els.customKind.value = state.customKind;
+    if (!isEditing(els.customVal)) els.customVal.value = (ck === 'pc' ? state.customPet : state.customLevel).toFixed(2);
+    els.customVal.title = ck === 'pc' ? 'Pet ratio (ATK+DEF share of all stats) must be MORE than this' : 'Level ratio (ATK+DEF) / ((Level-1)*5) must be at least this';
+    const customOn = state[ck === 'pc' ? 'pet' : 'lvl'] === ck;
+    els.customAdd.textContent = customOn ? '✓' : '+';
+    els.customAdd.title = customOn ? 'Update your custom ratio' : 'Add your own ratio as a target and hold it';
+    els.adv.innerHTML = '';
+    if (s.level > 1) {
+      const keys = visibleKeys();
+      GROUPS.forEach((g) => {
+        const col = document.createElement('div'); // one column per group: Level on the left, Pet on the right
+        col.className = 'sb-advcol';
+        const head = document.createElement('div');
+        head.className = 'sb-label';
+        head.textContent = g.name;
+        col.appendChild(head);
+        els.adv.appendChild(col);
+        g.keys.filter((k) => keys.includes(k)).forEach((k) => {
+          const r = rows[k];
+          const T = TARGETS[k];
+          const sel = state[g.id] === k;
+          const row = document.createElement('div');
+          row.className = 'sb-advrow sb-pick' + (sel ? ' sb-advon' : '');
+          const l = document.createElement('span');
+          l.className = 'sb-advl';
+          l.textContent = r.label;
+          const v = document.createElement('span');
+          v.className = 'sb-muted';
+          if (maintain) {
+            row.title = r.bonus;
+            v.textContent = (r.reached ? '✅ ' : '❌ ') + advRowText(r, s.points);
+          } else {
+            const p = sum > 0 ? projectPattern(T, s, state.pattern) : null;
+            row.title = r.bonus + (p ? ' — long run: ' + (p.f * 100).toFixed(1) + '% of your points go to ATK/DEF; this needs ' + (T.kind === 'level' ? '≥ ' : '> ') + T.t + '.' : '');
+            v.textContent = (p ? (p.ok ? '✅ ' : '❌ ') : '') + projText(p);
+          }
+          row.addEventListener('click', () => {
+            const other = state[g.id === 'lvl' ? 'pet' : 'lvl'];
+            if (sel) {
+              if (!other) {
+                setStatus('Keep at least one target on.');
+                return;
+              }
+              state[g.id] = null;
+            } else state[g.id] = k;
+            changed();
+          });
+          row.append(l, v);
+          col.appendChild(row);
+        });
+      });
+    }
+
+    // Allocate button + plan line (same planner as a real run).
+    if (maintain) {
+      if (s.level) {
+        const x = s.points > 0 ? s.points : POINTS_PER_LEVEL; // with none unspent, preview the next level-up's 5
+        const p = planFor(s, x, cfgFromState(previewCarry()));
+        els.info.textContent =
+          (s.points > 0 ? 'Allocate ' + fmt(x) + ' now: ' : 'Next level (' + x + ' pts): ') +
+          STATS.map((k) => SHORT[k] + ' ' + fmt(p[k])).join(' · ') +
+          (p.forced ? ' · catching up (below ' + targetLabels(state) + ')' : '');
+      } else els.info.textContent = '';
+      els.allocBtn.textContent = 'Allocate ' + fmt(s.points) + ' points';
+      els.allocBtn.disabled = s.points < 1 || running;
+      els.need.textContent = '';
+      els.autoText.textContent = 'Spends new points as they arrive to reach and keep ' + targetLabels(state) + '.';
+    } else {
+      els.info.textContent = sum > 0 ? 'Total: ' + fmt(sum) + ' points' : 'Choose how many points go to each stat';
+      els.allocBtn.textContent = sum > 0 ? 'Allocate ' + fmt(sum) + ' points' : 'Allocate';
+      els.allocBtn.disabled = sum <= 0 || s.points < sum || running;
+      els.need.textContent = sum > 0 && s.points < sum ? 'You have ' + fmt(s.points) + ' unspent, need ' + fmt(sum) + '.' : '';
+      els.autoText.textContent = sum > 0 ? 'Spends ' + fmt(sum) + ' points your way each time that many are unspent.' : '';
+    }
+
+    els.autoPill.textContent = state.enabled ? 'On' : 'Off';
+    els.autoPill.classList.toggle('sb-pill-on', !!state.enabled);
+    if (state.enabled) els.autoText.textContent = (els.autoText.textContent + ' Checks every ' + Math.max(POLL_MIN_SECONDS, state.pollSeconds) + ' s.').trim();
+
+    // "If I spend at once": empty box = your real unspent points, planned exactly like the Allocate button.
+    if (!(s.level > 1) || (!maintain && sum <= 0)) {
+      els.whatOut.textContent = '';
+      els.whatN.placeholder = '';
+    } else {
+      const dflt = maintain ? (s.points > 0 ? s.points : POINTS_PER_LEVEL) : Math.max(sum, Math.floor(s.points / sum) * sum);
+      const n = whatN != null ? whatN : dflt;
+      els.whatN.placeholder = String(dflt);
+      const w = whatIf(s, n, cfgFromState(previewCarry()));
+      const lines = previewLines(s, n, w, maintain);
+      renderPreview(els.whatOut, lines, w);
+    }
+  }
+
+  // ---------------------------------------------------------------------
+  // FORMULA TOOLTIP (hover on desktop, tap on touch, focus with keyboard)
+  // ---------------------------------------------------------------------
+
+  let tipFor = null;
+
+  function tipContent(kind) {
+    const s = latest || { points: 0, attack: 0, defense: 0, stamina: 0, level: 0 };
+    const ad = fmt(s.attack) + ' + ' + fmt(s.defense);
+    if (kind === 'ratio') {
+      const ok = s.level > 1;
+      return {
+        title: 'Level ratio',
+        formula: '(ATK + DEF) ÷ ((Level − 1) × 5)',
+        working: ok ? '(' + ad + ') ÷ ((' + fmt(s.level) + ' − 1) × 5)' : 'level not read yet',
+        result: ok ? levelRatio(s).toFixed(4) : '—',
+        keys: ['l08', 'l06']
+      };
+    }
+    const ok = allStats(s) > 0;
+    return {
+      title: 'Pet ratio',
+      formula: '(ATK + DEF) ÷ (ATK + DEF + STA)',
+      working: ok ? '(' + ad + ') ÷ ' + fmt(allStats(s)) : 'no stats read yet',
+      result: ok ? (petShare(s) * 100).toFixed(2) + '%' : '—',
+      keys: ['p60', 'p40']
     };
   }
 
-  function renderEditorGrid(working, catalog) {
-    const grid = document.getElementById('gpEditorGrid');
-    grid.innerHTML = '';
-    SLOT_DEFS.forEach((def) => {
-      const slot = working.slots[def.id];
-      const card = document.createElement('div');
-      card.className = 'gp-slot-card';
-
-      const label = document.createElement('div');
-      label.className = 'gp-slot-label';
-      label.textContent = def.label;
-      card.appendChild(label);
-
-      const iconWrap = document.createElement('div');
-      iconWrap.className = 'gp-slot-icon' + (slot ? '' : ' empty');
-      if (slot) {
-        const img = document.createElement('img');
-        img.src = slot.image;
-        img.title = slot.name;
-        iconWrap.appendChild(img);
-        const rm = document.createElement('button');
-        rm.type = 'button';
-        rm.className = 'gp-slot-remove';
-        rm.title = 'Remove';
-        rm.textContent = '×';
-        rm.addEventListener('click', (e) => {
-          e.stopPropagation();
-          delete working.slots[def.id];
-          renderEditorGrid(working, catalog);
-        });
-        iconWrap.appendChild(rm);
-      } else {
-        iconWrap.textContent = '+';
-      }
-      iconWrap.addEventListener('click', () => {
-        openPicker(def, catalog, (chosen) => {
-          working.slots[def.id] = { name: chosen.name, image: chosen.image };
-          renderEditorGrid(working, catalog);
-        });
-      });
-      card.appendChild(iconWrap);
-
-      const name = document.createElement('div');
-      name.className = 'gp-slot-name';
-      name.textContent = slot ? slot.name : 'Empty';
-      card.appendChild(name);
-
-      grid.appendChild(card);
+  function renderTip() {
+    if (!tipFor || !els.tipBody) return;
+    const c = tipContent(tipFor.dataset.tip);
+    const s = latest;
+    const mk = (cls, text) => {
+      const d = document.createElement('div');
+      d.className = cls;
+      d.textContent = text;
+      return d;
+    };
+    const used = mk('sb-tip-used', '');
+    c.keys.forEach((key) => {
+      const T = TARGETS[key];
+      const row = document.createElement('div');
+      row.className = 'sb-tip-row';
+      const ok = !!(s && s.level > 1 && meets(T, s));
+      const l = document.createElement('span');
+      l.textContent = (ok ? '✅ ' : '❌ ') + T.label;
+      const r = document.createElement('span');
+      r.textContent = T.kind === 'level' ? 'needs ≥ ' + T.t.toFixed(1) : 'needs > ' + Math.round(T.t * 100) + '%';
+      row.append(l, r);
+      used.appendChild(row);
     });
+    els.tipBody.textContent = '';
+    els.tipBody.append(mk('sb-tip-title', c.title), mk('sb-tip-formula', c.formula), mk('sb-tip-work', '= ' + c.working), mk('sb-tip-result', '= ' + c.result), used);
   }
 
-  function openPicker(def, catalog, onPick) {
-    document.getElementById('gpPickerTitle').textContent = 'Choose ' + def.label;
-    const body = document.getElementById('gpPickerBody');
-    const matches = Object.values(catalog).filter((it) => it.type === def.type)
-    .sort((a, b) => a.name.localeCompare(b.name));
-    if (!matches.length) {
-      body.innerHTML = '<div class="gp-empty-state">No owned items of this type found.</div>';
-    } else {
-      body.innerHTML = '<div class="gp-picker-grid"></div>';
-      const g = body.querySelector('.gp-picker-grid');
-      matches.forEach((it) => {
-        const card = document.createElement('div');
-        card.className = 'gp-picker-card';
-        card.setAttribute('role', 'button');
-        card.tabIndex = 0;
-        card.title = 'Select ' + it.name;
-        card.innerHTML = `<div class="gp-picker-icon"><img src="${it.image}"></div><div class="gp-picker-name">${escapeHtml(it.name)}</div>`;
-        const pick = () => { closeGpModal('gpPickerModal'); onPick(it); };
-        card.addEventListener('click', pick);
-        card.addEventListener('keydown', (e) => {
-          if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pick(); }
-        });
-        g.appendChild(card);
-      });
-    }
-    document.getElementById('gpPickerModal').classList.add('show');
+  function placeTip() {
+    const tip = els.tip;
+    if (!tip || !tipFor) return;
+    const r = tipFor.getBoundingClientRect();
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const tw = tip.offsetWidth;
+    const th = tip.offsetHeight;
+    const left = clamp(r.left + r.width / 2 - tw / 2, 8, Math.max(8, vw - tw - 8));
+    const below = r.bottom + 10 + th <= vh - 8 || r.top - 10 - th < 8;
+    tip.style.left = Math.round(left) + 'px';
+    tip.style.top = Math.round(below ? r.bottom + 10 : r.top - 10 - th) + 'px';
+    tip.dataset.side = below ? 'below' : 'above';
+    tip.style.setProperty('--ax', Math.round(clamp(r.left + r.width / 2 - left, 16, Math.max(16, tw - 16))) + 'px');
   }
 
-  // ---- apply (target set chooser) ----
-
-  function openApplyModal(preset) {
-    activeApplyPreset = preset;
-    document.getElementById('gpApplyTitle').textContent = `Apply "${preset.name}" to:`;
-    document.getElementById('gpApplyModal').classList.add('show');
-  }
-  async function onApplyTarget(targetSetKey) {
-    if (!activeApplyPreset) return;
-    const preset = activeApplyPreset;
-    closeGpModal('gpApplyModal');
-    await restorePresetToSet(preset, targetSetKey);
-    activeApplyPreset = null;
-    renderPresetList();
+  function showTip(chip) {
+    if (!els.tip) return;
+    tipFor = chip;
+    renderTip();
+    placeTip();
+    els.tip.classList.add('on');
   }
 
-  // ---- capture (source set chooser) ----
-
-  function openCaptureModal() {
-    document.getElementById('gpCaptureModal').classList.add('show');
+  function hideTip() {
+    tipFor = null;
+    if (els.tip) els.tip.classList.remove('on');
   }
-
-  // ---------- build UI ----------
-
-  let gpPanel = null, gpHome = null;
 
   function buildUI() {
-    injectStyles();
+    // The unspent-points badge rides on the Core dock button (attached in init).
+    const badge = document.createElement('span');
+    badge.id = 'sbDrawerBadge';
+    badge.className = 'core-pill';
+    badge.textContent = '0';
 
-    const wrap = document.createElement('div');
-    wrap.innerHTML = `
-      <div class="gp-modal" id="gpModal">
-        <div class="gp-modal-card">
-          <div class="gp-modal-head">
-            <h3 class="gp-modal-title">Gear Presets</h3>
-            <button type="button" class="gp-close-btn" data-gp-close="gpModal">&times;</button>
+    // Built once and re-attached by Core.float every time the panel opens (see init).
+    const drawer = document.createElement('div');
+    drawer.id = 'sbDrawer';
+    const $ = (sel) => drawer.querySelector(sel);
+
+    const rows = STATS.map(
+      (k) => `
+        <div class="sb-arow" id="sbRow_${k}">
+          <div class="sb-aname"><span>${ICON[k]} ${NAME[k]}</span><span class="sb-muted" id="sbCur_${k}">0</span></div>
+          <div class="sb-step">
+            <button type="button" class="sb-stepbtn core-btn core-btn-soft" data-step="${k}" data-d="-1">−</button>
+            <input type="number" class="sb-stepin core-input" id="sbP_${k}" min="0" max="9999" step="1">
+            <button type="button" class="sb-stepbtn core-btn core-btn-soft" data-step="${k}" data-d="1">+</button>
           </div>
-          <div id="gpList"></div>
-          <div class="gp-footer">
-            <button type="button" class="gp-btn gp-btn-soft" id="gpRefreshBtn" title="Re-read your current gear">⟳ Refresh</button>
-            <button type="button" class="gp-btn gp-btn-soft" id="gpLegacyPetsBtn">🐾 Legacy Quick Sets</button>
-            <div style="flex:1 1 auto;"></div>
-            <button type="button" class="gp-btn gp-btn-soft" id="gpNewBlank">+ New Preset</button>
-            <button type="button" class="gp-btn gp-btn-success" id="gpCaptureBtn" title="Capture your current gear into a preset">Capture</button>
+        </div>`
+    ).join('');
+    drawer.innerHTML = `
+      <div class="sb-col">
+        <div class="sb-card sb-hero">
+          <span class="sb-label">Unspent points</span>
+          <div class="sb-big" id="sbPoints">0</div>
+          <span id="sbLevel" class="core-pill">LV --</span>
+          <div class="sb-chips">
+            <span class="sb-chip" data-tip="ratio" tabindex="0"><span class="sb-muted">Level ratio</span><b id="sbRatio">—</b></span>
+            <span class="sb-chip" data-tip="share" tabindex="0"><span class="sb-muted">Pet ratio</span><b id="sbShare">—</b></span>
+          </div>
+        </div>
+
+        <div class="sb-card">
+          <div class="sb-seg">
+            <button type="button" class="sb-seg-btn" data-mode="target">Target</button>
+            <button type="button" class="sb-seg-btn" data-mode="manual">My amounts</button>
+          </div>
+          <div class="sb-row between sb-targethead">
+            <div class="sb-label" id="sbAdvLabel" style="cursor:help">Targets ⓘ</div>
+            <div class="sb-customrow" id="sbCustomRow">
+              <span class="sb-muted">Custom</span>
+              <select class="sb-cinput sb-csel core-input" id="sbCKind" title="Which kind of ratio"><option value="level">Level</option><option value="pet">Pet</option></select>
+              <input type="number" class="sb-cinput core-input" id="sbCV" min="0.05" max="0.99" step="0.01">
+              <button type="button" class="sb-mini core-btn core-btn-soft" id="sbCAdd">+</button>
+            </div>
+          </div>
+          <div id="sbAdv"></div>
+          <div id="sbManualRows">${rows}</div>
+          <div id="sbCombat">
+            <div class="sb-sublabel">Points for ATK/DEF go to</div>
+            <div class="sb-seg">
+              <button type="button" class="sb-seg-btn" data-combat="attack">Attack</button>
+              <button type="button" class="sb-seg-btn" data-combat="defense">Defense</button>
+              <button type="button" class="sb-seg-btn" data-combat="build">Like my stats</button>
+            </div>
+            <div class="sb-muted" id="sbCombatText"></div>
           </div>
         </div>
       </div>
 
-      <div class="gp-modal" id="gpCaptureModal">
-        <div class="gp-modal-card" style="max-width:420px;">
-          <div class="gp-modal-head">
-            <h3 class="gp-modal-title">Capture Current Gear</h3>
-            <button type="button" class="gp-close-btn" data-gp-close="gpCaptureModal">&times;</button>
-          </div>
-          <div class="gp-modal-sub">Which set's current loadout do you want to save?</div>
-          <div class="gp-set-choice">
-            <button type="button" class="gp-btn" data-capture-set="attack">PvE Attack Set</button>
-            <button type="button" class="gp-btn" data-capture-set="pvp_attack">PvP Attack Set</button>
-            <button type="button" class="gp-btn" data-capture-set="defense">PvP Defense Set</button>
-          </div>
+      <div class="sb-col">
+        <div class="sb-card">
+          <div class="sb-preview" id="sbWhatOut"></div>
+          <div class="sb-row between sb-whatrow"><span class="sb-label" style="cursor:help" title="Try a different number of points. Leave empty to use your real unspent points. Uses the same planner as the Allocate button.">If I spend at once</span><input type="number" class="sb-input core-input" id="sbWhatN" min="1" step="1"></div>
         </div>
-      </div>
 
-      <div class="gp-modal" id="gpApplyModal">
-        <div class="gp-modal-card" style="max-width:420px;">
-          <div class="gp-modal-head">
-            <h3 class="gp-modal-title" id="gpApplyTitle">Apply preset to:</h3>
-            <button type="button" class="gp-close-btn" data-gp-close="gpApplyModal">&times;</button>
-          </div>
-          <div class="gp-modal-sub">This will overwrite whatever's currently equipped in that set.</div>
-          <div class="gp-set-choice">
-            <button type="button" class="gp-btn" data-apply-set="attack">PvE Attack Set</button>
-            <button type="button" class="gp-btn" data-apply-set="pvp_attack">PvP Attack Set</button>
-            <button type="button" class="gp-btn" data-apply-set="defense">PvP Defense Set</button>
-          </div>
+        <div class="sb-card">
+          <div class="sb-total" id="sbInfo"></div>
+          <button type="button" class="sb-primary core-btn" id="sbAlloc">Allocate</button>
+          <div class="sb-muted" id="sbNeed"></div>
         </div>
-      </div>
 
-      <div class="gp-modal" id="gpEditorModal">
-        <div class="gp-modal-card" style="max-width:820px;">
-          <div class="gp-modal-head">
-            <h3 class="gp-modal-title">Edit Preset — <span id="gpEditorName"></span></h3>
-            <button type="button" class="gp-close-btn" data-gp-close="gpEditorModal">&times;</button>
+        <div class="sb-card">
+          <div class="sb-row between">
+            <span class="sb-inline"><span class="sb-strong">Auto-allocate</span><span class="core-pill" id="sbAutoPill">Off</span></span>
+            <label class="sb-switch" title="Keep spending new points for you, in the background"><input type="checkbox" id="sbAuto"><span class="sb-slider"></span></label>
           </div>
-          <div id="gpEditorGrid" class="gp-editor-grid"></div>
-          <div class="gp-footer">
-            <div style="flex:1 1 auto;"></div>
-            <button type="button" class="gp-btn gp-btn-soft" data-gp-close="gpEditorModal">Cancel</button>
-            <button type="button" class="gp-btn gp-btn-success" id="gpEditorSave">Save Preset</button>
-          </div>
+          <div class="sb-muted" id="sbAutoText"></div>
+          <div class="sb-status" id="sbStatus">Not running.</div>
         </div>
-      </div>
 
-      <div class="gp-modal" id="gpPickerModal">
-        <div class="gp-modal-card">
-          <div class="gp-modal-head">
-            <h3 class="gp-modal-title" id="gpPickerTitle">Choose an item</h3>
-            <button type="button" class="gp-close-btn" data-gp-close="gpPickerModal">&times;</button>
+        <details class="sb-card sb-adv">
+          <summary>Advanced</summary>
+          <div class="sb-row between">
+            <span>Check every</span>
+            <span class="sb-inline"><input type="number" class="sb-input core-input" id="sbPoll" min="${POLL_MIN_SECONDS}"> <span class="sb-muted">sec</span></span>
           </div>
-          <div id="gpPickerBody"></div>
-        </div>
+        </details>
       </div>
     `;
-    document.body.appendChild(wrap);
 
-    // The main presets panel is shown by Core's floating-button system (the ⚔️ button) instead of
-    // its own modal. It's built here, parked in a hidden holder so getElementById() keeps
-    // working, and moved into Core's panel when the button is clicked.
-    const mainModal = wrap.querySelector('#gpModal');
-    gpPanel = document.createElement('div');
-    gpPanel.id = 'gpPanel';
-    mainModal.querySelectorAll('.gp-modal-card > :not(.gp-modal-head)').forEach((n) => gpPanel.appendChild(n));
-    mainModal.remove();
-    gpHome = document.createElement('div');
-    gpHome.style.display = 'none';
-    gpHome.appendChild(gpPanel);
-    document.body.appendChild(gpHome);
+    const tip = document.createElement('div');
+    tip.id = 'sbTip';
+    tip.className = 'sb-tip';
+    tip.setAttribute('role', 'tooltip');
+    tip.innerHTML = '<div class="sb-tip-arrow"></div><div class="sb-tip-body"></div>';
+    document.body.appendChild(tip);
 
-    document.body.addEventListener('click', (e) => {
-      const closeBtn = e.target.closest('[data-gp-close]');
-      if (closeBtn) closeGpModal(closeBtn.getAttribute('data-gp-close'));
-      if (!e.target.closest('.gp-menu-dropdown') && !e.target.closest('.gp-menu-btn')) {
-        document.getElementById('gpSharedMenu')?.classList.remove('open');
-        gpMenuMountedFor = null;
-      }
-      const captureBtn = e.target.closest('[data-capture-set]');
-      if (captureBtn) {
-        closeGpModal('gpCaptureModal');
-        captureCurrentToPreset(captureBtn.getAttribute('data-capture-set'));
-      }
-      const applyBtn = e.target.closest('[data-apply-set]');
-      if (applyBtn) {
-        onApplyTarget(applyBtn.getAttribute('data-apply-set'), applyBtn);
-      }
+    els = {
+      drawer,
+      tip,
+      tipBody: tip.querySelector('.sb-tip-body'),
+      badge,
+      level: $('#sbLevel'),
+      points: $('#sbPoints'),
+      ratio: $('#sbRatio'),
+      share: $('#sbShare'),
+      modeBtns: Array.from(drawer.querySelectorAll('[data-mode]')),
+      advLabel: $('#sbAdvLabel'),
+      adv: $('#sbAdv'),
+      customKind: $('#sbCKind'),
+      customVal: $('#sbCV'),
+      customAdd: $('#sbCAdd'),
+      stepBtns: Array.from(drawer.querySelectorAll('[data-step]')),
+      manualRows: $('#sbManualRows'),
+      combatBox: $('#sbCombat'),
+      combatBtns: Array.from(drawer.querySelectorAll('[data-combat]')),
+      combatText: $('#sbCombatText'),
+      info: $('#sbInfo'),
+      allocBtn: $('#sbAlloc'),
+      need: $('#sbNeed'),
+      auto: $('#sbAuto'),
+      autoText: $('#sbAutoText'),
+      autoPill: $('#sbAutoPill'),
+      status: $('#sbStatus'),
+      whatN: $('#sbWhatN'),
+      whatOut: $('#sbWhatOut'),
+      pollSeconds: $('#sbPoll')
+    };
+    STATS.forEach((k) => {
+      els['p_' + k] = $('#sbP_' + k);
+      els['cur_' + k] = $('#sbCur_' + k);
     });
+  }
 
-    ['gpCaptureModal', 'gpApplyModal', 'gpEditorModal', 'gpPickerModal'].forEach((id) => {
-      document.getElementById(id).addEventListener('click', (e) => {
-        if (e.target.id === id) closeGpModal(id);
+  function changed() {
+    saveState();
+    syncUI();
+  }
+
+  function wireEvents() {
+    let touched = false;
+    Array.from(els.drawer.querySelectorAll('[data-tip]')).forEach((chip) => {
+      const isMouse = (e) => !e.pointerType || e.pointerType === 'mouse';
+      chip.addEventListener('pointerdown', (e) => {
+        touched = !isMouse(e);
+      });
+      chip.addEventListener('pointerenter', (e) => {
+        if (isMouse(e)) showTip(chip);
+      });
+      chip.addEventListener('pointerleave', (e) => {
+        if (isMouse(e)) hideTip();
+      });
+      chip.addEventListener('focus', () => {
+        if (!touched) showTip(chip);
+      });
+      chip.addEventListener('blur', hideTip);
+      chip.addEventListener('click', () => {
+        if (!touched) return;
+        touched = false;
+        if (tipFor === chip) hideTip();
+        else showTip(chip);
       });
     });
+    document.addEventListener(
+      'pointerdown',
+      (e) => {
+        if (tipFor && !tipFor.contains(e.target)) hideTip();
+      },
+      true
+    );
+    document.addEventListener('scroll', hideTip, true); // the modal card is the scroller
+    window.addEventListener('resize', hideTip);
 
-    document.getElementById('gpRefreshBtn').addEventListener('click', () => renderPresetList());
-    document.getElementById('gpCaptureBtn').addEventListener('click', openCaptureModal);
-    document.getElementById('gpNewBlank').addEventListener('click', () => {
-      const name = prompt('Name this new preset:', `Preset ${loadPresets().length + 1}`);
-      if (name == null) return;
-      openEditor({ id: makePresetId(), name: name.trim() || 'Untitled preset', slots: {}, updatedAt: Date.now() });
+    els.auto.addEventListener('change', () => {
+      state.enabled = els.auto.checked;
+      failStreak = 0;
+      saveState();
+      if (state.enabled) {
+        setStatus('Checking now…');
+        pollNow();
+      } else {
+        setStatus('Not running.');
+      }
+      syncUI();
     });
-    document.getElementById('gpLegacyPetsBtn').addEventListener('click', () => {
-      Core.float.close('gear-presets');
-      document.body.classList.add('qsdrawer-open');
+
+    els.modeBtns.forEach((b) =>
+      b.addEventListener('click', () => {
+        state.mode = b.dataset.mode;
+        changed();
+      })
+    );
+
+    els.customKind.addEventListener('change', () => {
+      state.customKind = els.customKind.value;
+      changed();
+    });
+    els.customVal.addEventListener('change', () => {
+      const pet = state.customKind === 'pet';
+      const v = cleanRatio(els.customVal.value, pet ? state.customPet : state.customLevel);
+      if (pet) state.customPet = v;
+      else state.customLevel = v;
+      applyCustom();
+      changed();
+    });
+    els.customAdd.addEventListener('click', () => {
+      // choosing the custom Level (or Pet) replaces whatever Level (or Pet) was held
+      if (state.customKind === 'pet') state.pet = 'pc';
+      else state.lvl = 'lc';
+      changed();
+    });
+
+    els.whatN.addEventListener('input', () => {
+      const v = els.whatN.value.trim();
+      whatN = v === '' ? null : clamp(toInt(v), 1, 100000000);
+      syncUI();
+    });
+    els.combatBtns.forEach((b) =>
+      b.addEventListener('click', () => {
+        state.combat = b.dataset.combat;
+        changed();
+      })
+    );
+    STATS.forEach((k) =>
+      els['p_' + k].addEventListener('change', () => {
+        state.pattern[k] = cleanPoints(els['p_' + k].value);
+        els['p_' + k].value = state.pattern[k];
+        changed();
+      })
+    );
+    els.stepBtns.forEach((b) =>
+      b.addEventListener('click', () => {
+        const k = b.dataset.step;
+        state.pattern[k] = cleanPoints(state.pattern[k] + toInt(b.dataset.d));
+        changed();
+      })
+    );
+    els.allocBtn.addEventListener('click', () => exclusiveRun(true));
+    els.pollSeconds.addEventListener('change', () => {
+      state.pollSeconds = Math.max(POLL_MIN_SECONDS, toInt(els.pollSeconds.value) || 60);
+      els.pollSeconds.value = state.pollSeconds;
+      saveState();
+      schedulePoll();
     });
   }
 
-  // Hide the site's own bottom-right ⚔️ Quick Sets button. Core's dock already draws a ⚔️ button that
-  // opens Gear Presets, so keeping (or repointing) the native one just made two identical buttons.
-  // It is hidden with CSS, not removed: the page's own script may still look it up, the rule also covers
-  // the button appearing after this addon loads, and Core's dock ignores display:none elements when it
-  // positions itself. The native drawer itself is untouched — "🐾 Legacy Quick Sets" in the panel opens it.
-  function hideNativeQuickSetButton() {
-    Core.ui.css('gear-presets-hide-native', '#openQuickSetDrawerBtn{display:none !important;}');
+  // ---------------------------------------------------------------------
+  // STYLES
+  // ---------------------------------------------------------------------
+
+  function injectStyles() {
+    const css = `
+#sbDrawerBadge{padding:1px 7px;font-size:11px;letter-spacing:0;text-transform:none;color:#cfdcff;border-color:rgba(110,168,255,.4);background:rgba(110,168,255,.12);font-variant-numeric:tabular-nums}
+#sbDrawer{display:grid;grid-template-columns:1fr 1fr;gap:12px;align-items:stretch;color:#eef3ff;font:13px Arial,sans-serif;box-sizing:border-box}
+.sb-col{display:flex;flex-direction:column;gap:12px;min-width:0}
+/* Both columns end on the same line: the last card in each one takes up any spare height. */
+.sb-col > .sb-card:last-child{flex-grow:1}
+@media (max-width:760px){#sbDrawer{grid-template-columns:1fr}}
+#sbDrawer *{box-sizing:border-box}
+.sb-card{background:#11192d;border:1px solid rgba(255,255,255,.06);border-radius:16px;padding:12px;display:flex;flex-direction:column;gap:8px;flex-shrink:0}
+.sb-hero{align-items:center;text-align:center;gap:6px}
+.sb-hero .sb-chips{width:100%}
+.sb-label,.sb-sublabel{font-size:11px;color:#9caad0;font-weight:700;text-transform:uppercase;letter-spacing:.03em}
+.sb-sublabel{margin-bottom:6px}
+.sb-strong{font-weight:800;color:#eef3ff;font-size:13px}
+.sb-muted{font-size:12px;color:#9caad0;line-height:1.5}
+.sb-muted:empty,#sbNeed:empty,#sbInfo:empty,.sb-preview:empty{display:none}
+.sb-row{display:flex;align-items:center;gap:8px;font-size:13px;color:#eef3ff}
+.sb-row.between{justify-content:space-between}
+.sb-inline{display:inline-flex;align-items:center;gap:6px}
+.sb-status{font-size:12px;color:#9caad0;line-height:1.4;background:#0d1322;border:1px solid rgba(255,255,255,.06);border-radius:10px;padding:7px 10px}
+.sb-status:empty{display:none}
+#sbAutoPill.sb-pill-on{color:#cfdcff;border-color:rgba(110,168,255,.4);background:rgba(110,168,255,.12)}
+.sb-preview{display:flex;flex-direction:column;gap:10px;font-variant-numeric:tabular-nums}
+.sb-pv-head{font-size:12px;color:#9caad0}
+.sb-preview:not(:empty) + .sb-whatrow{border-top:1px solid rgba(255,255,255,.06);padding-top:10px}
+.sb-pv-tiles{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.sb-pv-tile{background:#0d1322;border:1px solid rgba(255,255,255,.06);border-radius:12px;padding:10px 4px;text-align:center}
+.sb-pv-k{font-size:11px;font-weight:700;color:#9caad0;letter-spacing:.03em}
+.sb-pv-v{font-size:24px;font-weight:800;color:#eef3ff;line-height:1.25}
+.sb-pv-ratio{display:flex;justify-content:space-between;gap:8px;font-size:12px;color:#cfd8f7}
+.sb-pv-marks{display:flex;flex-wrap:wrap;gap:6px}
+.sb-pv-marks .core-pill{text-transform:none;font-size:11px;letter-spacing:0;padding:3px 9px}
+.sb-pv-warn{font-size:12px;color:#ffd978}
+.sb-big{font-size:40px;font-weight:800;color:#eef3ff;font-variant-numeric:tabular-nums;line-height:1}
+.sb-chips{display:flex;gap:8px}
+.sb-chip{flex:1;display:flex;flex-direction:column;align-items:center;gap:2px;background:#0d1322;border:1px solid rgba(255,255,255,.06);border-radius:12px;padding:9px 4px;font-variant-numeric:tabular-nums;text-align:center;cursor:help;outline:none}
+.sb-chip b{font-size:16px;font-weight:800;color:#eef3ff}
+.sb-chip:focus-visible{border-color:#4b6dd0}
+.sb-chip .sb-muted{border-bottom:1px dotted #4b6dd0}
+#sbDrawer .sb-input{width:72px}
+#sbDrawer .sb-stepin{width:62px;text-align:center;font-weight:700;font-variant-numeric:tabular-nums}
+#sbDrawer .sb-cinput{width:56px;height:28px;padding:3px 6px;font-size:12px;text-align:center;font-weight:700;font-variant-numeric:tabular-nums}
+#sbDrawer .sb-csel{width:64px;padding:3px 2px;text-align:left}
+#sbDrawer .sb-stepbtn{width:34px;height:34px;padding:0;font-size:18px;line-height:1;box-shadow:none}
+#sbDrawer .sb-mini{width:28px;height:28px;padding:0;font-size:16px;line-height:1;box-shadow:none}
+#sbDrawer .sb-primary{width:100%;padding:11px;font-size:14px}
+.sb-arow{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.sb-aname{display:flex;align-items:baseline;gap:8px;font-size:13px;font-weight:800;color:#eef3ff}
+.sb-step{display:flex;align-items:center;gap:4px}
+#sbManualRows{display:flex;flex-direction:column;gap:6px}
+.sb-total{font-size:12px;color:#9caad0;font-weight:700}
+.sb-seg{display:flex;background:#0d1322;border:1px solid #2b3859;border-radius:12px;padding:3px;gap:3px}
+.sb-seg-btn{flex:1;background:transparent;border:none;color:#9caad0;font:700 12px Arial,sans-serif;padding:8px 4px;border-radius:9px;cursor:pointer}
+.sb-seg-btn:hover{color:#eef3ff}
+.sb-seg-btn.active{background:linear-gradient(135deg,#3657a7,#4b6dd0);color:#fff}
+#sbAdv{display:grid;grid-template-columns:1fr 1fr;gap:8px;align-items:start}
+.sb-advcol{display:flex;flex-direction:column;gap:4px;min-width:0}
+/* line the LEVEL / PET headers up with the text inside the rows (row padding 10px + 1px border) */
+.sb-advcol > .sb-label{padding-left:11px}
+.sb-advrow{display:flex;flex-direction:column;align-items:flex-start;gap:1px;padding:6px 10px;border:1px solid transparent;border-radius:12px;font-size:12px;transition:transform .15s ease,box-shadow .15s ease,border-color .15s ease,background .15s ease}
+.sb-advl{font-weight:800;color:#eef3ff}
+.sb-pick{cursor:pointer}
+.sb-pick:hover{transform:translateY(-2px);border-color:rgba(110,168,255,.3);box-shadow:0 8px 20px rgba(0,0,0,.35);background:#141d38}
+.sb-advon{border-color:rgba(110,168,255,.35);background:rgba(110,168,255,.05);box-shadow:inset 3px 0 0 #6ea8ff}
+.sb-advon:hover{border-color:rgba(110,168,255,.35);background:rgba(110,168,255,.05);box-shadow:0 0 0 2px rgba(110,168,255,.45) inset,0 10px 24px rgba(110,168,255,.22)}
+.sb-customrow{display:flex;gap:5px;align-items:center}
+.sb-customrow .sb-muted{font-size:11px;margin-right:1px}
+.sb-targethead{flex-wrap:wrap;gap:6px}
+.sb-tip{position:fixed;z-index:300000;width:min(270px,calc(100vw - 16px));box-sizing:border-box;background:#171e33;border:1px solid rgba(255,255,255,.1);border-radius:12px;box-shadow:0 12px 28px rgba(0,0,0,.45);padding:12px 13px;color:#eef3ff;font:12px/1.4 Arial,sans-serif;pointer-events:none;opacity:0;visibility:hidden;transform:translateY(4px);transition:opacity .12s ease,transform .12s ease,visibility .12s}
+.sb-tip[data-side=above]{transform:translateY(-4px)}
+.sb-tip.on{opacity:1;visibility:visible;transform:none}
+.sb-tip-arrow{position:absolute;left:var(--ax,50%);width:10px;height:10px;background:#171e33;border:1px solid rgba(255,255,255,.1);transform:translateX(-50%) rotate(45deg)}
+.sb-tip[data-side=below] .sb-tip-arrow{top:-6px;border-right:none;border-bottom:none}
+.sb-tip[data-side=above] .sb-tip-arrow{bottom:-6px;border-left:none;border-top:none}
+.sb-tip-title{font-size:11px;font-weight:800;letter-spacing:.04em;text-transform:uppercase;color:#9caad0;margin-bottom:8px}
+.sb-tip-formula{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;background:#0d1322;border:1px solid rgba(255,255,255,.06);border-radius:10px;padding:8px 9px;color:#cfd8f7}
+.sb-tip-work{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11.5px;color:#9caad0;margin-top:8px;font-variant-numeric:tabular-nums;word-break:break-word}
+.sb-tip-result{font-size:20px;font-weight:800;color:#fff;margin-top:2px;font-variant-numeric:tabular-nums}
+.sb-tip-used{margin-top:10px;padding-top:9px;border-top:1px solid rgba(255,255,255,.06);display:flex;flex-direction:column;gap:4px}
+.sb-tip-row{display:flex;justify-content:space-between;gap:8px;font-size:12px}
+.sb-tip-row span:last-child{color:#9caad0}
+.sb-switch{position:relative;display:inline-flex;align-items:center}
+.sb-switch input{position:absolute;opacity:0;pointer-events:none}
+.sb-slider{position:relative;width:40px;height:22px;border-radius:999px;background:#2b3859;border:1px solid rgba(255,255,255,.08);transition:background .18s ease}
+.sb-slider::before{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#fff;transition:left .18s ease}
+.sb-switch input:checked + .sb-slider{background:linear-gradient(135deg,#3657a7,#4b6dd0)}
+.sb-switch input:checked + .sb-slider::before{left:20px}
+.sb-switch input:focus-visible + .sb-slider{box-shadow:0 0 0 2px rgba(110,168,255,.55)}
+.sb-adv summary{cursor:pointer;font-size:11px;font-weight:700;color:#9caad0;text-transform:uppercase;letter-spacing:.03em}
+.sb-adv[open] summary{margin-bottom:6px}
+`;
+    Core.ui.css(ID, css);
   }
 
-  buildUI();
-  hideNativeQuickSetButton();
+  if (window.__VEYRA_TEST__) {
+    Object.assign(window.__VEYRA_TEST__.api, { advRowText, previewLines, exclusiveRun, recoverJournal, fetchStats, readJournal, getLatest: () => latest, getState: () => state, setState: (p) => Object.assign(state, p), runOnce });
+  }
 
-  // Register the floating ⚔️ button + panel with Core.
-  Core.float.add({
-    id: 'gear-presets', title: 'Gear Presets', icon: '⚔️', order: 20,
-    render(el) { el.replaceChildren(gpPanel); },
-    onShow() { renderPresetList(); },
-    onHide() { if (gpHome && gpPanel) gpHome.appendChild(gpPanel); },
-  });
+  // ---------------------------------------------------------------------
+  // INIT
+  // ---------------------------------------------------------------------
 
-  // ---- Public API for other addons ---------------------------------------------------------------------------------------
-  // Offered through Core capabilities (see guides/CAPABILITIES.md). The SAME contract for every preset addon (gear, crystal, pet):
-  //   Core.call('preset.gear.list')                          -> [{ id, name }]   (cheap and synchronous: Core.cap('preset.gear.list')())
-  //   Core.call('preset.gear.apply', id, { silent, target }) -> Promise<{ ok, message }>   equips it; never asks for confirmation. target = which set: 'attack' (default, PvE), 'pvp_attack' or 'defense'
-  //   apply never throws: a problem comes back as { ok: false, message }.
-  // The older way keeps working: Core.get('gear-presets').list() / .apply(id, opts) is the same object.
-  const gearApi = {
-    list: () => loadPresets().map((p) => ({ id: p.id, name: p.name })),
-    async apply(id, o) {
-      const p = loadPresets().find((x) => String(x.id) === String(id));
-      if (!p) return { ok: false, message: 'preset not found' };
-      const target = (o && (o.target || o.set)) || 'attack';
-      if (!SET_KEYS.includes(target)) return { ok: false, message: 'unknown set "' + target + '" (use ' + SET_KEYS.join(', ') + ')' };
-      try { return await restorePresetToSet(p, target); }
-      catch (e) { return { ok: false, message: 'failed: ' + ((e && e.message) || e) }; }
-    },
-  };
-  Core.module({
-    id: 'gear-presets', name: 'Gear Presets',
-    provides: {
-      'preset.gear.list':  { fn: gearApi.list,  doc: 'saved gear presets', returns: '[{ id, name }]' },
-      'preset.gear.apply': { fn: gearApi.apply, doc: 'equip a gear preset (no confirm dialog)', args: "(id, { target? = 'attack' | 'pvp_attack' | 'defense' })", returns: 'Promise<{ ok, message }>' },
-    },
-    init() { return gearApi; },
-  });
+  function init() {
+    injectStyles();
+    buildUI();
+    wireEvents();
+    const ctl = Core.float.add({
+      id: ID,
+      title: 'Auto Stat Builder',
+      order: 40,
+      width: 800,
+      render(el) {
+        el.replaceChildren(els.drawer);
+        syncUI();
+      },
+      onHide: hideTip
+    });
+    // Like the userscript's button: just the unspent-points number (Core would otherwise show a placeholder dot).
+    if (ctl) ctl.button.replaceChildren(els.badge);
+    els.auto.checked = state.enabled;
+    els.pollSeconds.value = state.pollSeconds;
+    syncUI();
 
+    setStatus('Not running.');
+    setTimeout(pollStats, 800);
+  }
+
+  Core.dom.ready.then(init);
 })();
