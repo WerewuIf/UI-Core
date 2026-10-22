@@ -603,7 +603,7 @@
   const pveInfo = msg => { console.info('[PvE]', msg); addLog('pve', 'info', msg); };
   const pveWarn = msg => { console.warn('[PvE]', msg); addLog('pve', 'warn', msg); };
 
-  const sleep    = ms => new Promise(r => setTimeout(r, ms));
+  const sleep    = Core.sleep;
   const normText = v  => String(v || '').replace(/\s+/g, ' ').trim().toLowerCase();
   const playerKey = v => normText(v);
 
