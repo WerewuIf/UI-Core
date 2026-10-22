@@ -44,9 +44,9 @@ window.__automatorLoaded = VERSION;
  * ================================================================================================================ */
 
 const BASE = location.origin;
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const sleep = Core.sleep;
 const ts = () => new Date().toLocaleTimeString('en-GB', { hour12: false });
-const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const esc = Core.esc;
 const cookie = (n) => { const m = document.cookie.match(new RegExp('(?:^|;\\s*)' + n + '=([^;]*)')); return m ? decodeURIComponent(m[1]) : null; };
 function parseNum(v, fb = 0) { const n = parseInt(String(v == null ? '' : v).replace(/[,\s_]/g, ''), 10); return Number.isFinite(n) ? n : fb; }
 function fmtNum(n) {
