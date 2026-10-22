@@ -20,6 +20,7 @@ One file for people and AIs who maintain or extend Core. (End-user setup is in `
 14. [Pets: sigils, orb, Equipped badge, apply](#14-pets-sigils-orb-equipped-badge-apply)
 15. [How to work on a change, what is verified, ideas](#15-how-to-work-on-a-change-what-is-verified-ideas)
 16. [Brief for an AI that is writing an addon](#16-brief-for-an-ai-that-is-writing-an-addon)
+17. [Coordination: `Core.model`, `Core.tx` (api level 6) and the plan](#17-coordination-coremodel-coretx-api-level-6-and-the-plan)
 
 ---
 
@@ -48,12 +49,15 @@ addons/
   automator.js        🤖 Automator (bosses, dungeons, duels, loot). Finds gear/crystal/pet presets through Core capabilities
 examples/addon-template.js   annotated starter for new addons
 README.md             BASIC end-user guide (install, use, troubleshoot). Keep it basic
-REFERENCE.md          this guide
+guides/REFERENCE.md   this guide (includes the coordination spec, §17)
+tests/coord.test.js   node test harness for Core.model + Core.tx (`node tests/coord.test.js`)
 ```
 
 Versions: Core **3.8.1** (`version:` in `core.js`; ⚙️ shows "Core v3.8.1"), bootstrap **4.0.1**, crystal 1.5.1, gear 3.2.2, pet **2.8.0**, ui-cleanup 2.2.0, battle 15.10.
 
 Core **3.14.1** / Battle **15.19** / Cube Suite **3.4.0**: `Core.me` is now the one place that knows the player's stamina / exp / level and keeps the top bar right (a fresh fetch beats a stale bar; see `Core.me` in §7), Battle Page and Cube Suite no longer write the bar themselves, addons can declare `"button": true|false` in `addons.json`, and addons that are skipped on a page are kept up to date and keep one fixed place in ⚙️ (§4, §11). Before that, Core **3.13.0** / Cube Suite **3.3.0**: `Core.potions` (shared, coordinated potion use, sidebar first then inventory), update-queue fix, and ⚙️ now lists addons that run without a button last and shows each button's real look (e.g. the Stat Builder's points badge) instead of a dot. Recent changes (all tested): Elemental Orb slot; hover ⋯ menus; loader rewrite (instant start from saved copy); Equipped badge that matches pets, links, sigils and orbs exactly on all three teams; apply on an already-matching team finishes at once, with request timeouts; one **Check for updates** button; Core updates itself like an addon; page scroll lock while a modal is open; `Core.me` (stamina, level, exp, gold, server clock, pid from the top bar) and `Core.csrf` (one registry for CSRF tokens); `Core.keepAlive` (Web Lock + loopback WebRTC + silent audio, to keep a background tab alive), `Core.lock` (Web Lock hold/steal/release/elect) and `Core.tab` (main-tab / idle-tab election with take-over, built on Core.lock). Addons not yet migrated to them: pet-presets still keeps its own sigil token.
+
+Core **3.17.0** (api level 6): **coordination**. `Core.model` is one parsed, versioned, cross-tab copy of each page; `Core.tx` is one locked, journaled write lane (`'loadout'`) with orphan recovery. Both are built and tested but no addon uses them yet; the plan to move the addons onto them is §17. Step 0 cleanups shipped with it: battle.js listens through `Core.net.watch` instead of wrapping `fetch`, gear-presets returns the apply result instead of using `lastSay`, `esc`/`sleep` come from Core, and `addons.json` now lists automator 1.7.20.
 
 Core **3.16.0** (api level 5): **capabilities**. An addon offers named functions with `provides` and another addon calls them with `Core.call(name, ...args)` without knowing who offers them (`Core.cap / has / caps / when`, event `caps:changed`; full guide: §9, "Capabilities"). Gear Presets **3.5.0**, Crystal Presets **1.8.0** and Pet Presets **2.10.0** all offer the same `preset.<kind>.list` / `preset.<kind>.apply` pair; Automator **1.1.0** discovers those instead of naming addons, so a new preset kind appears in its per-boss dropdowns by itself. `Core.get('gear-presets')` etc. keep working unchanged.
 
@@ -83,6 +87,7 @@ What this buys you:
 - **One page cache.** Two addons asking for `inventory.php` cause one request; the cache is dropped after your own POSTs (in all open tabs).
 - **One place for "who/what am I" and CSRF.** `Core.me` knows the player's numbers; `Core.csrf` holds every CSRF token source. Addons should use these instead of reading the page themselves (that is how the pid bug happened).
 - **The top bar is a stale copy; `Core.me` knows who is newest.** A page can be hours old, a background tab's timers are throttled, another tab may have drunk a potion. So every source of the numbers is stamped with when it was seen: the bar changing (stamped when noticed), a response or page that was fetched (stamped when the *request started*, so it can't beat a change seen after it was sent), another tab's saved snapshot. The newest wins, and when it beats the bar, Core rewrites the bar (stamina, exp, level; gold and gems are tracked, not rewritten). Attack responses (`damage.php`) update stamina by themselves (it is a plain number, so it can't double-count); exp is *not* taken from them automatically because the page's own script already adds it for its own attacks. An addon that attacks itself calls `Core.me.fromAttack(data)` / `Core.me.addExp(n)`. **Never write `#stamina_span` or the exp bar yourself.** (Mana is not handled by Core: it only exists on the battle page.)
+- **One reader per resource, one writer lane per domain (api level 6, §17).** A page is parsed in exactly one place (`Core.model`) and every addon and tab gets the parsed value and an epoch; every change to the player's loadout is a transaction (`Core.tx`) that takes a cross-tab lock, journals its "before", announces `loadout:begin/end` and verifies before it reports success.
 - **One of everything else:** one toast, one modal stack, one cookie lock, one DOM observer, one storage layer.
 - The three presets addons keep their original storage keys so players' data carries over: `pcPresets_<pid>`, `gearPresets_<pid>`, `petPresets_<pid>`. **Never change those keys or the preset data shape in a breaking way.**
 - Globals, CSS and storage are prefixed `Core` / `core-` / `core:` (originally "DS"; the owner disliked that name, `ds:` keys are obsolete).
@@ -520,6 +525,31 @@ Coordination, per potion kind (`stamina`, `hp`, or the item name): callers that 
 `Core.call(name, ...args)` (async; rejects with `err.code === 'NO_CAP'` when nobody offers it) · `Core.cap(name)` (the function or `null`, for sync reads) · `Core.has(name)` · `Core.caps(prefix?)` → `[{ cap, by, doc, args, returns }]` · `Core.when(name, { timeout })` → `Promise<boolean>` · event `caps:changed` `{ by, added }`.
 Names are lowercase dotted (≥ 2 parts); the first provider of a name wins. Today: `preset.{gear,crystal,pet}.{list,apply}` and `automator.{status,start,stop,scan}`. Rules, the preset contract and examples: §9, "Capabilities".
 
+### `Core.model` and `Core.tx` (api level 6)
+
+Full design, events and failure matrix: §17. Feature-detect with `Core.apiLevel >= 6` (or `Core.model`) and fall back to the `Core.net` path on an older Core.
+
+| `Core.model` | |
+|---|---|
+| `define(id, { url \| load(ctx), parse(textOrDoc, ctx), scope, maxAge, hardMaxAge, domain, persist, canary, verifyAgainst, verify(mine, other), match, harvest, live, share })` | register what a resource is. `parse` returns a value or `null` (login / maintenance / unreadable: never cached). `id` may be parametrised: `define('mob', { url: (n) => ... })` then `get('mob:Name')` |
+| `get(id, { maxAge, force, during })` | `Promise<{ value, epoch, at, stale, error, source }>`. Single flight; waits out an open tx of the resource's `domain` unless `during:true` |
+| `peek(id)` | same shape, synchronous, or `null` |
+| `feed(id, htmlOrDocOrValue, { source, at, href })` | give the model a page you already hold |
+| `stale(idOrIds, why)` | bump the epoch and tell every tab; never refetches by itself (the next `get` does) |
+| `snapshot([ids])` | `{ values, epochs, stable }`; retries if an epoch moved while gathering |
+| `watch(id, cb)` | `cb({ id, epoch, why, source, remote })`; returns unsubscribe. `'*'` = everything. Also the event `model:changed` |
+| `writes(urlRegex, ids, bodyRegex?)` | "a POST to X makes these resources stale". Built in: `stats_ajax` -> stats; `inventory_ajax` -> gear, team; `pet_link_action` / `pet_sigil_action` -> team, links; `power_crystals` -> crystals; `use_item` / `user_heal_potion` -> stats |
+| `status()` | `console.table` of resources, epochs, ages and the tx state |
+
+| `Core.tx` | |
+|---|---|
+| `run(domain, { owner, kind, label, ifBusy, plan, snapshot(t), apply(t), during(t), restore(before, t), verify({phase, before, t}), stale, maxMs, waitMs })` | `kind`: `apply` \| `check` \| `restore` \| `preset` \| `auto` \| `recover`. `ifBusy: 'fail'` (default, returns `{ ok:false, error:'busy' }`) or `'wait'`. Resolves `{ ok, tx, epoch, changed, error, restored, external }`; never throws for a failed apply. Inside, use `t.post(url, params)` (tags the request as yours), `t.step(text)`, `t.get(id)`, `t.cancelled` |
+| `busy(domain)` / `idle(domain)` | the open tx (this tab or another) / a promise that resolves when it is over |
+| `recovery(domain, fn(journal, t), { verify, stale })` | tell Core how to put an interrupted tx back from `journal.before` |
+| `orphan(domain)` / `recover(domain)` / `dismiss(domain)` / `autoRecover(domain, bool)` / `cancel(domain)` / `status()` | orphan handling (§17.4, §17.11) |
+
+Events (all shared across tabs): `model:changed`, `loadout:begin`, `loadout:step`, `loadout:applied`, `loadout:restoring`, `loadout:restored`, `loadout:end`, `loadout:external-change`, `loadout:orphan` (payloads in §17.7).
+
 ### Console
 
 `Core.status()` (module table) · `Core.addons.status` (loader state per addon) · `Core.debug = true` (verbose) · `Core.net.cacheSize` · `Core.float.list()`.
@@ -563,6 +593,9 @@ JSON needs doubled backslashes (`\\.`). Entries run in the order listed. "Add by
 - [ ] **Get the player id from `Core.player.id()`.** Some pages (e.g. the event map) have no sidebar, so a hand-rolled lookup returns the wrong id there and your saved data looks empty.
 - [ ] **Idempotent DOM work.** `Core.dom.watch` re-runs your function after DOM changes; mark what you've done (`dataset`, a class) and bail out early.
 - [ ] **Read through `Core.net` / `Core.pages`**, not raw `fetch` + `DOMParser`, so pages are shared and caches invalidate. (`fetch` is fine for POSTs the site itself would make; `Core.net.post` is nicer.)
+- [ ] **Changing the player's gear / pets / crystals goes through `Core.tx.run('loadout', ...)`** once the preset addons implement it (§17.5), so a human click, the automator and another tab cannot interleave. Until then keep your own busy flag, and feature-detect (`Core.apiLevel >= 6`) rather than depend on it.
+- [ ] **A page that several addons read belongs in `Core.model`**, parsed once; never add another private parser or cache for `stats.php`, `inventory.php`, `pets.php`.
+- [ ] **Return results from functions, not through module-level variables** (the `lastSay` bug in gear-presets let a second call clobber the first one's result).
 - [ ] **Saved data goes in `Core.store`.** Pass `key` if you must keep an old key.
 - [ ] **Don't touch `hide_dead_monsters` / `show_dead_bosses_only` cookies directly.** Use `Core.cookies.withMode`.
 - [ ] **No `window.confirm`-style blocking when you can avoid it.** Prefer `Core.ui.modal` (the existing addons still use `confirm` in places).
@@ -617,7 +650,7 @@ In `pet-presets.js`: `SIGIL_SLOTS = ['attack','defense','elemental']`, `SIGIL_LA
 
 1. Read the relevant code (grep first; the addons are huge). Prefer **exact-match patches** (`str.replace` with an `assert old in s`) over rewrites. Never touch logic you were not asked to touch.
 2. `node --check` every changed JS file.
-3. Reproduce the user's problem or write the new behaviour as a test **first when practical** (there is no test harness in the repo; small jsdom scripts for logic and Playwright/Chromium for layout and scrollbars work well, with `--hide-scrollbars` turned off so classic scrollbars are measurable), and confirm a test fails on the old code (run it against the old file). The owner values proof that the test can catch the bug. If the old code can't be exercised by the test (different DOM or API), say so instead of claiming it proves the bug.
+3. Reproduce the user's problem or write the new behaviour as a test **first when practical** (`tests/coord.test.js` covers `Core.model` / `Core.tx` and runs with plain `node`; for everything else there is no harness in the repo, so small jsdom scripts for logic and Playwright/Chromium for layout and scrollbars work well, with `--hide-scrollbars` turned off so classic scrollbars are measurable), and confirm a test fails on the old code (run it against the old file). The owner values proof that the test can catch the bug. If the old code can't be exercised by the test (different DOM or API), say so instead of claiming it proves the bug.
 4. Run the tests. Look at screenshots for anything visual.
 5. Bump versions (`version:` in `core.js` if Core changed; `addons.json` is optional for addons, see §4). Update `README.md` (basic!) and this guide if behaviour or API changed.
 6. Rebuild the zip, send the changed files, and say which of them the user must push.
@@ -629,9 +662,13 @@ Environment notes for a Linux sandbox: Playwright + Chromium are usually availab
 
 **Verified** (headless Chromium + jsdom, mock pages from the real CSS/markup): loader (incl. self-updating Core bootstrap, manual update check, skipped-addon handling), float API, page scroll lock, dock style identical to the site's quick-set button, dock placement at 320–1280 px on two page types, single scroller, hidden scrollbars, crystal preview, pets capture/restore/forced take-over/old-preset safety/editor layout with the orb, GitHub URL normalisation, offline saved-copy fallback, player-id on sidebar-less pages.
 
-**NOT verified** (no live access): real equip/restore round-trips on the live server; the site's real CSP; `event-core.css` (only layout approximated); the real HTML of `power_crystals.php`/`inventory.php` (crystal/gear scanners are the user's original, unmodified logic); real Elemental Orb behaviour server-side (restrictions such as pet level are unknown; the addon surfaces the server's error text); how things look with the real pet artwork. Say so when relevant.
+**Verified, coordination (Core 3.17.0):** 26 checks in `tests/coord.test.js` (fake server, `navigator.locks`, `BroadcastChannel`, `localStorage`, several simulated tabs: single flight, write rules, canary, login pages, cross-tab adoption, tx event order, crash and orphan recovery, races, external changes, logout, per-player journals), plus a jsdom boot of the real `core.js` that defined a resource, read it and ran a tx. The step 0 addon edits (battle.js watcher, gear-presets result, helper aliases, `Core.net.fetchText` refetches) were syntax-checked only.
+
+**NOT verified** (no live access): real equip/restore round-trips on the live server (including the step 0 edits above, and `Core.tx` against the real site); the site's real CSP; `event-core.css` (only layout approximated); the real HTML of `power_crystals.php`/`inventory.php` (crystal/gear scanners are the user's original, unmodified logic); real Elemental Orb behaviour server-side (restrictions such as pet level are unknown; the addon surfaces the server's error text); how things look with the real pet artwork. Say so when relevant.
 
 **Ideas not done (only if the owner asks)**
+
+The rest of the coordination plan (§17.9 steps 2 to 6): `stats` through the model, the engine, `loadout.*` participants, auto mode, the dedupe sweep. 
 
 A changelog panel in ⚙️; owner tooling to hash (`sha256`) addons automatically; gear presets for any new site slot types; making the first-load battle page flash-free.
 
@@ -661,6 +698,7 @@ DATA RULES
 - Read site pages with Core.pages.inventory(set) / pets(team) / crystals() / stats() / pvp() / quests() / battlePass() / dungeons()
   or Core.net.fetchText/fetchDoc/fetchJson(url,{ttl,force}). They are cached and shared. Never write your own fetch+DOMParser loop.
 - POST with Core.net.post(url, params). Observe the site's own fetches with Core.net.watch(regex, cb).
+- Shared parsed pages: Core.model.define / get / peek / watch (api 6; check Core.apiLevel >= 6). Changes to gear / pets / crystals: Core.tx.run('loadout', {...}) (api 6, once the preset addons support it). Spec: REFERENCE.md §17.
 - Save data with Core.store(ns, { def, key? }) -> { get, set, update, watch } (per player, synced across tabs).
 - Monster-cookie-dependent fetches go through Core.cookies.withMode('alive'|'dead'|'all', fn).
 - DOM changes: Core.dom.watch(fn) (must be idempotent), Core.dom.when(selector), Core.dom.ready. No own MutationObserver on document.
@@ -673,3 +711,229 @@ DELIVER
 Keep it one file, no external libraries, no localStorage keys outside Core.store, and state any page selectors you are assuming
 so I can check them against the real HTML.
 ```
+
+---
+
+## 17. Coordination: `Core.model`, `Core.tx` (api level 6) and the plan
+
+**Status (Core 3.17.0).** Built and covered by `tests/coord.test.js` (`node tests/coord.test.js`, 26 checks): §17.3 `Core.model` and §17.4 `Core.tx`.
+Step 0 cleanups are done (§17.9). **Not built:** §17.5 `loadout.*` participants, §17.6 the `build-engine` addon, moving `Core.me` / battle.js onto the `stats`
+model, the step 6 dedupe sweep. Nothing consumes `Core.model` / `Core.tx` yet, so today they change no behaviour. The block lives in `core.js` between
+`// >>> core-coord:begin` and `// <<< core-coord:end` and only touches the `env` object it is given, which is how the test loads it on its own.
+
+Goal: the addons behave like one script. One reader per page, one writer lane per domain, every state change announced,
+every write journaled, nothing correct only because a timer happened to fire.
+
+How to read this: **Verified** = read in the source (`core.js` 3.16.0 / api 5, the addons as in `main` today). **Design** = proposal (sections marked IMPLEMENTED are built in Core 3.17.0; DESIGN ones are not).
+
+### 17.1 Findings (verified in the source before the step 0 changes)
+
+| # | Finding | Where | Why it matters |
+|---|---|---|---|
+| F1 | `battle.js` installs its own `window.fetch` wrapper (`installAttackResponseWatcher`), while Core already proxies `fetch` and offers `Core.net.watch(re, cb)` for exactly this. Two wrappers stack on every request. | battle.js ~467 | Fragile (load order), duplicates Core. |
+| F2 | `stats.php` is parsed in at least four places with different retry/stale rules: `Core.me` (top bar numbers via `net.onText`), `battle.js` (`readStatsPage`, own cache `playerRemoteStats`, own 30 s retry, own `no-store` fallback fetch), `stat-autobuilder` (`Core.pages.stats` + own parser), and the optimizer userscript. | core.js ~1696, battle.js ~2374, stat-autobuilder | They can disagree at the same instant; battle.js also re-requests what Core.net already holds. |
+| F3 | Raw `fetch()` GETs that bypass `Core.net` (no in-flight sharing, no cache, no harvest by `Core.me`): battle.js 3, pet-presets 4, gear-presets 1, crystal-presets 2, ui-cleanup ~12, cube-suite 3. Many are "re-fetch my own page" (`location.href`). Raw POSTs are still seen by Core's fetch proxy, so invalidation rules still fire. | all of them | Wasted requests; the shared cache never learns what these pages saw. |
+| F4 | **No writer is coordinated.** gear-presets uses `presetOpBusy`, pet-presets `presetBusy`, crystal-presets `pcpPostBusy`, the automator its own `Lane`: all in-tab flags. None takes a Web Lock, none journals, none announces begin/end. gear-presets does not verify after applying. Only stat-autobuilder uses `Core.lock`. | gear-presets ~539, pet-presets ~1659, crystal ~235 | The automator and a human clicking a preset, or two tabs, can interleave equips. A tab closed mid-apply leaves a half build and no record. |
+| F5 | gear-presets `apply()` returns its result through a module-level `lastSay`; `cancelRun` is module-level too. | gear-presets 365, 1174 | A second call can clobber the first one's result. |
+| F6 | gear-presets identifies items by **name** (`catalog[desiredName].invId`). Two same-name pieces with different ATK/DEF are ambiguous; the optimizer matches name + ATK + DEF. | gear-presets ~565 | An optimizer plan cannot be expressed through presets as they are. |
+| F7 | The preset contract is only `preset.<kind>.list` and `.apply(id, {silent, target})`. There is no snapshot, restore, verify, or apply-from-spec. Crystal's apply has no `target`. | the three `provides` blocks | Presets can't be used for ad hoc builds or for restore. |
+| F8 | Three overlapping "who refreshes, how often": ui-cleanup `dashboard-live` (`setInterval`, `game_dash.php`, its own cross-tab leader/clock), `Core.me.sync`, and automator `Me.refresh` (wave page / dash). Core already has `Core.tab` and `Core.lock.elect`. | ui-cleanup ~3513, ~5425 | Duplicate polling, drift. |
+| F9 | `guild_dungeon.php` is fetched and parsed by ui-cleanup (raw, 4 refs), cube-suite (raw, 2) and the automator; `game_dash.php` by ui-cleanup (6), cube-suite, automator and Core. | grep matrix | Same pages, three parsers, no shared cache. |
+| F10 | Helpers Core already exports are redefined: `esc` (battle 9, ui-cleanup 33, gear/pet/crystal 3-4 each), `sleep` (automator 14, cube 21, stat-autobuilder 4), `parseNum`/`fmt`, own timeout wrappers (pet-presets, automator, stat-autobuilder), player id from the DOM (cube-suite). `Core.esc/sleep/fmt/parseNum/player.id` exist. | `Core = {...}` export | Cosmetic, but every copy is a place to drift. |
+| F11 | The repo's `automator.js` is 1.1.0; the working copy is 1.7.20 (and `addons.json` lists 1.1.0). | addons.json | The repo copy is stale. |
+| F12 | Good already: `Core.net.invalidateOn` rules (inventory_ajax, pet_link_action, use_item, power_crystals) with cross-tab broadcast; in-flight sharing per URL; `Core.potions.coordinate` (flight + lock + "covered since"); `Core.auth.pageState` + `addDetector`; account-switcher calls `Core.net.invalidate()` then reloads. | core.js | This is the pattern to generalize, not replace. |
+
+Not a problem: battle.js / ui-cleanup / cube-suite use plain `localStorage` for UI preferences (panel collapsed, etc.), which is fine per device.
+
+---
+
+### 17.2 Principles
+
+1. One reader per resource: a page is parsed in exactly one place; everyone gets the parsed value.
+2. One writer lane per domain (`loadout`), enforced by a cross-tab Web Lock.
+3. Every state change is an event carrying an epoch.
+4. Every write is a transaction with a journal. Journal open + lock free = orphan.
+5. Timers are safety nets, never the correctness mechanism.
+6. Addons never hard-depend on each other: feature-detect (`Core.apiLevel >= 6`, `Core.has('x')`), fall back to today's behavior. (`deps` makes an addon skip itself; use it only when truly required.)
+7. Core stays game-agnostic: it holds mechanics; addons register what a resource means.
+
+---
+
+### 17.3 Core.model (IMPLEMENTED, apiLevel 6)
+
+```
+Core.model.define(id, {
+  url | load(ctx),            // default load = Core.net.fetchText(url)
+  parse(textOrDoc, ctx),      // -> value | null (null = login/maintenance/unreadable: never cached)
+  scope: 'player',            // keyed by Core.player.id()
+  maxAge, hardMaxAge,         // soft / safety cap
+  verify(mine, otherValue),   // optional canary check against another resource (see below)
+  verifyAgainst: 'stats',
+})
+Core.model.get(id, { maxAge })     -> Promise<{ value, epoch, at, source }>   // single-flight; waits out an open loadout tx unless { during:true }
+Core.model.peek(id)                -> { value, epoch, at, stale } | null      // sync
+Core.model.feed(id, srcOrValue, { source, at })                              // harvest from a page you already hold
+Core.model.stale(idOrIds, why)                                               // bump epoch, broadcast; never refetches by itself
+Core.model.snapshot([ids])         -> Promise<{ values, epochs, stable }>     // retries if an epoch moved while gathering
+Core.model.watch(id, cb)           -> unsubscribe                             // cb({ id, epoch, why, source })
+Core.model.status()                                                           // console.table: resources, epochs, ages, open tx, lock holder, journal
+```
+
+- Epoch: a per-resource Lamport counter (`max(local, received) + 1`), so tabs order changes without a shared clock.
+- Cross-tab: on change, the parsed value (small JSON) goes over `core-bus` with `{shared:true}`; other tabs adopt it if newer. No second tab refetches what a first tab just read.
+- Harvest: Core registers a `net.onText` hook per defined `url`; any real fetch of that page, by any addon, is parsed once and fed.
+- Staleness never fetches: the next `get` does. No request storms.
+- A `null` parse (login page, maintenance, Cloudflare) keeps the last good value and marks `error`; it never poisons the cache (`Core.auth.pageState` decides).
+
+#### Freshness classes
+
+| Class | Examples | Valid until | Safety |
+|---|---|---|---|
+| live | `stats` | ~60 s, or a write / level change | also the canary |
+| stable | `gear`, `team`, `links`, `relics`, `class` | marked stale by a write rule | `hardMaxAge` ~30 min, plus canary |
+| static | `mob:<name>` | ~24 h | marked stale if observed values disagree |
+
+#### Canary
+
+`stats.php` already carries ATK/DEF, equipment ATK, pet ATK, element and level (battle.js reads them). When `stats` is loaded, each resource with `verifyAgainst:'stats'` runs its `verify(mine, statsValue)`. A mismatch marks it stale. This catches writers Core has no rule for (gear upgrades, anything new) within one stats read.
+
+#### Write rules
+
+`Core.net.invalidateOn` keeps working and now also calls `Core.model.stale`. Add: `stats_ajax.php` -> `stats`; `inventory_ajax.php` -> `gear`, `team`; `pet_link_action.php`, `pet_sigil_action.php` -> `team`, `links`; `power_crystals.php` -> `crystals`. Addons can register their own (`Core.model.writes(re, ids)`).
+
+---
+
+### 17.4 Core.tx (IMPLEMENTED): transactions with a lock and a journal
+
+```
+Core.tx.run('loadout', {
+  owner, kind,                 // 'apply' | 'check' | 'restore' | 'preset' | 'auto' | 'recover'
+  label, ifBusy: 'wait'|'fail',
+  snapshot: async () => json,  // "before"
+  apply: async (t) => {},      // t.step(text), t.cancelled, t.post(url, params)  (tagged request)
+  during?: async (t) => any,   // kind 'check': the Slash
+  restore: async (before) => {},
+  verify: async () => ({ ok, why: [] }),
+  stale: ['gear','team','stats'],
+}) -> Promise<{ ok, tx, epoch, changed, error, restored }>
+Core.tx.busy('loadout')   -> { tx, owner, kind, since } | null
+Core.tx.idle('loadout')   -> Promise
+Core.tx.recovery('loadout', fn)   // who knows how to restore an orphan
+```
+
+Sequence: take Web Lock `core:tx:loadout` (fail-fast or wait) -> write journal `{id, pid, owner, kind, status:'open'}` -> `begin` -> `snapshot()` into the journal -> `apply` -> `applied` -> (check: `during`, `restoring`, `restore`, `restored`) -> `verify` -> mark `stale`, re-read the canary -> close journal -> `end` -> release.
+
+- `end` carries `ok:true` only after verification passes. Otherwise `ok:false`, the journal stays open and Core tries `restore` once.
+- Journal lives in `Core.store('tx:loadout:' + pid)`. It is per player: an orphan from account A is never restored on account B.
+- **Orphan detection:** the Web Lock is released by the browser when a tab dies. On load, on `auth:signedin`, and on `module:ready`, Core checks: journal open + lock available -> emit `loadout:orphan {journal}`. If a recovery handler is registered it is offered/run; otherwise it waits for one.
+- **External change:** writers use `t.post`, which tags requests. A write-pattern POST seen while a tx is open that no `t.post` sent raises `loadout:external-change`; the writer verifies early and replans once, or aborts. Raw-`fetch` participants can't be tagged, so for them verification is the safety net (stated limit).
+- **Logout / maintenance mid-write:** tx ends failed, journal stays; `auth:signedin` triggers the orphan check.
+- **Cancel:** `t.cancelled`; the journal still gets closed with what was done.
+
+---
+
+### 17.5 loadout.* participants and the preset addons (DESIGN, not built)
+
+Today's contract (`preset.<kind>.list/apply`) stays unchanged. Add, per kind:
+
+```
+loadout.<kind>.snapshot(target?)   -> json          // exact state: gear by invId + name + ATK + DEF; pets: mains, links, sigils
+loadout.<kind>.apply(spec, {t})    -> Promise<{ ok, message }>   // from a spec, not a saved preset id; uses t.post / t.step
+loadout.<kind>.restore(snapshot, {t})
+loadout.<kind>.verify(spec)        -> { ok, why[] }
+```
+
+- gear and pet implement all four. crystal implements them later (the engine does not need crystals).
+- Existing `preset.<kind>.apply` becomes `Core.tx.run('loadout', { kind:'preset', ... })` around the same code. Result: a human click and the automator can't interleave, and every apply announces `loadout:begin/end`.
+- gear spec identifies items by `invId` (F6). Name-only presets keep working.
+- Fix F5 while there: return the result from the function, not through `lastSay`.
+- Until gear/pet implement `loadout.*`, the engine ships its own driver (ported from the optimizer's `swDiff` / `lbGearPlan` / `lbApply*`) registered as the same capability names. When presets implement them, the engine's copy is deleted. Consumers only ever see the names.
+
+---
+
+### 17.6 Engine addon `build-engine` (DESIGN, not built)
+
+- No `match` (loads everywhere), `button:false`, no `deps`.
+- Provides: `build.predict(mob, build?)`, `build.best(mob, {mode, rules})`, `build.apply(plan, {silent})`, `build.revert()`, `preset.best.list`, `preset.best.apply(id, {target})`.
+- Resources it defines: `gear`, `team`, `links`, `relics`, `class`, `mob:<name>`.
+- **Mob stats are lazy and by name.** Wave cards give ATK/DEF/HP only; petDef, eqDef, element and effect come from the mob's battle page (one request). Persistent store `build-engine:mobs`, ~24 h. Harvested for free from: battle.js (live page / monster modal), the automator's loot scan, any `battle.php` through `net.onText`. Dungeon mobs / Generals / observed petDef: keyed by monster id, short life. No gates/olympus/wave/dungeon crawl; a manual "scan all" stays optional.
+- **Links:** read only the three team mains' links; others on demand.
+- **Result cache:** keyed by (epochs of stats/gear/team, mob, mode); cleared by `watch`. The search is pure CPU.
+- **Calibration:** reads `veyra_calibration`, `veyra_mob_pen`, `veyra_mob_observed` if present (as battle.js does); defaults otherwise.
+- **Auto mode (automator):** `Presets.ensure` already calls `preset.<kind>.apply(id, {silent})`; pass the boss as `target` (monsterId, name, atk/def/petDef/eqDef/element). Swap only if gain >= threshold (default 2%) and apply through `Core.tx`. The automator pauses swings between `loadout:begin` and `loadout:end`. Dungeon and General mobs stay on saved presets (approximate).
+- **Access check:** the optimizer userscript gates its numbers behind a guild check. The engine either keeps that check or is built with the author's permission; see open decisions.
+
+#### One boss switch, end to end
+
+1. Automator -> `build.best(mob B)`. Engine `snapshot(['stats','gear','team'])`. If `stats` < 60 s and nothing is stale: 0 requests, result from cache.
+2. Gain above threshold -> `Core.tx.run('loadout', ...)`: lock, journal, equips through `t.post`, verify, ~3 reads (stats, gear, team). Epoch advances.
+3. Other tabs get `model:changed` with the new values. battle.js re-renders without a request.
+
+---
+
+### 17.7 Events (all `{shared:true}`)
+
+| Event | Payload | Meaning |
+|---|---|---|
+| `model:changed` | `{ id, epoch, why, source }` | a resource changed or went stale |
+| `loadout:begin` | `{ tx, owner, kind, label, plan }` | hold swings, grey attack buttons |
+| `loadout:step` | `{ tx, i, n, text }` | progress |
+| `loadout:applied` | `{ tx, changed }` | the build is on; check's Slash may run |
+| `loadout:restoring` / `loadout:restored` | `{ tx }` | check/undo going back |
+| `loadout:end` | `{ tx, ok, epoch, changed, error? }` | only after verification |
+| `loadout:external-change` | `{ tx, url }` | something else wrote during a tx |
+| `loadout:orphan` | `{ journal }` | an interrupted tx was found |
+
+---
+
+### 17.8 Failure matrix
+
+| Situation | Behavior |
+|---|---|
+| Tab dies mid-apply | lock released by the browser; next load finds journal open + lock free -> `loadout:orphan` -> recovery restores `before` |
+| Second tab writes at the same time | lock: `ifBusy:'fail'` for the automator (skip, don't queue a stale swap), `'wait'` for a human |
+| User changes gear by hand mid-tx | `loadout:external-change`; verify early; replan once or abort |
+| Logout / Cloudflare / maintenance | parse returns null, last good value kept; tx ends failed, journal stays; `auth:signedin` re-checks |
+| Account switch | memory is dropped on the reload; the journal is keyed by player id, never applied to another account |
+| Core older than apiLevel 6 | addons feature-detect and use today's paths (`Core.net`, own busy flags) |
+| Engine off or failed | battle.js uses its built-in formula; automator hides the Best option |
+| Preset addon off | `loadout.<kind>` absent; engine uses its own driver for that kind or reports "not available" |
+
+---
+
+### 17.9 Migration order (each step ships on its own, backward compatible)
+
+0. **DONE (Core 3.17.0 / addons bumped in `addons.json`)**: F1, F5, F10 (esc/sleep), F11 (manifest), and the "re-fetch my own page" GETs of F3 in battle.js / pet-presets / gear-presets. **Still open:** the rest of F3 (ui-cleanup, cube-suite, action POSTs), `parseNum`/`fmt`/timeout wrappers, player id in cube-suite. Original list: battle.js `installAttackResponseWatcher` -> `Core.net.watch` (F1); raw GETs -> `Core.net.fetchText` (F3); `Core.esc/sleep/parseNum/fmt/player.id` instead of copies (F10); gear-presets result via return value (F5); refresh the repo's `automator.js` (F11).
+1. **DONE.** `Core.model` + `Core.tx` behind `apiLevel 6`, plus the harness (§17.10). **Done in Core 3.17.0.** Nothing consumes them yet.
+2. **Stats through the model:** `Core.me` and battle.js read `stats` via `Core.model`; stat-autobuilder's `stats_ajax.php` rule.
+3. **Engine, read-only:** `build.predict`/`build.best`, mob store, verified against the optimizer's numbers on the same mobs. battle.js uses `build.predict` when present.
+4. **Participants:** gear-presets and pet-presets implement `loadout.*` and wrap applies in `Core.tx`; crystal wraps its apply.
+5. **Apply and auto:** `build.apply/revert`, `preset.best.*`, automator pause on `loadout:begin` and the `target` hand-over.
+6. **Dedupe sweep:** ui-cleanup / cube-suite / automator onto shared `dash` and `dungeons` resources and `Core.tab` leadership (F8, F9).
+
+---
+
+### 17.10 Test harness (node, fake `fetch`, `navigator.locks`, `BroadcastChannel`, `localStorage`)
+
+1. Two concurrent `get('gear')` -> one request.
+2. Write rule fires -> `gear`/`team` stale -> next `get` refetches once.
+3. Canary mismatch (stats equipment ATK differs from cached gear) -> stale.
+4. Login page returned -> value kept, `error`, no poisoning.
+5. Tab A fetches, tab B adopts via bus without a request; epochs order correctly.
+6. Tx happy path: events in order, `end.ok` only after verify.
+7. Tx check: apply -> during -> restore -> verify.
+8. Crash mid-apply: drop the lock, reload -> `loadout:orphan` -> recovery restores `before`.
+9. Two txs race: second fails fast / waits as configured.
+10. External POST during a tx -> `external-change`.
+11. Logout mid-tx -> journal remains; `auth:signedin` triggers recovery.
+12. Journal for player A not applied under player B.
+13. Core without `model` (apiLevel 5): addons take the fallback paths.
+
+---
+
+### 17.11 Open decisions
+
+1. **The optimizer's access check.** The userscript multiplies base damage by a flag set only by a guild check; without it every prediction is 0. This engine would live in a public repo. Ask the author first, or keep the check. **Current decision:** do not copy the gated calculator into this repo; build `build.predict` / `build.best` on the damage formula battle.js already has (no gate), or use the original only with the author's permission.
+2. Cross-tab sharing of values (adopt over the bus) vs leader-only fetching. **Decided and built:** adopt over the bus.
+3. Auto-recover an orphan, or offer a "Restore previous build" button. **Decided and built:** a toast offering "Restore" by default; `Core.tx.autoRecover(domain, true)` turns on automatic restore.
+4. Hosting `loadout.*` in the engine first, then moving into the preset addons (proposed), or in the preset addons from the start.
