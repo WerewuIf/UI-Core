@@ -24,7 +24,7 @@
  * replies were retried instantly instead of honouring their delay.
  */
 Core.module({
-  id: 'automator', name: 'Automator', icon: '🤖', version: '1.7.14',
+  id: 'automator', name: 'Automator', icon: '🤖', version: '1.7.16',
   // Offered to other addons through Core capabilities (guides/CAPABILITIES.md):
   //   automator.status() -> the status string     automator.start() / automator.stop()     automator.scan() -> scan the bosses now
   provides: (api) => api && api.start ? {
@@ -35,7 +35,7 @@ Core.module({
   } : {},
   init(Core) {
 'use strict';
-const ID = 'automator', VERSION = '1.7.14';
+const ID = 'automator', VERSION = '1.7.16';
 if (window.__automatorLoaded) { console.warn('[automator] already loaded', window.__automatorLoaded); return null; }
 window.__automatorLoaded = VERSION;
 
@@ -629,6 +629,32 @@ const WaveMap = (() => {
 })();
 
 /* ---- loot data: written by the loot scan (PART 4b) into one store. Every loot DMG req is a cap choice, the highest is the default cap ---- */
+/* Divine shield: the Olympus gods (+ Poseidon the Sea Emperor) cut your damage to 50%; each of THEIR relics you hold adds 5% (10 = full). Counts: Materials list of /inventory.php, refreshed every 30 min. Informational only. */
+const Relics = (() => {
+  const TTL = 30 * 60 * 1000, warned = new Map(), store = Core.store(ID + '-relics', { def: { at: 0, n: {} } }), load = () => Object.assign({ at: 0, n: {} }, store.get());
+  const MAP = { 'hermes, divine herald of the endless road': 'Swiftbreaker', 'artemis, divine huntress of the moonlit wilds': 'Moonbreaker', 'poseidon, sovereign of the drowned steps': 'Deepbreaker', 'ares, sovereign of the red bastion': 'Warbreaker',
+    'apollo, sovereign of the sun basilica': 'Sunbreaker', 'athena, sovereign of the ivory war library': 'Aegisbreaker', 'hera, sovereign of the crown court': 'Crownbreaker', 'zeus, sovereign of the storm throne': 'Stormbreaker', 'poseidon, the sea emperor': 'Tidebreaker' };
+  let data = load(), busy = false;
+  function info(low) {                                               // null = no divine shield
+    const d = Roster.get(low), c = d && Roster.canon(d), relic = MAP[c ? c.low : String(low).toLowerCase()]; if (!relic) return null;
+    const have = data.at ? data.n[relic.toLowerCase() + ' relic'] || 0 : null;
+    return { relic: relic + ' Relic', have, pct: have == null ? null : 50 + 5 * Math.min(10, have), short: have != null && have < 10 };
+  }
+  async function refresh() {
+    const s = load(); if (s.at > data.at) data = s; if (busy || Date.now() - data.at < TTL) return; busy = true;
+    try {
+      const doc = parseHtml(await Core.net.fetchText('/inventory.php', { ttl: 30000, key: 'ma:inv-relics' })), n = {};
+      if (Guard.pageState(doc) !== 'ok' || !doc.querySelector('.slot-box')) return;   // not the inventory: keep the last counts
+      Object.values(MAP).forEach((r) => { n[r.toLowerCase() + ' relic'] = 0; }); doc.querySelectorAll('.slot-box').forEach((b) => { const k = String(((b.querySelector('.info-btn') || { dataset: {} }).dataset.name) || '').trim().toLowerCase(), m = /\bx\s*(\d[\d,]*)/i.exec(b.textContent || ''); if (k in n && m) n[k] = parseInt(m[1].replace(/,/g, ''), 10) || 0; });
+      data = { at: Date.now(), n }; store.set(data); UI.dirty('relics');
+    } catch (_) { /* keep the last counts */ } finally { busy = false; }
+  }
+  function warn(t) { const i = info(t.low); if (!i || !i.short || Date.now() - (warned.get(i.relic) || 0) < TTL) return;
+    warned.set(i.relic, Date.now()); log(`✨ ${esc(t.name)}: ${i.have}/10 ${esc(i.relic)} — only ${i.pct}% of your damage gets through`, 'warn');
+  }
+  return { info, refresh, warn };
+})();
+
 const lootStore = Core.store(ID + '-loot', { def: { v: 1, at: 0, bosses: {} } });
 const LootData = (() => {
   const norm = (v) => (v && typeof v === 'object' && v.bosses && typeof v.bosses === 'object' ? v : { v: 1, at: 0, bosses: {} });
@@ -1279,7 +1305,7 @@ const Engine = (() => {
     while (live(tk)) {
       try {
         if (Guard.isFaulted()) { await sleepLive(tk, 2000); continue; }
-        if (forceScan || Scan.anyDue()) { const f = forceScan; forceScan = false; if (f) Status.set('SCANNING'); await Scan.run(f); if (!live(tk)) break; }
+        Relics.refresh(); if (forceScan || Scan.anyDue()) { const f = forceScan; forceScan = false; if (f) Status.set('SCANNING'); await Scan.run(f); if (!live(tk)) break; }
         const now = Date.now();
         const list = candidates().filter((t) => !((skip.get(targetKey(t)) || 0) > now));
         if (!list.length) {
@@ -1296,7 +1322,7 @@ const Engine = (() => {
         const t = list[0];
         if (t.low !== curLow) {
           current = t; curLow = t.low;
-          log(`🎯 target: ${esc(t.name)} (cap ${fmtNum(t.cap)}, dealt ${fmtNum(t.userDmg)})`, 'ok');
+          log(`🎯 target: ${esc(t.name)} (cap ${fmtNum(t.cap)}, dealt ${fmtNum(t.userDmg)})`, 'ok'); Relics.warn(t);
           try { Core.emit('automator:target', { name: t.name, low: t.low, kind: t.kind, cap: t.cap }); } catch (_) { /* */ }
           await Presets.ensure(t.low);
           if (!live(tk)) break;
@@ -2174,7 +2200,7 @@ Object.assign(LootScan, (() => {
 const Panel = (() => {
   const { h, btn } = Core.ui;
   const TABS = [['home', 'Overview', '🏠'], ['bosses', 'Bosses', '👹'], ['loot', 'Loot', '🪦'], ['settings', 'Settings', '⚙️'], ['activity', 'Activity', '📜']];
-  const DIRTY_TAB = { status: 'home', log: 'activity', diag: 'activity', loot: 'loot' };   // 'scan' repaints only the strip
+  const DIRTY_TAB = { status: 'home', log: 'activity', diag: 'activity', loot: 'loot', relics: 'bosses' };   // 'scan' repaints only the strip
   const uiStore = Core.store(ID + '-ui', { def: { tab: 'home', open: {}, filter: '', bsec: 'waves' } });
   const ui = Object.assign({ tab: 'home', open: {}, filter: '', bsec: 'waves' }, uiStore.get() || {}); if (!ui.open || typeof ui.open !== 'object') ui.open = {};
   const saveUi = () => uiStore.set(ui);
@@ -2298,7 +2324,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
 .ma-bb-n b{display:block;font:700 12px/1.25 Arial,sans-serif;color:#eef3ff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .ma-bb-n small{display:block;color:#7c88ad;font-size:10.5px;line-height:1.3;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .ma-bb-n small .st-ok{color:#8ee6a8}.ma-bb-n small .st-warn{color:#ffd978}.ma-bb-n small .st-cap{color:#8fb7a0}.ma-bb-n small .st-blue{color:#9fc1ff}.ma-bb-n small .st-err{color:#ff9aa6}
-.ma-bb-n small .capv{color:#aeb9dc;font-weight:700}
+.ma-bb-n small .capv{color:#aeb9dc;font-weight:700}.ma-bb-n small .ma-rl{color:#ffd978;font-weight:800}
 /* the editor of an open boss */
 .ma-big{display:flex;align-items:center;gap:10px;margin-bottom:7px}.ma-big .ma-in{font:800 17px Arial,sans-serif;padding:7px 10px}.ma-big small{color:#7c88ad;font-size:11px;line-height:1.35}
 .ma-ed{grid-column:1/-1;margin:1px 0 3px;padding:9px 11px 10px;background:#16213f;border:1px solid rgba(110,168,255,.34);border-radius:16px}.ma-ed .ma-in,.ma-bulk .ma-in{background:#101a33}
@@ -2626,10 +2652,11 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     if (exp && !rungs.some((r) => r.exp)) { rungs.push({ req: exp, items: [], exp: true }); rungs.sort((a, b) => a.req - b.req); }
     const pctTxt = info && info.expCapPct != null ? ` (${info.expCapPct}%)` : '';
     const setCap = (v) => (e) => { stop(e); ovr(low).cap = v; saveCfg(); draw(); };
-    const reached = rungs.filter((r) => r.req <= base).length;
+    const reached = rungs.filter((r) => r.req <= base).length, rl = Relics.info(low);
     const head = h('div', { class: 'ma-capbar' }, num(() => baseCap(low), (n) => { ovr(low).cap = n; draw(); }, { fmt: fmtNum, w: 84 }),
       h('div', { class: 'ma-capmeta' },
         info && info.levelReq ? pill(lvTxt(info.levelReq)) : null,
+        rl && rl.have != null ? h('span', { title: `${rl.relic}: ${rl.have}/10 (each relic adds 5% damage, 10 = full)` }, pill(`✨ ${rl.have}/10 · ${rl.pct}% dmg`, rl.short ? 'warn' : 'ok')) : null,
         info && info.expCapPct != null ? pill(`EXP cap ${info.expCapPct}%`, 'xp') : null,
         rungs.length && base > 0 ? pill(`${reached}/${rungs.length} levels`, reached === rungs.length ? 'ok' : '') : null,
         rungs.length && base > 0 ? h('span', { class: 'ma-segs', title: `${reached} of ${rungs.length} loot levels reached` }, rungs.map((r) => h('i', { class: r.req <= base ? 'on' : '' }))) : null,
@@ -2707,7 +2734,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     const pickMode = BK.on, picked = pickMode && BK.sel.has(def.low);
     const on = isOn(def), op = !pickMode && ui.sel === def.low, ms = Roster.members(def), cap = bossCap(def.low), [txt, kind] = entryState(def), nx = nextChange(def.low), ld = loadoutBits(def);
     const loc = def.kind === 'wave' ? '' : def.locationId ? 'Loc ' + def.locationId : def.locationIds ? 'Loc ' + def.locationIds.join('/') : '';
-    const bits = [h('span', { class: 'capv' }, cap > 0 ? 'cap ' + short(cap) : 'skipped'), nx ? `→ ${short(nx.cap)} ${fmtClock(nx.t)}` : '', ld.length ? h('span', { title: ld.join('\n') }, '🎒') : '', loc, ms.length > 1 ? ms.length + ' phases' : '', on ? h('span', { class: 'st-' + (kind || 'x') }, txt) : ''].filter(Boolean);
+    const rl = Relics.info(def.low), bits = [h('span', { class: 'capv' }, cap > 0 ? 'cap ' + short(cap) : 'skipped'), rl && rl.short ? h('span', { class: 'ma-rl', title: `${rl.relic}: ${rl.have}/10 — only ${rl.pct}% of your damage gets through` }, `✨ ${rl.pct}%`) : '', nx ? `→ ${short(nx.cap)} ${fmtClock(nx.t)}` : '', ld.length ? h('span', { title: ld.join('\n') }, '🎒') : '', loc, ms.length > 1 ? ms.length + ' phases' : '', on ? h('span', { class: 'st-' + (kind || 'x') }, txt) : ''].filter(Boolean);
     const sub = []; bits.forEach((b, i) => { if (i) sub.push(' · '); sub.push(b); });
     return h('div', { class: 'ma-bb' + (on ? ' on' : '') + (op ? ' open' : '') + (picked ? ' pick' : ''), title: def.name + (ld.length ? '\n' + ld.join('\n') : ''),
       onclick: pickMode ? () => toggleSel([def]) : () => { ui.sel = op ? '' : def.low; saveUi(); draw(); if (!op) setTimeout(() => { const e = root && root.querySelector('.ma-ed'); if (e && e.scrollIntoView) e.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); }, 40); } },
@@ -2849,7 +2876,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   function paintScan() { if (scanBox && scanBox.isConnected) scanBox.replaceChildren(...scanBar()); }
 
   function tBosses() {
-    const out = [];
+    Relics.refresh(); const out = [];
     if (LootScan.available) { scanBox = h('div', {}, ...scanBar()); out.push(scanBox); } else scanBox = null;
     const canon = Roster.list.filter((d) => Roster.canon(d) === d), dunOn = Kernel.isOn('dungeons');
     const sets = { waves: canon.filter((d) => d.kind === 'wave'), dungeons: dunOn ? canon.filter((d) => d.kind !== 'wave') : [] };
