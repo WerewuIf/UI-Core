@@ -2969,8 +2969,19 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
         ' · ', h('button', { type: 'button', class: 'ma-link', onclick: () => { SideMob.forget(); draw(); } }, `forget ${SideMob.shielded()} shielded mob${SideMob.shielded() === 1 ? '' : 's'}`))];
   }
 
+  const logRow = (r) => h('div', { class: 'ma-ll ' + r.k }, h('b', {}, r.t), r.m.replace(/<[^>]+>/g, ''));
+  let lastRow = null;                                                // newest log line already on screen
+  function paintLog() {                                              // a new log line only appends a row: no rebuild of the panel or the list
+    const box = root && root.querySelector('.ma-log'), f = cfg.logFilter || 'all', all = Log.all(), i = all.indexOf(lastRow);
+    if (!box || !lastRow || f === 'skips' || i < 0) return false;
+    const stick = box.scrollTop + box.clientHeight >= box.scrollHeight - 30;
+    all.slice(i + 1).filter((r) => f === 'all' || r.k === f).forEach((r) => box.append(logRow(r)));
+    while (box.childElementCount > 200) box.firstChild.remove();
+    lastRow = all[all.length - 1]; if (stick) box.scrollTop = box.scrollHeight;
+    schedule(4000); return true;                                     // the filter counts catch up a moment later
+  }
   function tActivity() {
-    const f = cfg.logFilter || 'all', all = Log.all(), cnt = (k) => all.filter((r) => r.k === k).length, l = Diag.last(), nSkip = Object.values(Diag.counts).reduce((a, b) => a + b, 0);
+    const f = cfg.logFilter || 'all', all = Log.all(); lastRow = all[all.length - 1] || null; const cnt = (k) => all.filter((r) => r.k === k).length, l = Diag.last(), nSkip = Object.values(Diag.counts).reduce((a, b) => a + b, 0);
     const chipDefs = [['all', 'All', all.length], ['dmg', 'Hits', cnt('dmg')], ['skill', 'Skills', cnt('skill')], ['warn', 'Warnings', cnt('warn')], ['err', 'Errors', cnt('err')], ['skips', 'Skips', nSkip]];
     const out = [h('div', { class: 'ma-alert info' }, l.reason ? h('span', {}, h('b', {}, 'Last skip: '), `${l.reason}${l.detail ? ' — ' + l.detail : ''} · ${ago(l.at)}`) : 'Nothing has been skipped. It attacks whenever a boss is up and under its cap.'),
       h('div', { class: 'ma-chips', style: { margin: '0 0 10px' } }, chipDefs.map(([v, label, n]) => h('button', { type: 'button', class: 'ma-chip' + (v === f ? ' on' : ''), onclick: () => { cfg.logFilter = v; saveCfg(); draw(); } }, label, n ? h('i', {}, n) : null)))];
@@ -2981,7 +2992,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
       out.push(h('div', { class: 'ma-actions', style: { marginTop: '10px' } }, btn('Clear', 'soft', () => { Diag.clear(); draw(); })));
     } else {
       const rows = all.filter((r) => f === 'all' || r.k === f).slice(-200);
-      out.push(rows.length ? h('div', { class: 'ma-log' }, rows.map((r) => h('div', { class: 'ma-ll ' + r.k }, h('b', {}, r.t), r.m.replace(/<[^>]+>/g, '')))) : h('div', { class: 'ma-empty' }, 'Nothing logged yet.'));
+      out.push(rows.length ? h('div', { class: 'ma-log' }, rows.map(logRow)) : h('div', { class: 'ma-empty' }, 'Nothing logged yet.'));
       out.push(h('div', { class: 'ma-actions', style: { marginTop: '10px' } }, btn('Clear log', 'soft', () => Log.clear())));
     }
     return out;
@@ -3009,7 +3020,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   const typing = () => root && root.contains(document.activeElement) && /^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement.tagName);
   function schedule(ms) { if (drawT) return; drawT = setTimeout(() => { drawT = 0; if (typing() || document.hidden) schedule(1500); else draw(true); }, ms || 400); }
   if (typeof Core.on === 'function') Core.on('caps:changed', (d) => { if (shown && d && (d.added || []).some((n) => n.startsWith('preset.'))) schedule(300); });   // a preset addon loaded late
-  UI.hook((what) => { if (!shown) return; if (what === 'scan') { if (tab === 'bosses') paintScan(); return; } if (what === undefined || what === 'status' || DIRTY_TAB[what] === tab) schedule(); });
+  UI.hook((what) => { if (!shown) return; if (what === 'scan') { if (tab === 'bosses') paintScan(); return; } if (what === 'log' && tab === 'activity' && paintLog()) return; if (what === undefined || what === 'status' || DIRTY_TAB[what] === tab) schedule(); });
   let beat = 0;
   setInterval(() => { if (!shown || !root || !root.isConnected || document.hidden) return; if (++beat % 3 === 0 && (tab === 'home') && !typing()) draw(true); }, 1000);   // overview: vitals + timers refresh every 3 s
 
