@@ -13,7 +13,7 @@
  *   PART 4  LOOT       graveyard scan + EXP-aware auto-loot
  *   PART 4b LOOT SCAN  reads every boss's loot / level / EXP cap into the cap choices; Export .txt (swappable)
  *   PART 5  [slots]    quests / adventurers guild / PvP / dailies: Kernel.register({ id, name, icon, every, tick, panel })
- *   PART 5  PANEL      Core.float panel: Overview, Bosses (Waves | Dungeons, waves grouped by area), Supplies, Loot, Settings, Activity
+ *   PART 5  PANEL      Core.float panel: Overview, Bosses (Waves | Dungeons, waves grouped by area), Loot, Settings, Activity
  *
  * LOOT DATA: the Loot scan (PART 4b, the Scan button at the top of the Bosses tab) reads every boss's battle page and saves its loot DMG
  * requirements, Level Req and EXP Cap into one store ('automator-loot'). Here they become the cap choices of each boss, the
@@ -24,7 +24,7 @@
  * replies were retried instantly instead of honouring their delay.
  */
 Core.module({
-  id: 'automator', name: 'Automator', icon: '🤖', version: '1.7.10',
+  id: 'automator', name: 'Automator', icon: '🤖', version: '1.7.11',
   // Offered to other addons through Core capabilities (guides/CAPABILITIES.md):
   //   automator.status() -> the status string     automator.start() / automator.stop()     automator.scan() -> scan the bosses now
   provides: (api) => api && api.start ? {
@@ -35,7 +35,7 @@ Core.module({
   } : {},
   init(Core) {
 'use strict';
-const ID = 'automator', VERSION = '1.7.10';
+const ID = 'automator', VERSION = '1.7.11';
 if (window.__automatorLoaded) { console.warn('[automator] already loaded', window.__automatorLoaded); return null; }
 window.__automatorLoaded = VERSION;
 
@@ -2163,9 +2163,8 @@ Object.assign(LootScan, (() => {
  *              Gear / Crystal / Pet dropdowns, damage cap (the number, a track of loot levels to tap, and what the cap gets you), timed cap (dungeon bosses).
  *              ☑ Select: tick bosses (one by one, by wave, by group, All shown, or Farming), choose gear / crystal / pet / cap once, Apply to all of them.
  *              "⧉ Copy loadout to…" in a boss's picker starts that with the boss's own picks filled in.
- *   Supplies   stamina potion (+ save near EXP cap, auto-loot when out), HP potion, mana potion
+ *   Settings   potions (stamina + save near EXP cap, HP, mana, auto-loot), fighting switches, request timing
  *   Loot       the graveyard
- *   Settings   class skill, behaviour, advanced timing
  *   Activity   log + skip reasons in one place
  * Look: the rounded, gradient look of Boss DMG Automator 3.0.0 (pills, bubbles, underline tabs, big Start / Stop) at a smaller size, on Core's
  * palette. Core's own classes (core-btn ...) where they fit, ma-* for the rest. The modal frame is tightened for this panel only.
@@ -2173,11 +2172,12 @@ Object.assign(LootScan, (() => {
  * ================================================================================================================ */
 const Panel = (() => {
   const { h, btn } = Core.ui;
-  const TABS = [['home', 'Overview', '🏠'], ['bosses', 'Bosses', '👹'], ['supplies', 'Supplies', '🧪'], ['loot', 'Loot', '🪦'], ['settings', 'Settings', '⚙️'], ['activity', 'Activity', '📜']];
+  const TABS = [['home', 'Overview', '🏠'], ['bosses', 'Bosses', '👹'], ['loot', 'Loot', '🪦'], ['settings', 'Settings', '⚙️'], ['activity', 'Activity', '📜']];
   const DIRTY_TAB = { status: 'home', log: 'activity', diag: 'activity', loot: 'loot' };   // 'scan' repaints only the strip
   const uiStore = Core.store(ID + '-ui', { def: { tab: 'home', open: {}, filter: '', bsec: 'waves' } });
   const ui = Object.assign({ tab: 'home', open: {}, filter: '', bsec: 'waves' }, uiStore.get() || {}); if (!ui.open || typeof ui.open !== 'object') ui.open = {};
   const saveUi = () => uiStore.set(ui);
+  if (ui.tab === 'supplies') ui.tab = 'settings';                  // the Supplies tab is part of Settings now
   let root = null, tab = TABS.some((t) => t[0] === ui.tab) ? ui.tab : 'home', shown = false, drawT = 0;
   const phaseSel = {};                                              // boss entry -> which phase the boss page is on
   /* Select mode (Bosses tab): tap bosses to tick them, pick gear / crystal / pet / cap once, apply to all. Not saved: it is a one-off action. */
@@ -2244,6 +2244,8 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
 /* label + control rows */
 .ma-set{display:flex;align-items:center;gap:10px;padding:5px 0}
 .ma-set+.ma-set{border-top:1px solid rgba(255,255,255,.05)}
+.ma-set.sub{padding:2px 0 5px 20px;border-top:0}.ma-set.sub .ma-set-t b{font-weight:400;font-size:11.5px;color:#aeb9dc}
+.ma-about{margin:8px 3px 2px}
 .ma-set-t{flex:1;min-width:0}.ma-set-t b{display:block;font:600 12.5px Arial,sans-serif;color:#e8edff}.ma-set-t small{display:block;color:#8b97bd;font-size:11px;line-height:1.3}
 .ma-fld{margin:7px 0}.ma-fld>label,.ma-fld>.ma-lbl{display:flex;align-items:baseline;gap:8px;color:#c4cdeb;font:700 11.5px Arial,sans-serif;margin-bottom:4px}.ma-fld>label small,.ma-lbl small{font-weight:400;color:#6e7a9c;font-size:11px}
 .ma-two{display:grid;grid-template-columns:1fr 1fr;gap:8px}
@@ -2844,22 +2846,6 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     return out;
   }
 
-  /* =================================================== SUPPLIES =================================================== */
-  function tSupplies() {
-    const S = cfg.stam, SV = S.save, H = cfg.hp, M = cfg.mana, L = cfg.autoLoot;
-    return [
-      card('⚡', 'Stamina potion', 'Drinks one when you run out of stamina.', S.enabled, (v) => { S.enabled = v; }, [
-        setting('Potion', null, dropdown([['Large Stamina Potion', 'Large Stamina Potion'], ['Full Stamina Potion', 'Full Stamina Potion']], S.item, (v) => { S.item = v; })),
-        setting('Save potions above', 'Stops drinking once your EXP bar is past this, so a potion is not wasted on a level-up.', h('div', { class: 'ma-ctl' }, num(() => SV.thresholdPct, (n) => { SV.thresholdPct = n; }, { parse: parseFloat, min: 0, max: 100, unit: '% EXP', w: 64 }), sw(() => SV.enabled, (v) => { SV.enabled = v; }, { redraw: false }))),
-        caption('When out of stamina'),
-        setting('Auto-loot corpses', 'Runs when the potion is off, saving, or empty. Otherwise it drinks a potion first.', sw(() => L.enabled, (v) => { L.enabled = v; })),
-        null]),
-      card('❤️', 'HP potion', 'Drinks one when your HP hits 0.', H.enabled, (v) => { H.enabled = v; H.thresholdPct = 0; }),
-      card('💧', 'Mana potion', 'Drinks one when your mana drops to the number below, or can’t pay for the class skill.', M.enabled, (v) => { M.enabled = v; }, [
-        setting('Potion', null, dropdown([['S', 'Small · 20 MP'], ['M', 'Medium · 40 MP'], ['L', 'Large · 60 MP'], ['XL', 'XL · 100 MP']], M.type, (v) => { M.type = v; })),
-        setting('Drink when MP is at or below', null, num(() => M.threshold, (n) => { M.threshold = n; }, { w: 70 }))])];
-  }
-
   /* ===================================================== LOOT ===================================================== */
   function tLoot() {
     const L = cfg.autoLoot, s = Loot.state, groups = new Map();
@@ -2876,7 +2862,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     const sections = AREAS.map((a) => ({ a, items: list.filter(([, g]) => g.area === a.id) })).filter((x) => x.items.length)
       .map(({ a, items }) => { const n = items.reduce((c, [, g]) => c + g.rows.length, 0); return fold('loot:' + a.id, true, [a.ico + ' ' + a.title, h('small', {}, `${n} corpse${n === 1 ? '' : 's'}`)], () => items.map(lootCard)); });
     return [
-      h('div', { class: 'ma-alert info' }, L.enabled ? 'Auto-loot is on: it claims these when you run out of stamina.' : 'Auto-loot is off.', ' ', h('button', { type: 'button', class: 'ma-link', onclick: () => go('supplies') }, 'Change in Supplies')),
+      h('div', { class: 'ma-alert info' }, L.enabled ? 'Auto-loot is on: it claims these when you run out of stamina.' : 'Auto-loot is off.', ' ', h('button', { type: 'button', class: 'ma-link', onclick: () => go('settings') }, 'Change in Settings')),
       h('div', { class: 'ma-actions' }, btn(s.scanning ? 'Scanning…' : '🔎 Scan graveyard', 'soft', () => { Loot.scan(true); }), btn(s.looting ? 'Looting…' : '🎒 Loot now', 'success', () => { Loot.pass(); })),
       s.scanning ? (() => { const w = Work.get('grave'); return h('div', { class: 'ma-scan' }, h('div', { class: 'ma-scan-t' }, h('b', {}, w ? w.label : 'Scanning…'), h('small', {}, w && w.total ? `${Math.min(w.done + 1, w.total)} of ${w.total}` : 'one moment…'), w && w.total ? h('div', { class: 'ma-bar' }, h('i', { style: { width: pctOf(w).toFixed(1) + '%' } })) : null)); })() : null,
       note(`${total} lootable · scanned ${ago(s.lastScanAt)}${need != null ? ' · ' + fmtNum(need) + ' EXP to next level' : ''}`),
@@ -2884,26 +2870,36 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
         : [h('div', { class: 'ma-empty' }, s.lastScanAt ? 'Nothing lootable right now.' : 'Press Scan graveyard to look.')])];
   }
 
-  /* =================================================== SETTINGS =================================================== */
+  /* =============================== SETTINGS (potions, fighting, timing) =============================== */
   function tSettings() {
+    const S = cfg.stam, SV = S.save, H = cfg.hp, M = cfg.mana, L = cfg.autoLoot;
     const au = Guard.info(), cls = effectiveClass(), cs = cls ? CLASS_SKILLS[cls] : null;
-    const timing = [['Wave swing gap', 'attackDelayMs'], ['Dungeon swing gap', 'dungeonAttackDelayMs'], ['Skill → attack gap', 'skillToAttackGapMs']];
+    const ctl = (...k) => h('div', { class: 'ma-ctl' }, ...k);
+    const sub = (title, c) => { const e = setting(title, null, c); e.classList.add('sub'); return e; };
+    const flag = (title, desc, key, o = {}) => setting(title, desc, sw(() => key.get(), (v) => key.set(v), o));
+    const ms = (label, k) => setting(label, null, num(() => cfg[k], (n) => { cfg[k] = n; }, { w: 64, unit: 'ms' }));
     return [
-      card('⚔️', 'Attacks', 'Always starts with World Breaker, and only steps down when less than that is left under the cap.', true, null, [
-        setting('Use class skill: ' + (cs ? cs.label : 'not detected yet'), 'Only cast right before a World Breaker slash.', sw(() => cfg.useClassSkill, (v) => { cfg.useClassSkill = v; }, { redraw: false })),
-        cs ? null : field('Class', 'could not be detected, pick yours', seg([['warrior', 'Warrior'], ['cleric', 'Cleric'], ['hunter', 'Hunter'], ['mage', 'Mage']], cfg.classOverride, (v) => { cfg.classOverride = v; }, { full: true }))]),
+      caption('Potions'),
       h('div', { class: 'ma-card' },
-        setting('Pause the server auto-farm while fighting', 'So the two never fight over stamina.', sw(() => cfg.autoFarmControl, (v) => { cfg.autoFarmControl = v; }, { redraw: false })),
-        setting('Fight phase duels automatically', null, sw(() => cfg.autoDuel, (v) => { cfg.autoDuel = v; }, { redraw: false })),
-        setting('Shield pierce on a side mob', 'Automatic. If a boss blocks the class skill (divine shield), only the class skill is cast on a live regular mob: first one in an open normal dungeon, else one on the boss’s wave page. Never a boss. The damage swings still hit the boss.', sw(() => cfg.sideMob.enabled, (v) => { cfg.sideMob.enabled = v; }))),
-      fold('adv', false, '🛠 Advanced timing', () => [note('Pause between requests, in milliseconds. The defaults are safe; lower numbers risk the server rejecting swings.'),
-        ...timing.map(([l, k]) => setting(l, null, num(() => cfg[k], (n) => { cfg[k] = n; }, { w: 76, unit: 'ms' }))),
-        setting('Graveyard scan every', null, num(() => cfg.autoLoot.scanMs, (n) => { cfg.autoLoot.scanMs = n; }, { w: 76, unit: 'ms' })),
-        setting('Gap between loot claims', null, num(() => cfg.autoLoot.claimGapMs, (n) => { cfg.autoLoot.claimGapMs = n; }, { w: 76, unit: 'ms' }))]),
-      caption('About'),
-      h('div', { class: 'ma-card' }, h('div', { class: 'ma-kv' }, h('span', {}, 'Version'), h('b', {}, VERSION)), h('div', { class: 'ma-kv' }, h('span', {}, 'Re-login'), h('b', {}, au.status ? (au.status.configured ? 'set up' : 'not set up') : 'Core.auth missing')),
-        h('div', { class: 'ma-kv' }, h('span', {}, 'Preset addons'), h('b', {}, Presets.note())), h('div', { class: 'ma-kv' }, h('span', {}, 'Shielded mobs remembered'), h('b', {}, SideMob.shielded())),
-        h('div', { class: 'ma-actions', style: { margin: '10px 0 0' } }, btn('Forget shielded mobs', 'soft', () => { SideMob.forget(); draw(); })))];
+        setting('⚡ Stamina', null, ctl(dropdown([['Large Stamina Potion', 'Large'], ['Full Stamina Potion', 'Full']], S.item, (v) => { S.item = v; }), sw(() => S.enabled, (v) => { S.enabled = v; }))),
+        S.enabled ? sub('Save potions past', ctl(num(() => SV.thresholdPct, (n) => { SV.thresholdPct = n; }, { parse: parseFloat, min: 0, max: 100, unit: '% EXP', w: 56 }), sw(() => SV.enabled, (v) => { SV.enabled = v; }, { redraw: false }))) : null,
+        flag('❤️ HP', 'drinks when HP hits 0', { get: () => H.enabled, set: (v) => { H.enabled = v; H.thresholdPct = 0; } }),
+        setting('💧 Mana', null, ctl(dropdown([['S', 'Small · 20'], ['M', 'Medium · 40'], ['L', 'Large · 60'], ['XL', 'XL · 100']], M.type, (v) => { M.type = v; }), sw(() => M.enabled, (v) => { M.enabled = v; }))),
+        M.enabled ? sub('Drink at or below', num(() => M.threshold, (n) => { M.threshold = n; }, { w: 56, unit: 'MP' })) : null,
+        flag('🪦 Auto-loot', 'when out of stamina: claims only what levels you up', { get: () => L.enabled, set: (v) => { L.enabled = v; } })),
+      caption('Fighting'),
+      h('div', { class: 'ma-card' },
+        flag('Class skill' + (cs ? ' · ' + cs.label : ' · not detected'), 'before each World Breaker slash', { get: () => cfg.useClassSkill, set: (v) => { cfg.useClassSkill = v; } }, { redraw: false }),
+        cs ? null : field('Class', 'pick yours', seg([['warrior', 'Warrior'], ['cleric', 'Cleric'], ['hunter', 'Hunter'], ['mage', 'Mage']], cfg.classOverride, (v) => { cfg.classOverride = v; }, { full: true })),
+        flag('Phase duels', 'fought automatically', { get: () => cfg.autoDuel, set: (v) => { cfg.autoDuel = v; } }, { redraw: false }),
+        flag('Shield pierce', 'class skill on a side mob when a boss is shielded', { get: () => cfg.sideMob.enabled, set: (v) => { cfg.sideMob.enabled = v; } }),
+        flag('Pause server auto-farm', 'so the two never fight over stamina', { get: () => cfg.autoFarmControl, set: (v) => { cfg.autoFarmControl = v; } }, { redraw: false })),
+      fold('adv', false, '⏱ Timing', () => [note('Pauses between requests, in ms. Lower numbers risk rejected requests.'),
+        ms('Wave swing gap', 'attackDelayMs'), ms('Dungeon swing gap', 'dungeonAttackDelayMs'), ms('Skill → attack gap', 'skillToAttackGapMs'),
+        setting('Graveyard scan every', null, num(() => L.scanMs, (n) => { L.scanMs = n; }, { w: 76, unit: 'ms' })),
+        setting('Gap between loot claims', null, num(() => L.claimGapMs, (n) => { L.claimGapMs = n; }, { w: 64, unit: 'ms' }))]),
+      h('div', { class: 'ma-note ma-about' }, `v${VERSION} · re-login ${au.status ? (au.status.configured ? 'set up' : 'not set up') : 'unavailable'} · ${Presets.note()}`,
+        ' · ', h('button', { type: 'button', class: 'ma-link', onclick: () => { SideMob.forget(); draw(); } }, `forget ${SideMob.shielded()} shielded mob${SideMob.shielded() === 1 ? '' : 's'}`))];
   }
 
   /* =================================================== ACTIVITY =================================================== */
@@ -2927,7 +2923,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     return out;
   }
 
-  const BUILD = { home: tHome, bosses: tBosses, supplies: tSupplies, loot: tLoot, settings: tSettings, activity: tActivity };
+  const BUILD = { home: tHome, bosses: tBosses, loot: tLoot, settings: tSettings, activity: tActivity };
   function scroller(el) { for (let n = el && el.parentElement; n; n = n.parentElement) { const o = getComputedStyle(n).overflowY; if ((o === 'auto' || o === 'scroll') && n.scrollHeight > n.clientHeight) return n; } return null; }
   /* A redraw builds the tab off-screen first. For the automatic ones (a timer, a status change) the page is only touched when the result
    * differs from what is showing: most ticks change nothing, so nothing is replaced, no image reloads, no scroll jump, no lost focus. */
