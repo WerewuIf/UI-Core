@@ -24,7 +24,7 @@
  * replies were retried instantly instead of honouring their delay.
  */
 Core.module({
-  id: 'automator', name: 'Automator', icon: '🤖', version: '1.7.18',
+  id: 'automator', name: 'Automator', icon: '🤖', version: '1.7.19',
   // Offered to other addons through Core capabilities (guides/CAPABILITIES.md):
   //   automator.status() -> the status string     automator.start() / automator.stop()     automator.scan() -> scan the bosses now
   provides: (api) => api && api.start ? {
@@ -35,7 +35,7 @@ Core.module({
   } : {},
   init(Core) {
 'use strict';
-const ID = 'automator', VERSION = '1.7.18';
+const ID = 'automator', VERSION = '1.7.19';
 if (window.__automatorLoaded) { console.warn('[automator] already loaded', window.__automatorLoaded); return null; }
 window.__automatorLoaded = VERSION;
 
@@ -79,7 +79,7 @@ const loadJSON = (k, fb) => { try { const r = localStorage.getItem(k); return r 
 
 /* ---- config (one Core.store, per player, shared across tabs) ---------------------------------------------------- */
 const DEFAULT_CFG = {
-  v: 1,
+  v: 2,                                // 2 = the old-default migrations in mergeCfg() have run (they must not rerun: they used to overwrite a value you typed)
   targets: [],                         // nameLow list = enabled bosses, in priority order (first alive + uncapped wins)
   bosses: {},                          // nameLow -> { cap, targeting:'auto|normal|shielded', <kind>:'' | '__keep' | presetId (one per preset kind offered: gear, crystal, pet, …; '' = use the default loadout), schedule:[{ at:'HH:MM', cap }] (server time) }
   loadout: {},                         // preset kind -> preset id applied on every boss without a pick of its own ('' = keep what is equipped)
@@ -89,15 +89,15 @@ const DEFAULT_CFG = {
   attackDelayMs: 0,                    // extra pause between swings, WAVE bosses (0: swings are only spaced by the request gap)
   dungeonAttackDelayMs: 0,             // dungeon bosses chain swings back-to-back
   minActionGapMs: 450, skillToAttackGapMs: 1250,
-  fightScanMs: 300000,                 // every boss (wave pages and dungeon maps): rescan this often (Settings → Timing, in minutes)
-  maxIdleRecheckMs: 300000, spawnLeadMs: 5000,
+  fightScanMs: 300000,                 // THE scan interval: wave pages, dungeon maps AND the graveyard all follow this (Settings → Timing, in minutes)
+  spawnLeadMs: 5000,
   mana: { enabled: true, type: 'S', threshold: 20 },     // drink a mana potion when MP <= threshold (or below the class skill's cost)
   stam: { enabled: false, item: 'Large Stamina Potion', save: { thresholdPct: 100 } },     // item: 'Large Stamina Potion' | 'Full Stamina Potion'
   hp: { enabled: false, thresholdPct: 0 },                // drinks when the server says you are dead (HP 0)
   autoFarmControl: true,
   autoDuel: true,
   sideMob: { enabled: false },                         // shield pierce on a side mob: automatic once switched on (off: it shouldn't be needed)
-  autoLoot: { enabled: false, mode: 'toLevel', scanMs: 300000, claimGapMs: 250 },
+  autoLoot: { enabled: false, mode: 'toLevel', claimGapMs: 250 },
   parts: { bosses: true, dungeons: true, duels: true, loot: true },
   logFilter: 'all',
 };
@@ -119,10 +119,13 @@ function mergeCfg(saved) {
   const item = os.item || (A.enabled ? A.item : B.enabled ? B.item : '') || DEFAULT_CFG.stam.item;
   out.stam = { enabled: on, item: /full/i.test(item) ? 'Full Stamina Potion' : 'Large Stamina Potion', save: (() => { const sv = Object.assign({}, DEFAULT_CFG.stam.save, os.save); if (sv.enabled === false) sv.thresholdPct = 100; delete sv.enabled; return sv; })() };   // the switch is gone: it was off -> 100 (never save)
   out.hp.thresholdPct = 0;
-  if (out.fightScanMs === 30000) out.fightScanMs = 300000;           // old default → 5 min
-  if (out.attackDelayMs === 350) out.attackDelayMs = 0;                 // the old defaults move to the new ones; anything you set yourself stays
-  if (out.autoLoot.scanMs === 60000) out.autoLoot.scanMs = 300000;
-  if (out.autoLoot.claimGapMs === 500) out.autoLoot.claimGapMs = 250;
+  if (!(s.v >= 2)) {                                                  // old defaults move to the new ones, ONCE (matching on the value alone also rewrote a 30 s scan or 500 ms claim gap you chose yourself, on every reload / tab sync)
+    if (out.fightScanMs === 30000) out.fightScanMs = 300000;
+    if (out.attackDelayMs === 350) out.attackDelayMs = 0;
+    if (out.autoLoot.claimGapMs === 500) out.autoLoot.claimGapMs = 250;
+  }
+  out.v = 2;
+  delete out.autoLoot.scanMs; delete out.maxIdleRecheckMs;            // retired: the graveyard follows fightScanMs now
   delete out.mana.fullMaxAt0; delete out.mana.fillTo; delete out.mana.name;
   out.loadout = s.loadout && typeof s.loadout === 'object' ? s.loadout : {};
   out.targets = Array.isArray(s.targets) ? s.targets.slice() : [];
@@ -458,7 +461,7 @@ const Conflicts = {
 // Parts that declare `every` + `tick` are run by the kernel in the MAIN tab only, one at a time, when cfg.parts[id] is on.
 // The boss engine itself is a long loop owned by PART 1 (Kernel.engineStart); a new automation part only needs register().
 const Kernel = (() => {
-  const parts = new Map(), nextAt = new Map(); let hb = 0, busy = new Set();
+  const parts = new Map(), lastRun = new Map(); let hb = 0, busy = new Set();
   const enabled = (p) => cfg.parts[p.id] !== false;
   function register(p) { parts.set(p.id, p); if (cfg.parts[p.id] === undefined) cfg.parts[p.id] = true; UI.dirty(); return p; }
   const isOn = (id) => cfg.parts[id] !== false;
@@ -468,9 +471,9 @@ const Kernel = (() => {
     for (const p of parts.values()) {
       if (!p.tick || !p.every || !enabled(p) || busy.has(p.id)) continue;
       if (Guard.isFaulted()) continue;
-      if ((nextAt.get(p.id) || 0) > now) continue;
       const ev = typeof p.every === 'function' ? p.every() : p.every; if (!(ev > 0)) continue;
-      busy.add(p.id); nextAt.set(p.id, now + ev);
+      if (now - (lastRun.get(p.id) || 0) < ev) continue;                 // measured from the last run, read live: a changed interval takes effect at once (a stored "next time" kept the old one)
+      busy.add(p.id); lastRun.set(p.id, now);
       Promise.resolve().then(() => p.tick({ cfg })).catch((e) => log(`⚠️ ${p.name || p.id}: ${e.message}`, 'warn')).finally(() => busy.delete(p.id));
     }
   }
@@ -862,7 +865,7 @@ const Scan = (() => {
     if (def.kind !== 'wave') return Dungeons.nextCheck(def);
     const e = Board.get(low); if (!e || !e.seenAt) return now;
     if (e.alive) return e.seenAt + cfg.fightScanMs;
-    if (e.nextTs && e.nextTs * 1000 + 120000 > now) return Math.max(e.seenAt + 5000, Math.min(e.nextTs * 1000 - cfg.spawnLeadMs, e.seenAt + cfg.maxIdleRecheckMs));
+    if (e.nextTs && e.nextTs * 1000 + 120000 > now) return Math.max(e.seenAt + 5000, Math.min(e.nextTs * 1000 - cfg.spawnLeadMs, e.seenAt + cfg.fightScanMs));
     return e.seenAt + cfg.fightScanMs;
   }
   const dueLows = (force) => cfg.targets.filter((l) => force || nextCheck(l) <= Date.now());
@@ -1718,7 +1721,7 @@ Object.assign(Duels, (() => {
  * ================================================================================================================ */
 Kernel.register({
   id: 'loot', name: 'Graveyard & loot', icon: '🪦',
-  every: () => (cfg.autoLoot.enabled ? cfg.autoLoot.scanMs || 300000 : 0),
+  every: () => (cfg.autoLoot.enabled ? cfg.fightScanMs || 300000 : 0),            // the same interval as the boss scan
   tick: () => Loot.scan(),
 });
 Object.assign(Loot, (() => {
@@ -1775,7 +1778,7 @@ Object.assign(Loot, (() => {
 
   async function scan(manual) {
     if (st.scanning) return; st.scanning = true; UI.dirty('loot');
-    await Lane.run(async () => {
+    try { await Lane.run(async () => {
       const t0 = Date.now(), before = st.lastScanAt ? st.rows.length : -1, prev = Status.get(); Status.set('GRAVEYARD');
       if (manual === true) log('🪦 scanning the graveyard…', 'info');
       try {
@@ -1785,8 +1788,7 @@ Object.assign(Loot, (() => {
         if (manual === true || st.rows.length !== before) log(`🪦 graveyard scan done · ${st.rows.length} corpse${st.rows.length === 1 ? '' : 's'} (${w.length} wave, ${d.length} dungeon) · ${((Date.now() - t0) / 1000).toFixed(1)}s`, 'info');
       } catch (e) { log(`⚠️ graveyard scan error: ${e.message}`, 'warn'); }
       finally { Work.clear('scan'); if (Status.get() === 'GRAVEYARD') Status.set(prev); }
-    });
-    st.scanning = false; UI.dirty('loot');
+    }); } finally { st.scanning = false; UI.dirty('loot'); }          // always released: a throw before the inner try used to leave scanning=true and block every later scan AND the out-of-stamina loot
   }
 
   /* ---- EXP estimate per corpse (one battle page per monster NAME gives rate, cap and reward level) ---- */
@@ -2956,11 +2958,10 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
         flag('Phase duels', 'fought automatically', () => cfg.autoDuel, (v) => { cfg.autoDuel = v; }, { redraw: false }),
         flag('Pause server auto-farm', 'so the two never fight over stamina', () => cfg.autoFarmControl, (v) => { cfg.autoFarmControl = v; }, { redraw: false })),
       fold('adv', false, '⏱ Timing', () => [note('Pauses between requests, in ms. Lower numbers risk rejected requests.'),
-        setting('Scan bosses every', 'waves and dungeons, e.g. 10', num(() => cfg.fightScanMs / 60000, (n) => { cfg.fightScanMs = Math.round(n * 60000); }, { w: 64, unit: 'min', min: 0.1, parse: parseFloat })),
+        setting('Scan every', 'waves, dungeons and graveyard, e.g. 5', num(() => cfg.fightScanMs / 60000, (n) => { cfg.fightScanMs = Math.round(n * 60000); }, { w: 64, unit: 'min', min: 0.1, parse: parseFloat })),
         ms('Wave swing gap', () => cfg.attackDelayMs, (n) => { cfg.attackDelayMs = n; }),
         ms('Dungeon swing gap', () => cfg.dungeonAttackDelayMs, (n) => { cfg.dungeonAttackDelayMs = n; }),
         skillOn ? ms('Skill → attack gap', () => cfg.skillToAttackGapMs, (n) => { cfg.skillToAttackGapMs = n; }) : null,
-        L.enabled ? setting('Graveyard scan every', 'e.g. 5', num(() => L.scanMs / 60000, (n) => { L.scanMs = Math.round(n * 60000); }, { w: 64, unit: 'min', min: 0.2, parse: parseFloat })) : null,
         L.enabled ? ms('Gap between loot claims', () => L.claimGapMs, (n) => { L.claimGapMs = n; }) : null]),
       h('div', { class: 'ma-note ma-about' }, `v${VERSION} · re-login ${au.status ? (au.status.configured ? 'set up' : 'not set up') : 'unavailable'} · ${Presets.note()}`,
         ' · ', h('button', { type: 'button', class: 'ma-link', onclick: () => { SideMob.forget(); draw(); } }, `forget ${SideMob.shielded()} shielded mob${SideMob.shielded() === 1 ? '' : 's'}`))];
