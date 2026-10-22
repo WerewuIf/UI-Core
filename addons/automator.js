@@ -24,7 +24,7 @@
  * replies were retried instantly instead of honouring their delay.
  */
 Core.module({
-  id: 'automator', name: 'Automator', icon: '🤖', version: '1.7.11',
+  id: 'automator', name: 'Automator', icon: '🤖', version: '1.7.12',
   // Offered to other addons through Core capabilities (guides/CAPABILITIES.md):
   //   automator.status() -> the status string     automator.start() / automator.stop()     automator.scan() -> scan the bosses now
   provides: (api) => api && api.start ? {
@@ -35,7 +35,7 @@ Core.module({
   } : {},
   init(Core) {
 'use strict';
-const ID = 'automator', VERSION = '1.7.11';
+const ID = 'automator', VERSION = '1.7.12';
 if (window.__automatorLoaded) { console.warn('[automator] already loaded', window.__automatorLoaded); return null; }
 window.__automatorLoaded = VERSION;
 
@@ -94,7 +94,7 @@ const DEFAULT_CFG = {
   maxIdleRecheckMs: 300000, spawnLeadMs: 5000,
   dungeonPollMs: 60000,
   mana: { enabled: true, type: 'S', threshold: 20 },     // drink a mana potion when MP <= threshold (or below the class skill's cost)
-  stam: { enabled: false, item: 'Large Stamina Potion', save: { enabled: false, thresholdPct: 93.5 } },     // item: 'Large Stamina Potion' | 'Full Stamina Potion'
+  stam: { enabled: false, item: 'Large Stamina Potion', save: { thresholdPct: 100 } },     // item: 'Large Stamina Potion' | 'Full Stamina Potion'
   hp: { enabled: false, thresholdPct: 0 },                // drinks when the server says you are dead (HP 0)
   autoFarmControl: true,
   autoDuel: true,
@@ -119,7 +119,7 @@ function mergeCfg(saved) {
   const os = s.stam || {}, A = os.A || {}, B = os.B || {};
   const on = os.enabled != null ? !!os.enabled : !!(A.enabled || B.enabled);
   const item = os.item || (A.enabled ? A.item : B.enabled ? B.item : '') || DEFAULT_CFG.stam.item;
-  out.stam = { enabled: on, item: /full/i.test(item) ? 'Full Stamina Potion' : 'Large Stamina Potion', save: Object.assign({}, DEFAULT_CFG.stam.save, os.save) };
+  out.stam = { enabled: on, item: /full/i.test(item) ? 'Full Stamina Potion' : 'Large Stamina Potion', save: (() => { const sv = Object.assign({}, DEFAULT_CFG.stam.save, os.save); if (sv.enabled === false) sv.thresholdPct = 100; delete sv.enabled; return sv; })() };   // the switch is gone: it was off -> 100 (never save)
   out.hp.thresholdPct = 0;
   if (out.dungeonPollMs === 45000) out.dungeonPollMs = 60000;
   if (out.attackDelayMs === 350) out.attackDelayMs = 0;                 // the old defaults move to the new ones; anything you set yourself stays
@@ -917,9 +917,10 @@ const Potions = (() => {
   }
   let saveWarn = 0;
   function canUseStam() {
-    if (!cfg.stam.save.enabled) return true;
+    const t = cfg.stam.save.thresholdPct;
+    if (!(t > 0 && t < 100)) return true;                                  // 100 (or nothing) = never save
     const pct = Me.expPct(); if (pct == null) return true;
-    if (pct >= cfg.stam.save.thresholdPct) { if (Date.now() - saveWarn > 30000) { saveWarn = Date.now(); log(`⏸️ stamina potions paused — EXP ${pct.toFixed(1)}% ≥ save threshold`, 'info'); } return false; }
+    if (pct >= t) { if (Date.now() - saveWarn > 30000) { saveWarn = Date.now(); log(`⏸️ stamina potions paused — EXP ${pct.toFixed(1)}% ≥ save threshold`, 'info'); } return false; }
     return true;
   }
   async function refillStamina() {
@@ -2875,34 +2876,36 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     const S = cfg.stam, SV = S.save, H = cfg.hp, M = cfg.mana, L = cfg.autoLoot;
     const au = Guard.info(), cls = effectiveClass(), cs = cls ? CLASS_SKILLS[cls] : null;
     const ctl = (...k) => h('div', { class: 'ma-ctl' }, ...k);
-    const sub = (title, c) => { const e = setting(title, null, c); e.classList.add('sub'); return e; };
-    const flag = (title, desc, key, o = {}) => setting(title, desc, sw(() => key.get(), (v) => key.set(v), o));
-    const ms = (label, k) => setting(label, null, num(() => cfg[k], (n) => { cfg[k] = n; }, { w: 64, unit: 'ms' }));
+    const sub = (title, c, desc) => { const e = setting(title, desc || null, c); e.classList.add('sub'); return e; };
+    const flag = (title, desc, get, set, o) => setting(title, desc, sw(get, set, o));
+    const ms = (label, get, set, o = {}) => setting(label, null, num(get, set, Object.assign({ w: 64, unit: 'ms', min: 0 }, o)));
+    const skillOn = cfg.useClassSkill;
     return [
       caption('Potions'),
       h('div', { class: 'ma-card' },
         setting('⚡ Stamina', null, ctl(dropdown([['Large Stamina Potion', 'Large'], ['Full Stamina Potion', 'Full']], S.item, (v) => { S.item = v; }), sw(() => S.enabled, (v) => { S.enabled = v; }))),
-        S.enabled ? sub('Save potions past', ctl(num(() => SV.thresholdPct, (n) => { SV.thresholdPct = n; }, { parse: parseFloat, min: 0, max: 100, unit: '% EXP', w: 56 }), sw(() => SV.enabled, (v) => { SV.enabled = v; }, { redraw: false }))) : null,
-        flag('❤️ HP', 'drinks when HP hits 0', { get: () => H.enabled, set: (v) => { H.enabled = v; H.thresholdPct = 0; } }),
+        S.enabled ? sub('Save potions past', num(() => SV.thresholdPct, (n) => { SV.thresholdPct = n; }, { parse: parseFloat, min: 1, max: 100, unit: '% EXP', w: 56 }), 'so none is wasted on a level-up · 100 = never') : null,
+        flag('❤️ HP', 'drinks when HP hits 0', () => H.enabled, (v) => { H.enabled = v; H.thresholdPct = 0; }, { redraw: false }),
         setting('💧 Mana', null, ctl(dropdown([['S', 'Small · 20'], ['M', 'Medium · 40'], ['L', 'Large · 60'], ['XL', 'XL · 100']], M.type, (v) => { M.type = v; }), sw(() => M.enabled, (v) => { M.enabled = v; }))),
-        M.enabled ? sub('Drink at or below', num(() => M.threshold, (n) => { M.threshold = n; }, { w: 56, unit: 'MP' })) : null,
-        flag('🪦 Auto-loot', 'when out of stamina: claims only what levels you up', { get: () => L.enabled, set: (v) => { L.enabled = v; } })),
+        M.enabled ? sub('Drink at or below', num(() => M.threshold, (n) => { M.threshold = n; }, { w: 56, min: 0, unit: 'MP' }), 'or when the class skill can’t be paid') : null,
+        flag('🪦 Auto-loot', 'out of stamina → claims only what levels you up', () => L.enabled, (v) => { L.enabled = v; })),
       caption('Fighting'),
       h('div', { class: 'ma-card' },
-        flag('Class skill' + (cs ? ' · ' + cs.label : ' · not detected'), 'before each World Breaker slash', { get: () => cfg.useClassSkill, set: (v) => { cfg.useClassSkill = v; } }, { redraw: false }),
-        cs ? null : field('Class', 'pick yours', seg([['warrior', 'Warrior'], ['cleric', 'Cleric'], ['hunter', 'Hunter'], ['mage', 'Mage']], cfg.classOverride, (v) => { cfg.classOverride = v; }, { full: true })),
-        flag('Phase duels', 'fought automatically', { get: () => cfg.autoDuel, set: (v) => { cfg.autoDuel = v; } }, { redraw: false }),
-        flag('Shield pierce', 'class skill on a side mob when a boss is shielded', { get: () => cfg.sideMob.enabled, set: (v) => { cfg.sideMob.enabled = v; } }),
-        flag('Pause server auto-farm', 'so the two never fight over stamina', { get: () => cfg.autoFarmControl, set: (v) => { cfg.autoFarmControl = v; } }, { redraw: false })),
+        flag('Class skill' + (cs ? ' · ' + cs.label : ' · not detected'), 'cast before each World Breaker slash', () => cfg.useClassSkill, (v) => { cfg.useClassSkill = v; }),
+        skillOn && !cs ? field('Class', 'pick yours', seg([['warrior', 'Warrior'], ['cleric', 'Cleric'], ['hunter', 'Hunter'], ['mage', 'Mage']], cfg.classOverride, (v) => { cfg.classOverride = v; }, { full: true })) : null,
+        skillOn ? sub('Shield pierce', sw(() => cfg.sideMob.enabled, (v) => { cfg.sideMob.enabled = v; }, { redraw: false }), 'boss shielded → class skill on a side mob instead') : null,
+        flag('Phase duels', 'fought automatically', () => cfg.autoDuel, (v) => { cfg.autoDuel = v; }, { redraw: false }),
+        flag('Pause server auto-farm', 'so the two never fight over stamina', () => cfg.autoFarmControl, (v) => { cfg.autoFarmControl = v; }, { redraw: false })),
       fold('adv', false, '⏱ Timing', () => [note('Pauses between requests, in ms. Lower numbers risk rejected requests.'),
-        ms('Wave swing gap', 'attackDelayMs'), ms('Dungeon swing gap', 'dungeonAttackDelayMs'), ms('Skill → attack gap', 'skillToAttackGapMs'),
-        setting('Graveyard scan every', null, num(() => L.scanMs, (n) => { L.scanMs = n; }, { w: 76, unit: 'ms' })),
-        setting('Gap between loot claims', null, num(() => L.claimGapMs, (n) => { L.claimGapMs = n; }, { w: 64, unit: 'ms' }))]),
+        ms('Wave swing gap', () => cfg.attackDelayMs, (n) => { cfg.attackDelayMs = n; }),
+        ms('Dungeon swing gap', () => cfg.dungeonAttackDelayMs, (n) => { cfg.dungeonAttackDelayMs = n; }),
+        skillOn ? ms('Skill → attack gap', () => cfg.skillToAttackGapMs, (n) => { cfg.skillToAttackGapMs = n; }) : null,
+        L.enabled ? ms('Graveyard scan every', () => L.scanMs, (n) => { L.scanMs = n; }, { w: 76, min: 10000 }) : null,
+        L.enabled ? ms('Gap between loot claims', () => L.claimGapMs, (n) => { L.claimGapMs = n; }) : null]),
       h('div', { class: 'ma-note ma-about' }, `v${VERSION} · re-login ${au.status ? (au.status.configured ? 'set up' : 'not set up') : 'unavailable'} · ${Presets.note()}`,
         ' · ', h('button', { type: 'button', class: 'ma-link', onclick: () => { SideMob.forget(); draw(); } }, `forget ${SideMob.shielded()} shielded mob${SideMob.shielded() === 1 ? '' : 's'}`))];
   }
 
-  /* =================================================== ACTIVITY =================================================== */
   function tActivity() {
     const prevLog = root && root.querySelector('.ma-log'), stick = !prevLog || prevLog.scrollTop + prevLog.clientHeight >= prevLog.scrollHeight - 30, keepTop = prevLog ? prevLog.scrollTop : 0;
     setTimeout(() => { const e = root && root.querySelector('.ma-log'); if (e) e.scrollTop = stick ? e.scrollHeight : keepTop; }, 0);     // newest line is at the bottom: follow it, unless you scrolled up
