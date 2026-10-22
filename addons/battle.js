@@ -296,7 +296,7 @@
 
   const nf = new Intl.NumberFormat();
   function fmt(n) { return nf.format(Number(n) || 0); }
-  function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
+  function sleep(ms) { return Core.sleep(ms); }
 
   function clearInlineStyle(el) {
     if (el) el.removeAttribute('style');
@@ -309,14 +309,7 @@
     return e;
   }
 
-  function escapeHtml(value) {
-    return String(value ?? '')
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;')
-      .replace(/'/g, '&#039;');
-  }
+  function escapeHtml(value) { return Core.esc(value); }
 
   function setHtmlIfExists(id, html) {
     document.querySelectorAll(`[id="${id}"]`).forEach(el => { el.innerHTML = html; });
@@ -454,44 +447,30 @@
   // observation, zero interference.
   const attackResponseWaiters = [];
 
-  function getRequestBodySkillId(init) {
-    try {
-      const body = init && init.body;
-      if (!body) return null;
-      const text = (typeof body === 'string') ? body : String(body);
-      const m = text.match(/(?:^|&)skill_id=([^&]*)/);
-      return m ? decodeURIComponent(m[1]) : null;
-    } catch (_) { return null; }
-  }
+  const skillIdFromBody = (body) => {
+    const m = String(body || '').match(/(?:^|&)skill_id=([^&]*)/);
+    try { return m ? decodeURIComponent(m[1]) : null; } catch (_) { return null; }
+  };
 
+  // Core already proxies window.fetch once for the whole page; this just listens through Core.net.watch instead of stacking a second
+  // wrapper on top (two wrappers depend on load order and both show up as the initiator of every request).
+  let attackWatchOff = null;
   function installAttackResponseWatcher() {
-    if (window.__bpFetchWatcherInstalled) return;
-    window.__bpFetchWatcherInstalled = true;
-
-    const nativeFetch = window.fetch.bind(window);
-    window.fetch = function (input, init) {
-      const url = (typeof input === 'string') ? input : (input && input.url) || '';
-      const promise = nativeFetch(input, init);
-
-      if (attackResponseWaiters.length && String(url).indexOf(getAttackEndpoint()) !== -1) {
-        const skillId = getRequestBodySkillId(init);
-        promise.then(res => {
-          res.clone().text().then(raw => {
-            const data = parseJsonMaybe(raw);
-            for (let i = attackResponseWaiters.length - 1; i >= 0; i--) {
-              const waiter = attackResponseWaiters[i];
-              if (waiter.skillId === null || waiter.skillId === skillId) {
-                attackResponseWaiters.splice(i, 1);
-                clearTimeout(waiter.timer);
-                waiter.resolve({ raw, data });
-              }
-            }
-          }).catch(() => {});
-        }).catch(() => {});
+    if (attackWatchOff) return;
+    const endpoint = getAttackEndpoint().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    attackWatchOff = Core.net.watch(new RegExp(endpoint), (res) => {
+      if (!attackResponseWaiters.length) return;
+      const skillId = skillIdFromBody(res.body);
+      const raw = res.text, data = parseJsonMaybe(raw);
+      for (let i = attackResponseWaiters.length - 1; i >= 0; i--) {
+        const waiter = attackResponseWaiters[i];
+        if (waiter.skillId === null || waiter.skillId === skillId) {
+          attackResponseWaiters.splice(i, 1);
+          clearTimeout(waiter.timer);
+          waiter.resolve({ raw, data });
+        }
       }
-
-      return promise;
-    };
+    });
   }
 
   function waitForAttackResponse(skillId, timeoutMs = 8000) {
@@ -2695,8 +2674,8 @@
   let monsterElemFallbackPromise = null;
   function fetchMonsterElementFallback() {
     if (monsterElemFallbackPromise) return monsterElemFallbackPromise;
-    monsterElemFallbackPromise = fetch(location.href, { credentials: 'same-origin', cache: 'no-store' })
-      .then(r => (r.ok ? r.text() : ''))
+    monsterElemFallbackPromise = Core.net.fetchText(location.href, { force: true })
+      .catch(() => '')
       .then(html => {
         monsterElemFallback = html
           ? readElementFromGrid(new DOMParser().parseFromString(html, 'text/html'))
@@ -3035,8 +3014,7 @@
     btn.classList.add('bm-spinning');
 
     try {
-      const res = await fetch(location.href, { credentials: 'same-origin', cache: 'no-store' });
-      const html = await res.text();
+      const html = await Core.net.fetchText(location.href, { force: true });
       const freshDoc = new DOMParser().parseFromString(html, 'text/html');
 
       const liveSections = Array.from(document.querySelectorAll('.phase-loot-section'));
