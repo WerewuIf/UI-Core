@@ -208,8 +208,7 @@
 
   // ---- trust the server's own render instead of hand-rolling DOM state ----
   async function smartRefresh() {
-    const res = await fetch(location.href, { cache: 'no-store' });
-    const html = await res.text();
+    const html = await Core.net.fetchText(location.href, { force: true });
     const doc = new DOMParser().parseFromString(html, 'text/html');
 
     doc.querySelectorAll(SECTION_SEL).forEach((fresh) => {
@@ -362,17 +361,9 @@
     el.onclick = hideRunToast;
     if (holdMs) runToastTimer = setTimeout(hideRunToast, holdMs);
   }
-  let lastSay = null;   // last message shown, so apply() below can report ok / failed to other addons
-  const say = (msg, ok = true) => { lastSay = { msg, ok }; showRunToast(msg, ok, ok ? 10000 : 20000); };
+  const say = (msg, ok = true) => { showRunToast(msg, ok, ok ? 10000 : 20000); };
 
-  function escapeHtml(str) {
-    return String(str ?? '')
-      .replaceAll('&', '&amp;')
-      .replaceAll('<', '&lt;')
-      .replaceAll('>', '&gt;')
-      .replaceAll('"', '&quot;')
-      .replaceAll("'", '&#039;');
-  }
+  function escapeHtml(str) { return Core.esc(str); }
 
   function isInventoryPage() {
     return location.pathname.replace(/\/+$/, '') === '/inventory.php';
@@ -537,7 +528,10 @@
   // ---------- restore ----------
 
   async function restorePresetToSet(preset, targetSetKey) {
-    if (presetOpBusy) { say('Please wait for the current action to finish.', false); return; }
+    // The result is RETURNED (not parked in a module-level variable), so two calls can never read each other's outcome.
+    let result = null;
+    const out = (msg, ok = true) => { result = { ok: ok !== false, message: msg }; say(msg, ok); };
+    if (presetOpBusy) { out('Please wait for the current action to finish.', false); return result; }
     presetOpBusy = true; cancelRun = false; runPresetId = preset.id; syncRunButtons();
     let done = 0, total = 0;
     try {
@@ -545,8 +539,8 @@
       try {
         doc = await getContextDoc(targetSetKey, true);
       } catch (err) {
-        say('Could not reach the Inventory page to read current equipment.', false);
-        return;
+        out('Could not reach the Inventory page to read current equipment.', false);
+        return result;
       }
       const currentSnap = scanEquippedSnapshot(doc);
       const catalog = scanEquipmentCatalog(doc);
@@ -573,10 +567,10 @@
 
       total = toUnequip.length + toEquip.length;
       if (!total) {
-        say(missing.length
+        out(missing.length
                ? `Already matches (${missing.length} saved item(s) no longer owned).`
                : `Already matches this preset in ${SET_LABELS[targetSetKey]}.`, true);
-        return;
+        return result;
       }
 
       const progress = () => showRunToast(`Applying "${preset.name}"\u2026 (${done}/${total})`, true, 0);
@@ -599,20 +593,22 @@
       if (isInventoryPage() && getUrlSet() === targetSetKey && typeof window.__invHelperSmartRefresh === 'function') {
         await window.__invHelperSmartRefresh();
       }
-      say(missing.length
+      out(missing.length
              ? `Preset "${preset.name}" applied to ${SET_LABELS[targetSetKey]}. Skipped: ${missing.join(', ')}`
              : `Preset "${preset.name}" applied to ${SET_LABELS[targetSetKey]}.`, true);
     } catch (err) {
       if (cancelRun) {
-        say(`Cancelled "${preset.name}" \u2014 ${SET_LABELS[targetSetKey]} may be part-way` + (total ? ` (${done}/${total} steps done).` : '.'));
+        out(`Cancelled "${preset.name}" \u2014 ${SET_LABELS[targetSetKey]} may be part-way` + (total ? ` (${done}/${total} steps done).` : '.'));
+        result.ok = false;
         invalidateContextCache(targetSetKey);
         try {
           if (isInventoryPage() && getUrlSet() === targetSetKey && typeof window.__invHelperSmartRefresh === 'function') await window.__invHelperSmartRefresh();
         } catch (_) { /* the page just shows the old state */ }
-      } else say('Stopped: ' + (err?.message || 'action failed'), false);
+      } else out('Stopped: ' + (err?.message || 'action failed'), false);
     } finally {
       presetOpBusy = false; cancelRun = false; runPresetId = null; syncRunButtons();
     }
+    return result || { ok: false, message: 'no result' };
   }
 
   // ---------- UI ----------
@@ -1171,11 +1167,8 @@
       if (!p) return { ok: false, message: 'preset not found' };
       const target = (o && (o.target || o.set)) || 'attack';
       if (!SET_KEYS.includes(target)) return { ok: false, message: 'unknown set "' + target + '" (use ' + SET_KEYS.join(', ') + ')' };
-      lastSay = null;
-      try { await restorePresetToSet(p, target); }
+      try { return await restorePresetToSet(p, target); }
       catch (e) { return { ok: false, message: 'failed: ' + ((e && e.message) || e) }; }
-      const s = lastSay;
-      return s ? { ok: s.ok !== false, message: s.msg } : { ok: false, message: 'no result' };
     },
   };
   Core.module({
