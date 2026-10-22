@@ -89,10 +89,8 @@ const DEFAULT_CFG = {
   attackDelayMs: 0,                    // extra pause between swings, WAVE bosses (0: swings are only spaced by the request gap)
   dungeonAttackDelayMs: 0,             // dungeon bosses chain swings back-to-back
   minActionGapMs: 450, skillToAttackGapMs: 1250,
-  fightScanMs: 300000,                 // wave pages: rescan this often (fighting, capped or idle; settings → Timing)
-  idleRecheckMs: 30000,                // dungeons: not alive / capped: recheck this often
+  fightScanMs: 300000,                 // every boss (wave pages and dungeon maps): rescan this often (Settings → Timing, in minutes)
   maxIdleRecheckMs: 300000, spawnLeadMs: 5000,
-  dungeonPollMs: 60000,
   mana: { enabled: true, type: 'S', threshold: 20 },     // drink a mana potion when MP <= threshold (or below the class skill's cost)
   stam: { enabled: false, item: 'Large Stamina Potion', save: { thresholdPct: 100 } },     // item: 'Large Stamina Potion' | 'Full Stamina Potion'
   hp: { enabled: false, thresholdPct: 0 },                // drinks when the server says you are dead (HP 0)
@@ -121,7 +119,6 @@ function mergeCfg(saved) {
   const item = os.item || (A.enabled ? A.item : B.enabled ? B.item : '') || DEFAULT_CFG.stam.item;
   out.stam = { enabled: on, item: /full/i.test(item) ? 'Full Stamina Potion' : 'Large Stamina Potion', save: (() => { const sv = Object.assign({}, DEFAULT_CFG.stam.save, os.save); if (sv.enabled === false) sv.thresholdPct = 100; delete sv.enabled; return sv; })() };   // the switch is gone: it was off -> 100 (never save)
   out.hp.thresholdPct = 0;
-  if (out.dungeonPollMs === 45000) out.dungeonPollMs = 60000;
   if (out.fightScanMs === 30000) out.fightScanMs = 300000;           // old default → 5 min
   if (out.attackDelayMs === 350) out.attackDelayMs = 0;                 // the old defaults move to the new ones; anything you set yourself stays
   if (out.autoLoot.scanMs === 60000) out.autoLoot.scanMs = 300000;
@@ -1564,8 +1561,7 @@ Object.assign(Dungeons, (() => {
   /* ---- the Scan hooks ---- */
   function nextCheck(def) {
     const now = Date.now(), e = Board.get(def.low); if (!e || !e.seenAt) return now;
-    if (e.alive && def.kind !== 'dungeon-swarm' && (e.userDmg || 0) >= bossCap(def.low)) return e.seenAt + cfg.idleRecheckMs;
-    return e.seenAt + (e.locked ? cfg.dungeonPollMs * 2 : cfg.dungeonPollMs);
+    return e.seenAt + cfg.fightScanMs * (e.locked ? 2 : 1);
   }
   async function refresh(lows, step) {
     const seen = new Set();
@@ -2960,7 +2956,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
         flag('Phase duels', 'fought automatically', () => cfg.autoDuel, (v) => { cfg.autoDuel = v; }, { redraw: false }),
         flag('Pause server auto-farm', 'so the two never fight over stamina', () => cfg.autoFarmControl, (v) => { cfg.autoFarmControl = v; }, { redraw: false })),
       fold('adv', false, '⏱ Timing', () => [note('Pauses between requests, in ms. Lower numbers risk rejected requests.'),
-        ms('Wave scan every', () => cfg.fightScanMs, (n) => { cfg.fightScanMs = n; }, { w: 76, min: 5000 }),
+        setting('Scan bosses every', 'waves and dungeons, e.g. 10', num(() => cfg.fightScanMs / 60000, (n) => { cfg.fightScanMs = Math.round(n * 60000); }, { w: 64, unit: 'min', min: 0.1, parse: parseFloat })),
         ms('Wave swing gap', () => cfg.attackDelayMs, (n) => { cfg.attackDelayMs = n; }),
         ms('Dungeon swing gap', () => cfg.dungeonAttackDelayMs, (n) => { cfg.dungeonAttackDelayMs = n; }),
         skillOn ? ms('Skill → attack gap', () => cfg.skillToAttackGapMs, (n) => { cfg.skillToAttackGapMs = n; }) : null,
