@@ -24,7 +24,7 @@
  * replies were retried instantly instead of honouring their delay.
  */
 Core.module({
-  id: 'automator', name: 'Automator', icon: '🤖', version: '1.7.7',
+  id: 'automator', name: 'Automator', icon: '🤖', version: '1.7.9',
   // Offered to other addons through Core capabilities (guides/CAPABILITIES.md):
   //   automator.status() -> the status string     automator.start() / automator.stop()     automator.scan() -> scan the bosses now
   provides: (api) => api && api.start ? {
@@ -35,7 +35,7 @@ Core.module({
   } : {},
   init(Core) {
 'use strict';
-const ID = 'automator', VERSION = '1.7.7';
+const ID = 'automator', VERSION = '1.7.9';
 if (window.__automatorLoaded) { console.warn('[automator] already loaded', window.__automatorLoaded); return null; }
 window.__automatorLoaded = VERSION;
 
@@ -86,7 +86,7 @@ const DEFAULT_CFG = {
   defaultBossCap: 3_000_000_000,
   maxTier: 'WORLD_BREAKER',            // always the strongest; pickTier steps down only when less is left under the cap
   classOverride: 'auto', useClassSkill: true,
-  attackDelayMs: 350,                  // between swings, WAVE bosses
+  attackDelayMs: 0,                    // extra pause between swings, WAVE bosses (0: swings are only spaced by the request gap)
   dungeonAttackDelayMs: 0,             // dungeon bosses chain swings back-to-back
   minActionGapMs: 450, skillToAttackGapMs: 1250,
   fightScanMs: 30000,                  // while fighting: rescan a target's wave page at least this often
@@ -99,7 +99,7 @@ const DEFAULT_CFG = {
   autoFarmControl: true,
   autoDuel: true,
   sideMob: { enabled: false },                         // shield pierce on a side mob: automatic once switched on (off: it shouldn't be needed)
-  autoLoot: { enabled: false, mode: 'toLevel', scanMs: 60000, claimGapMs: 500 },
+  autoLoot: { enabled: false, mode: 'toLevel', scanMs: 300000, claimGapMs: 250 },
   parts: { bosses: true, dungeons: true, duels: true, loot: true },
   logFilter: 'all',
 };
@@ -121,6 +121,9 @@ function mergeCfg(saved) {
   out.stam = { enabled: on, item: /full/i.test(item) ? 'Full Stamina Potion' : 'Large Stamina Potion', save: Object.assign({}, DEFAULT_CFG.stam.save, os.save) };
   out.hp.thresholdPct = 0;
   if (out.dungeonPollMs === 45000) out.dungeonPollMs = 60000;
+  if (out.attackDelayMs === 350) out.attackDelayMs = 0;                 // the old defaults move to the new ones; anything you set yourself stays
+  if (out.autoLoot.scanMs === 60000) out.autoLoot.scanMs = 300000;
+  if (out.autoLoot.claimGapMs === 500) out.autoLoot.claimGapMs = 250;
   delete out.mana.fullMaxAt0; delete out.mana.fillTo; delete out.mana.name;
   out.loadout = s.loadout && typeof s.loadout === 'object' ? s.loadout : {};
   out.targets = Array.isArray(s.targets) ? s.targets.slice() : [];
@@ -1675,7 +1678,7 @@ Object.assign(Duels, (() => {
  * ================================================================================================================ */
 Kernel.register({
   id: 'loot', name: 'Graveyard & loot', icon: '🪦',
-  every: () => (cfg.autoLoot.enabled ? cfg.autoLoot.scanMs || 60000 : 0),
+  every: () => (cfg.autoLoot.enabled ? cfg.autoLoot.scanMs || 300000 : 0),
   tick: () => Loot.scan(),
 });
 Object.assign(Loot, (() => {
@@ -1702,7 +1705,7 @@ Object.assign(Loot, (() => {
         const exp = parseNum(card.dataset.expire, 0); if (exp > 0 && exp < nowSec) return;       // despawned: nothing to claim
         const id = card.dataset.monsterId, raw = (card.dataset.name || '').trim(); if (!id || !raw) return;
         const img = card.querySelector('img');
-        out.push({ key: 'wave:' + id, kind: 'wave', monsterId: String(id), name: raw, nameLow: raw.toLowerCase(), isBoss: !!Roster.get(raw.toLowerCase()), icon: img ? img.getAttribute('src') : undefined, userDamage: dmg, needsLoot: true });
+        out.push({ key: 'wave:' + id, kind: 'wave', gate: l.gate, wave: l.wave, area: WaveMap.of(l.gate, l.wave).group.id, monsterId: String(id), name: raw, nameLow: raw.toLowerCase(), isBoss: !!Roster.get(raw.toLowerCase()), icon: img ? img.getAttribute('src') : undefined, userDamage: dmg, needsLoot: true });
       });
       await sleep(150);
     }
@@ -1715,14 +1718,14 @@ Object.assign(Loot, (() => {
     const ins = await Dungeons.instances(true), out = [];
     const counted = (label, fn, total) => { let n = 0; Work.set('grave', label, 0, total); return (j) => fn(j).finally(() => Work.set('grave', label, ++n, total)); };
     const all = (t) => [...new Set([...(ins.v[t] || []), ...(ins.ended[t] || [])])];
-    const push = (rows, inst, loc, isBoss) => rows.forEach((r) => out.push({ key: `dungeon:${inst}:${r.dgmid}`, kind: 'dungeon', monsterId: r.dgmid, instanceId: inst, locationId: loc, name: r.name, nameLow: r.name.toLowerCase(), isBoss, icon: r.icon, userDamage: null, needsLoot: true, expPerDmg: r.expPerDmg }));
+    const push = (rows, inst, loc, isBoss, dtype) => rows.forEach((r) => out.push({ key: `dungeon:${inst}:${r.dgmid}`, kind: 'dungeon', dtype, area: dtype === 'hard' ? 'castle' : 'shadow', monsterId: r.dgmid, instanceId: inst, locationId: loc, name: r.name, nameLow: r.name.toLowerCase(), isBoss, icon: r.icon, userDamage: null, needsLoot: true, expPerDmg: r.expPerDmg }));
     const hard = all('hard'), pinSets = await Dungeons.pool(hard, (id) => Dungeons.pins(id), 3), jobs = [];
     hard.forEach((id, i) => (pinSets[i] || []).forEach((p) => { if (!p.isLocked && p.isDone && p.locationId != null) jobs.push({ inst: id, loc: p.locationId }); }));
     const hr = await Dungeons.pool(jobs, counted('Graveyard · Castle rooms', (j) => Dungeons.deadMobs(j.inst, j.loc), jobs.length), 4);
-    jobs.forEach((j, i) => push(hr[i] || [], j.inst, j.loc, true));
+    jobs.forEach((j, i) => push(hr[i] || [], j.inst, j.loc, true, 'hard'));
     const easy = []; all('easy').forEach((id) => SHADOW_LOCS.forEach((loc) => easy.push({ inst: id, loc })));
     const er = await Dungeons.pool(easy, counted('Graveyard · Shadowbridge rooms', (j) => Dungeons.deadMobs(j.inst, j.loc), easy.length), 4);
-    easy.forEach((j, i) => push(er[i] || [], j.inst, j.loc, j.loc === SHADOW_BOSS_LOC));
+    easy.forEach((j, i) => push(er[i] || [], j.inst, j.loc, j.loc === SHADOW_BOSS_LOC, 'easy'));
     return out;
   }
 
@@ -1808,21 +1811,22 @@ Object.assign(Loot, (() => {
           if (res.expDelta > 0) await syncMe();
           if (cfg.autoLoot.mode === 'toLevel' && Me.level() > startLevel) { log('✅ leveled up — stopping the loot pass', 'ok'); break; }
         } else log(`⚠️ loot claim failed for ${esc(row.name)}`, 'warn');
-        UI.dirty('loot'); await sleep(cfg.autoLoot.claimGapMs || 500);
+        UI.dirty('loot'); await sleep(cfg.autoLoot.claimGapMs ?? 250);
       }
     } finally { st.looting = false; UI.dirty('loot'); }
   }
-  async function claimGroup(nameLow) {                         // the "Claim all" button of one monster name
-    if (st.claiming.has(nameLow)) return; st.claiming.add(nameLow); UI.dirty('loot');
+  async function claimGroup(nameLow, area) {                   // the "Claim all" button of one monster name, within one area
+    const ck = (area || '') + '|' + nameLow;
+    if (st.claiming.has(ck)) return; st.claiming.add(ck); UI.dirty('loot');
     try {
-      for (const row of st.rows.filter((r) => r.nameLow === nameLow && r.needsLoot !== false)) {
+      for (const row of st.rows.filter((r) => r.nameLow === nameLow && (r.area || '') === (area || '') && r.needsLoot !== false)) {
         const res = await claim(row);
         if (res.ok) { log(`🎒 looted ${esc(row.name)}${res.expDelta ? ` (+${fmtNum(res.expDelta)} EXP)` : ''}`, 'ok'); row.needsLoot = false; if (res.expDelta > 0) await syncMe(); }
         else log(`⚠️ claim failed for ${esc(row.name)}`, 'warn');
-        UI.dirty('loot'); await sleep(cfg.autoLoot.claimGapMs || 500);
+        UI.dirty('loot'); await sleep(cfg.autoLoot.claimGapMs ?? 250);
       }
       st.rows = st.rows.filter((r) => r.needsLoot !== false);
-    } finally { st.claiming.delete(nameLow); UI.dirty('loot'); }
+    } finally { st.claiming.delete(ck); UI.dirty('loot'); }
   }
   async function onStamStall() {
     if (!cfg.autoLoot.enabled || !Kernel.isOn('loot') || !Tab.isMain()) return;
@@ -2802,40 +2806,47 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   /* ===================================================== LOOT ===================================================== */
   function tLoot() {
     const L = cfg.autoLoot, s = Loot.state, groups = new Map();
-    s.rows.filter((r) => r.needsLoot !== false).forEach((r) => { const g = groups.get(r.nameLow) || { name: r.name, rows: [], boss: r.isBoss, icon: r.icon }; g.rows.push(r); if (!g.icon && r.icon) g.icon = r.icon; groups.set(r.nameLow, g); });
+    const AREAS = [...Object.values(WaveMap.groups).sort((a, b) => a.order - b.order).map((g) => ({ id: g.id, title: g.title, ico: g.ico })), { id: 'castle', title: 'Castle', ico: '🏰' }, { id: 'shadow', title: 'Shadowbridge', ico: '🌉' }];
+    const areaOf = (r) => r.area || (r.kind === 'wave' ? WaveMap.of(r.gate, r.wave).group.id : (r.dtype === 'hard' ? 'castle' : 'shadow'));   // same monster name in two areas = two cards
+    s.rows.filter((r) => r.needsLoot !== false).forEach((r) => { const area = areaOf(r), key = area + '|' + r.nameLow; const g = groups.get(key) || { name: r.name, low: r.nameLow, area, rows: [], boss: r.isBoss, icon: r.icon }; g.rows.push(r); if (!g.icon && r.icon) g.icon = r.icon; groups.set(key, g); });
     const need = (() => { const m = Core.me.get(), e = m && m.exp; return e && e.max > 0 ? Math.max(0, e.max - e.cur) : null; })();
     const list = [...groups.entries()].sort((a, b) => (b[1].boss - a[1].boss) || a[1].name.localeCompare(b[1].name)), total = list.reduce((n, [, g]) => n + g.rows.length, 0);
     const lootCard = ([low, g]) => {
       const dmg = g.rows.reduce((n, r) => n + (Number.isFinite(r.userDamage) ? r.userDamage : 0), 0), busy = s.claiming.has(low);
-      const b = btn(busy ? 'Claiming…' : 'Claim', 'soft', () => { Loot.claimGroup(low); }); b.classList.add('ma-claim');
+      const b = btn(busy ? 'Claiming…' : 'Claim', 'soft', () => { Loot.claimGroup(g.low, g.area); }); b.classList.add('ma-claim');
       return h('div', { class: 'ma-lc' }, avatar(g.name, g.icon, { boss: g.boss }), h('div', { class: 'ma-lc-n' }, h('b', {}, g.name), h('small', {}, `${g.rows.length} corpse${g.rows.length === 1 ? '' : 's'}${dmg ? ' · ' + fmtNum(dmg) + ' damage' : ''}`)), b);
     };
-    const bosses = list.filter(([, g]) => g.boss), mobs = list.filter(([, g]) => !g.boss);
+    const sections = AREAS.map((a) => ({ a, items: list.filter(([, g]) => g.area === a.id) })).filter((x) => x.items.length)
+      .map(({ a, items }) => { const n = items.reduce((c, [, g]) => c + g.rows.length, 0); return fold('loot:' + a.id, true, [a.ico + ' ' + a.title, h('small', {}, `${n} corpse${n === 1 ? '' : 's'}`)], () => items.map(lootCard)); });
     return [
       h('div', { class: 'ma-alert info' }, L.enabled ? 'Auto-loot is on: it claims these when you run out of stamina.' : 'Auto-loot is off.', ' ', h('button', { type: 'button', class: 'ma-link', onclick: () => go('supplies') }, 'Change in Supplies')),
       h('div', { class: 'ma-actions' }, btn(s.scanning ? 'Scanning…' : '🔎 Scan graveyard', 'soft', () => { Loot.scan(true); }), btn(s.looting ? 'Looting…' : '🎒 Loot now', 'success', () => { Loot.pass(); })),
       s.scanning ? (() => { const w = Work.get('grave'); return h('div', { class: 'ma-scan' }, h('div', { class: 'ma-scan-t' }, h('b', {}, w ? w.label : 'Scanning…'), h('small', {}, w && w.total ? `${Math.min(w.done + 1, w.total)} of ${w.total}` : 'one moment…'), w && w.total ? h('div', { class: 'ma-bar' }, h('i', { style: { width: pctOf(w).toFixed(1) + '%' } })) : null)); })() : null,
       note(`${total} lootable · scanned ${ago(s.lastScanAt)}${need != null ? ' · ' + fmtNum(need) + ' EXP to next level' : ''}`),
-      ...(list.length ? [bosses.length ? caption('Bosses') : null, ...bosses.map(lootCard), mobs.length ? caption('Monsters') : null, ...mobs.map(lootCard)]
+      ...(list.length ? sections
         : [h('div', { class: 'ma-empty' }, s.lastScanAt ? 'Nothing lootable right now.' : 'Press Scan graveyard to look.')])];
   }
 
   /* =================================================== SETTINGS =================================================== */
   function tSettings() {
     const au = Guard.info(), cls = effectiveClass(), cs = cls ? CLASS_SKILLS[cls] : null;
-    const timing = [['Wave swing gap', 'attackDelayMs'], ['Dungeon swing gap', 'dungeonAttackDelayMs'], ['Skill → attack gap', 'skillToAttackGapMs']];
+    const ms = (label, desc, get, set, o = {}) => setting(label, desc, num(get, set, Object.assign({ w: 64, unit: 'ms', min: 0 }, o)));
+    const mins = (v) => String(+(v / 60000).toFixed(2));
     return [
-      card('⚔️', 'Attacks', 'Always starts with World Breaker, and only steps down when less than that is left under the cap.', true, null, [
-        setting('Use class skill: ' + (cs ? cs.label : 'not detected yet'), 'Only cast right before a World Breaker slash.', sw(() => cfg.useClassSkill, (v) => { cfg.useClassSkill = v; }, { redraw: false })),
-        cs ? null : field('Class', 'could not be detected, pick yours', seg([['warrior', 'Warrior'], ['cleric', 'Cleric'], ['hunter', 'Hunter'], ['mage', 'Mage']], cfg.classOverride, (v) => { cfg.classOverride = v; }, { full: true }))]),
-      h('div', { class: 'ma-card' },
-        setting('Pause the server auto-farm while fighting', 'So the two never fight over stamina.', sw(() => cfg.autoFarmControl, (v) => { cfg.autoFarmControl = v; }, { redraw: false })),
+      caption('Fighting'),
+      card('⚔️', 'Attacks', 'Starts with World Breaker, and steps down only when less than that is left under the cap.', true, null, [
+        setting('Use class skill: ' + (cs ? cs.label : 'not detected yet'), 'Cast right before a World Breaker slash.', sw(() => cfg.useClassSkill, (v) => { cfg.useClassSkill = v; }, { redraw: false })),
+        cs ? null : field('Class', 'could not be detected, pick yours', seg([['warrior', 'Warrior'], ['cleric', 'Cleric'], ['hunter', 'Hunter'], ['mage', 'Mage']], cfg.classOverride, (v) => { cfg.classOverride = v; }, { full: true })),
         setting('Fight phase duels automatically', null, sw(() => cfg.autoDuel, (v) => { cfg.autoDuel = v; }, { redraw: false })),
-        setting('Shield pierce on a side mob', 'Automatic. If a boss blocks the class skill (divine shield), only the class skill is cast on a live regular mob: first one in an open normal dungeon, else one on the boss’s wave page. Never a boss. The damage swings still hit the boss.', sw(() => cfg.sideMob.enabled, (v) => { cfg.sideMob.enabled = v; }))),
-      fold('adv', false, '🛠 Advanced timing', () => [note('Pause between requests, in milliseconds. The defaults are safe; lower numbers risk the server rejecting swings.'),
-        ...timing.map(([l, k]) => setting(l, null, num(() => cfg[k], (n) => { cfg[k] = n; }, { w: 76, unit: 'ms' }))),
-        setting('Graveyard scan every', null, num(() => cfg.autoLoot.scanMs, (n) => { cfg.autoLoot.scanMs = n; }, { w: 76, unit: 'ms' })),
-        setting('Gap between loot claims', null, num(() => cfg.autoLoot.claimGapMs, (n) => { cfg.autoLoot.claimGapMs = n; }, { w: 76, unit: 'ms' }))]),
+        setting('Shield pierce on a side mob', 'If a boss blocks the class skill (divine shield), casts only the class skill on a live regular mob. Never a boss; the swings still hit the boss.', sw(() => cfg.sideMob.enabled, (v) => { cfg.sideMob.enabled = v; })),
+        setting('Pause the server auto-farm while fighting', 'So the two never fight over stamina.', sw(() => cfg.autoFarmControl, (v) => { cfg.autoFarmControl = v; }, { redraw: false }))]),
+      caption('Timing'),
+      fold('adv', false, '⏱ Request timing', () => [note('Pauses between requests. The defaults are safe; lower numbers risk the server rejecting requests.'),
+        ms('Wave swing gap', 'extra pause after each wave swing', () => cfg.attackDelayMs, (n) => { cfg.attackDelayMs = n; }),
+        ms('Dungeon swing gap', 'extra pause after each dungeon swing', () => cfg.dungeonAttackDelayMs, (n) => { cfg.dungeonAttackDelayMs = n; }),
+        ms('Skill → attack gap', 'after a class skill, before the slash', () => cfg.skillToAttackGapMs, (n) => { cfg.skillToAttackGapMs = n; }),
+        ms('Graveyard scan every', 'only while auto-loot is on', () => cfg.autoLoot.scanMs, (n) => { cfg.autoLoot.scanMs = n; }, { unit: 'min', fmt: mins, parse: (v) => { const x = parseFloat(v); return Number.isFinite(x) && x > 0 ? Math.round(x * 60000) : null; }, min: 10000 }),
+        ms('Gap between loot claims', null, () => cfg.autoLoot.claimGapMs, (n) => { cfg.autoLoot.claimGapMs = n; })]),
       caption('About'),
       h('div', { class: 'ma-card' }, h('div', { class: 'ma-kv' }, h('span', {}, 'Version'), h('b', {}, VERSION)), h('div', { class: 'ma-kv' }, h('span', {}, 'Re-login'), h('b', {}, au.status ? (au.status.configured ? 'set up' : 'not set up') : 'Core.auth missing')),
         h('div', { class: 'ma-kv' }, h('span', {}, 'Preset addons'), h('b', {}, Presets.note())), h('div', { class: 'ma-kv' }, h('span', {}, 'Shielded mobs remembered'), h('b', {}, SideMob.shielded())),
