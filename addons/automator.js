@@ -24,7 +24,7 @@
  * replies were retried instantly instead of honouring their delay.
  */
 Core.module({
-  id: 'automator', name: 'Automator', icon: '🤖', version: '1.7.19',
+  id: 'automator', name: 'Automator', icon: '🤖', version: '1.7.20',
   // Offered to other addons through Core capabilities (guides/CAPABILITIES.md):
   //   automator.status() -> the status string     automator.start() / automator.stop()     automator.scan() -> scan the bosses now
   provides: (api) => api && api.start ? {
@@ -35,7 +35,7 @@ Core.module({
   } : {},
   init(Core) {
 'use strict';
-const ID = 'automator', VERSION = '1.7.19';
+const ID = 'automator', VERSION = '1.7.20';
 if (window.__automatorLoaded) { console.warn('[automator] already loaded', window.__automatorLoaded); return null; }
 window.__automatorLoaded = VERSION;
 
@@ -89,7 +89,7 @@ const DEFAULT_CFG = {
   attackDelayMs: 0,                    // extra pause between swings, WAVE bosses (0: swings are only spaced by the request gap)
   dungeonAttackDelayMs: 0,             // dungeon bosses chain swings back-to-back
   minActionGapMs: 450, skillToAttackGapMs: 1250,
-  fightScanMs: 300000,                 // THE scan interval: wave pages, dungeon maps AND the graveyard all follow this (Settings → Timing, in minutes)
+  fightScanMs: 300000,                 // THE scan interval: wave pages and dungeon maps follow this (Settings → Timing, in minutes). The graveyard has no timer: Scan graveyard / Loot now / out of stamina
   spawnLeadMs: 5000,
   mana: { enabled: true, type: 'S', threshold: 20 },     // drink a mana potion when MP <= threshold (or below the class skill's cost)
   stam: { enabled: false, item: 'Large Stamina Potion', save: { thresholdPct: 100 } },     // item: 'Large Stamina Potion' | 'Full Stamina Potion'
@@ -125,7 +125,7 @@ function mergeCfg(saved) {
     if (out.autoLoot.claimGapMs === 500) out.autoLoot.claimGapMs = 250;
   }
   out.v = 2;
-  delete out.autoLoot.scanMs; delete out.maxIdleRecheckMs;            // retired: the graveyard follows fightScanMs now
+  delete out.autoLoot.scanMs; delete out.maxIdleRecheckMs;            // retired: the graveyard no longer scans on a timer
   delete out.mana.fullMaxAt0; delete out.mana.fillTo; delete out.mana.name;
   out.loadout = s.loadout && typeof s.loadout === 'object' ? s.loadout : {};
   out.targets = Array.isArray(s.targets) ? s.targets.slice() : [];
@@ -1720,12 +1720,10 @@ Object.assign(Duels, (() => {
  * The cube instance (Polyhedral Crucible) is never listed or touched.
  * ================================================================================================================ */
 Kernel.register({
-  id: 'loot', name: 'Graveyard & loot', icon: '🪦',
-  every: () => (cfg.autoLoot.enabled ? cfg.fightScanMs || 300000 : 0),            // the same interval as the boss scan
-  tick: () => Loot.scan(),
+  id: 'loot', name: 'Graveyard & loot',  icon: '🪦',          // no periodic scan: the graveyard is read on demand (Scan graveyard / Loot now / out of stamina)
 });
 Object.assign(Loot, (() => {
-  const st = { rows: [], scanning: false, looting: false, lastScanAt: 0, lastStuckAt: 0, claiming: new Set() };
+  const st = { rows: [], scanning: false, looting: false, estimating: false, lastScanAt: 0, lastStuckAt: 0, claiming: new Set() };
   const rate = new Map(), capInfo = new Map(), upTo = new Map(), dmgCache = new Map();
   const syncMe = async () => { try { await Core.me.sync(); } catch (_) { /* */ } };
   const expNeeded = () => { const m = Core.me.get(), e = m && m.exp; return e && e.max > 0 ? Math.max(0, e.max - e.cur) : null; };
@@ -1788,7 +1786,8 @@ Object.assign(Loot, (() => {
         if (manual === true || st.rows.length !== before) log(`🪦 graveyard scan done · ${st.rows.length} corpse${st.rows.length === 1 ? '' : 's'} (${w.length} wave, ${d.length} dungeon) · ${((Date.now() - t0) / 1000).toFixed(1)}s`, 'info');
       } catch (e) { log(`⚠️ graveyard scan error: ${e.message}`, 'warn'); }
       finally { Work.clear('scan'); if (Status.get() === 'GRAVEYARD') Status.set(prev); }
-    }); } finally { st.scanning = false; UI.dirty('loot'); }          // always released: a throw before the inner try used to leave scanning=true and block every later scan AND the out-of-stamina loot
+    }); await estimateAll().catch(() => {});                          // the total EXP of what the scan found (after the site lane is free again)
+    } finally { st.scanning = false; UI.dirty('loot'); }          // always released: a throw before the inner try used to leave scanning=true and block every later scan AND the out-of-stamina loot
   }
 
   /* ---- EXP estimate per corpse (one battle page per monster NAME gives rate, cap and reward level) ---- */
@@ -1826,6 +1825,18 @@ Object.assign(Loot, (() => {
     const rt = r.expPerDmg != null ? r.expPerDmg : rate.get(r.nameLow); if (rt == null) return null;
     const ci = capInfo.get(r.nameLow), eff = ci && ci.capDmg != null ? Math.min(r.userDamage, ci.capDmg) : r.userDamage;
     return Math.ceil(eff * rt);
+  }
+  // estimated EXP of every corpse of the last scan, kept on the row (row.est: a number, 0 = out-levelled, null = unknown). The Loot tab sums them.
+  async function estimateAll() {
+    const rows = st.rows.filter((r) => r.needsLoot !== false); if (!rows.length) return;
+    st.estimating = true; UI.dirty('loot');
+    try {
+      let n = 0; Work.set('scan', 'Graveyard · estimating EXP', 0, rows.length);
+      await Dungeons.pool(rows, async (r) => {
+        try { const e = await estimate(r); r.est = Number.isFinite(e) ? e : null; } catch (_) { r.est = null; }
+        Work.set('scan', 'Graveyard · estimating EXP', ++n, rows.length);
+      }, 4);
+    } finally { Work.clear('scan'); st.estimating = false; UI.dirty('loot'); }
   }
   // biggest corpse that still fits the EXP gap first; when nothing fits, the smallest one closes it
   function descendingPlan(known, needed) {
@@ -1890,7 +1901,9 @@ Object.assign(Loot, (() => {
     log('⏸️ out of stamina and no potion — checking the graveyard for loot', 'info');
     await scan(); await pass();
   }
-  return { onStamStall, scan, pass, claimGroup, state: st, estimate, claimOne: async (row) => { const r = await claim(row); if (r.ok) { st.rows = st.rows.filter((x) => x.key !== row.key); UI.dirty('loot'); } return r; } };
+  // "Loot now": always look first (the rows are only as fresh as the last scan), then claim
+  async function scanAndPass() { await scan(true); await pass(); }
+  return { onStamStall, scan, pass, scanAndPass, claimGroup, state: st, estimate, claimOne: async (row) => { const r = await claim(row); if (r.ok) { st.rows = st.rows.filter((x) => x.key !== row.key); UI.dirty('loot'); } return r; } };
 })());
 
 /* ===================================================================================================================
@@ -2926,10 +2939,15 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
       .map(({ a, items }) => { const n = items.reduce((c, [, g]) => c + g.rows.length, 0); return fold('loot:' + a.id, true, [a.ico + ' ' + a.title, h('small', {}, `${n} corpse${n === 1 ? '' : 's'}`)], () => items.map(lootCard)); });
     return [
       h('div', { class: 'ma-alert info' }, L.enabled ? 'Auto-loot is on: it claims these when you run out of stamina.' : 'Auto-loot is off.', ' ', h('button', { type: 'button', class: 'ma-link', onclick: () => go('settings') }, 'Change in Settings')),
-      h('div', { class: 'ma-actions' }, btn(s.scanning ? 'Scanning…' : '🔎 Scan graveyard', 'soft', () => { Loot.scan(true); }), btn(s.looting ? 'Looting…' : '🎒 Loot now', 'success', () => { Loot.pass(); })),
-      note(`${total} lootable · scanned ${ago(s.lastScanAt)}${need != null ? ' · ' + fmtNum(need) + ' EXP to next level' : ''}`),
+      h('div', { class: 'ma-actions' }, btn(s.scanning ? 'Scanning…' : '🔎 Scan graveyard', 'soft', () => { Loot.scan(true); }), btn(s.looting ? 'Looting…' : '🎒 Loot now', 'success', () => { Loot.scanAndPass(); })),
+      note(!s.lastScanAt ? 'Not scanned yet.' : `${total} lootable · scanned ${ago(s.lastScanAt)}${need != null ? ' · ' + fmtNum(need) + ' EXP to next level' : ''}`),
+      ...(s.lastScanAt && total ? [(() => {
+        const rows = [...groups.values()].flatMap((g) => g.rows), known = rows.filter((r) => Number.isFinite(r.est)), xp = known.reduce((n, r) => n + r.est, 0), unk = rows.length - known.length;
+        return h('div', { class: 'ma-stats' }, h('div', { class: 'ma-stat' }, '✨ Total XP', h('b', {}, s.estimating && !known.length ? 'estimating…' : '~' + fmtNum(xp))),
+          s.estimating ? h('div', { class: 'ma-stat' }, 'estimating…') : unk ? h('div', { class: 'ma-stat' }, 'unknown', h('b', {}, unk)) : null);
+      })()] : []),
       ...(list.length ? sections
-        : [h('div', { class: 'ma-empty' }, s.lastScanAt ? 'Nothing lootable right now.' : 'Press Scan graveyard to look.')])];
+        : [h('div', { class: 'ma-empty' }, s.lastScanAt ? 'Nothing lootable right now.' : 'Not scanned yet, press Scan graveyard.')])];
   }
 
   /* =============================== SETTINGS (potions, fighting, timing) =============================== */
@@ -2958,7 +2976,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
         flag('Phase duels', 'fought automatically', () => cfg.autoDuel, (v) => { cfg.autoDuel = v; }, { redraw: false }),
         flag('Pause server auto-farm', 'so the two never fight over stamina', () => cfg.autoFarmControl, (v) => { cfg.autoFarmControl = v; }, { redraw: false })),
       fold('adv', false, '⏱ Timing', () => [note('Pauses between requests, in ms. Lower numbers risk rejected requests.'),
-        setting('Scan every', 'waves, dungeons and graveyard, e.g. 5', num(() => cfg.fightScanMs / 60000, (n) => { cfg.fightScanMs = Math.round(n * 60000); }, { w: 64, unit: 'min', min: 0.1, parse: parseFloat })),
+        setting('Scan every', 'waves and dungeons, e.g. 5', num(() => cfg.fightScanMs / 60000, (n) => { cfg.fightScanMs = Math.round(n * 60000); }, { w: 64, unit: 'min', min: 0.1, parse: parseFloat })),
         ms('Wave swing gap', () => cfg.attackDelayMs, (n) => { cfg.attackDelayMs = n; }),
         ms('Dungeon swing gap', () => cfg.dungeonAttackDelayMs, (n) => { cfg.dungeonAttackDelayMs = n; }),
         skillOn ? ms('Skill → attack gap', () => cfg.skillToAttackGapMs, (n) => { cfg.skillToAttackGapMs = n; }) : null,
