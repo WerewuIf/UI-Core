@@ -2970,8 +2970,6 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   }
 
   function tActivity() {
-    const prevLog = root && root.querySelector('.ma-log'), stick = !prevLog || prevLog.scrollTop + prevLog.clientHeight >= prevLog.scrollHeight - 30, keepTop = prevLog ? prevLog.scrollTop : 0;
-    setTimeout(() => { const e = root && root.querySelector('.ma-log'); if (e) e.scrollTop = stick ? e.scrollHeight : keepTop; }, 0);     // newest line is at the bottom: follow it, unless you scrolled up
     const f = cfg.logFilter || 'all', all = Log.all(), cnt = (k) => all.filter((r) => r.k === k).length, l = Diag.last(), nSkip = Object.values(Diag.counts).reduce((a, b) => a + b, 0);
     const chipDefs = [['all', 'All', all.length], ['dmg', 'Hits', cnt('dmg')], ['skill', 'Skills', cnt('skill')], ['warn', 'Warnings', cnt('warn')], ['err', 'Errors', cnt('err')], ['skips', 'Skips', nSkip]];
     const out = [h('div', { class: 'ma-alert info' }, l.reason ? h('span', {}, h('b', {}, 'Last skip: '), `${l.reason}${l.detail ? ' — ' + l.detail : ''} · ${ago(l.at)}`) : 'Nothing has been skipped. It attacks whenever a boss is up and under its cap.'),
@@ -3003,9 +3001,10 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     const sig = tab + '\u0003' + sigOf(tmp);
     if (auto === true && sig === lastSig && root.firstChild) return;
     lastSig = sig;
-    const sc = scroller(root), top = sc ? sc.scrollTop : 0;
+    const sc = scroller(root), top = sc ? sc.scrollTop : 0, pl = root.querySelector('.ma-log'), stick = !pl || pl.scrollTop + pl.clientHeight >= pl.scrollHeight - 30, lt = pl ? pl.scrollTop : 0;
     root.replaceChildren(...next);
     if (sc) sc.scrollTop = top;
+    const nl = root.querySelector('.ma-log'); if (nl) nl.scrollTop = stick ? nl.scrollHeight : lt;      // the log keeps its place in the same frame (newest line is at the bottom: follow it unless you scrolled up)
   }
   const typing = () => root && root.contains(document.activeElement) && /^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement.tagName);
   function schedule(ms) { if (drawT) return; drawT = setTimeout(() => { drawT = 0; if (typing() || document.hidden) schedule(1500); else draw(true); }, ms || 400); }
