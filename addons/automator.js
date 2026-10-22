@@ -24,7 +24,7 @@
  * replies were retried instantly instead of honouring their delay.
  */
 Core.module({
-  id: 'automator', name: 'Automator', icon: '🤖', version: '1.7.12',
+  id: 'automator', name: 'Automator', icon: '🤖', version: '1.7.13',
   // Offered to other addons through Core capabilities (guides/CAPABILITIES.md):
   //   automator.status() -> the status string     automator.start() / automator.stop()     automator.scan() -> scan the bosses now
   provides: (api) => api && api.start ? {
@@ -35,7 +35,7 @@ Core.module({
   } : {},
   init(Core) {
 'use strict';
-const ID = 'automator', VERSION = '1.7.12';
+const ID = 'automator', VERSION = '1.7.13';
 if (window.__automatorLoaded) { console.warn('[automator] already loaded', window.__automatorLoaded); return null; }
 window.__automatorLoaded = VERSION;
 
@@ -2245,7 +2245,9 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
 /* label + control rows */
 .ma-set{display:flex;align-items:center;gap:10px;padding:5px 0}
 .ma-set+.ma-set{border-top:1px solid rgba(255,255,255,.05)}
-.ma-set.sub{padding:2px 0 5px 20px;border-top:0}.ma-set.sub .ma-set-t b{font-weight:400;font-size:11.5px;color:#aeb9dc}
+.ma-set.sub{margin:0 0 3px 6px;padding:0 0 0 10px;gap:8px;border-top:0;border-left:2px solid rgba(110,168,255,.25)}
+.ma-set.sub .ma-set-t b{display:inline;font:400 11.5px Arial,sans-serif;color:#aeb9dc}.ma-set.sub .ma-set-t small{display:inline;margin-left:6px;font-size:10.5px;color:#6e7a9c}
+.ma-set.sub .ma-in{padding:3px 7px;font-size:12px;border-radius:8px}
 .ma-about{margin:8px 3px 2px}
 .ma-set-t{flex:1;min-width:0}.ma-set-t b{display:block;font:600 12.5px Arial,sans-serif;color:#e8edff}.ma-set-t small{display:block;color:#8b97bd;font-size:11px;line-height:1.3}
 .ma-fld{margin:7px 0}.ma-fld>label,.ma-fld>.ma-lbl{display:flex;align-items:baseline;gap:8px;color:#c4cdeb;font:700 11.5px Arial,sans-serif;margin-bottom:4px}.ma-fld>label small,.ma-lbl small{font-weight:400;color:#6e7a9c;font-size:11px}
@@ -2884,16 +2886,16 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
       caption('Potions'),
       h('div', { class: 'ma-card' },
         setting('⚡ Stamina', null, ctl(dropdown([['Large Stamina Potion', 'Large'], ['Full Stamina Potion', 'Full']], S.item, (v) => { S.item = v; }), sw(() => S.enabled, (v) => { S.enabled = v; }))),
-        S.enabled ? sub('Save potions past', num(() => SV.thresholdPct, (n) => { SV.thresholdPct = n; }, { parse: parseFloat, min: 1, max: 100, unit: '% EXP', w: 56 }), 'so none is wasted on a level-up · 100 = never') : null,
+        S.enabled ? sub('Save potions past', num(() => SV.thresholdPct, (n) => { SV.thresholdPct = n; }, { parse: parseFloat, min: 1, max: 100, unit: '% EXP', w: 52 }), '100 = never') : null,
         flag('❤️ HP', 'drinks when HP hits 0', () => H.enabled, (v) => { H.enabled = v; H.thresholdPct = 0; }, { redraw: false }),
         setting('💧 Mana', null, ctl(dropdown([['S', 'Small · 20'], ['M', 'Medium · 40'], ['L', 'Large · 60'], ['XL', 'XL · 100']], M.type, (v) => { M.type = v; }), sw(() => M.enabled, (v) => { M.enabled = v; }))),
-        M.enabled ? sub('Drink at or below', num(() => M.threshold, (n) => { M.threshold = n; }, { w: 56, min: 0, unit: 'MP' }), 'or when the class skill can’t be paid') : null,
+        M.enabled ? sub('Drink at or below', num(() => M.threshold, (n) => { M.threshold = n; }, { w: 52, min: 0, unit: 'MP' })) : null,
         flag('🪦 Auto-loot', 'out of stamina → claims only what levels you up', () => L.enabled, (v) => { L.enabled = v; })),
       caption('Fighting'),
       h('div', { class: 'ma-card' },
         flag('Class skill' + (cs ? ' · ' + cs.label : ' · not detected'), 'cast before each World Breaker slash', () => cfg.useClassSkill, (v) => { cfg.useClassSkill = v; }),
         skillOn && !cs ? field('Class', 'pick yours', seg([['warrior', 'Warrior'], ['cleric', 'Cleric'], ['hunter', 'Hunter'], ['mage', 'Mage']], cfg.classOverride, (v) => { cfg.classOverride = v; }, { full: true })) : null,
-        skillOn ? sub('Shield pierce', sw(() => cfg.sideMob.enabled, (v) => { cfg.sideMob.enabled = v; }, { redraw: false }), 'boss shielded → class skill on a side mob instead') : null,
+        skillOn ? sub('Pierce shielded mobs', sw(() => cfg.sideMob.enabled, (v) => { cfg.sideMob.enabled = v; }, { redraw: false, sm: true }), `${cs ? cs.label : 'class skill'} on a regular mob`) : null,
         flag('Phase duels', 'fought automatically', () => cfg.autoDuel, (v) => { cfg.autoDuel = v; }, { redraw: false }),
         flag('Pause server auto-farm', 'so the two never fight over stamina', () => cfg.autoFarmControl, (v) => { cfg.autoFarmControl = v; }, { redraw: false })),
       fold('adv', false, '⏱ Timing', () => [note('Pauses between requests, in ms. Lower numbers risk rejected requests.'),
