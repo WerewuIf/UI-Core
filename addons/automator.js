@@ -24,7 +24,7 @@
  * replies were retried instantly instead of honouring their delay.
  */
 Core.module({
-  id: 'automator', name: 'Automator', icon: '🤖', version: '1.7.16',
+  id: 'automator', name: 'Automator', icon: '🤖', version: '1.7.17',
   // Offered to other addons through Core capabilities (guides/CAPABILITIES.md):
   //   automator.status() -> the status string     automator.start() / automator.stop()     automator.scan() -> scan the bosses now
   provides: (api) => api && api.start ? {
@@ -35,7 +35,7 @@ Core.module({
   } : {},
   init(Core) {
 'use strict';
-const ID = 'automator', VERSION = '1.7.16';
+const ID = 'automator', VERSION = '1.7.17';
 if (window.__automatorLoaded) { console.warn('[automator] already loaded', window.__automatorLoaded); return null; }
 window.__automatorLoaded = VERSION;
 
@@ -2354,7 +2354,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
 .ma-lv .ma-none{color:#6e7a9c;font-size:11px;padding:4px 2px}
 /* select several bosses: the check on a bubble, and the bar that applies one setup to all of them */
 .ma-ck{flex:0 0 auto;width:20px;height:20px;box-sizing:border-box;border-radius:50%;border:2px solid #33406a;display:flex;align-items:center;justify-content:center;font:900 11px Arial,sans-serif;color:#fff}
-.ma-bb.pick{background:rgba(75,115,224,.2);border-color:#6ea8ff}.ma-bb.pick .ma-ck{background:#4b73e0;border-color:#6ea8ff}
+.ma-bb.pick{background:rgba(75,115,224,.2);border-color:#6ea8ff}.ma-bb.rlw{border-color:#e3b341;box-shadow:0 0 0 1px rgba(227,179,65,.25)}.ma-bb.pick .ma-ck{background:#4b73e0;border-color:#6ea8ff}
 .ma-bulk{position:sticky;top:0;z-index:3;margin:0 0 8px;padding:7px 10px 9px;background:#131d38;border:1px solid rgba(110,168,255,.45);border-radius:14px;box-shadow:0 6px 16px rgba(0,0,0,.35)}
 .ma-bk-sel{display:grid;grid-template-columns:repeat(auto-fit,minmax(104px,1fr));gap:6px;margin-top:7px}.ma-bk-sel select{width:100%;text-overflow:ellipsis}
 @media (max-height:720px){.ma-bulk{position:static}}
@@ -2736,7 +2736,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     const loc = def.kind === 'wave' ? '' : def.locationId ? 'Loc ' + def.locationId : def.locationIds ? 'Loc ' + def.locationIds.join('/') : '';
     const rl = Relics.info(def.low), bits = [h('span', { class: 'capv' }, cap > 0 ? 'cap ' + short(cap) : 'skipped'), rl && rl.short ? h('span', { class: 'ma-rl', title: `${rl.relic}: ${rl.have}/10 — only ${rl.pct}% of your damage gets through` }, `✨ ${rl.pct}%`) : '', nx ? `→ ${short(nx.cap)} ${fmtClock(nx.t)}` : '', ld.length ? h('span', { title: ld.join('\n') }, '🎒') : '', loc, ms.length > 1 ? ms.length + ' phases' : '', on ? h('span', { class: 'st-' + (kind || 'x') }, txt) : ''].filter(Boolean);
     const sub = []; bits.forEach((b, i) => { if (i) sub.push(' · '); sub.push(b); });
-    return h('div', { class: 'ma-bb' + (on ? ' on' : '') + (op ? ' open' : '') + (picked ? ' pick' : ''), title: def.name + (ld.length ? '\n' + ld.join('\n') : ''),
+    return h('div', { class: 'ma-bb' + (on ? ' on' : '') + (op ? ' open' : '') + (picked ? ' pick' : '') + (rl && rl.short ? ' rlw' : ''), title: def.name + (ld.length ? '\n' + ld.join('\n') : ''),
       onclick: pickMode ? () => toggleSel([def]) : () => { ui.sel = op ? '' : def.low; saveUi(); draw(); if (!op) setTimeout(() => { const e = root && root.querySelector('.ma-ed'); if (e && e.scrollIntoView) e.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); }, 40); } },
       avatar(def.name, iconOfBoss(def.low), { boss: true, dot: on ? kind || 'x' : '' }),
       h('div', { class: 'ma-bb-n' }, h('b', {}, nameOf(def)), h('small', {}, ...sub)),
@@ -2798,20 +2798,18 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     const capChip = (v, label, tip) => h('button', { type: 'button', title: tip, class: 'ma-chip' + (BK.cap === v ? ' on' : ''), onclick: (e) => { stop(e); BK.cap = BK.cap === v ? '' : v; BK.msg = ''; draw(); } }, label);   // tap again to clear
     const plan = [...kinds.filter((k) => BK.pick[k]).map((k) => { const o = [['__default', 'default loadout'], ['__keep', 'keep equipped'], ...presetOpts(k)].find(([v]) => v === BK.pick[k]); return `${cap1(k)} → ${o ? o[1] : '…'}`; }),
       ...(BK.cap ? [{ max: 'Cap → max loot', exp: 'Cap → EXP cap', skip: 'Cap → skip', num: 'Cap → ' + fmtNum(BK.n) }[BK.cap]] : [])].join(' · ');
-    const go = btn(!n ? 'Select bosses' : !chg ? 'Choose a change' : `Apply to ${n} boss${n === 1 ? '' : 'es'}`, 'success', () => { if (n && chg) applyBulk(); });
-    if (!n || !chg) { go.disabled = true; go.style.opacity = '.45'; go.style.cursor = 'default'; }
+    const go = n && chg ? btn(`Apply to ${n} boss${n === 1 ? '' : 'es'}`, 'success', applyBulk) : btn('Done', 'soft', endBulk);   // nothing to apply: the button just leaves select mode
     return h('div', { class: 'ma-bulk' },
       h('div', { class: 'ma-bk-h' }, h('b', {}, n ? `☑ ${n} selected` : '☑ Tap bosses to select'),
         lnk('All shown', 'Select every boss in the list below (it follows the filter)', () => toggleSel(shownDefs(sec), true)),
         lnk('Farming', 'Select the bosses that are switched on', () => toggleSel(Roster.list.filter((d) => Roster.canon(d) === d && isOn(d)), true)),
-        lnk('None', 'Clear the selection', () => toggleSel([...BK.sel].map((l) => Roster.get(l)).filter(Boolean), false)),
-        lnk('Done', 'Leave select mode', endBulk)),
+        lnk('None', 'Clear the selection', () => toggleSel([...BK.sel].map((l) => Roster.get(l)).filter(Boolean), false))),
       BK.from ? h('div', { class: 'ma-bk-from' }, `Loadout copied from ${BK.from}. Select the bosses that should get it.`) : null,
       kinds.length ? h('div', { class: 'ma-bk-sel' }, kinds.map(pickBox)) : null,
       h('div', { class: 'ma-bk-cap' }, h('label', {}, '🎯 Cap'),
         capChip('max', 'Max loot', 'Cap at the highest loot level'), capChip('exp', 'EXP cap', 'Cap at the damage that reaches the EXP cap'), capChip('skip', 'Skip', 'Cap 0: the boss is skipped'), capChip('num', 'Set…', 'Type a number'),
         BK.cap === 'num' ? num(() => BK.n, (v) => { BK.n = v; }, { fmt: fmtNum, w: 90 }) : null),
-      h('div', { class: 'ma-bk-go' }, go, h('span', {}, BK.msg || plan || 'Pick a cap or a loadout. Anything you leave alone stays as it is.')));
+      h('div', { class: 'ma-bk-go' }, go, h('span', {}, BK.msg || (plan ? plan + (n ? '' : ' · now select bosses') : 'Pick a cap or a loadout to apply. Anything you leave alone stays as it is.'))));
   }
   function waveGroups(defs) {
     const groups = new Map();
