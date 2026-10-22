@@ -24,7 +24,7 @@
  * replies were retried instantly instead of honouring their delay.
  */
 Core.module({
-  id: 'automator', name: 'Automator', icon: '🤖', version: '1.7.13',
+  id: 'automator', name: 'Automator', icon: '🤖', version: '1.7.14',
   // Offered to other addons through Core capabilities (guides/CAPABILITIES.md):
   //   automator.status() -> the status string     automator.start() / automator.stop()     automator.scan() -> scan the bosses now
   provides: (api) => api && api.start ? {
@@ -35,7 +35,7 @@ Core.module({
   } : {},
   init(Core) {
 'use strict';
-const ID = 'automator', VERSION = '1.7.13';
+const ID = 'automator', VERSION = '1.7.14';
 if (window.__automatorLoaded) { console.warn('[automator] already loaded', window.__automatorLoaded); return null; }
 window.__automatorLoaded = VERSION;
 
@@ -2307,31 +2307,36 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
 .ma-ld{display:grid;grid-template-columns:repeat(auto-fit,minmax(96px,1fr));gap:6px;margin:2px 0 2px}
 .ma-ld label{display:block;font:800 9.5px Arial,sans-serif;color:#6e7a9c;text-transform:uppercase;letter-spacing:.06em;margin:0 3px 3px}
 .ma-ld select{width:100%;text-overflow:ellipsis}
-.ma-capbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px}.ma-capbar .ma-in{font:800 13px Arial,sans-serif;padding:4px 8px}.ma-capbar small{color:#7c88ad;font-size:11px;line-height:1.35;flex:1;min-width:90px}
-.ma-lvs{display:flex;flex-wrap:wrap;gap:6px}
-.ma-lv{position:relative;display:flex;flex-direction:column;gap:7px;padding:10px 9px 8px;background:#1d2a4d;border:1px solid rgba(255,255,255,.08);border-radius:12px;cursor:pointer;opacity:.55;transition:.15s;overflow:hidden}
+.ma-capbar{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin-bottom:9px}.ma-capbar .ma-in{font:800 14px Arial,sans-serif;padding:5px 9px}
+.ma-capmeta{display:flex;align-items:center;gap:5px;flex-wrap:wrap;flex:1;min-width:120px}.ma-capmeta small{color:#6e7a9c;font-size:10.5px}
+.ma-pill.xp{color:#d9c4ff;border-color:rgba(160,122,216,.4);background:rgba(160,122,216,.12)}
+.ma-segs{display:inline-flex;gap:2px;align-items:center}.ma-segs i{width:9px;height:5px;border-radius:2px;background:#27324f}.ma-segs i.on{background:#4b73e0}
+.ma-lvs{display:grid;grid-template-columns:repeat(auto-fill,minmax(92px,1fr));gap:6px}
+.ma-lv{position:relative;display:flex;flex-direction:column;gap:6px;padding:10px 8px 8px;background:#1a2647;border:1px solid rgba(255,255,255,.07);border-radius:12px;cursor:pointer;opacity:.5;transition:.15s;overflow:hidden;min-width:0}
+.ma-lvh{display:flex;align-items:center;justify-content:space-between;gap:4px}.ma-lvx{color:#d9c4ff;font-size:12px;line-height:1}
 .ma-lv::before{content:'';position:absolute;left:0;right:0;top:0;height:3px;background:#2f3d66}
 .ma-lv:hover{opacity:.92}
 .ma-lv.got{opacity:1}.ma-lv.got::before{background:#4b73e0}
 .ma-lv.on{background:#243462;border-color:#6ea8ff;box-shadow:0 0 0 2px rgba(110,168,255,.24)}.ma-lv.on::before{background:#9fc1ff}
-.ma-lv>b{font:800 12.5px Arial,sans-serif;color:#8b97bd;letter-spacing:.01em}.ma-lv.got>b{color:#fff}.ma-lv.exp>b{color:#d9c4ff}
-.ma-lvt{display:flex;flex-wrap:wrap;gap:4px;max-width:116px}
-.ma-ti{width:34px;height:34px;box-sizing:border-box;border-radius:9px;overflow:hidden;border:1px solid #3a4a78;background:#131c38;display:flex;align-items:center;justify-content:center}
+.ma-lv b{font:800 12.5px Arial,sans-serif;color:#8b97bd;letter-spacing:.01em}.ma-lv.got b{color:#fff}.ma-lv.exp b{color:#d9c4ff}
+.ma-lvt{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:3px;align-content:start}
+.ma-ti{aspect-ratio:1;min-width:0;box-sizing:border-box;border-radius:7px;overflow:hidden;border:1px solid #33406a;background:#131c38;display:flex;align-items:center;justify-content:center}.ma-ti.more{font:800 10px Arial,sans-serif;color:#9caad0}
 .ma-lv.got .ma-ti{border-color:#6ea8ff}
 .ma-ti img{width:100%;height:100%;object-fit:contain;display:block}
-.ma-ti-fb{width:100%;height:100%;display:flex;align-items:center;justify-content:center;font:800 11px Arial,sans-serif;color:#fff}
+.ma-ti-fb{width:100%;height:100%;display:flex;align-items:center;justify-content:center;font:800 9px Arial,sans-serif;color:#fff}
 .ma-ti.xp{border-color:#a07ad8;background:#2a2050;color:#e3d3ff;font:800 17px Arial,sans-serif}
 .ma-lv .ma-none{color:#6e7a9c;font-size:11px;padding:4px 2px}
 /* select several bosses: the check on a bubble, and the bar that applies one setup to all of them */
 .ma-ck{flex:0 0 auto;width:20px;height:20px;box-sizing:border-box;border-radius:50%;border:2px solid #33406a;display:flex;align-items:center;justify-content:center;font:900 11px Arial,sans-serif;color:#fff}
 .ma-bb.pick{background:rgba(75,115,224,.2);border-color:#6ea8ff}.ma-bb.pick .ma-ck{background:#4b73e0;border-color:#6ea8ff}
-.ma-bulk{position:sticky;top:0;z-index:3;margin:0 0 8px;padding:8px 10px 9px;background:#16213f;border:1px solid #6ea8ff;border-radius:16px;box-shadow:0 10px 24px rgba(0,0,0,.5)}
+.ma-bulk{position:sticky;top:0;z-index:3;margin:0 0 8px;padding:7px 10px 9px;background:#131d38;border:1px solid rgba(110,168,255,.45);border-radius:14px;box-shadow:0 6px 16px rgba(0,0,0,.35)}
+.ma-bk-sel{display:grid;grid-template-columns:repeat(auto-fit,minmax(104px,1fr));gap:6px;margin-top:7px}.ma-bk-sel select{width:100%;text-overflow:ellipsis}
 @media (max-height:720px){.ma-bulk{position:static}}
 .ma-bk-h{display:flex;align-items:center;gap:2px;flex-wrap:wrap}.ma-bk-h b{font:800 12.5px Arial,sans-serif;color:#fff;margin-right:auto}
 .ma-bk-from{margin:2px 0 0;color:#9fc1ff;font-size:11px}
 .ma-bulk .ma-ld{margin-top:7px}.ma-bulk .ma-in.chg{border-color:#6ea8ff;background:#101b36}
-.ma-bk-cap{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:8px}.ma-bk-cap label{font:800 9.5px Arial,sans-serif;color:#6e7a9c;text-transform:uppercase;letter-spacing:.06em;margin:0 3px}
-.ma-bk-go{display:flex;align-items:center;gap:9px;margin-top:9px}.ma-bk-go span{flex:1;min-width:0;font-size:11px;color:#8ee6a8;line-height:1.35}.ma-bk-go .core-btn{padding:7px 16px;font-size:12px}
+.ma-bk-cap{display:flex;align-items:center;gap:5px;flex-wrap:wrap;margin-top:7px}.ma-bk-cap label{font:800 9.5px Arial,sans-serif;color:#6e7a9c;text-transform:uppercase;letter-spacing:.06em;margin:0 3px}
+.ma-bk-go{display:flex;align-items:center;gap:9px;margin-top:8px}.ma-bk-go span{flex:1;min-width:0;font-size:11px;color:#9fb0dc;line-height:1.35}.ma-bk-go .core-btn{padding:7px 16px;font-size:12px}
 .ma-what{margin:7px 3px 0;color:#7c88ad;font-size:11px;line-height:1.35;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .ma-reset{display:flex;align-items:center;gap:4px;flex-wrap:wrap;margin-top:9px;padding-top:6px;border-top:1px solid rgba(255,255,255,.06)}.ma-reset .sp{flex:1}
 .ma-link.warn{color:#ff9b9b}.ma-link.warn:hover{color:#ffc4c4;background:rgba(255,120,120,.1)}
@@ -2621,8 +2626,14 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     if (exp && !rungs.some((r) => r.exp)) { rungs.push({ req: exp, items: [], exp: true }); rungs.sort((a, b) => a.req - b.req); }
     const pctTxt = info && info.expCapPct != null ? ` (${info.expCapPct}%)` : '';
     const setCap = (v) => (e) => { stop(e); ovr(low).cap = v; saveCfg(); draw(); };
-    const bits = [info && info.levelReq ? lvTxt(info.levelReq) : '', info && info.expCapPct != null ? `EXP cap ${info.expCapPct}%` : '', rungs.length && base > 0 ? `${rungs.filter((r) => r.req <= base).length} of ${rungs.length} levels` : '', '0 = skip'].filter(Boolean);
-    const head = h('div', { class: 'ma-capbar' }, num(() => baseCap(low), (n) => { ovr(low).cap = n; draw(); }, { fmt: fmtNum, w: 78 }), h('small', {}, bits.join(' · ')));
+    const reached = rungs.filter((r) => r.req <= base).length;
+    const head = h('div', { class: 'ma-capbar' }, num(() => baseCap(low), (n) => { ovr(low).cap = n; draw(); }, { fmt: fmtNum, w: 84 }),
+      h('div', { class: 'ma-capmeta' },
+        info && info.levelReq ? pill(lvTxt(info.levelReq)) : null,
+        info && info.expCapPct != null ? pill(`EXP cap ${info.expCapPct}%`, 'xp') : null,
+        rungs.length && base > 0 ? pill(`${reached}/${rungs.length} levels`, reached === rungs.length ? 'ok' : '') : null,
+        rungs.length && base > 0 ? h('span', { class: 'ma-segs', title: `${reached} of ${rungs.length} loot levels reached` }, rungs.map((r) => h('i', { class: r.req <= base ? 'on' : '' }))) : null,
+        h('small', {}, '0 = skip')));
     if (!rungs.length) {
       return [head, chips([[1e8, '100M'], [5e8, '500M'], [1e9, '1B'], [2e9, '2B'], [3e9, '3B'], [5e9, '5B']], base, (v) => { ovr(low).cap = v; }),
         h('div', { class: 'ma-what' }, base <= 0 ? 'Cap 0: this boss is skipped.' : !info ? (LootScan.available ? 'No loot data yet. Press Scan at the top to read it.' : 'No loot data for this boss yet.') : '')];
@@ -2631,10 +2642,11 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     const at = new Map();                                              // item -> every level that drops it (for the hover text)
     rungs.forEach((r) => r.items.forEach((nm) => { const e = at.get(nm) || []; e.push(r.req); at.set(nm, e); }));
     const cards = rungs.map((r) => {
-      const tiles = r.items.map((nm) => h('span', { class: 'ma-ti', title: `${nm}\nDrops at ${at.get(nm).map(short).join(' · ')} damage` }, lootIcon(nm)));
-      if (r.exp) tiles.push(h('span', { class: 'ma-ti xp', title: `Reaches the EXP cap${pctTxt}` }, '★'));
+      const MAXT = 6, tiles = r.items.slice(0, MAXT).map((nm) => h('span', { class: 'ma-ti', title: `${nm}\nDrops at ${at.get(nm).map(short).join(' · ')} damage` }, lootIcon(nm)));
+      if (r.items.length > MAXT) tiles.push(h('span', { class: 'ma-ti more', title: r.items.slice(MAXT).join(', ') }, '+' + (r.items.length - MAXT)));
       return h('div', { class: 'ma-lv' + (r.req <= base ? ' got' : '') + (r.req === base ? ' on' : '') + (r.exp ? ' exp' : ''), title: `Cap at ${fmtNum(r.req)}` + (r.items.length ? ': ' + r.items.join(', ') : ''), onclick: setCap(r.req) },
-        h('b', {}, short(r.req)), h('div', { class: 'ma-lvt' }, tiles));
+        h('div', { class: 'ma-lvh' }, h('b', {}, short(r.req)), r.exp ? h('span', { class: 'ma-lvx', title: `Reaches the EXP cap${pctTxt}` }, '★') : null),
+        tiles.length ? h('div', { class: 'ma-lvt' }, tiles) : h('span', { class: 'ma-none' }, 'EXP cap'));
     });
     return [head, h('div', { class: 'ma-lvs' }, cards),
       base <= 0 ? h('div', { class: 'ma-what' }, 'Cap 0: this boss is skipped.') : base > topReq ? h('div', { class: 'ma-what' }, `Above the top level (${short(topReq)}): the extra damage adds nothing.`) : null];
@@ -2749,24 +2761,30 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   }
   function bulkBar(sec) {
     const kinds = Presets.kinds(), n = selCount(), chg = bulkChanges();
-    const pickBox = (items, cur, set) => h('select', { class: 'ma-in' + (cur ? ' chg' : ''), onclick: stop, onchange: (e) => { set(e.target.value); BK.msg = ''; draw(); } },
-      items.map(([v, l]) => h('option', Object.assign({ value: v }, String(v) === String(cur) ? { selected: true } : {}), l)));
     const lnk = (label, title, fn) => h('button', { type: 'button', class: 'ma-link', title, onclick: (e) => { stop(e); fn(); } }, label);
-    const go = btn(n ? `Apply to ${n} boss${n === 1 ? '' : 'es'}` : 'Tick some bosses', 'success', () => { if (n && chg) applyBulk(); });
+    // one dropdown per loadout kind: the unset state IS "no change" and wears the kind's name, so no labels and no "Leave as is"
+    const pickBox = (k) => {
+      const ico = KIND_ICO[k] || '🎒', cur = BK.pick[k] || '', opts = [['__default', 'Default loadout'], ['__keep', 'Keep equipped'], ...presetOpts(k)];
+      return h('select', { class: 'ma-in' + (cur ? ' chg' : ''), title: cap1(k) + ': ' + (cur ? 'will change' : 'no change'), onclick: stop, onchange: (e) => { if (e.target.value) BK.pick[k] = e.target.value; else delete BK.pick[k]; BK.msg = ''; draw(); } },
+        h('option', { value: '' }, `${ico} ${cap1(k)}`), ...opts.map(([v, l]) => h('option', Object.assign({ value: v }, String(v) === String(cur) ? { selected: true } : {}), `${ico} ${l}`)));
+    };
+    const capChip = (v, label, tip) => h('button', { type: 'button', title: tip, class: 'ma-chip' + (BK.cap === v ? ' on' : ''), onclick: (e) => { stop(e); BK.cap = BK.cap === v ? '' : v; BK.msg = ''; draw(); } }, label);   // tap again to clear
+    const plan = [...kinds.filter((k) => BK.pick[k]).map((k) => { const o = [['__default', 'default loadout'], ['__keep', 'keep equipped'], ...presetOpts(k)].find(([v]) => v === BK.pick[k]); return `${cap1(k)} → ${o ? o[1] : '…'}`; }),
+      ...(BK.cap ? [{ max: 'Cap → max loot', exp: 'Cap → EXP cap', skip: 'Cap → skip', num: 'Cap → ' + fmtNum(BK.n) }[BK.cap]] : [])].join(' · ');
+    const go = btn(!n ? 'Select bosses' : !chg ? 'Choose a change' : `Apply to ${n} boss${n === 1 ? '' : 'es'}`, 'success', () => { if (n && chg) applyBulk(); });
     if (!n || !chg) { go.disabled = true; go.style.opacity = '.45'; go.style.cursor = 'default'; }
     return h('div', { class: 'ma-bulk' },
-      h('div', { class: 'ma-bk-h' }, h('b', {}, n ? `☑ ${n} selected` : '☑ Tap bosses to select them'),
-        lnk('All shown', 'Tick every boss in the list below (it follows the filter)', () => toggleSel(shownDefs(sec), true)),
-        lnk('Farming', 'Tick the bosses that are switched on', () => toggleSel(Roster.list.filter((d) => Roster.canon(d) === d && isOn(d)), true)),
-        lnk('None', 'Untick everything', () => toggleSel([...BK.sel].map((l) => Roster.get(l)).filter(Boolean), false)),
+      h('div', { class: 'ma-bk-h' }, h('b', {}, n ? `☑ ${n} selected` : '☑ Tap bosses to select'),
+        lnk('All shown', 'Select every boss in the list below (it follows the filter)', () => toggleSel(shownDefs(sec), true)),
+        lnk('Farming', 'Select the bosses that are switched on', () => toggleSel(Roster.list.filter((d) => Roster.canon(d) === d && isOn(d)), true)),
+        lnk('None', 'Clear the selection', () => toggleSel([...BK.sel].map((l) => Roster.get(l)).filter(Boolean), false)),
         lnk('Done', 'Leave select mode', endBulk)),
-      BK.from ? h('div', { class: 'ma-bk-from' }, `Loadout copied from ${BK.from}. Tick the bosses that should get it.`) : null,
-      kinds.length ? h('div', { class: 'ma-ld' }, kinds.map((k) => h('div', {}, h('label', {}, (KIND_ICO[k] || '🎒') + ' ' + cap1(k)),
-        pickBox([['', 'Leave as is'], ['__default', 'Default loadout'], ['__keep', 'Keep equipped'], ...presetOpts(k)], BK.pick[k] || '', (v) => { if (v) BK.pick[k] = v; else delete BK.pick[k]; })))) : null,
+      BK.from ? h('div', { class: 'ma-bk-from' }, `Loadout copied from ${BK.from}. Select the bosses that should get it.`) : null,
+      kinds.length ? h('div', { class: 'ma-bk-sel' }, kinds.map(pickBox)) : null,
       h('div', { class: 'ma-bk-cap' }, h('label', {}, '🎯 Cap'),
-        seg([['', 'Leave'], ['max', 'Max loot'], ['exp', 'EXP cap'], ['skip', 'Skip'], ['num', 'Set…']], BK.cap, (v) => { BK.cap = v; BK.msg = ''; }),
-        BK.cap === 'num' ? num(() => BK.n, (v) => { BK.n = v; }, { fmt: fmtNum, w: 96 }) : null),
-      h('div', { class: 'ma-bk-go' }, go, h('span', {}, BK.msg || (chg ? '' : 'Pick something to change above. “Leave as is” keeps what each boss has.'))));
+        capChip('max', 'Max loot', 'Cap at the highest loot level'), capChip('exp', 'EXP cap', 'Cap at the damage that reaches the EXP cap'), capChip('skip', 'Skip', 'Cap 0: the boss is skipped'), capChip('num', 'Set…', 'Type a number'),
+        BK.cap === 'num' ? num(() => BK.n, (v) => { BK.n = v; }, { fmt: fmtNum, w: 90 }) : null),
+      h('div', { class: 'ma-bk-go' }, go, h('span', {}, BK.msg || plan || 'Pick a cap or a loadout. Anything you leave alone stays as it is.')));
   }
   function waveGroups(defs) {
     const groups = new Map();
