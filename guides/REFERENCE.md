@@ -47,15 +47,21 @@ addons/
   ui-cleanup.js       layout tidy + reminders on guild/home/battle pages (page-matched)
   battle.js           battle page restructure + AutoSlash (page-matched, early)
   automator.js        🤖 Automator (bosses, dungeons, duels, loot). Finds gear/crystal/pet presets through Core capabilities
+  build-engine.js     🧮 Build Engine (no button): damage prediction + best gear/pets/links for a boss, apply/revert through Core.tx. Ported from the Veyra Build Optimizer v11.81 with the author's permission
 examples/addon-template.js   annotated starter for new addons
 README.md             BASIC end-user guide (install, use, troubleshoot). Keep it basic
 guides/REFERENCE.md   this guide (includes the coordination spec, §17)
 tests/coord.test.js   node test harness for Core.model + Core.tx (`node tests/coord.test.js`)
+tests/plan.test.js    node: the automator's build planner (distance / order), loaded straight from addons/automator.js between PLAN-BEGIN and PLAN-END
+tests/auto-build.browser.js   Playwright + Chromium: the real automator + Build Engine + gear/pet presets against tests/lib/game.js (a fake game server)
+tests/build-engine.test.js, tests/fidelity.test.js   the engine against the fake game (jsdom; `tests/lib/env.js`, `tests/lib/game.js`, `tests/lib/t.js` are the harness)
 ```
 
 Versions: Core **3.8.1** (`version:` in `core.js`; ⚙️ shows "Core v3.8.1"), bootstrap **4.0.1**, crystal 1.5.1, gear 3.2.2, pet **2.8.0**, ui-cleanup 2.2.0, battle 15.10.
 
 Core **3.14.1** / Battle **15.19** / Cube Suite **3.4.0**: `Core.me` is now the one place that knows the player's stamina / exp / level and keeps the top bar right (a fresh fetch beats a stale bar; see `Core.me` in §7), Battle Page and Cube Suite no longer write the bar themselves, addons can declare `"button": true|false` in `addons.json`, and addons that are skipped on a page are kept up to date and keep one fixed place in ⚙️ (§4, §11). Before that, Core **3.13.0** / Cube Suite **3.3.0**: `Core.potions` (shared, coordinated potion use, sidebar first then inventory), update-queue fix, and ⚙️ now lists addons that run without a button last and shows each button's real look (e.g. the Stat Builder's points badge) instead of a dot. Recent changes (all tested): Elemental Orb slot; hover ⋯ menus; loader rewrite (instant start from saved copy); Equipped badge that matches pets, links, sigils and orbs exactly on all three teams; apply on an already-matching team finishes at once, with request timeouts; one **Check for updates** button; Core updates itself like an addon; page scroll lock while a modal is open; `Core.me` (stamina, level, exp, gold, server clock, pid from the top bar) and `Core.csrf` (one registry for CSRF tokens); `Core.keepAlive` (Web Lock + loopback WebRTC + silent audio, to keep a background tab alive), `Core.lock` (Web Lock hold/steal/release/elect) and `Core.tab` (main-tab / idle-tab election with take-over, built on Core.lock). Addons not yet migrated to them: pet-presets still keeps its own sigil token.
+
+Core **3.17.1** / Automator **1.9.0** / Build Engine **1.0.1** / Gear Presets **3.5.2** / Pet Presets **2.10.2** / Crystal Presets **1.8.1**: the Build Engine is in the manifest and loads (it never did before: it was missing from `addons.json`). `Core.tx` fixes: a failed apply with no snapshot used to leave the journal open, and every later build change was refused as an \"orphan\"; and `Core.tx.run('loadout', { raw: true })` for writers that use plain `fetch` (see §17.4). The three preset addons now run each apply inside the `loadout` lane. The Build Engine's relic reader took \"1,500\" as 1. The Automator holds every join / skill / attack while a build change runs, hands the boss to every preset apply, and has two new switches: **Auto best build** and **Fewest build changes** (§17.12).
 
 Core **3.17.0** (api level 6): **coordination**. `Core.model` is one parsed, versioned, cross-tab copy of each page; `Core.tx` is one locked, journaled write lane (`'loadout'`) with orphan recovery. Both are built and tested but no addon uses them yet; the plan to move the addons onto them is §17. Step 0 cleanups shipped with it: battle.js listens through `Core.net.watch` instead of wrapping `fetch`, gear-presets returns the apply result instead of using `lastSay`, `esc`/`sleep` come from Core, and `addons.json` now lists automator 1.7.20.
 
@@ -716,10 +722,16 @@ so I can check them against the real HTML.
 
 ## 17. Coordination: `Core.model`, `Core.tx` (api level 6) and the plan
 
-**Status (Core 3.17.0).** Built and covered by `tests/coord.test.js` (`node tests/coord.test.js`, 26 checks): §17.3 `Core.model` and §17.4 `Core.tx`.
-Step 0 cleanups are done (§17.9). **Not built:** §17.5 `loadout.*` participants, §17.6 the `build-engine` addon, moving `Core.me` / battle.js onto the `stats`
-model, the step 6 dedupe sweep. Nothing consumes `Core.model` / `Core.tx` yet, so today they change no behaviour. The block lives in `core.js` between
-`// >>> core-coord:begin` and `// <<< core-coord:end` and only touches the `env` object it is given, which is how the test loads it on its own.
+**Status (Core 3.17.1).** Built: §17.3 `Core.model`, §17.4 `Core.tx`, §17.6 the `build-engine` addon (gear + pets + links; not crystals), the
+lane wrappers around the three preset addons' applies (§17.5, partly), and the automator's use of all of it (§17.12). `tests/coord.test.js` (26 checks) covered
+`Core.model` / `Core.tx` at 3.17.0; it was not re-run after the 3.17.1 edits, and the file was not in the export they were made from, so re-run it before releasing.
+**Not built:** the `loadout.<kind>.snapshot/apply/restore/verify` capabilities of §17.5 (the engine has its own driver), moving `Core.me` / battle.js onto the `stats`
+model, the step 6 dedupe sweep. The block lives in `core.js` between `// >>> core-coord:begin` and `// <<< core-coord:end` and only touches the `env` object it is given,
+which is how the test loads it on its own.
+
+**What was run, honestly.** `tests/plan.test.js` (11 checks) and `tests/auto-build.browser.js` (6 checks, real Chromium) pass. The engine tests passed 20 of 20 in the
+session that fixed the relic parser and the unknown-boss error; they need jsdom and were not re-run afterwards. Everything runs against `tests/lib/game.js`, a fake
+server built from the selectors the addons read. **Nothing has been run against the live game.**
 
 Goal: the addons behave like one script. One reader per page, one writer lane per domain, every state change announced,
 every write journaled, nothing correct only because a timer happened to fire.
@@ -829,10 +841,15 @@ Sequence: take Web Lock `core:tx:loadout` (fail-fast or wait) -> write journal `
 - **External change:** writers use `t.post`, which tags requests. A write-pattern POST seen while a tx is open that no `t.post` sent raises `loadout:external-change`; the writer verifies early and replans once, or aborts. Raw-`fetch` participants can't be tagged, so for them verification is the safety net (stated limit).
 - **Logout / maintenance mid-write:** tx ends failed, journal stays; `auth:signedin` triggers the orphan check.
 - **Cancel:** `t.cancelled`; the journal still gets closed with what was done.
+- **No snapshot (3.17.1):** a tx that fails before it has a `before` has nothing to restore, so its journal is closed. Before, it stayed open and the lane refused every later tx as an orphan.
+- **`raw: true` (3.17.1):** for a writer that uses plain `fetch` and cannot tag with `t.post` (the preset addons). Same-tab writes seen by the fetch hook are then not \"external\"; another tab's writes still are.
 
 ---
 
-### 17.5 loadout.* participants and the preset addons (DESIGN, not built)
+### 17.5 loadout.* participants and the preset addons (PARTLY BUILT)
+
+**Built (3.17.1):** `gear-presets`, `pet-presets` and `crystal-presets` wrap the body of their existing `preset.<kind>.apply` in `Core.tx.run('loadout', { kind: 'preset', raw: true, ... })`. A human click, the automator and the engine can no longer interleave, and every apply announces `loadout:begin/end`. They are thin wrappers: the apply code is unchanged. **Not built:** the `loadout.<kind>.*` capabilities below.
+
 
 Today's contract (`preset.<kind>.list/apply`) stays unchanged. Add, per kind:
 
@@ -851,7 +868,11 @@ loadout.<kind>.verify(spec)        -> { ok, why[] }
 
 ---
 
-### 17.6 Engine addon `build-engine` (DESIGN, not built)
+### 17.6 Engine addon `build-engine` (IMPLEMENTED, v1.0.1)
+
+**As built:** `addons/build-engine.js`, registered in `addons.json` (`button:false`, no `match`). It offers `build.predict`, `build.best`, `build.apply`, `build.revert`, `preset.best.list` (one preset, id `best`) and `preset.best.apply(id, { target, threshold?, mode?, silent? })`. It reads the pages it needs through `Core.model` and equips through `Core.tx('loadout')` with its own journal recovery. **It searches gear, pets and pet links. It does not search crystals.** The optimizer's panel, mob crawl and PvP tab are not ported; mob stats are read one boss at a time. The optimizer's author gave permission to use its code here, so the engine contains the calculator as it is (marked ENGINE in the file) and §17.11 item 1 is closed.
+`build.best` returns `{ ok, best: { sel, result }, current: { sel, result }, gainPct, changes[] }`, where `sel = { mains[3], link1[3], link2[3], gear: { Slot: name } }`. It changes nothing; `preset.best.apply` skips the swap when the gain is under the threshold (default 2%). The design notes below are the original plan.
+
 
 - No `match` (loads everywhere), `button:false`, no `deps`.
 - Provides: `build.predict(mob, build?)`, `build.best(mob, {mode, rules})`, `build.apply(plan, {silent})`, `build.revert()`, `preset.best.list`, `preset.best.apply(id, {target})`.
@@ -906,9 +927,9 @@ loadout.<kind>.verify(spec)        -> { ok, why[] }
 0. **DONE (Core 3.17.0 / addons bumped in `addons.json`)**: F1, F5, F10 (esc/sleep), F11 (manifest), and the "re-fetch my own page" GETs of F3 in battle.js / pet-presets / gear-presets. **Still open:** the rest of F3 (ui-cleanup, cube-suite, action POSTs), `parseNum`/`fmt`/timeout wrappers, player id in cube-suite. Original list: battle.js `installAttackResponseWatcher` -> `Core.net.watch` (F1); raw GETs -> `Core.net.fetchText` (F3); `Core.esc/sleep/parseNum/fmt/player.id` instead of copies (F10); gear-presets result via return value (F5); refresh the repo's `automator.js` (F11).
 1. **DONE.** `Core.model` + `Core.tx` behind `apiLevel 6`, plus the harness (§17.10). **Done in Core 3.17.0.** Nothing consumes them yet.
 2. **Stats through the model:** `Core.me` and battle.js read `stats` via `Core.model`; stat-autobuilder's `stats_ajax.php` rule.
-3. **Engine, read-only:** `build.predict`/`build.best`, mob store, verified against the optimizer's numbers on the same mobs. battle.js uses `build.predict` when present.
-4. **Participants:** gear-presets and pet-presets implement `loadout.*` and wrap applies in `Core.tx`; crystal wraps its apply.
-5. **Apply and auto:** `build.apply/revert`, `preset.best.*`, automator pause on `loadout:begin` and the `target` hand-over.
+3. **DONE (Build Engine 1.0.1).** **Engine, read-only:** `build.predict`/`build.best`, mob store, verified against the optimizer's numbers on the same mobs. battle.js uses `build.predict` when present.
+4. **PARTLY DONE.** **Participants:** the applies of gear / pet / crystal are wrapped in `Core.tx` (3.17.1). `loadout.*` capabilities: not built.
+5. **DONE (Automator 1.9.0).** **Apply and auto:** `build.apply/revert`, `preset.best.*`, automator pause on `loadout:begin` and the `target` hand-over.
 6. **Dedupe sweep:** ui-cleanup / cube-suite / automator onto shared `dash` and `dungeons` resources and `Core.tab` leadership (F8, F9).
 
 ---
@@ -929,11 +950,28 @@ loadout.<kind>.verify(spec)        -> { ok, why[] }
 12. Journal for player A not applied under player B.
 13. Core without `model` (apiLevel 5): addons take the fallback paths.
 
+Added with the engine and the automator (files in §2): the engine against the fake game (`tests/build-engine.test.js`, `tests/fidelity.test.js`); the planner's distance and order, including a brute-force check that the exact order is the cheapest (`tests/plan.test.js`); and, in Chromium, `wanted()` for auto on / off / manual / dungeon, `ensure()` equipping the engine's build, `Planner.pick()` with stubbed engine answers (same build first, cached searches, failing search), and the automator without the engine (`tests/auto-build.browser.js`). Not covered: the swing loop's hold after a build change (checked by reading and `node --check` only), anything against the live site.
+
 ---
 
-### 17.11 Open decisions
 
-1. **The optimizer's access check.** The userscript multiplies base damage by a flag set only by a guild check; without it every prediction is 0. This engine would live in a public repo. Ask the author first, or keep the check. **Current decision:** do not copy the gated calculator into this repo; build `build.predict` / `build.best` on the damage formula battle.js already has (no gate), or use the original only with the author's permission.
-2. Cross-tab sharing of values (adopt over the bus) vs leader-only fetching. **Decided and built:** adopt over the bus.
-3. Auto-recover an orphan, or offer a "Restore previous build" button. **Decided and built:** a toast offering "Restore" by default; `Core.tx.autoRecover(domain, true)` turns on automatic restore.
-4. Hosting `loadout.*` in the engine first, then moving into the preset addons (proposed), or in the preset addons from the start.
+### 17.12 Automator: build changes, Auto best build, Fewest build changes (Automator 1.9.0)
+
+**Rules the automator follows around a build change**
+- No join, skill or attack is sent while `Core.tx.busy('loadout')` is set (a human preset click, another tab, the engine). The wait is polled and woken by `loadout:end`, time-boxed to 3 minutes; after that the request is not sent and the normal failure path takes over. Its own `Presets.ensure` runs between swings, so it never waits on itself. Without `Core.tx` (older Core) there is nothing to wait for.
+- Every preset apply gets `{ silent: true, boss }`; kind `best` also gets `target = boss`. The `best` memo is kept per boss (`best@<monsterId>`). Dungeon bosses, swarms and Generals skip `best` and use saved presets.
+- Any build change by someone else (`loadout:end` from another owner or tab) clears what this tab remembers applying. Applying `best` that changed gear or pets clears the gear and pet memos.
+
+**Auto best build** (`cfg.autoBuild.enabled`, Settings → Builds, and the Default loadout card)
+A wave boss with no gear and no pet pick of its own is equipped with the engine's best gear + pets for that boss instead of the saved gear / pet presets. Crystals stay the boss's own crystal pick, else the default loadout's (the engine does not search crystals). A boss that has its own gear or pet pick (including \"keep equipped\") is manual: its picks win and the engine is left out; a boss set to keep `best` equipped is manual too. Off, or no Build Engine: the old behaviour. `Presets.wanted(low, target)` is the one function that says what a boss gets; `ensure` and the planner both use it.
+
+**Fewest build changes** (`cfg.autoBuild.order`, `cfg.autoBuild.maxChanges`, default 2)
+Instead of \"first alive and uncapped in your order\", the next boss is chosen so the build changes as little as possible. Needs the Build Engine; without it, or with a single candidate, your order stands.
+- *Signature of a boss:* the engine's best `sel` (gear by slot, mains, links) plus its crystal preset id. A boss on saved presets gets a tag from its gear / pet preset ids; a boss that keeps what is equipped needs no change.
+- *Distance between two builds:* 1 per gear slot that differs (including one that goes empty), 1 per main pet that leaves, 1 + its links per main that joins, 1 per link that differs on a main that stays, 1 for a different crystal preset (only when both are known). A saved-preset build and a searched build are not comparable (counted as 20).
+- *Order:* bosses that keep the equipped build go first. The rest: up to 9 bosses, the cheapest order of all, exact (DP over subsets, starting from the build that is on now). More than 9: nearest-first; while a boss within `maxChanges` is left it stays on that build (free ones, then 1, then 2 changes), and when none is left it switches to the nearest build that has the most bosses around it. Ties go to the boss you ranked first.
+- *Starting build:* read from the engine's answer (`current.sel`); when searches are cached, the build the last pick is expected to have put on.
+- *Sticky:* once on a boss the automator stays on it until it is capped, dead or skipped. Leaving it would be a build change too.
+- *Cost:* one `build.best` per candidate boss (90 s limit each), remembered for 15 minutes and cleared when you change a loadout or either switch. A failed search makes that boss count as a full switch. Any error in the planner falls back to your order and is logged (\"build planner: ...\").
+- *Logs:* \"🧭 planning the order for N bosses…\" and \"🧭 build order: A → B → C (n changes)\".
+- *Limits:* the plan assumes the engine will equip its best build; it skips the swap when the gain is under 2%, so the real number of changes can be lower. The order is recomputed only when the current boss ends, so a boss that spawns mid-fight waits. Nothing here has run against the live game.
