@@ -24,7 +24,7 @@
  * replies were retried instantly instead of honouring their delay.
  */
 Core.module({
-  id: 'automator', name: 'Automator', icon: '🤖', version: '1.7.5',
+  id: 'automator', name: 'Automator', icon: '🤖', version: '1.7.7',
   // Offered to other addons through Core capabilities (guides/CAPABILITIES.md):
   //   automator.status() -> the status string     automator.start() / automator.stop()     automator.scan() -> scan the bosses now
   provides: (api) => api && api.start ? {
@@ -35,7 +35,7 @@ Core.module({
   } : {},
   init(Core) {
 'use strict';
-const ID = 'automator', VERSION = '1.7.5';
+const ID = 'automator', VERSION = '1.7.7';
 if (window.__automatorLoaded) { console.warn('[automator] already loaded', window.__automatorLoaded); return null; }
 window.__automatorLoaded = VERSION;
 
@@ -1345,7 +1345,7 @@ const shadowExtras = (() => {
 })();
 function setShadowExtras(on) {
   shadowExtras.forEach((e) => {
-    const name = e.mob + ' (Shadowbridge)', low = name.toLowerCase();
+    const name = e.mob, low = name.toLowerCase();
     if (on || cfg.targets.includes(low)) {
       if (!Roster.get(low)) Roster.add({ name, defaultCap: 1e6, kind: 'dungeon-swarm', dtype: 'easy', extra: true, locationId: e.locs[0], locationIds: e.locs, terr: e.terr.join(' + '),
         swarmMatch: new RegExp('^\\s*' + e.mob.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*$', 'i') });
@@ -1359,7 +1359,7 @@ function setShadowExtras(on) {
     { name: 'Grimgrowl the Chimera', defaultCap: 2e9, kind: 'dungeon', locationId: 8, dtype: 'hard' },
     { name: 'Drazhul The Broken Crown', defaultCap: 2e9, kind: 'dungeon', locationId: 9, dtype: 'hard' },
     { name: 'Khaal The Abomination Prince', defaultCap: 3e9, kind: 'dungeon', locationId: 10, dtype: 'hard', mapGated: true },
-    { name: 'Gribbles (Shadowbridge)', defaultCap: 1e6, kind: 'dungeon-swarm', dtype: 'easy', locationIds: [2, 4], swarmMatch: /gribble/i },
+    { name: 'Gribbles', defaultCap: 1e6, kind: 'dungeon-swarm', dtype: 'easy', locationIds: [2, 4], swarmMatch: /gribble/i },
     { name: 'Prince Grixkar The Hybrid', defaultCap: 3e9, kind: 'dungeon', locationId: 5, dtype: 'easy', mapGated: true },
   ].forEach((d) => Roster.add(d));
   const khaal = Roster.get('khaal the abomination prince');
@@ -1547,7 +1547,7 @@ Object.assign(Dungeons, (() => {
       if (!r || !r.doc || /route is still sealed/i.test(r.html)) continue;
       for (const card of r.doc.querySelectorAll('.mon')) {
         if (card.classList.contains('dead')) continue;
-        const name = monName(card), dgmid = dgmidOf(card); if (!dgmid || Roster.get(name.toLowerCase())) continue;
+        const name = monName(card), dgmid = dgmidOf(card), known = Roster.get(name.toLowerCase()); if (!dgmid || (known && known.kind !== 'dungeon-swarm')) continue;
         const key = `dungeon:${dgmid}:${id}`; if (key === excludeKey || (shielded && shielded.has(key))) continue;
         return { kind: 'dungeon', monsterId: dgmid, instanceId: String(id), locationId: loc, name: name || 'dungeon mob', low: name.toLowerCase() };
       }
@@ -2489,7 +2489,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
       return h('div', { class: 'ma-q', onclick: go2(def) }, avatar(def.name, ev.icon || iconOfBoss(def.low), { boss: true }),
         h('div', { class: 'ma-q-n' }, h('b', {}, def.name), swarm ? null : h('div', { class: 'ma-bar' + (cap > 0 && dmg >= cap ? ' done' : '') }, h('i', { style: { width: (cap > 0 ? Math.min(100, dmg / cap * 100) : 0).toFixed(1) + '%' } })), swarm ? null : h('small', {}, `${fmtNum(dmg)} / ${fmtNum(cap)}`)), pill(r.txt, r.kind));
     };
-    const miniRow = (r) => h('div', { class: 'ma-mini', title: r.def.name, onclick: go2(r.def) }, avatar(r.def.name, iconOfBoss(r.live), { size: 'xs' }), h('div', {}, h('b', {}, splitName(r.def.name)[0]), h('small', { class: 'st-' + (r.kind || 'x') }, r.txt)));
+    const miniRow = (r) => h('div', { class: 'ma-mini', title: r.def.name, onclick: go2(r.def) }, avatar(r.def.name, iconOfBoss(r.live), { size: 'xs' }), h('div', {}, h('b', {}, nameOf(r.def)), h('small', { class: 'st-' + (r.kind || 'x') }, r.txt)));
     const tally = (k, label) => { const n = rest.filter((r) => k(r)).length; return n ? pill(`${n} ${label}`, k === isCapped ? 'cap' : k === isWait ? 'blue' : 'warn') : null; };
     const isCapped = (r) => r.kind === 'cap', isWait = (r) => r.kind === 'blue' || r.kind === '' , isOther = (r) => !isCapped(r) && !isWait(r);
     const few = rows.length <= 6, all = isOpen('ov:rest', false);
@@ -2609,6 +2609,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   }
 
   /* a boss as a bubble: avatar (dot = state), short name, cap · state, switch. Tap it to select it (one at a time) and open its editor. */
+  const nameOf = (d) => (d.kind === 'dungeon-swarm' ? d.name : splitName(d.name)[0]);   // shorthand for every boss (wave + dungeon); only the normal dungeon mobs (Gribbles etc.) keep the full name
   function splitName(n) {
     n = String(n || ''); const c = n.indexOf(',');
     if (c > 0) return [n.slice(0, c).trim(), n.slice(c + 1).trim()];
@@ -2633,7 +2634,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     return h('div', { class: 'ma-bb' + (on ? ' on' : '') + (op ? ' open' : '') + (picked ? ' pick' : ''), title: def.name + (ld.length ? '\n' + ld.join('\n') : ''),
       onclick: pickMode ? () => toggleSel([def]) : () => { ui.sel = op ? '' : def.low; saveUi(); draw(); if (!op) setTimeout(() => { const e = root && root.querySelector('.ma-ed'); if (e && e.scrollIntoView) e.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); }, 40); } },
       avatar(def.name, iconOfBoss(def.low), { boss: true, dot: on ? kind || 'x' : '' }),
-      h('div', { class: 'ma-bb-n' }, h('b', {}, splitName(def.name)[0]), h('small', {}, ...sub)),
+      h('div', { class: 'ma-bb-n' }, h('b', {}, nameOf(def)), h('small', {}, ...sub)),
       pickMode ? h('span', { class: 'ma-ck' }, picked ? '✓' : '') : sw(() => on, (v) => setMany([def], v), { sm: true, redraw: false }));
   }
   /* one row = a label (W12 for a wave, L6 for a dungeon territory) + its bosses as bubbles */
