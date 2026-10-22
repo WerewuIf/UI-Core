@@ -24,7 +24,7 @@
  * replies were retried instantly instead of honouring their delay.
  */
 Core.module({
-  id: 'automator', name: 'Automator', icon: '🤖', version: '1.7.20',
+  id: 'automator', name: 'Automator', icon: '🤖', version: '1.9.0',
   // Offered to other addons through Core capabilities (guides/CAPABILITIES.md):
   //   automator.status() -> the status string     automator.start() / automator.stop()     automator.scan() -> scan the bosses now
   provides: (api) => api && api.start ? {
@@ -35,7 +35,7 @@ Core.module({
   } : {},
   init(Core) {
 'use strict';
-const ID = 'automator', VERSION = '1.7.20';
+const ID = 'automator', VERSION = '1.9.0';
 if (window.__automatorLoaded) { console.warn('[automator] already loaded', window.__automatorLoaded); return null; }
 window.__automatorLoaded = VERSION;
 
@@ -83,6 +83,7 @@ const DEFAULT_CFG = {
   targets: [],                         // nameLow list = enabled bosses, in priority order (first alive + uncapped wins)
   bosses: {},                          // nameLow -> { cap, targeting:'auto|normal|shielded', <kind>:'' | '__keep' | presetId (one per preset kind offered: gear, crystal, pet, …; '' = use the default loadout), schedule:[{ at:'HH:MM', cap }] (server time) }
   loadout: {},                         // preset kind -> preset id applied on every boss without a pick of its own ('' = keep what is equipped)
+  autoBuild: { enabled: false, order: false, maxChanges: 2 },   // enabled: wave bosses get the Build Engine's best gear + pets (crystals: the preset). order: fight bosses with the same / a similar build back to back (maxChanges = how many changes still count as "the same build")
   defaultBossCap: 3_000_000_000,
   maxTier: 'WORLD_BREAKER',            // always the strongest; pickTier steps down only when less is left under the cap
   classOverride: 'auto', useClassSkill: true,
@@ -108,7 +109,9 @@ const logStore = Core.store(ID + '-log', { def: [] });
 function mergeCfg(saved) {
   const d = JSON.parse(JSON.stringify(DEFAULT_CFG)), s = saved && typeof saved === 'object' ? saved : {};
   const out = Object.assign(d, s);
-  for (const k of ['mana', 'hp', 'sideMob', 'autoLoot']) out[k] = Object.assign({}, DEFAULT_CFG[k], s[k] || {});
+  for (const k of ['mana', 'hp', 'sideMob', 'autoLoot', 'autoBuild']) out[k] = Object.assign({}, DEFAULT_CFG[k], s[k] || {});
+  out.autoBuild.enabled = !!out.autoBuild.enabled; out.autoBuild.order = !!out.autoBuild.order;
+  out.autoBuild.maxChanges = Number.isFinite(Number(out.autoBuild.maxChanges)) ? Math.min(20, Math.max(0, Math.round(Number(out.autoBuild.maxChanges)))) : DEFAULT_CFG.autoBuild.maxChanges;
   delete out.sideMob.locked; delete out.sideMob.lockedKey; delete out.sideMob.source;      // (old picks: the pierce is automatic now)
   out.autoLoot.mode = 'toLevel';                                     // claims only what levels you up: not a setting any more
   out.parts = Object.assign({}, DEFAULT_CFG.parts); Object.keys(out.parts).forEach((k) => { out.parts[k] = true; });   // modules are always on
@@ -1016,26 +1019,202 @@ const Presets = (() => {
     try { return (f() || []).map((p) => ({ id: String(p.id), name: String(p.name == null ? p.id : p.name) })); } catch (_) { return []; }
   }
   const nameOf = (kind, id) => { const p = list(kind).find((x) => x.id === String(id)); return p ? p.name : String(id); };
+  // The Build Engine offers the pseudo-kind 'best' (preset.best.*): it needs the boss, and it only makes sense for a wave boss.
+  const BEST = 'best';
+  const bossOf = (t) => ({ monsterId: t.monsterId, name: t.name, kind: t.kind });
+  const noBest = (t) => !t || t.kind === 'dungeon' || !!t.swarm || /\bGeneral\b/i.test(String(t.name || ''));   // dungeon bosses and Generals stay on saved presets
+  const memoOf = (kind, want, t) => (kind === BEST ? 'best@' + (t && t.monsterId != null ? t.monsterId : '') : String(want));   // best is judged per boss
   // Called between swings, when the engine moves to a boss. Applies the boss's preset of each kind if it is not already on.
-  async function ensure(low) {
-    const o = cfg.bosses[low] || {};
+  // Every apply gets { silent: true, boss } (a preset addon may use the boss); kind 'best' also gets target = the boss, which is what the engine searches for.
+  // What this boss gets, per kind: { kind: presetId }. The boss's own pick, else the default loadout.
+  // Auto best build (Settings): a wave boss with NO gear / pet pick of its own takes the engine's best gear + pets instead of the saved
+  // gear / pet presets; its crystals stay the boss's pick or the default loadout (the engine does not search crystals).
+  // A boss with its own gear or pet pick (even "keep equipped") is manual: that pick wins and the engine is left out.
+  const autoFor = (low, t) => {
+    if (!(cfg.autoBuild && cfg.autoBuild.enabled) || !available(BEST) || noBest(t)) return false;
+    const o = cfg.bosses[low] || {}; return !o.gear && !o.pet && o[BEST] !== '__keep';
+  };
+  function wanted(low, t) {
+    const o = cfg.bosses[low] || {}, auto = autoFor(low, t), out = {};
     for (const kind of kinds()) {
-      const mine = o[kind], want = mine === '__keep' ? '' : (mine || (cfg.loadout || {})[kind]);   // the boss's own pick, else the default loadout
-      if (!want || applied[kind] === String(want)) continue;
-      const key = kind + ':' + want;
-      if (Date.now() - (failedAt[key] || 0) < 300000) continue;           // a failed apply is not retried for 5 min
-      log(`🎒 applying ${kind} preset "${esc(nameOf(kind, want))}" for ${esc(bossName(low))}…`, 'info');
-      let r;
-      try { r = await withTimeout(Core.call('preset.' + kind + '.apply', String(want), { silent: true }), 120000, { ok: false, message: 'timed out' }); }
-      catch (e) { r = { ok: false, message: (e && e.code === 'NO_CAP') ? 'the addon that offered it is gone' : ((e && e.message) || String(e)) }; }
-      if (r && r.ok !== false) { applied[kind] = String(want); log(`✅ ${kind} preset applied`, 'ok'); try { await Core.me.sync(); } catch (_) { /* */ } Me.statsAt = 0; }
-      else { failedAt[key] = Date.now(); log(`⚠️ ${kind} preset "${esc(nameOf(kind, want))}" failed: ${esc((r && r.message) || 'unknown')}`, 'warn'); }
+      const mine = o[kind];
+      let want = mine === '__keep' ? '' : (mine || (cfg.loadout || {})[kind]);
+      if (auto && (kind === 'gear' || kind === 'pet') && !mine) want = '';
+      if (kind === BEST) want = auto ? BEST : (noBest(t) ? '' : want);
+      if (want) out[kind] = String(want);
     }
+    return out;
   }
+  let ensuring = false;
+  async function ensure(low, t) {
+    const W = wanted(low, t);
+    ensuring = true;
+    try {
+      for (const kind of kinds()) {
+        const want = W[kind];
+        if (!want) continue;
+        const memo = memoOf(kind, want, t);
+        if (applied[kind] === memo) continue;
+        const key = kind + ':' + memo;
+        if (Date.now() - (failedAt[key] || 0) < 300000) continue;           // a failed apply is not retried for 5 min (best: per boss)
+        log(`🎒 applying ${kind} preset "${esc(nameOf(kind, want))}" for ${esc(bossName(low))}…`, 'info');
+        const boss = t ? bossOf(t) : { name: bossName(low) };
+        const opts = kind === BEST ? { silent: true, boss, target: boss } : { silent: true, boss };
+        let r;
+        try { r = await withTimeout(Core.call('preset.' + kind + '.apply', String(want), opts), 120000, { ok: false, message: 'timed out' }); }
+        catch (e) { r = { ok: false, message: (e && e.code === 'NO_CAP') ? 'the addon that offered it is gone' : ((e && e.message) || String(e)) }; }
+        if (r && r.ok !== false) {
+          applied[kind] = memo; log(`✅ ${kind} preset applied`, 'ok'); try { await Core.me.sync(); } catch (_) { /* */ } Me.statsAt = 0;
+          if (kind === BEST && r.changed) { delete applied.gear; delete applied.pet; }   // the engine moved gear / pets: those memos no longer describe what is on
+        } else { failedAt[key] = Date.now(); log(`⚠️ ${kind} preset "${esc(nameOf(kind, want))}" failed: ${esc((r && r.message) || 'unknown')}`, 'warn'); }
+      }
+    } finally { ensuring = false; }
+  }
+  // Someone else changed the build (a human preset click, another tab, the engine): what this tab remembers applying may be stale.
+  // Which memos an owner can invalidate; an unknown owner clears everything.
+  const OWNS = { 'gear-presets': ['gear', BEST], 'pet-presets': ['pet', BEST], 'crystal-presets': ['crystal'], 'build-engine': ['gear', 'pet', BEST] };
+  function foreignEnd(d) {
+    if (ensuring && d && d.tab === Core.tabId) return;                 // our own applies (this tab): ensure() keeps its memo itself
+    const ks = (d && OWNS[d.owner]) || Object.keys(applied);
+    ks.forEach((k) => { delete applied[k]; });
+  }
+  if (typeof Core.on === 'function') Core.on('loadout:end', foreignEnd);
   // "gear: Boss gear · pet: Boss pets" for the Status tab, or an em dash when nothing was applied this session
-  const summary = () => { const a = kinds().filter((k) => applied[k]).map((k) => k + ': ' + nameOf(k, applied[k])); return a.length ? a.join(' · ') : '—'; };
+  const summary = () => { const a = kinds().filter((k) => applied[k]).map((k) => k + ': ' + nameOf(k, String(applied[k]).split('@')[0])); return a.length ? a.join(' · ') : '—'; };
   const note = () => !haveCaps() ? 'needs Core 3.16.0+' : (kinds().length ? kinds().map((k) => `${k} (${list(k).length})`).join(' · ') : 'none offered');
-  return { kinds, available, list, ensure, summary, note, applied: () => Object.assign({}, applied), forget: () => { Object.keys(applied).forEach((k) => delete applied[k]); } };
+  return { kinds, available, list, ensure, wanted, autoFor, summary, note, applied: () => Object.assign({}, applied), forget: () => { Object.keys(applied).forEach((k) => delete applied[k]); } };
+})();
+
+/* ---- build planner: which boss next, so the build changes as little as possible ------------------------------------------
+ * Every boss that is about to be fought has a "build signature": what will be equipped for it (the Build Engine's best gear + pets, or the
+ * saved presets' names) and its crystal preset. distance() counts the changes between two builds (one per gear slot, per pet, per link,
+ * 1 for another crystal preset); order() puts the bosses in the order that needs the fewest changes from the build that is on now.
+ * Up to EXACT_MAX bosses: the cheapest order of all (DP over subsets). More: nearest-first, staying on the build while bosses
+ * within maxChanges are left. Ties go to the boss you ranked first. Plan is pure (no Core, no DOM): tests/plan.test.js loads it as it is.
+ */
+/* PLAN-BEGIN */
+const Plan = (() => {
+  const UNRELATED = 20, EXACT_MAX = 9;
+  const nz = (v) => (v == null ? '' : String(v));
+  const cryst = (c) => (c == null || c === '' ? null : String(c));
+  // sig: { any, tag, gear:{Slot:name}, mains:[name], links:{main:[l1,l2]}, crystal } — any: needs no change (keeps what is equipped); tag: a saved-preset build, not comparable with a searched one
+  function sigFromSel(sel, crystal) {
+    const mains = [], links = {};
+    ((sel && sel.mains) || []).forEach((m, i) => { m = nz(m); if (!m) return; mains.push(m); links[m] = [nz(((sel.link1) || [])[i]), nz(((sel.link2) || [])[i])]; });
+    return { any: false, tag: '', gear: Object.assign({}, (sel && sel.gear) || {}), mains, links, crystal: cryst(crystal) };
+  }
+  const tagSig = (tag, crystal) => ({ any: false, tag: String(tag), gear: {}, mains: [], links: {}, crystal: cryst(crystal) });
+  const anySig = (crystal) => ({ any: true, tag: '', gear: {}, mains: [], links: {}, crystal: cryst(crystal) });
+  function distance(a, b) {
+    let d = a.crystal != null && b.crystal != null && a.crystal !== b.crystal ? 1 : 0;
+    if (a.any || b.any) return d;
+    if (a.tag !== b.tag) return d + UNRELATED;
+    if (a.tag) return d;
+    new Set([...Object.keys(a.gear), ...Object.keys(b.gear)]).forEach((slot) => { if (nz(a.gear[slot]) !== nz(b.gear[slot])) d++; });
+    const am = new Set(a.mains), bm = new Set(b.mains);
+    am.forEach((m) => { if (!bm.has(m)) d++; });
+    bm.forEach((m) => {
+      if (!am.has(m)) { d += 1 + (b.links[m] || []).filter(Boolean).length; return; }
+      const la = a.links[m] || ['', ''], lb = b.links[m] || ['', ''];
+      for (let i = 0; i < 2; i++) if (nz(la[i]) !== nz(lb[i])) d++;
+    });
+    return d;
+  }
+  const dist0 = (start, sig) => (start ? distance(start, sig) : 0);
+  function cost(start, sigs) { let c = 0, cur = start; sigs.forEach((s) => { c += dist0(cur, s); cur = s; }); return c; }
+  // items: [{ key, sig }] in priority order (index = rank). Returns { keys, cost, mode }.
+  function order(items, start, opts) {
+    const n = items.length, maxCh = opts && Number.isFinite(opts.maxChanges) ? opts.maxChanges : 2;
+    if (!n) return { keys: [], cost: 0, mode: 'exact' };
+    const sigs = items.map((i) => i.sig), keysOf = (idx) => idx.map((i) => items[i].key);
+    if (n <= EXACT_MAX) {
+      const D = sigs.map((a) => sigs.map((b) => distance(a, b))), S = sigs.map((a) => dist0(start, a)), BIG = 1e6, FULL = (1 << n) - 1;
+      const best = new Float64Array((FULL + 1) * n).fill(Infinity), from = new Int16Array((FULL + 1) * n).fill(-1);
+      const pen = (i, pos) => i * (n - pos);                         // an earlier slot weighs more: a better-ranked boss goes first on a tie
+      for (let i = 0; i < n; i++) best[(1 << i) * n + i] = S[i] * BIG + pen(i, 0);
+      for (let m = 1; m <= FULL; m++) {
+        let pos = 0; for (let x = m; x; x &= x - 1) pos++;
+        for (let l = 0; l < n; l++) {
+          const cur = best[m * n + l]; if (cur === Infinity) continue;
+          for (let j = 0; j < n; j++) {
+            if (m & (1 << j)) continue;
+            const nm = m | (1 << j), c = cur + D[l][j] * BIG + pen(j, pos);
+            if (c < best[nm * n + j]) { best[nm * n + j] = c; from[nm * n + j] = l; }
+          }
+        }
+      }
+      let l = 0; for (let i = 1; i < n; i++) if (best[FULL * n + i] < best[FULL * n + l]) l = i;
+      const idx = []; let m = FULL;
+      while (l >= 0) { idx.push(l); const pl = from[m * n + l]; m &= ~(1 << l); l = pl; }
+      idx.reverse();
+      return { keys: keysOf(idx), cost: cost(start, idx.map((i) => sigs[i])), mode: 'exact' };
+    }
+    const left = items.map((_, i) => i), idx = []; let cur = start;
+    while (left.length) {
+      const d = (i) => dist0(cur, sigs[i]), near = left.filter((i) => d(i) <= maxCh);
+      let pick;
+      if (near.length) pick = near.reduce((a, b) => (d(b) < d(a) ? b : a));              // free ones first, then 1, then 2 changes ...
+      else {                                                                          // nothing close: switch to the build that has the most bosses around it
+        const group = (i) => left.filter((j) => distance(sigs[i], sigs[j]) <= maxCh).length;
+        pick = left.reduce((a, b) => (d(b) < d(a) || (d(b) === d(a) && group(b) > group(a)) ? b : a));
+      }
+      idx.push(pick); left.splice(left.indexOf(pick), 1); cur = sigs[pick];
+    }
+    return { keys: keysOf(idx), cost: cost(start, idx.map((i) => sigs[i])), mode: 'greedy' };
+  }
+  return { sigFromSel, tagSig, anySig, distance, order, cost };
+})();
+/* PLAN-END */
+
+const Planner = (() => {
+  const cache = new Map();                                            // boss -> { at, sel } : the engine's best selection (valid while your gear / pets did not change)
+  const TTL = 15 * 60000, SEARCH_MS = 90000;
+  let lastLog = '', onNow = null;                                     // onNow: the build the last pick will have equipped (used when no fresh search says what is on)
+  const on = () => !!(cfg.autoBuild && cfg.autoBuild.order) && Presets.available('best');
+  const reset = () => { cache.clear(); lastLog = ''; onNow = null; };
+  const crystalNow = () => { const c = Presets.applied().crystal; return c ? String(c).split('@')[0] : null; };
+  // -> { sig, cur }   cur = the live selection (from the same search), for the starting point
+  async function sigFor(t) {
+    const w = Presets.wanted(t.low, t), crystal = w.crystal != null ? w.crystal : null;
+    if (w.best) {
+      let hit = cache.get(t.low), cur = null;
+      if (!hit || Date.now() - hit.at > TTL) {
+        let r = null;
+        try { r = await withTimeout(Promise.resolve(Core.call('build.best', { monsterId: t.monsterId, name: t.name, kind: t.kind })), SEARCH_MS, null); } catch (_) { r = null; }
+        if (r && r.ok !== false && r.best && r.best.sel) { hit = { at: Date.now(), sel: r.best.sel }; cache.set(t.low, hit); cur = r.current && r.current.sel; }
+        else hit = null;
+      }
+      if (hit) return { sig: Plan.sigFromSel(hit.sel, crystal), cur };
+      return { sig: Plan.tagSig('unknown:' + t.low, crystal), cur: null };              // no answer from the engine: treated as a full switch
+    }
+    if (w.gear || w.pet) return { sig: Plan.tagSig('gear:' + (w.gear || '-') + '/pet:' + (w.pet || '-'), crystal), cur: null };
+    return { sig: Plan.anySig(crystal), cur: null };                                     // keep-equipped: costs nothing wherever it runs
+  }
+  // list = candidates() in priority order. Returns the boss to fight next. Never throws: on any trouble it is list[0], the old behaviour.
+  async function pick(list, curLow) {
+    if (!on() || list.length < 2) return list[0];
+    const keep = curLow ? list.find((t) => t.low === curLow) : null;
+    if (keep) return keep;                                                              // finish the boss you are on: leaving it is a build change too
+    try {
+      log(`🧭 planning the order for ${list.length} bosses…`, 'info');
+      const items = [], wild = []; let fresh = null;
+      for (const t of list) {
+        const r = await sigFor(t);
+        if (r.cur && !fresh) fresh = Plan.sigFromSel(r.cur, crystalNow());
+        (r.sig.any ? wild : items).push({ key: t.low, sig: r.sig, t });
+      }
+      const start = fresh || onNow;
+      const res = Plan.order(items, start, { maxChanges: cfg.autoBuild.maxChanges });
+      const byKey = new Map(list.map((t) => [t.low, t]));
+      const seq = wild.map((x) => x.key).concat(res.keys).map((k) => byKey.get(k)).filter(Boolean);
+      const line = seq.map((t) => t.name.split(/[ ,]/)[0]).join(' → ') + ` (${res.cost} change${res.cost === 1 ? '' : 's'}${res.mode === 'greedy' ? ', nearest-first' : ''})`;
+      if (line !== lastLog) { lastLog = line; log('🧭 build order: ' + esc(line), 'ok'); }
+      const first = seq[0] || list[0], fi = items.find((x) => x.key === first.low);
+      if (fi) onNow = fi.sig;                                                              // the engine is about to put this build on
+      return first;
+    } catch (e) { log('⚠️ build planner: ' + esc((e && e.message) || String(e)) + ' — using your order', 'warn'); return list[0]; }
+  }
+  return { on, pick, reset };
 })();
 
 /* ---- side-mob / shielded-boss support (TOGGLE in Settings, off by default: it should not be needed) --------------------
@@ -1114,7 +1293,29 @@ const Engine = (() => {
     wake = false;
   }
   const tfields = (t) => (t.kind === 'dungeon' ? { dgmid: t.monsterId, instance_id: t.instanceId, location_id: t.locationId } : { monster_id: t.monsterId });
-  const act = (t, fn, gap) => Act.run(fn, t.kind === 'dungeon' ? 0 : gap);
+  // ---- build change in progress (Core.tx 'loadout') -------------------------------------------------------------------
+  // While gear / pets / crystals are being rewritten (a human preset click, another tab, the Build Engine) no join, skill or attack is
+  // sent: the swing would hit a half-built loadout. Our own Presets.ensure runs between swings, so it never waits on itself.
+  // Without Core.tx (older Core) there is nothing to wait for. The wait is time-boxed; after that the request is not sent and the
+  // normal failure path (wait, retry) takes over.
+  const BUILD_WAIT_MS = 180000;
+  const buildBusy = () => { try { return Core.tx && typeof Core.tx.busy === 'function' ? Core.tx.busy('loadout') : null; } catch (_) { return null; } };
+  let buildWake = null;
+  if (typeof Core.on === 'function') Core.on('loadout:end', () => { if (buildWake) buildWake(); });
+  async function holdForBuild(tk) {
+    if (!buildBusy()) return true;
+    const b = buildBusy();
+    log('⏸ build change in progress, waiting' + (b && b.owner && b.owner !== 'unknown' ? ' (' + esc(b.owner) + ')' : ''), 'info'); Diag.skip('build-change', 'a gear / pet / crystal change is running');
+    const end = Date.now() + BUILD_WAIT_MS;
+    while (live(tk) && buildBusy()) {
+      if (Date.now() >= end) { log('⚠️ build change still running after ' + Math.round(BUILD_WAIT_MS / 60000) + ' min — not swinging', 'warn'); return false; }
+      await new Promise((res) => { const to = setTimeout(res, 750); buildWake = () => { clearTimeout(to); res(); }; });   // woken by loadout:end, else a short poll
+      buildWake = null;
+    }
+    return live(tk);
+  }
+  const HELD = { ok: false, status: 0, text: '', json: null, held: true };       // what act() answers when the build never settled
+  const act = (t, fn, gap) => { const tk = token; return Act.run(async () => ((await holdForBuild(tk)) ? fn() : HELD), t.kind === 'dungeon' ? 0 : gap); };
   const remPct = (cap, dealt) => (cap > 0 ? (Math.max(0, cap - dealt) / cap * 100).toFixed(1) : '0');
   let lastWarn = { msg: '', at: 0 };
   const warnOnce = (msg) => { if (lastWarn.msg !== msg || Date.now() - lastWarn.at > 30000) { lastWarn = { msg, at: Date.now() }; log(msg, 'warn'); } };
@@ -1324,12 +1525,13 @@ const Engine = (() => {
           continue;
         }
         idleSince = 0;
-        const t = list[0];
+        const t = await Planner.pick(list, curLow);
+        if (!live(tk)) break;
         if (t.low !== curLow) {
           current = t; curLow = t.low;
           log(`🎯 target: ${esc(t.name)} (cap ${fmtNum(t.cap)}, dealt ${fmtNum(t.userDmg)})`, 'ok'); Relics.warn(t);
           try { Core.emit('automator:target', { name: t.name, low: t.low, kind: t.kind, cap: t.cap }); } catch (_) { /* */ }
-          await Presets.ensure(t.low);
+          await Presets.ensure(t.low, t);
           if (!live(tk)) break;
         } else current = t;
         Status.set('FIGHTING');
@@ -2736,9 +2938,20 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
       timedBtn || resetBtn || removeBtn || copyBtn ? h('div', { class: 'ma-reset' }, timedBtn, h('span', { class: 'sp' }), copyBtn, resetBtn, removeBtn) : null,
       m.kind !== 'wave' && tOpen ? scheduleEditor(low) : null);
   }
+  // Auto best build + fewest-changes order. Needs the Build Engine addon (the 'best' preset kind).
+  function buildRows() {
+    const AB = cfg.autoBuild, has = Presets.available('best'), reset = () => { Presets.forget(); Planner.reset(); };
+    if (!has) return [setting('🤖 Auto best build', 'needs the Build Engine addon (it is not loaded)', null)];
+    return [
+      setting('🤖 Auto best build', 'wave bosses: best gear + pets for each boss, crystals from the preset. A boss with its own gear / pet pick keeps it', sw(() => AB.enabled, (v) => { AB.enabled = v; reset(); })),
+      setting('🧭 Fewest build changes', 'fight bosses with the same or a similar build back to back', sw(() => AB.order, (v) => { AB.order = v; reset(); })),
+      AB.order ? (() => { const e = setting('Same build means up to', 'more bosses than 9: nearest-first within this many changes', num(() => AB.maxChanges, (n) => { AB.maxChanges = n; reset(); }, { parse: parseFloat, min: 0, max: 20, unit: 'changes', w: 44 })); e.classList.add('sub'); return e; })() : null,
+    ];
+  }
   function loadoutCard() {
     return h('div', { class: 'ma-card' }, h('div', { class: 'ma-card-h' }, h('span', { class: 'ma-ico' }, '🎒'), h('div', { class: 'ma-card-t' }, h('b', {}, 'Default loadout'), h('small', {}, 'Equipped before any boss that has no pick of its own. Open a boss to change it just for that boss.'))),
-      h('div', { style: { marginTop: '9px' } }, loadoutGrid((k) => dropdown([['', 'Keep equipped'], ...presetOpts(k)], (cfg.loadout || {})[k] || '', (v) => { cfg.loadout = cfg.loadout || {}; if (v) cfg.loadout[k] = v; else delete cfg.loadout[k]; Presets.forget(); }))));
+      h('div', { style: { marginTop: '9px' } }, loadoutGrid((k) => dropdown([['', 'Keep equipped'], ...presetOpts(k)], (cfg.loadout || {})[k] || '', (v) => { cfg.loadout = cfg.loadout || {}; if (v) cfg.loadout[k] = v; else delete cfg.loadout[k]; Presets.forget(); Planner.reset(); }))),
+      h('div', { style: { marginTop: '9px' } }, ...buildRows()));
   }
 
   /* a boss as a bubble: avatar (dot = state), short name, cap · state, switch. Tap it to select it (one at a time) and open its editor. */
@@ -2968,6 +3181,8 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
         setting('💧 Mana', null, ctl(dropdown([['S', 'Small · 20'], ['M', 'Medium · 40'], ['L', 'Large · 60'], ['XL', 'XL · 100']], M.type, (v) => { M.type = v; }), sw(() => M.enabled, (v) => { M.enabled = v; }))),
         M.enabled ? sub('Drink at or below', num(() => M.threshold, (n) => { M.threshold = n; }, { w: 52, min: 0, unit: 'MP' })) : null,
         flag('🪦 Auto-loot', 'out of stamina → claims only what levels you up', () => L.enabled, (v) => { L.enabled = v; })),
+      Presets.available('best') ? caption('Builds') : null,
+      Presets.available('best') ? h('div', { class: 'ma-card' }, ...buildRows()) : null,
       caption('Fighting'),
       h('div', { class: 'ma-card' },
         flag('Class skill' + (cs ? ' · ' + cs.label : ' · not detected'), 'cast before each World Breaker slash', () => cfg.useClassSkill, (v) => { cfg.useClassSkill = v; }),
