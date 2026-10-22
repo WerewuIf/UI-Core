@@ -24,7 +24,7 @@
  * replies were retried instantly instead of honouring their delay.
  */
 Core.module({
-  id: 'automator', name: 'Automator', icon: '🤖', version: '1.7.3',
+  id: 'automator', name: 'Automator', icon: '🤖', version: '1.7.4',
   // Offered to other addons through Core capabilities (guides/CAPABILITIES.md):
   //   automator.status() -> the status string     automator.start() / automator.stop()     automator.scan() -> scan the bosses now
   provides: (api) => api && api.start ? {
@@ -35,7 +35,7 @@ Core.module({
   } : {},
   init(Core) {
 'use strict';
-const ID = 'automator', VERSION = '1.7.3';
+const ID = 'automator', VERSION = '1.7.4';
 if (window.__automatorLoaded) { console.warn('[automator] already loaded', window.__automatorLoaded); return null; }
 window.__automatorLoaded = VERSION;
 
@@ -125,7 +125,6 @@ function mergeCfg(saved) {
   out.loadout = s.loadout && typeof s.loadout === 'object' ? s.loadout : {};
   out.targets = Array.isArray(s.targets) ? s.targets.slice() : [];
   out.bosses = s.bosses && typeof s.bosses === 'object' ? s.bosses : {};
-  out.shadowMobs = s.shadowMobs && typeof s.shadowMobs === 'object' ? s.shadowMobs : {};       // Shadowbridge mob types found so far: { 'name (shadowbridge)': { name, locs: [1..4] } }
   out.ignored = Array.isArray(s.ignored) ? s.ignored.filter((x) => typeof x === 'string') : [];      // monsters you removed: the loot scan never adds them back
   for (const o of Object.values(out.bosses)) {                               // one "switch cap at" pair -> the first cap change
     if (!o) continue;
@@ -727,7 +726,7 @@ function candidates() {
 const targetKey = (t) => `${t.kind}:${t.instanceId || ''}:${t.monsterId}`;
 
 /* ---- slots the other parts fill in. Each has a harmless stub, so deleting PART 2 / 3 / 4 never breaks the wave bosses ---- */
-const Dungeons = { nextCheck: () => Infinity, refresh: async () => {}, discover: async () => 0, sideMobs: null, corpses: null };   // PART 2 fills this
+const Dungeons = { nextCheck: () => Infinity, refresh: async () => {}, sideMobs: null, corpses: null };   // PART 2 fills this
 const Duels = { fight: null, bootPage: () => {} };                                                         // PART 3 fills this
 const Loot = { onStamStall: async () => {} };                                                              // PART 4 fills this
 const LootScan = { available: false, state: { running: false, stop: false, label: '', done: 0, total: 0, read: 0, added: 0, notes: [], error: '', startedAt: 0, endedAt: 0 }, run: async () => {}, stop() {}, download() {}, text: () => '' };   // PART 4b fills this
@@ -851,7 +850,6 @@ const Scan = (() => {
       for (const loc of pages.values()) { if (!Run.active()) return; Work.set('scan', `Scanning Gate ${loc.gate} · Wave ${loc.wave}`, n++, total); await page(loc.gate, loc.wave); await sleep(150); }
       if (dd.length) await Dungeons.refresh(dd, (label) => Work.set('scan', label, n++, total));
     } finally { Work.clear('scan'); }
-    if (force && Kernel.isOn('dungeons')) Dungeons.discover().catch(() => {});
     if (force && total) { const up = due.filter((l) => (Board.get(l) || {}).alive === true).length; log(`🔎 scan done · ${up} of ${due.length} boss${due.length === 1 ? '' : 'es'} up · ${((Date.now() - t0) / 1000).toFixed(1)}s`, 'info'); }
   }
   return { page, run, anyDue, nextDueIn, nextCheck, cardAlive, cardId };
@@ -1330,6 +1328,13 @@ const Engine = (() => {
  * Castle of the Fallen Prince bosses (+ Khaal's second phase), the Shadowbridge Gribble swarm, mobs for the shield pierce,
  * and the dungeon pages the graveyard reads. NOT the cube / Polyhedral Crucible: Cube Suite owns it completely.
  * ================================================================================================================ */
+const SHADOW_TERR = {
+  1: { name: 'Brood Pits', mobs: ['Krak One-Horn', 'Nib Wickfingers', 'Orc Stone-Rend', 'Skrit Gear', 'Vorga Ash-Shaman'] },
+  2: { name: 'Plunder Warrens', mobs: ['Gribble Junk-Magus', 'Makra the Mireborn', 'Shagra Bone-Singer', 'Talla Flint-Stem', 'Urzul Iron-Tusks'] },
+  3: { name: 'Shattered Stone Causeways', mobs: ['Droknar Night-Blade', 'Hruk Forge-Eater', 'Pip Tanglefoot', 'Rukka The Wolf Raider', 'Zorgra Frost-Vein'] },
+  4: { name: 'Territory Center', mobs: ['Brog Skull', 'Gorvash the Stone-Ram', 'Gribble Junk-Magus', 'Rukka The Wolf Raider', 'Tharka Blood-Howl'] },
+};
+const SHADOW_BOSS_LOC = 5, SHADOW_LOCS = [1, 2, 3, 4, SHADOW_BOSS_LOC];
 (function seedDungeonRoster() {
   [
     { name: 'The Goblin Royal Vizier', defaultCap: 2e9, kind: 'dungeon', locationId: 6, dtype: 'hard' },
@@ -1337,21 +1342,18 @@ const Engine = (() => {
     { name: 'Grimgrowl the Chimera', defaultCap: 2e9, kind: 'dungeon', locationId: 8, dtype: 'hard' },
     { name: 'Drazhul The Broken Crown', defaultCap: 2e9, kind: 'dungeon', locationId: 9, dtype: 'hard' },
     { name: 'Khaal The Abomination Prince', defaultCap: 3e9, kind: 'dungeon', locationId: 10, dtype: 'hard', mapGated: true },
-    { name: 'Gribbles (Shadowbridge)', defaultCap: 1e6, kind: 'dungeon-swarm', dtype: 'easy', locationIds: [1, 2, 3, 4], swarmMatch: /gribble/i },
+    { name: 'Gribbles (Shadowbridge)', defaultCap: 1e6, kind: 'dungeon-swarm', dtype: 'easy', locationIds: [2, 4], swarmMatch: /gribble/i },
+    { name: 'Prince Grixkar The Hybrid', defaultCap: 3e9, kind: 'dungeon', locationId: 5, dtype: 'easy', mapGated: true },
   ].forEach((d) => Roster.add(d));
+  // Shadowbridge territories (location 5 is the Boss Room above). One swarm entry per mob type and territory; the Gribbles keep their own entry (2 and 4).
+  Object.entries(SHADOW_TERR).forEach(([loc, t]) => t.mobs.forEach((m) => {
+    if (/gribble/i.test(m)) return;
+    Roster.add({ name: `${m} · ${t.name}`, defaultCap: 1e6, kind: 'dungeon-swarm', dtype: 'easy', locationId: +loc, locationIds: [+loc], terr: t.name,
+      swarmMatch: new RegExp('^\\s*' + m.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*$', 'i') });
+  }));
   const khaal = Roster.get('khaal the abomination prince');
   if (khaal) Roster.addPhase(khaal, 'Khaal Sovereign of the Shattered Bloodline', 2e9);
 })();
-
-const SHADOW_LOCS = [1, 2, 3, 4];
-// one swarm entry per Shadowbridge mob type (the Gribbles keep theirs); found by Dungeons.discover, kept in cfg.shadowMobs, removable like a loot-scan boss
-function addShadow(name, locs) {
-  const full = name + ' (Shadowbridge)'; let d = Roster.get(full.toLowerCase());
-  if (!d) d = Roster.add({ name: full, defaultCap: 1e6, kind: 'dungeon-swarm', dtype: 'easy', locationIds: [], swarmMatch: new RegExp('^\\s*' + name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*$', 'i'), fromScan: true });
-  (locs || []).forEach((l) => { if (!d.locationIds.includes(l)) d.locationIds.push(l); }); d.locationIds.sort((x, y) => x - y);
-  return d;
-}
-Object.values(cfg.shadowMobs).forEach((m) => { if (m && m.name && !cfg.ignored.includes((m.name + ' (Shadowbridge)').toLowerCase())) addShadow(m.name, m.locs); });
 
 Object.assign(Dungeons, (() => {
   const LIST = '/guild_dungeon.php', LOC = '/guild_dungeon_location.php';
@@ -1442,11 +1444,13 @@ Object.assign(Dungeons, (() => {
     const ins = await instances(), list = ins.v[def.dtype] || []; if (!list.length) return null;
     let sawDead = null, sawLocked = null;
     for (const id of list) {
+      let locId = def.locationId;
       if (def.mapGated) {                                                  // Khaal: the map pin says whether the throne is open
         const p = await pins(id), bp = p && p.find((x) => x.isBoss);
         if (bp && bp.isLocked) { sawLocked = { locked: true, live: def, inst: id }; continue; }
+        if (bp && bp.locationId) locId = bp.locationId;
       }
-      const r = await getDoc(`${LOC}?instance_id=${id}&location_id=${def.locationId}`, 8000, `ma:dloc:${id}:${def.locationId}`);
+      const r = await getDoc(`${LOC}?instance_id=${id}&location_id=${locId}`, 8000, `ma:dloc:${id}:${locId}`);
       if (!r) continue; if (!r.doc) return undefined;
       if (/route is still sealed/i.test(r.html)) { sawLocked = { locked: true, live: def, inst: id }; continue; }
       const locked = Array.from(r.doc.querySelectorAll('.wrap .row .pill')).map((p) => (p.textContent || '').trim().toLowerCase()).includes('locked');
@@ -1458,7 +1462,7 @@ Object.assign(Dungeons, (() => {
       if (locked || ps.includes('locked')) { sawLocked = { locked: true, live, inst: id }; continue; }
       const dgmid = dgmidOf(card); if (!dgmid) continue;
       const joined = ps.includes('joined');
-      return { live, inst: id, id: dgmid, name: scraped || live.name, icon: iconOf(card), userDmg: joined ? ((await dmgOn(id, dgmid)) || 0) : 0 };
+      return { live, inst: id, loc: locId, id: dgmid, name: scraped || live.name, icon: iconOf(card), userDmg: joined ? ((await dmgOn(id, dgmid)) || 0) : 0 };
     }
     return sawDead || sawLocked || null;
   }
@@ -1473,7 +1477,7 @@ Object.assign(Dungeons, (() => {
     if (f.locked) { Board.patch(liveLow, base(liveLow, { alive: false, locked: true, noInstance: false, instanceId: f.inst, seenAt: now })); return; }
     const same = sameInst && String(prev.monsterId) === String(f.id);
     Board.patch(liveLow, base(liveLow, {
-      alive: true, locked: false, noInstance: false, monsterId: f.id, instanceId: f.inst, locationId: Roster.canon(def).locationId, name: f.name, icon: f.icon,
+      alive: true, locked: false, noInstance: false, monsterId: f.id, instanceId: f.inst, locationId: f.loc || Roster.canon(def).locationId, name: f.name, icon: f.icon,
       userDmg: Math.max(same ? prev.userDmg || 0 : 0, f.userDmg || 0), firstAliveAt: same && prev.firstAliveAt ? prev.firstAliveAt : now, needsDuel: same ? prev.needsDuel : false, seenAt: now,
     }));
   }
@@ -1558,30 +1562,7 @@ Object.assign(Dungeons, (() => {
     return out;
   }
 
-  /* ---- Shadowbridge: read all four locations and give every mob type that is not the Gribbles / a boss its own entry (never ticked for you) ---- */
-  let discAt = 0;
-  async function discover(force) {
-    if (!force && Date.now() - discAt < 120000) return 0; discAt = Date.now();
-    const ins = await instances(), found = [];
-    for (const id of ins.v.easy || []) for (const loc of SHADOW_LOCS) {
-      const r = await getDoc(`${LOC}?instance_id=${id}&location_id=${loc}`, 8000, `ma:dloc:${id}:${loc}`);
-      if (!r) continue; if (!r.doc) return 0; if (/route is still sealed/i.test(r.html)) continue;
-      for (const card of r.doc.querySelectorAll('.mon')) {
-        const name = String(monName(card) || '').trim(); if (!name || Roster.get(name.toLowerCase())) continue;
-        const own = Roster.list.find((x) => x.dtype === 'easy' && x.swarmMatch && x.swarmMatch.test(name));
-        if (own && !own.fromScan) continue;                                                       // the Gribbles
-        const key = (name + ' (Shadowbridge)').toLowerCase(); if (cfg.ignored.includes(key)) continue;
-        const e = cfg.shadowMobs[key] || (cfg.shadowMobs[key] = { name, locs: [] });
-        if (!e.locs.includes(loc)) { e.locs.push(loc); found.push(`${name} @${loc}`); }
-      }
-      await sleep(100);
-    }
-    if (!found.length) return 0;
-    Object.values(cfg.shadowMobs).forEach((m) => addShadow(m.name, m.locs)); saveCfg(); UI.dirty();
-    log(`🌉 Shadowbridge: ${found.length} new mob spot${found.length === 1 ? '' : 's'} — ${esc(found.slice(0, 6).join(', '))}${found.length > 6 ? '…' : ''} (Bosses → Shadowbridge)`, 'info');
-    return found.length;
-  }
-  return { nextCheck, refresh, sideMobs, instances, pins, deadMobs, dmgOn, pool, monName, dgmidOf, discover };
+  return { nextCheck, refresh, sideMobs, instances, pins, deadMobs, dmgOn, pool, monName, dgmidOf };
 })());
 
 /* ===================================================================================================================
@@ -1728,7 +1709,7 @@ Object.assign(Loot, (() => {
     jobs.forEach((j, i) => push(hr[i] || [], j.inst, j.loc, true));
     const easy = []; all('easy').forEach((id) => SHADOW_LOCS.forEach((loc) => easy.push({ inst: id, loc })));
     const er = await Dungeons.pool(easy, counted('Graveyard · Shadowbridge rooms', (j) => Dungeons.deadMobs(j.inst, j.loc), easy.length), 4);
-    easy.forEach((j, i) => push(er[i] || [], j.inst, j.loc, false));
+    easy.forEach((j, i) => push(er[i] || [], j.inst, j.loc, j.loc === SHADOW_BOSS_LOC));
     return out;
   }
 
@@ -2581,12 +2562,12 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   }
   function placeOf(m) {
     if (m.kind === 'wave') { const l = bossLoc(m.low); return l ? `Gate ${l.gate} · Wave ${l.wave}` : ''; }
-    return (m.dtype === 'easy' || m.kind === 'dungeon-swarm' ? 'Shadowbridge' : 'Castle') + (m.locationId ? ' · location ' + m.locationId : m.locationIds ? ' · location' + (m.locationIds.length > 1 ? 's ' : ' ') + m.locationIds.join(', ') : '');
+    return (m.dtype === 'easy' || m.kind === 'dungeon-swarm' ? 'Shadowbridge' : 'Castle') + (m.terr ? ' · ' + m.terr : m.locationId ? ' · location ' + m.locationId : m.locationIds ? ' · locations ' + m.locationIds.join(' + ') : '');
   }
   /* a boss the loot scan added (not in the built-in list): remove it, and the scan will not bring it back */
   function removeAdded(defs) {
     defs.forEach((def) => Roster.members(def).slice().forEach((m) => {
-      LootData.dismiss(m.low); Roster.remove(m.low); delete cfg.shadowMobs[m.low];
+      LootData.dismiss(m.low); Roster.remove(m.low);
       cfg.targets = cfg.targets.filter((l) => l !== m.low); delete cfg.bosses[m.low];
     }));
     if (ui.sel && !Roster.get(ui.sel)) { ui.sel = ''; saveUi(); }
@@ -2725,7 +2706,13 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   function dungeonGroups(defs) {
     const castle = defs.filter((d) => !(d.kind === 'dungeon-swarm' || d.dtype === 'easy')), shadow = defs.filter((d) => d.kind === 'dungeon-swarm' || d.dtype === 'easy');
     const sort = (a) => a.slice().sort((x, y) => (x.locationId || (x.locationIds || [0])[0] || 0) - (y.locationId || (y.locationIds || [0])[0] || 0) || rIdx(x.low) - rIdx(y.low));
-    return [{ id: 'castle', title: 'Castle', ico: '🏰', sub: 'hard', defs: sort(castle) }, { id: 'shadow', title: 'Shadowbridge', ico: '🌉', sub: 'easy', defs: sort(shadow) }].filter((g) => g.defs.length);
+    const out = [{ id: 'castle', title: 'Castle', ico: '🏰', sub: 'hard', defs: sort(castle) }];
+    const gribbles = shadow.filter((d) => d.kind === 'dungeon-swarm' && !d.terr);
+    if (gribbles.length) out.push({ id: 'shadow:gribbles', title: 'Gribbles', ico: '🌉', sub: 'Shadowbridge · locations 2 + 4', defs: gribbles });
+    Object.entries(SHADOW_TERR).forEach(([loc, t]) => { const defs = sort(shadow.filter((d) => d.terr && d.locationId === +loc)); if (defs.length) out.push({ id: 'shadow:' + loc, title: t.name, ico: '🌉', sub: 'Shadowbridge · location ' + loc, defs }); });
+    const boss = shadow.filter((d) => d.locationId === SHADOW_BOSS_LOC);
+    if (boss.length) out.push({ id: 'shadow:boss', title: 'Boss Room', ico: '👑', sub: 'Shadowbridge · location ' + SHADOW_BOSS_LOC, defs: boss });
+    return out.filter((g) => g.defs.length);
   }
   const shownDefs = (sec) => {                                        // the bosses the list shows right now (this section, after the filter)
     const f = (ui.filter || '').trim().toLowerCase();
