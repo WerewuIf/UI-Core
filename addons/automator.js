@@ -24,7 +24,7 @@
  * replies were retried instantly instead of honouring their delay.
  */
 Core.module({
-  id: 'automator', name: 'Automator', icon: '🤖', version: '1.7.4',
+  id: 'automator', name: 'Automator', icon: '🤖', version: '1.7.5',
   // Offered to other addons through Core capabilities (guides/CAPABILITIES.md):
   //   automator.status() -> the status string     automator.start() / automator.stop()     automator.scan() -> scan the bosses now
   provides: (api) => api && api.start ? {
@@ -35,7 +35,7 @@ Core.module({
   } : {},
   init(Core) {
 'use strict';
-const ID = 'automator', VERSION = '1.7.4';
+const ID = 'automator', VERSION = '1.7.5';
 if (window.__automatorLoaded) { console.warn('[automator] already loaded', window.__automatorLoaded); return null; }
 window.__automatorLoaded = VERSION;
 
@@ -125,6 +125,7 @@ function mergeCfg(saved) {
   out.loadout = s.loadout && typeof s.loadout === 'object' ? s.loadout : {};
   out.targets = Array.isArray(s.targets) ? s.targets.slice() : [];
   out.bosses = s.bosses && typeof s.bosses === 'object' ? s.bosses : {};
+  out.shadowAll = !!s.shadowAll;                                   // show every Shadowbridge mob type (off: only the Gribbles and the boss are loaded)
   out.ignored = Array.isArray(s.ignored) ? s.ignored.filter((x) => typeof x === 'string') : [];      // monsters you removed: the loot scan never adds them back
   for (const o of Object.values(out.bosses)) {                               // one "switch cap at" pair -> the first cap change
     if (!o) continue;
@@ -1335,6 +1336,22 @@ const SHADOW_TERR = {
   4: { name: 'Territory Center', mobs: ['Brog Skull', 'Gorvash the Stone-Ram', 'Gribble Junk-Magus', 'Rukka The Wolf Raider', 'Tharka Blood-Howl'] },
 };
 const SHADOW_BOSS_LOC = 5, SHADOW_LOCS = [1, 2, 3, 4, SHADOW_BOSS_LOC];
+// The other Shadowbridge mob types, one entry per NAME (a mob seen in two territories is one entry that covers both). Not loaded unless
+// "Show all mobs" is on (cfg.shadowAll) or the entry is ticked: the Gribbles and the boss are the Shadowbridge list.
+const shadowExtras = (() => {
+  const by = new Map();
+  Object.entries(SHADOW_TERR).forEach(([loc, t]) => t.mobs.forEach((m) => { if (/gribble/i.test(m)) return; const e = by.get(m) || { mob: m, locs: [], terr: [] }; e.locs.push(+loc); e.terr.push(t.name); by.set(m, e); }));
+  return [...by.values()];
+})();
+function setShadowExtras(on) {
+  shadowExtras.forEach((e) => {
+    const name = e.mob + ' (Shadowbridge)', low = name.toLowerCase();
+    if (on || cfg.targets.includes(low)) {
+      if (!Roster.get(low)) Roster.add({ name, defaultCap: 1e6, kind: 'dungeon-swarm', dtype: 'easy', extra: true, locationId: e.locs[0], locationIds: e.locs, terr: e.terr.join(' + '),
+        swarmMatch: new RegExp('^\\s*' + e.mob.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*$', 'i') });
+    } else if (Roster.get(low)) Roster.remove(low);
+  });
+}
 (function seedDungeonRoster() {
   [
     { name: 'The Goblin Royal Vizier', defaultCap: 2e9, kind: 'dungeon', locationId: 6, dtype: 'hard' },
@@ -1345,15 +1362,11 @@ const SHADOW_BOSS_LOC = 5, SHADOW_LOCS = [1, 2, 3, 4, SHADOW_BOSS_LOC];
     { name: 'Gribbles (Shadowbridge)', defaultCap: 1e6, kind: 'dungeon-swarm', dtype: 'easy', locationIds: [2, 4], swarmMatch: /gribble/i },
     { name: 'Prince Grixkar The Hybrid', defaultCap: 3e9, kind: 'dungeon', locationId: 5, dtype: 'easy', mapGated: true },
   ].forEach((d) => Roster.add(d));
-  // Shadowbridge territories (location 5 is the Boss Room above). One swarm entry per mob type and territory; the Gribbles keep their own entry (2 and 4).
-  Object.entries(SHADOW_TERR).forEach(([loc, t]) => t.mobs.forEach((m) => {
-    if (/gribble/i.test(m)) return;
-    Roster.add({ name: `${m} · ${t.name}`, defaultCap: 1e6, kind: 'dungeon-swarm', dtype: 'easy', locationId: +loc, locationIds: [+loc], terr: t.name,
-      swarmMatch: new RegExp('^\\s*' + m.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*$', 'i') });
-  }));
   const khaal = Roster.get('khaal the abomination prince');
   if (khaal) Roster.addPhase(khaal, 'Khaal Sovereign of the Shattered Bloodline', 2e9);
 })();
+
+setShadowExtras(!!cfg.shadowAll);
 
 Object.assign(Dungeons, (() => {
   const LIST = '/guild_dungeon.php', LOC = '/guild_dungeon_location.php';
@@ -2704,15 +2717,9 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     });
   }
   function dungeonGroups(defs) {
-    const castle = defs.filter((d) => !(d.kind === 'dungeon-swarm' || d.dtype === 'easy')), shadow = defs.filter((d) => d.kind === 'dungeon-swarm' || d.dtype === 'easy');
-    const sort = (a) => a.slice().sort((x, y) => (x.locationId || (x.locationIds || [0])[0] || 0) - (y.locationId || (y.locationIds || [0])[0] || 0) || rIdx(x.low) - rIdx(y.low));
-    const out = [{ id: 'castle', title: 'Castle', ico: '🏰', sub: 'hard', defs: sort(castle) }];
-    const gribbles = shadow.filter((d) => d.kind === 'dungeon-swarm' && !d.terr);
-    if (gribbles.length) out.push({ id: 'shadow:gribbles', title: 'Gribbles', ico: '🌉', sub: 'Shadowbridge · locations 2 + 4', defs: gribbles });
-    Object.entries(SHADOW_TERR).forEach(([loc, t]) => { const defs = sort(shadow.filter((d) => d.terr && d.locationId === +loc)); if (defs.length) out.push({ id: 'shadow:' + loc, title: t.name, ico: '🌉', sub: 'Shadowbridge · location ' + loc, defs }); });
-    const boss = shadow.filter((d) => d.locationId === SHADOW_BOSS_LOC);
-    if (boss.length) out.push({ id: 'shadow:boss', title: 'Boss Room', ico: '👑', sub: 'Shadowbridge · location ' + SHADOW_BOSS_LOC, defs: boss });
-    return out.filter((g) => g.defs.length);
+    const isShadow = (d) => d.kind === 'dungeon-swarm' || d.dtype === 'easy', locOf = (d) => d.locationId || (d.locationIds || [0])[0] || 0;
+    const sort = (a) => a.slice().sort((x, y) => (x.extra ? 1 : 0) - (y.extra ? 1 : 0) || locOf(x) - locOf(y) || rIdx(x.low) - rIdx(y.low));     // Gribbles, the boss, then the others
+    return [{ id: 'castle', title: 'Castle', ico: '🏰', sub: 'hard', defs: sort(defs.filter((d) => !isShadow(d))) }, { id: 'shadow', title: 'Shadowbridge', ico: '🌉', sub: 'easy', defs: sort(defs.filter(isShadow)) }].filter((g) => g.defs.length);
   }
   const shownDefs = (sec) => {                                        // the bosses the list shows right now (this section, after the filter)
     const f = (ui.filter || '').trim().toLowerCase();
@@ -2725,7 +2732,8 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     const lit = (d) => (BK.on ? BK.sel.has(d.low) : isOn(d));            // select mode counts ticked bosses, otherwise switched-on ones
     const counts = (defs) => { const n = defs.filter(lit).length; return h('span', { class: 'ma-pill' + (n ? ' blue' : '') }, n + '/' + defs.length); };
     const bulk = (defs) => [h('button', { class: 'ma-link', type: 'button', onclick: (e) => { stop(e); if (BK.on) toggleSel(defs, true); else setMany(defs, true); } }, 'All'), h('button', { class: 'ma-link', type: 'button', onclick: (e) => { stop(e); if (BK.on) toggleSel(defs, false); else setMany(defs, false); } }, 'None')];
-    const mk = (g, body) => fold('grp:' + g.id, g.defs.some(lit), [g.ico + ' ' + g.title, g.sub ? h('small', {}, g.sub) : null], body, { force, aside: [counts(g.defs), ...bulk(g.defs)] });
+    const showAll = () => h('button', { class: 'ma-link', type: 'button', title: 'The other Shadowbridge mob types are not loaded until you show them', onclick: (e) => { stop(e); cfg.shadowAll = !cfg.shadowAll; setShadowExtras(cfg.shadowAll); saveCfg(); draw(); } }, cfg.shadowAll ? 'Hide others' : 'Show all mobs');
+    const mk = (g, body) => fold('grp:' + g.id, g.defs.some(lit), [g.ico + ' ' + g.title, g.sub ? h('small', {}, g.sub) : null], body, { force, aside: [counts(g.defs), ...bulk(g.defs), ...(g.id === 'shadow' ? [showAll()] : [])] });
     let out;
     if (sec === 'dungeons') out = dungeonGroups(canon.filter((d) => d.kind !== 'wave')).map((g) => mk(g, () => { const rows = []; for (let i = 0; i < g.defs.length; i += 2) rows.push(rowOf('', g.defs.slice(i, i + 2), null)); return rows; }));
     else out = waveGroups(canon.filter((d) => d.kind === 'wave')).map((g) => mk(g, () => g.waves.map((wv) => rowOf(wv.label, wv.defs, wv))));
