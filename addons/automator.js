@@ -24,7 +24,7 @@
  * replies were retried instantly instead of honouring their delay.
  */
 Core.module({
-  id: 'automator', name: 'Automator', icon: '🤖', version: '1.7.17',
+  id: 'automator', name: 'Automator', icon: '🤖', version: '1.7.18',
   // Offered to other addons through Core capabilities (guides/CAPABILITIES.md):
   //   automator.status() -> the status string     automator.start() / automator.stop()     automator.scan() -> scan the bosses now
   provides: (api) => api && api.start ? {
@@ -35,7 +35,7 @@ Core.module({
   } : {},
   init(Core) {
 'use strict';
-const ID = 'automator', VERSION = '1.7.17';
+const ID = 'automator', VERSION = '1.7.18';
 if (window.__automatorLoaded) { console.warn('[automator] already loaded', window.__automatorLoaded); return null; }
 window.__automatorLoaded = VERSION;
 
@@ -89,8 +89,8 @@ const DEFAULT_CFG = {
   attackDelayMs: 0,                    // extra pause between swings, WAVE bosses (0: swings are only spaced by the request gap)
   dungeonAttackDelayMs: 0,             // dungeon bosses chain swings back-to-back
   minActionGapMs: 450, skillToAttackGapMs: 1250,
-  fightScanMs: 30000,                  // while fighting: rescan a target's wave page at least this often
-  idleRecheckMs: 30000,                // not alive / capped: recheck this often (or at the known respawn time)
+  fightScanMs: 300000,                 // wave pages: rescan this often (fighting, capped or idle; settings → Timing)
+  idleRecheckMs: 30000,                // dungeons: not alive / capped: recheck this often
   maxIdleRecheckMs: 300000, spawnLeadMs: 5000,
   dungeonPollMs: 60000,
   mana: { enabled: true, type: 'S', threshold: 20 },     // drink a mana potion when MP <= threshold (or below the class skill's cost)
@@ -122,6 +122,7 @@ function mergeCfg(saved) {
   out.stam = { enabled: on, item: /full/i.test(item) ? 'Full Stamina Potion' : 'Large Stamina Potion', save: (() => { const sv = Object.assign({}, DEFAULT_CFG.stam.save, os.save); if (sv.enabled === false) sv.thresholdPct = 100; delete sv.enabled; return sv; })() };   // the switch is gone: it was off -> 100 (never save)
   out.hp.thresholdPct = 0;
   if (out.dungeonPollMs === 45000) out.dungeonPollMs = 60000;
+  if (out.fightScanMs === 30000) out.fightScanMs = 300000;           // old default → 5 min
   if (out.attackDelayMs === 350) out.attackDelayMs = 0;                 // the old defaults move to the new ones; anything you set yourself stays
   if (out.autoLoot.scanMs === 60000) out.autoLoot.scanMs = 300000;
   if (out.autoLoot.claimGapMs === 500) out.autoLoot.claimGapMs = 250;
@@ -199,6 +200,8 @@ const Act = (() => {
   }
   return { run, mark: () => { lastDone = Date.now(); } };
 })();
+// boss scan (alive pages) and graveyard scan (dead pages) swap the site's cookie mode: they take turns, never overlap
+const Lane = (() => { let tail = Promise.resolve(), n = 0; return { busy: () => n > 0, run(fn) { n++; const p = tail.then(fn).finally(() => n--); tail = p.catch(() => {}); return p; } }; })();
 
 const withTimeout = (p, ms, dflt) => Promise.race([p, new Promise((res) => setTimeout(() => res(dflt), ms))]);
 // POST through Core.net (keeps the page caches honest). Never throws.
@@ -381,9 +384,9 @@ const Guard = (() => {
 
 /* ---- UI hook (the real panel is PART 6 and installs itself with UI.hook; until then dirty() is a no-op) ------------ */
 const UI = (() => { let fn = null; return { dirty(what) { if (fn) fn(what); }, hook(f) { fn = f; } }; })();
-// What is being worked on right now, by key ('scan' = boss scan / start-up, 'grave' = graveyard): { label, done, total }. Shown in the Overview and Graveyard.
+// What is being worked on right now, by key ('scan' = boss scan / graveyard / start-up): { label, done, total }. Shown in the Overview and Graveyard.
 const Work = (() => {
-  const m = new Map(), ping = (k) => UI.dirty(k === 'grave' ? 'loot' : 'status');
+  const m = new Map(), ping = () => UI.dirty('status');
   return { set(k, label, done, total) { m.set(k, { label, done: done || 0, total: total || 0 }); ping(k); }, clear(k) { if (m.delete(k)) ping(k); }, get: (k) => m.get(k) || null };
 })();
 const pctOf = (w) => (w && w.total > 0 ? Math.min(100, w.done / w.total * 100) : 0);
@@ -861,14 +864,14 @@ const Scan = (() => {
     const def = Roster.get(low), now = Date.now(); if (!def || bossCap(low) <= 0) return Infinity;
     if (def.kind !== 'wave') return Dungeons.nextCheck(def);
     const e = Board.get(low); if (!e || !e.seenAt) return now;
-    if (e.alive) return e.seenAt + ((e.userDmg || 0) >= bossCap(low) ? cfg.idleRecheckMs : cfg.fightScanMs);
+    if (e.alive) return e.seenAt + cfg.fightScanMs;
     if (e.nextTs && e.nextTs * 1000 + 120000 > now) return Math.max(e.seenAt + 5000, Math.min(e.nextTs * 1000 - cfg.spawnLeadMs, e.seenAt + cfg.maxIdleRecheckMs));
-    return e.seenAt + cfg.idleRecheckMs;
+    return e.seenAt + cfg.fightScanMs;
   }
   const dueLows = (force) => cfg.targets.filter((l) => force || nextCheck(l) <= Date.now());
   const anyDue = () => dueLows(false).length > 0;
   const nextDueIn = () => { let m = Infinity; for (const l of cfg.targets) m = Math.min(m, nextCheck(l)); return Math.max(0, m - Date.now()); };
-  async function run(force) {
+  async function scanNow(force) {
     const due = dueLows(force), pages = new Map(), dd = [], t0 = Date.now();
     for (const low of due) {
       const def = Roster.get(low); if (!def) continue;
@@ -885,6 +888,7 @@ const Scan = (() => {
     } finally { Work.clear('scan'); }
     if (force && total) { const up = due.filter((l) => (Board.get(l) || {}).alive === true).length; log(`🔎 scan done · ${up} of ${due.length} boss${due.length === 1 ? '' : 'es'} up · ${((Date.now() - t0) / 1000).toFixed(1)}s`, 'info'); }
   }
+  const run = (force) => Lane.run(() => scanNow(force));
   return { page, run, anyDue, nextDueIn, nextCheck, cardAlive, cardId };
 })();
 
@@ -1055,7 +1059,7 @@ const SideMob = (() => {
 
   async function waveMob(t) {
     const loc = bossLoc(t.low); if (!loc) return null;
-    let html; try { html = await Core.net.fetchText(`/active_wave.php?gate=${loc.gate}&wave=${loc.wave}`, { ttl: 15000, key: `ma:wave:${loc.gate}:${loc.wave}`, via: (run) => Core.cookies.withMode('alive', run) }); } catch (_) { return null; }
+    let html; try { html = await Lane.run(() => Core.net.fetchText(`/active_wave.php?gate=${loc.gate}&wave=${loc.wave}`, { ttl: 15000, key: `ma:wave:${loc.gate}:${loc.wave}`, via: (run) => Core.cookies.withMode('alive', run) })); } catch (_) { return null; }
     const doc = parseHtml(html); if (Guard.pageState(doc) !== 'ok') return null;
     for (const card of doc.querySelectorAll('.monster-container .monster-card, .monster-card')) {
       if (!Scan.cardAlive(card)) continue;
@@ -1252,7 +1256,7 @@ const Engine = (() => {
       case 'dead':
         log(`⏭️ ${esc(t.name)} is dead`, 'info');
         if (t.swarm) Board.dropSwarm(t); else Board.patch(low, { alive: false });
-        if (t.kind === 'wave' && loc) await Scan.page(loc.gate, loc.wave);     // the page knows the respawn time
+        if (t.kind === 'wave' && loc) await Lane.run(() => Scan.page(loc.gate, loc.wave));     // the page knows the respawn time
         else if (t.kind === 'dungeon') await Dungeons.refresh([low]);
         return;
       case 'auth': Guard.fault('signedout', 'no login cookie'); return;
@@ -1305,6 +1309,7 @@ const Engine = (() => {
     while (live(tk)) {
       try {
         if (Guard.isFaulted()) { await sleepLive(tk, 2000); continue; }
+        if (Lane.busy()) { await sleepLive(tk, 500); continue; }          // the graveyard scan has the site's cookie mode: wait for it
         Relics.refresh(); if (forceScan || Scan.anyDue()) { const f = forceScan; forceScan = false; if (f) Status.set('SCANNING'); await Scan.run(f); if (!live(tk)) break; }
         const now = Date.now();
         const list = candidates().filter((t) => !((skip.get(targetKey(t)) || 0) > now));
@@ -1645,7 +1650,12 @@ Object.assign(Duels, (() => {
     return jsonFetch('/pvp_style_action.php', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' }, body: b.toString() });
   };
   const pickTarget = (st) => { const en = ((st.teams || {}).enemy || {}).players_by_num || {}; for (const n of Object.keys(en)) { const p = en[n]; if (p && p.key && p.alive) return p; } return null; };
-  const pickSkill = (skills) => { const u = (skills || []).filter((s) => s.target === 'enemy' || s.target === 'self'); return u.length ? u.slice().sort((a, b) => (b.cost || 0) - (a.cost || 0))[0] : null; };   // highest cost = hardest hit
+  const POWER_RE = /power\s*slash/i, SLASH_RE = /\bslash\b/i;
+  // Power Slash first; then plain Slash (else the cheapest attack). Enemy-targeting skills only: no buffs / heals.
+  const pickSkills = (skills) => {
+    const atk = (skills || []).filter((x) => x && x.target === 'enemy'), ps = atk.find((x) => POWER_RE.test(x.name || '')), rest = atk.filter((x) => x !== ps);
+    return [ps, rest.find((x) => !POWER_RE.test(x.name || '') && SLASH_RE.test(x.name || '')) || rest.slice().sort((a, b) => (Number(a.cost) || 0) - (Number(b.cost) || 0))[0]].filter(Boolean);
+  };
 
   // true = won, false = gave up (10 losses / retry refused), null = halted or timed out
   async function play(qs, stillOn, maxMs) {
@@ -1662,11 +1672,13 @@ Object.assign(Duels, (() => {
         } else {
           const turn = st.turn || {}, me = st.me || {};
           if (me.in_match && String(turn.user_id) === String(me0) && turn.side === 'ally' && me.alive) {
-            const target = pickTarget(st), skill = pickSkill(me.skills);
-            if (skill && (skill.target === 'self' || target)) {
-              try { await doAction(qs, 'use_skill', { skill_id: skill.id, target_key: skill.target === 'self' ? '' : target.key }); log(`⚔️ [Duel] used ${esc(skill.name || 'a skill')}${target ? ` on ${esc(target.username || 'the enemy')}` : ''}`, 'dmg'); }
-              catch (e) { log(`⚠️ [Duel] action failed: ${e.message}`, 'warn'); }
-            } else if (Date.now() - warnedAt > 30000) { warnedAt = Date.now(); log('⚠️ [Duel] no usable skill / target this turn', 'warn'); }
+            const target = pickTarget(st), skills = target ? pickSkills(me.skills) : []; let err = null, used = null;
+            for (const skill of skills) {                                    // Power Slash when it goes through, otherwise fall back to Slash
+              try { await doAction(qs, 'use_skill', { skill_id: skill.id, target_key: target.key }); used = skill; break; } catch (e) { err = e; }
+            }
+            if (used) log(`⚔️ [Duel] used ${esc(used.name || 'a skill')} on ${esc(target.username || 'the enemy')}`, 'dmg');
+            else if (err) log(`⚠️ [Duel] action failed: ${err.message}`, 'warn');
+            else if (Date.now() - warnedAt > 30000) { warnedAt = Date.now(); log('⚠️ [Duel] no usable skill / target this turn', 'warn'); }
           }
         }
       } catch (e) { if (Date.now() - warnedAt > 30000) { warnedAt = Date.now(); log(`⚠️ [Duel] state error: ${e.message}`, 'warn'); } }
@@ -1723,7 +1735,7 @@ Object.assign(Loot, (() => {
     const seen = new Set(), locs = [], out = [];
     for (const d of Roster.list) { if (d.kind !== 'wave') continue; const l = bossLoc(d.low); if (!l) continue; const k = l.gate + '/' + l.wave; if (!seen.has(k)) { seen.add(k); locs.push(l); } }
     for (const [i, l] of locs.entries()) {
-      Work.set('grave', `Graveyard · Gate ${l.gate} · Wave ${l.wave}`, i, locs.length);
+      Work.set('scan', `Graveyard · Gate ${l.gate} · Wave ${l.wave}`, i, locs.length);
       let html;
       try { html = await Core.net.fetchText(`/active_wave.php?gate=${l.gate}&wave=${l.wave}`, { ttl: 20000, key: `ma:gy:${l.gate}:${l.wave}`, via: (run) => Core.cookies.withMode('all', run) }); }
       catch (e) { log(`⚠️ graveyard fetch failed (${l.gate}/${l.wave}): ${e.message}`, 'warn'); continue; }
@@ -1749,9 +1761,9 @@ Object.assign(Loot, (() => {
 
   /* ---- dungeon corpses: Castle locations the map shows as cleared, Shadowbridge Gribble rooms. Never the cube. ---- */
   async function dungeonRows() {
-    Work.set('grave', 'Graveyard · dungeon maps', 0, 0);
+    Work.set('scan', 'Graveyard · dungeon maps', 0, 0);
     const ins = await Dungeons.instances(true), out = [];
-    const counted = (label, fn, total) => { let n = 0; Work.set('grave', label, 0, total); return (j) => fn(j).finally(() => Work.set('grave', label, ++n, total)); };
+    const counted = (label, fn, total) => { let n = 0; Work.set('scan', label, 0, total); return (j) => fn(j).finally(() => Work.set('scan', label, ++n, total)); };
     const all = (t) => [...new Set([...(ins.v[t] || []), ...(ins.ended[t] || [])])];
     const push = (rows, inst, loc, isBoss, dtype) => rows.forEach((r) => { LootScan.learn({ name: r.name, kind: 'dungeon', dtype, locationId: loc, boss: isBoss, id: r.dgmid, instanceId: inst }); out.push({ key: `dungeon:${inst}:${r.dgmid}`, kind: 'dungeon', dtype, area: dtype === 'hard' ? 'castle' : 'shadow', monsterId: r.dgmid, instanceId: inst, locationId: loc, name: r.name, nameLow: r.name.toLowerCase(), isBoss, icon: r.icon, userDamage: null, needsLoot: true, expPerDmg: r.expPerDmg }); });
     const hard = all('hard'), pinSets = await Dungeons.pool(hard, (id) => Dungeons.pins(id), 3), jobs = [];
@@ -1765,15 +1777,19 @@ Object.assign(Loot, (() => {
   }
 
   async function scan(manual) {
-    if (st.scanning) return; st.scanning = true; const t0 = Date.now(), before = st.lastScanAt ? st.rows.length : -1; UI.dirty('loot');
-    if (manual === true) log('🪦 scanning the graveyard…', 'info');
-    try {
-      const w = await waveRows();
-      const d = Kernel.isOn('dungeons') ? await dungeonRows() : [];
-      st.rows = [...w, ...d]; st.lastScanAt = Date.now();
-      if (manual === true || st.rows.length !== before) log(`🪦 graveyard scan done · ${st.rows.length} corpse${st.rows.length === 1 ? '' : 's'} (${w.length} wave, ${d.length} dungeon) · ${((Date.now() - t0) / 1000).toFixed(1)}s`, 'info');
-    } catch (e) { log(`⚠️ graveyard scan error: ${e.message}`, 'warn'); }
-    finally { st.scanning = false; Work.clear('grave'); UI.dirty('loot'); }
+    if (st.scanning) return; st.scanning = true; UI.dirty('loot');
+    await Lane.run(async () => {
+      const t0 = Date.now(), before = st.lastScanAt ? st.rows.length : -1, prev = Status.get(); Status.set('GRAVEYARD');
+      if (manual === true) log('🪦 scanning the graveyard…', 'info');
+      try {
+        const w = await waveRows();
+        const d = Kernel.isOn('dungeons') ? await dungeonRows() : [];
+        st.rows = [...w, ...d]; st.lastScanAt = Date.now();
+        if (manual === true || st.rows.length !== before) log(`🪦 graveyard scan done · ${st.rows.length} corpse${st.rows.length === 1 ? '' : 's'} (${w.length} wave, ${d.length} dungeon) · ${((Date.now() - t0) / 1000).toFixed(1)}s`, 'info');
+      } catch (e) { log(`⚠️ graveyard scan error: ${e.message}`, 'warn'); }
+      finally { Work.clear('scan'); if (Status.get() === 'GRAVEYARD') Status.set(prev); }
+    });
+    st.scanning = false; UI.dirty('loot');
   }
 
   /* ---- EXP estimate per corpse (one battle page per monster NAME gives rate, cap and reward level) ---- */
@@ -2362,7 +2378,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
 .ma-bk-from{margin:2px 0 0;color:#9fc1ff;font-size:11px}
 .ma-bulk .ma-ld{margin-top:7px}.ma-bulk .ma-in.chg{border-color:#6ea8ff;background:#101b36}
 .ma-bk-cap{display:flex;align-items:center;gap:5px;flex-wrap:wrap;margin-top:7px}.ma-bk-cap label{font:800 9.5px Arial,sans-serif;color:#6e7a9c;text-transform:uppercase;letter-spacing:.06em;margin:0 3px}
-.ma-bk-go{display:flex;align-items:center;gap:9px;margin-top:8px}.ma-bk-go span{flex:1;min-width:0;font-size:11px;color:#9fb0dc;line-height:1.35}.ma-bk-go .core-btn{padding:7px 16px;font-size:12px}
+.ma-bk-go{display:flex;align-items:center;gap:9px;margin-top:8px}.ma-bk-go span{flex:1;min-width:0;font-size:11px;color:#9fb0dc;line-height:1.35}.ma-bk-go .core-btn{padding:7px 16px;font-size:12px}.ma-bk-go .core-btn:disabled{opacity:.4;cursor:default;pointer-events:none}
 .ma-what{margin:7px 3px 0;color:#7c88ad;font-size:11px;line-height:1.35;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .ma-reset{display:flex;align-items:center;gap:4px;flex-wrap:wrap;margin-top:9px;padding-top:6px;border-top:1px solid rgba(255,255,255,.06)}.ma-reset .sp{flex:1}
 .ma-link.warn{color:#ff9b9b}.ma-link.warn:hover{color:#ffc4c4;background:rgba(255,120,120,.1)}
@@ -2530,11 +2546,11 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   const selectedEntries = () => { const seen = new Set(), out = []; cfg.targets.forEach((low) => { const d = Roster.get(low); if (!d) return; const c = Roster.canon(d); if (!seen.has(c.low)) { seen.add(c.low); out.push(c); } }); return out.sort((x, y) => rIdx(x.low) - rIdx(y.low)); };
 
   /* ---- footer (always visible): status + Start / Stop ---- */
-  const STATE_TXT = { FIGHTING: 'Fighting', RUNNING: 'Running', SCANNING: 'Scanning bosses', WAITING: 'Waiting for a boss', 'NO STAMINA': 'Out of stamina', DUEL: 'Phase duel', PAUSED: 'Paused', STOPPED: 'Stopped', FOLLOWER: 'Another tab is running it' };
-  const dotOf = (st) => (!Tab.isMain() ? 'follower' : /FIGHT|RUN|DUEL|SCAN/.test(st) ? 'running' : /WAIT|STAMINA/.test(st) ? 'waiting' : /PAUSE/.test(st) ? 'follower' : '');
+  const STATE_TXT = { FIGHTING: 'Fighting', RUNNING: 'Running', SCANNING: '🔎 Scanning bosses', GRAVEYARD: '🪦 Scanning graveyard', WAITING: 'Waiting for a boss', 'NO STAMINA': 'Out of stamina', DUEL: 'Phase duel', PAUSED: 'Paused', STOPPED: 'Stopped', FOLLOWER: 'Another tab is running it' };
+  const dotOf = (st) => (!Tab.isMain() ? 'follower' : /FIGHT|RUN|DUEL|SCAN|GRAVE/.test(st) ? 'running' : /WAIT|STAMINA/.test(st) ? 'waiting' : /PAUSE/.test(st) ? 'follower' : '');
   function footer() {
     const st = Status.get(), cur = Engine.current(), run = Run.wanted() && !Run.paused();
-    const wk = Work.get('scan'), sub = cur ? '🎯 ' + cur.name : wk ? wk.label : (Tab.isMain() ? (cfg.targets.length ? 'no target right now' : 'no bosses selected') : 'this tab is following');
+    const wk = Work.get('scan'), sub = wk ? wk.label : cur ? '🎯 ' + cur.name : (Tab.isMain() ? (cfg.targets.length ? 'no target right now' : 'no bosses selected') : 'this tab is following');
     return h('div', { class: 'ma-foot' },
       h('div', { class: 'ma-foot-st' }, h('b', {}, h('i', { class: 'ma-dot ' + dotOf(st) }), STATE_TXT[st] || st), h('span', { title: sub }, sub)),
       run ? btn('⏹ Stop', 'danger', () => { Run.stop('stopped from the panel'); draw(); }) : btn('▶ Start', 'success', () => { Run.start(); draw(); }));
@@ -2562,7 +2578,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
         h('div', { class: 'ma-bar' + (pct >= 100 ? ' done' : '') }, h('i', { style: { width: pct.toFixed(1) + '%' } }))));
     } else {
       const l = Diag.last(), why = l.reason ? `${l.reason}${l.detail ? ' — ' + l.detail : ''}` : '', wk = Work.get('scan');
-      out.push(h('div', { class: 'ma-hero' }, h('div', { class: 'ma-hero-top' }, h('span', { class: 'ma-ico', style: { width: '50px', height: '50px', fontSize: '24px', borderRadius: '13px' } }, wk ? '🔎' : Run.wanted() ? '⏳' : '💤'),
+      out.push(h('div', { class: 'ma-hero' }, h('div', { class: 'ma-hero-top' }, h('span', { class: 'ma-ico', style: { width: '50px', height: '50px', fontSize: '24px', borderRadius: '13px' } }, wk ? (st === 'GRAVEYARD' ? '🪦' : '🔎') : Run.wanted() ? '⏳' : '💤'),
         h('div', { class: 'ma-hero-t' }, h('div', { class: 'ma-state' }, h('i', { class: 'ma-dot ' + dotOf(st) }), STATE_TXT[st] || st),
           h('div', { class: 'ma-hero-name' }, wk ? wk.label : !cfg.targets.length ? 'No bosses selected' : Run.wanted() ? 'No target right now' : 'Ready when you are'),
           h('div', { class: 'ma-hero-sub' }, wk ? (wk.total ? `Step ${Math.min(wk.done + 1, wk.total)} of ${wk.total}` : 'One moment…') : !cfg.targets.length ? 'Pick what to farm in the Bosses tab.' : Run.wanted() && nextIn != null ? 'Next check in ' + fmtDur(nextIn) + (why ? ' · last skip: ' + why : '') : (why ? 'Last skip: ' + why : 'Press Start to begin.')))),
@@ -2714,7 +2730,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   }
 
   /* a boss as a bubble: avatar (dot = state), short name, cap · state, switch. Tap it to select it (one at a time) and open its editor. */
-  const nameOf = (d) => (d.kind === 'dungeon-swarm' ? d.name : splitName(d.name)[0]);   // shorthand for every boss (wave + dungeon); only the normal dungeon mobs (Gribbles etc.) keep the full name
+  const nameOf = (d) => (d.kind === 'dungeon-swarm' ? d.name : /vizier/i.test(d.name) ? 'Vizier' : splitName(d.name)[0]);   // shorthand for every boss (wave + dungeon); only the normal dungeon mobs (Gribbles etc.) keep the full name
   function splitName(n) {
     n = String(n || ''); const c = n.indexOf(',');
     if (c > 0) return [n.slice(0, c).trim(), n.slice(c + 1).trim()];
@@ -2798,7 +2814,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     const capChip = (v, label, tip) => h('button', { type: 'button', title: tip, class: 'ma-chip' + (BK.cap === v ? ' on' : ''), onclick: (e) => { stop(e); BK.cap = BK.cap === v ? '' : v; BK.msg = ''; draw(); } }, label);   // tap again to clear
     const plan = [...kinds.filter((k) => BK.pick[k]).map((k) => { const o = [['__default', 'default loadout'], ['__keep', 'keep equipped'], ...presetOpts(k)].find(([v]) => v === BK.pick[k]); return `${cap1(k)} → ${o ? o[1] : '…'}`; }),
       ...(BK.cap ? [{ max: 'Cap → max loot', exp: 'Cap → EXP cap', skip: 'Cap → skip', num: 'Cap → ' + fmtNum(BK.n) }[BK.cap]] : [])].join(' · ');
-    const go = n && chg ? btn(`Apply to ${n} boss${n === 1 ? '' : 'es'}`, 'success', applyBulk) : btn('Done', 'soft', endBulk);   // nothing to apply: the button just leaves select mode
+    const ok = n && chg, go = btn(ok ? `Apply to ${n} boss${n === 1 ? '' : 'es'}` : 'Apply', 'success', applyBulk); go.disabled = !ok;   // greyed out until there is something to apply; Cancel is the way out
     return h('div', { class: 'ma-bulk' },
       h('div', { class: 'ma-bk-h' }, h('b', {}, n ? `☑ ${n} selected` : '☑ Tap bosses to select'),
         lnk('All shown', 'Select every boss in the list below (it follows the filter)', () => toggleSel(shownDefs(sec), true)),
@@ -2809,7 +2825,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
       h('div', { class: 'ma-bk-cap' }, h('label', {}, '🎯 Cap'),
         capChip('max', 'Max loot', 'Cap at the highest loot level'), capChip('exp', 'EXP cap', 'Cap at the damage that reaches the EXP cap'), capChip('skip', 'Skip', 'Cap 0: the boss is skipped'), capChip('num', 'Set…', 'Type a number'),
         BK.cap === 'num' ? num(() => BK.n, (v) => { BK.n = v; }, { fmt: fmtNum, w: 90 }) : null),
-      h('div', { class: 'ma-bk-go' }, go, h('span', {}, BK.msg || (plan ? plan + (n ? '' : ' · now select bosses') : 'Pick a cap or a loadout to apply. Anything you leave alone stays as it is.'))));
+      h('div', { class: 'ma-bk-go' }, go, btn('Cancel', 'soft', endBulk), h('span', {}, BK.msg || (plan ? plan + (n ? '' : ' · now select bosses') : 'Pick a cap or a loadout to apply. Anything you leave alone stays as it is.'))));
   }
   function waveGroups(defs) {
     const groups = new Map();
@@ -2910,7 +2926,6 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     return [
       h('div', { class: 'ma-alert info' }, L.enabled ? 'Auto-loot is on: it claims these when you run out of stamina.' : 'Auto-loot is off.', ' ', h('button', { type: 'button', class: 'ma-link', onclick: () => go('settings') }, 'Change in Settings')),
       h('div', { class: 'ma-actions' }, btn(s.scanning ? 'Scanning…' : '🔎 Scan graveyard', 'soft', () => { Loot.scan(true); }), btn(s.looting ? 'Looting…' : '🎒 Loot now', 'success', () => { Loot.pass(); })),
-      s.scanning ? (() => { const w = Work.get('grave'); return h('div', { class: 'ma-scan' }, h('div', { class: 'ma-scan-t' }, h('b', {}, w ? w.label : 'Scanning…'), h('small', {}, w && w.total ? `${Math.min(w.done + 1, w.total)} of ${w.total}` : 'one moment…'), w && w.total ? h('div', { class: 'ma-bar' }, h('i', { style: { width: pctOf(w).toFixed(1) + '%' } })) : null)); })() : null,
       note(`${total} lootable · scanned ${ago(s.lastScanAt)}${need != null ? ' · ' + fmtNum(need) + ' EXP to next level' : ''}`),
       ...(list.length ? sections
         : [h('div', { class: 'ma-empty' }, s.lastScanAt ? 'Nothing lootable right now.' : 'Press Scan graveyard to look.')])];
@@ -2942,6 +2957,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
         flag('Phase duels', 'fought automatically', () => cfg.autoDuel, (v) => { cfg.autoDuel = v; }, { redraw: false }),
         flag('Pause server auto-farm', 'so the two never fight over stamina', () => cfg.autoFarmControl, (v) => { cfg.autoFarmControl = v; }, { redraw: false })),
       fold('adv', false, '⏱ Timing', () => [note('Pauses between requests, in ms. Lower numbers risk rejected requests.'),
+        ms('Wave scan every', () => cfg.fightScanMs, (n) => { cfg.fightScanMs = n; }, { w: 76, min: 5000 }),
         ms('Wave swing gap', () => cfg.attackDelayMs, (n) => { cfg.attackDelayMs = n; }),
         ms('Dungeon swing gap', () => cfg.dungeonAttackDelayMs, (n) => { cfg.dungeonAttackDelayMs = n; }),
         skillOn ? ms('Skill → attack gap', () => cfg.skillToAttackGapMs, (n) => { cfg.skillToAttackGapMs = n; }) : null,
