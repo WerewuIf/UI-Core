@@ -2224,7 +2224,7 @@ const Panel = (() => {
   let root = null, tab = TABS.some((t) => t[0] === ui.tab) ? ui.tab : 'home', shown = false, drawT = 0;
   const phaseSel = {};                                              // boss entry -> which phase the boss page is on
   /* Select mode (Bosses tab): tap bosses to tick them, pick gear / crystal / pet / cap once, apply to all. Not saved: it is a one-off action. */
-  const BK = { on: false, sel: new Set(), pick: {}, cap: '', n: 3e9, msg: '', from: '' };
+  const BK = { on: false, sel: new Set(), ph: null, pick: {}, cap: '', n: 3e9, msg: '', from: '' };
   const isOpen = (key, dflt) => (ui.open[key] != null ? !!ui.open[key] : !!dflt);
 
   (function css() {
@@ -2589,7 +2589,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     const xp = Me.expPct();
     out.push(h('div', { class: 'ma-vitals', style: { marginTop: '8px', marginBottom: 0 } },
       meter('HP', Me.hp, Me.maxHp, 'hp', Me.hpKnown), meter('Stamina', Me.stam(), Me.maxStam(), 'st', Me.stamKnown()),
-      meter('Mana', Me.mp, Me.maxMp, 'mp', Me.mpKnown), meter('EXP · Lv ' + (Me.level() || '?'), xp || 0, 100, 'xp', xp != null, xp != null ? xp.toFixed(1) + '%' : '')));
+      meter('Mana', Me.mp, Me.maxMp, 'mp', Me.mpKnown), meter('Lv ' + (Me.level() || '?'), xp || 0, 100, 'xp', xp != null, xp != null ? xp.toFixed(1) + '%' : '')));
 
     // bosses being farmed: a one-line summary, the ones that are up right now, and everything else folded away
     const sel = selectedEntries();
@@ -2777,22 +2777,23 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     BK.on = true; BK.sel = new Set(); BK.pick = {}; BK.cap = ''; BK.msg = ''; BK.from = def.name;
     Presets.kinds().forEach((k) => { if (o[k]) BK.pick[k] = o[k]; });
     const cp = baseCapOf(low || def.low); if (cp > 0) { BK.cap = 'num'; BK.n = cp; } else if (cp === 0) BK.cap = 'skip';      // its damage cap is copied too (tap the chip again to leave it out)
+    const ms = Roster.members(def); BK.ph = ms.length > 1 ? ms.map((m) => { const mo = cfg.bosses[m.low] || {}, r = { cap: baseCapOf(m.low) }; Presets.kinds().forEach((k) => { if (mo[k]) r[k] = mo[k]; }); return r; }) : null;   // a boss with phases: each phase goes to the same phase of the target
     ui.sel = ''; saveUi(); draw();
     setTimeout(() => { const e = root && root.querySelector('.ma-bulk'); if (e && e.scrollIntoView) e.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); }, 40);
   }
-  function endBulk() { BK.on = false; BK.sel = new Set(); BK.pick = {}; BK.cap = ''; BK.msg = ''; BK.from = ''; draw(); }
+  function endBulk() { BK.on = false; BK.ph = null; BK.sel = new Set(); BK.pick = {}; BK.cap = ''; BK.msg = ''; BK.from = ''; draw(); }
   const bulkChanges = () => Presets.kinds().filter((k) => BK.pick[k]).length + (BK.cap ? 1 : 0);
   function applyBulk() {
     const defs = [...BK.sel].map((l) => Roster.get(l)).filter(Boolean), kinds = Presets.kinds(), did = new Set(), mode = BK.cap; let capDefs = 0, noExp = 0;
     defs.forEach((def) => {
       let capped = false;
-      Roster.members(def).forEach((m) => {                                                               // every phase of the boss gets it
-        const o = ovr(m.low);
-        kinds.forEach((k) => { const v = BK.pick[k]; if (!v) return; if (v === '__default') delete o[k]; else o[k] = v; did.add(k); });
-        if (mode === 'max') { delete o.cap; capped = true; }
-        else if (mode === 'skip') { o.cap = 0; capped = true; }
-        else if (mode === 'num') { o.cap = Math.max(0, Math.round(BK.n) || 0); capped = true; }
-        else if (mode === 'exp') { const i = LootData.get(m.low); if (i && i.expCapDmg > 0) { o.cap = i.expCapDmg; capped = true; } }
+      Roster.members(def).forEach((m, i) => {                                                            // every phase of the boss gets it (phase by phase when the copied boss has phases)
+        const o = ovr(m.low), sp = BK.ph && BK.ph[Math.min(i, BK.ph.length - 1)], pk = sp || BK.pick, md = sp ? (sp.cap > 0 ? 'num' : sp.cap === 0 ? 'skip' : '') : mode, nn = sp ? sp.cap : BK.n;
+        kinds.forEach((k) => { const v = pk[k]; if (!v) return; if (v === '__default') delete o[k]; else o[k] = v; did.add(k); });
+        if (md === 'max') { delete o.cap; capped = true; }
+        else if (md === 'skip') { o.cap = 0; capped = true; }
+        else if (md === 'num') { o.cap = Math.max(0, Math.round(nn) || 0); capped = true; }
+        else if (md === 'exp') { const i = LootData.get(m.low); if (i && i.expCapDmg > 0) { o.cap = i.expCapDmg; capped = true; } }
         if (!Object.keys(o).length) delete cfg.bosses[m.low];
       });
       if (capped) capDefs++; else if (mode === 'exp') noExp++;
@@ -2800,7 +2801,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     saveCfg(); Engine.poke(true);
     const parts = [...did]; if (capDefs) parts.push('cap' + (capDefs < defs.length ? ` (${capDefs} of ${defs.length})` : '')); const cnt = defs.length;
     BK.msg = parts.length ? `✅ ${parts.join(' + ')} applied to ${cnt} boss${cnt === 1 ? '' : 'es'}` + (noExp ? ` · ${noExp} ${noExp === 1 ? 'has' : 'have'} no EXP cap data, so ${noExp === 1 ? 'its' : 'their'} cap was left alone` : '') : '⚠ nothing changed' + (noExp ? ': none of them has EXP cap data (scan the loot first)' : '');
-    BK.pick = {}; BK.cap = '';
+    BK.pick = {}; BK.cap = ''; BK.ph = null;
     draw();
   }
   function bulkBar(sec) {
@@ -2809,10 +2810,10 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     // one dropdown per loadout kind: the unset state IS "no change" and wears the kind's name, so no labels and no "Leave as is"
     const pickBox = (k) => {
       const ico = KIND_ICO[k] || '🎒', cur = BK.pick[k] || '', opts = [['__default', 'Default loadout'], ['__keep', 'Keep equipped'], ...presetOpts(k)];
-      return h('select', { class: 'ma-in' + (cur ? ' chg' : ''), title: cap1(k) + ': ' + (cur ? 'will change' : 'no change'), onclick: stop, onchange: (e) => { if (e.target.value) BK.pick[k] = e.target.value; else delete BK.pick[k]; BK.msg = ''; draw(); } },
+      return h('select', { class: 'ma-in' + (cur ? ' chg' : ''), title: cap1(k) + ': ' + (cur ? 'will change' : 'no change'), onclick: stop, onchange: (e) => { if (e.target.value) BK.pick[k] = e.target.value; else delete BK.pick[k]; BK.ph = null; BK.msg = ''; draw(); } },
         h('option', { value: '' }, `${ico} ${cap1(k)}`), ...opts.map(([v, l]) => h('option', Object.assign({ value: v }, String(v) === String(cur) ? { selected: true } : {}), `${ico} ${l}`)));
     };
-    const capChip = (v, label, tip) => h('button', { type: 'button', title: tip, class: 'ma-chip' + (BK.cap === v ? ' on' : ''), onclick: (e) => { stop(e); BK.cap = BK.cap === v ? '' : v; BK.msg = ''; draw(); } }, label);   // tap again to clear
+    const capChip = (v, label, tip) => h('button', { type: 'button', title: tip, class: 'ma-chip' + (BK.cap === v ? ' on' : ''), onclick: (e) => { stop(e); BK.cap = BK.cap === v ? '' : v; BK.ph = null; BK.msg = ''; draw(); } }, label);   // tap again to clear
     const plan = [...kinds.filter((k) => BK.pick[k]).map((k) => { const o = [['__default', 'default loadout'], ['__keep', 'keep equipped'], ...presetOpts(k)].find(([v]) => v === BK.pick[k]); return `${cap1(k)} → ${o ? o[1] : '…'}`; }),
       ...(BK.cap ? [{ max: 'Cap → max loot', exp: 'Cap → EXP cap', skip: 'Cap → skip', num: 'Cap → ' + fmtNum(BK.n) }[BK.cap]] : [])].join(' · ');
     const ok = n && chg, go = btn(ok ? `Apply to ${n} boss${n === 1 ? '' : 'es'}` : 'Apply', 'success', applyBulk); go.disabled = !ok;   // greyed out until there is something to apply; Cancel is the way out
@@ -2821,11 +2822,11 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
         lnk('All shown', 'Select every boss in the list below (it follows the filter)', () => toggleSel(shownDefs(sec), true)),
         lnk('Farming', 'Select the bosses that are switched on', () => toggleSel(Roster.list.filter((d) => Roster.canon(d) === d && isOn(d)), true)),
         lnk('None', 'Clear the selection', () => toggleSel([...BK.sel].map((l) => Roster.get(l)).filter(Boolean), false))),
-      BK.from ? h('div', { class: 'ma-bk-from' }, `Loadout and cap copied from ${BK.from}. Select the bosses that should get it.`) : null,
+      BK.from ? h('div', { class: 'ma-bk-from' }, `Loadout and cap copied from ${BK.from}${BK.ph ? ', phase by phase' : ''}. Select the bosses that should get it.`) : null,
       kinds.length ? h('div', { class: 'ma-bk-sel' }, kinds.map(pickBox)) : null,
       h('div', { class: 'ma-bk-cap' }, h('label', {}, '🎯 Cap'),
         capChip('max', 'Max loot', 'Cap at the highest loot level'), capChip('exp', 'EXP cap', 'Cap at the damage that reaches the EXP cap'), capChip('skip', 'Skip', 'Cap 0: the boss is skipped'), capChip('num', 'Set…', 'Type a number'),
-        BK.cap === 'num' ? num(() => BK.n, (v) => { BK.n = v; }, { fmt: fmtNum, w: 90 }) : null),
+        BK.cap === 'num' ? num(() => BK.n, (v) => { BK.n = v; BK.ph = null; }, { fmt: fmtNum, w: 90 }) : null),
       h('div', { class: 'ma-bk-go' }, go, btn('Cancel', 'soft', endBulk), h('span', {}, BK.msg || (plan ? plan + (n ? '' : ' · now select bosses') : 'Pick a cap or a loadout to apply. Anything you leave alone stays as it is.'))));
   }
   function waveGroups(defs) {
