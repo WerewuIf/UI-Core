@@ -162,8 +162,7 @@
     if (sigilCsrfRefreshInFlight) return sigilCsrfRefreshInFlight;
     sigilCsrfRefreshInFlight = (async () => {
       try {
-        const res = await fetch('/pets.php', { credentials: 'include', cache: 'no-store' });
-        const html = await res.text();
+        const html = await Core.net.fetchText('/pets.php', { force: true });
         const fresh = extractPetSigilCsrf(html);
         if (fresh) sigilCsrfToken = fresh;
         return fresh;
@@ -194,11 +193,7 @@
     } catch (_) { /* not pets.php */ }
     return normalizeTeamKey(new URLSearchParams(location.search).get('team') || 'attack');
   }
-  function esc(str) {
-    return String(str ?? '')
-      .replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
-      .replaceAll('"', '&quot;').replaceAll("'", '&#039;');
-  }
+  function esc(str) { return Core.esc(str); }
   function starsLevelTag(p) {
     if (p.stars == null && p.level == null) return '';
     const bits = [];
@@ -1062,9 +1057,7 @@
 
   async function refreshPetCardsInPlace(petInvId) {
     try {
-      const res = await fetch(location.href, { cache: 'no-store', credentials: 'include' });
-      if (!res.ok) return false;
-      const doc = new DOMParser().parseFromString(await res.text(), 'text/html');
+      const doc = new DOMParser().parseFromString(await Core.net.fetchText(location.href, { force: true }), 'text/html');   // a failed read throws -> the catch below returns false
       const sel = '.pet-card[data-pet-inv-id="' + CSS.escape(String(petInvId)) + '"]';
       const fresh = Array.from(doc.querySelectorAll(sel));
       const live = Array.from(document.querySelectorAll(sel));
@@ -1383,9 +1376,7 @@
 
   async function smartRefreshTeamSections(teamKey) {
     try {
-      const res = await fetch(location.href, { cache: 'no-store', credentials: 'include' });
-      if (!res.ok) { location.reload(); return; }
-      const doc = new DOMParser().parseFromString(await res.text(), 'text/html');
+      const doc = new DOMParser().parseFromString(await Core.net.fetchText(location.href, { force: true }), 'text/html');   // a failed read throws -> the catch below reloads
       const fresh = findSectionByTitle(doc, TEAM_LABELS[teamKey] + ' Team');
       const live = findSectionByTitle(document, TEAM_LABELS[teamKey] + ' Team');
       if (!fresh || !live) { location.reload(); return; }
