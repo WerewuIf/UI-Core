@@ -1,8 +1,9 @@
 {
   "addons": [
-    { "id": "crystal-presets",    "name": "Crystal Presets", "version": "1.8.0",  "url": "addons/crystal-presets.js",  "button": true },
-    { "id": "gear-presets",       "name": "Gear Presets",    "version": "3.5.1",  "url": "addons/gear-presets.js",     "button": true },
-    { "id": "pet-presets",        "name": "Pet Presets",     "version": "2.10.1",  "url": "addons/pet-presets.js",      "button": true },
+    { "id": "crystal-presets",    "name": "Crystal Presets", "version": "1.8.1",  "url": "addons/crystal-presets.js",  "button": true },
+    { "id": "gear-presets",       "name": "Gear Presets",    "version": "3.5.2",  "url": "addons/gear-presets.js",     "button": true },
+    { "id": "pet-presets",        "name": "Pet Presets",     "version": "2.10.2",  "url": "addons/pet-presets.js",      "button": true },
+    { "id": "build-engine",      "name": "Build Engine",    "version": "1.0.1",  "url": "addons/build-engine.js",     "button": false },
     { "id": "account-switcher",  "name": "Account Switcher","version": "1.2.0",  "url": "addons/account-switcher.js", "button": true },
     { "id": "stat-autobuilder",  "name": "Stat Auto-Builder","version": "18.9.6", "url": "addons/stat-autobuilder.js", "button": true },
     { "id": "ui-cleanup",         "name": "UI Cleanup",      "version": "2.5.0",  "url": "addons/ui-cleanup.js",       "button": false },
@@ -10,6 +11,6 @@
       "match": "^/battle\\.php", "early": true },
     { "id": "cube-suite",         "name": "Cube Suite",      "version": "3.4.1",  "url": "addons/cube-suite.js",       "button": false,
       "match": "^/guild_dungeon_cube\\.php\\?.*instance_id=" },
-    { "id": "automator",          "name": "Automator",        "version": "1.7.20",  "url": "addons/automator.js",        "button": true }
+    { "id": "automator",          "name": "Automator",        "version": "1.9.0",  "url": "addons/automator.js",        "button": true }
   ]
 }
