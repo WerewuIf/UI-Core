@@ -24,7 +24,7 @@
  * replies were retried instantly instead of honouring their delay.
  */
 Core.module({
-  id: 'automator', name: 'Automator', icon: '🤖', version: '1.7.2',
+  id: 'automator', name: 'Automator', icon: '🤖', version: '1.7.3',
   // Offered to other addons through Core capabilities (guides/CAPABILITIES.md):
   //   automator.status() -> the status string     automator.start() / automator.stop()     automator.scan() -> scan the bosses now
   provides: (api) => api && api.start ? {
@@ -35,7 +35,7 @@ Core.module({
   } : {},
   init(Core) {
 'use strict';
-const ID = 'automator', VERSION = '1.7.2';
+const ID = 'automator', VERSION = '1.7.3';
 if (window.__automatorLoaded) { console.warn('[automator] already loaded', window.__automatorLoaded); return null; }
 window.__automatorLoaded = VERSION;
 
@@ -125,6 +125,7 @@ function mergeCfg(saved) {
   out.loadout = s.loadout && typeof s.loadout === 'object' ? s.loadout : {};
   out.targets = Array.isArray(s.targets) ? s.targets.slice() : [];
   out.bosses = s.bosses && typeof s.bosses === 'object' ? s.bosses : {};
+  out.shadowMobs = s.shadowMobs && typeof s.shadowMobs === 'object' ? s.shadowMobs : {};       // Shadowbridge mob types found so far: { 'name (shadowbridge)': { name, locs: [1..4] } }
   out.ignored = Array.isArray(s.ignored) ? s.ignored.filter((x) => typeof x === 'string') : [];      // monsters you removed: the loot scan never adds them back
   for (const o of Object.values(out.bosses)) {                               // one "switch cap at" pair -> the first cap change
     if (!o) continue;
@@ -225,14 +226,14 @@ const uid = () => { const c = cookie('demon'); if (c && /^\d+$/.test(c)) return 
 
 /* ---- player state ---------------------------------------------------------------------------------------------- */
 const Me = {
-  hp: 0, maxHp: 1, mp: 0, maxMp: 1, statsAt: 0, mpKnown: false, hpKnown: false,
+  hp: 0, maxHp: 1, mp: 0, maxMp: 1, statsAt: 0, syncAt: 0, mpKnown: false, hpKnown: false,
   stam() { const m = Core.me.get(); return m && m.stamina && m.stamina.cur != null ? m.stamina.cur : 0; },
   stamKnown() { const m = Core.me.get(); return !!(m && m.stamina && m.stamina.cur != null); },
   maxStam() { const m = Core.me.get(); return m && m.stamina && m.stamina.max ? m.stamina.max : 1; },
   expPct() { const m = Core.me.get(); const e = m && m.exp; return e && e.max > 0 ? (e.cur / e.max) * 100 : null; },
   level() { const m = Core.me.get(); return (m && m.level) || 0; },
-  // HP / MP are not tracked by Core.me. Every page with the sidebar carries them as `.player-resources .res-row` (label + "cur / max"):
-  // the wave pages the scan already fetches feed this for free (Scan.page), game_dash.php and a wave page are the fallbacks of refresh().
+  // HP / MP are not tracked by Core.me. The wave pages carry them as `.player-resources .res-row` (label + "cur / max"; game_dash.php does not):
+  // the scan already fetches those pages, so Scan.page feeds this for free; refresh() reads a wave page when it needs them now.
   readRes(doc) {
     let h = null, hMax = null, m = null, mMax = null;
     doc.querySelectorAll('.player-resources .res-row').forEach((row) => {
@@ -261,12 +262,10 @@ const Me = {
       const doc = parseHtml(html), st = Guard.pageState(doc); if (st !== 'ok') { Guard.fault(st, url); return null; }
       return Me.readRes(doc);
     };
-    const got = await read('/game_dash.php');
+    const low = [...cfg.targets, ...Roster.list.map((d) => d.low)].find((l) => bossLoc(l)), loc = low && bossLoc(low);
+    const got = (loc && (await read(`/active_wave.php?gate=${loc.gate}&wave=${loc.wave}`))) || (await read('/game_dash.php'));      // game_dash.php has no resource block: only a fallback
     if (got === null) return false;
-    if (!got) {                                          // no HP on the dashboard: take it off a wave page
-      const low = [...cfg.targets, ...Roster.list.map((d) => d.low)].find((l) => bossLoc(l)), loc = low && bossLoc(low);
-      if (loc) await read(`/active_wave.php?gate=${loc.gate}&wave=${loc.wave}`);
-    }
+    if (Date.now() - Me.syncAt > 60000) { Me.syncAt = Date.now(); try { Promise.resolve(Core.me.sync()).catch(() => {}); } catch (_) { /* */ } }   // stamina / EXP / level came with the dashboard fetch
     Me.statsAt = Date.now();
     return true;
   },
@@ -728,7 +727,7 @@ function candidates() {
 const targetKey = (t) => `${t.kind}:${t.instanceId || ''}:${t.monsterId}`;
 
 /* ---- slots the other parts fill in. Each has a harmless stub, so deleting PART 2 / 3 / 4 never breaks the wave bosses ---- */
-const Dungeons = { nextCheck: () => Infinity, refresh: async () => {}, sideMobs: null, corpses: null };   // PART 2 fills this
+const Dungeons = { nextCheck: () => Infinity, refresh: async () => {}, discover: async () => 0, sideMobs: null, corpses: null };   // PART 2 fills this
 const Duels = { fight: null, bootPage: () => {} };                                                         // PART 3 fills this
 const Loot = { onStamStall: async () => {} };                                                              // PART 4 fills this
 const LootScan = { available: false, state: { running: false, stop: false, label: '', done: 0, total: 0, read: 0, added: 0, notes: [], error: '', startedAt: 0, endedAt: 0 }, run: async () => {}, stop() {}, download() {}, text: () => '' };   // PART 4b fills this
@@ -852,6 +851,7 @@ const Scan = (() => {
       for (const loc of pages.values()) { if (!Run.active()) return; Work.set('scan', `Scanning Gate ${loc.gate} · Wave ${loc.wave}`, n++, total); await page(loc.gate, loc.wave); await sleep(150); }
       if (dd.length) await Dungeons.refresh(dd, (label) => Work.set('scan', label, n++, total));
     } finally { Work.clear('scan'); }
+    if (force && Kernel.isOn('dungeons')) Dungeons.discover().catch(() => {});
     if (force && total) { const up = due.filter((l) => (Board.get(l) || {}).alive === true).length; log(`🔎 scan done · ${up} of ${due.length} boss${due.length === 1 ? '' : 'es'} up · ${((Date.now() - t0) / 1000).toFixed(1)}s`, 'info'); }
   }
   return { page, run, anyDue, nextDueIn, nextCheck, cardAlive, cardId };
@@ -1337,11 +1337,21 @@ const Engine = (() => {
     { name: 'Grimgrowl the Chimera', defaultCap: 2e9, kind: 'dungeon', locationId: 8, dtype: 'hard' },
     { name: 'Drazhul The Broken Crown', defaultCap: 2e9, kind: 'dungeon', locationId: 9, dtype: 'hard' },
     { name: 'Khaal The Abomination Prince', defaultCap: 3e9, kind: 'dungeon', locationId: 10, dtype: 'hard', mapGated: true },
-    { name: 'Gribbles (Shadowbridge)', defaultCap: 1e6, kind: 'dungeon-swarm', dtype: 'easy', locationIds: [2, 4], swarmMatch: /gribble/i },
+    { name: 'Gribbles (Shadowbridge)', defaultCap: 1e6, kind: 'dungeon-swarm', dtype: 'easy', locationIds: [1, 2, 3, 4], swarmMatch: /gribble/i },
   ].forEach((d) => Roster.add(d));
   const khaal = Roster.get('khaal the abomination prince');
   if (khaal) Roster.addPhase(khaal, 'Khaal Sovereign of the Shattered Bloodline', 2e9);
 })();
+
+const SHADOW_LOCS = [1, 2, 3, 4];
+// one swarm entry per Shadowbridge mob type (the Gribbles keep theirs); found by Dungeons.discover, kept in cfg.shadowMobs, removable like a loot-scan boss
+function addShadow(name, locs) {
+  const full = name + ' (Shadowbridge)'; let d = Roster.get(full.toLowerCase());
+  if (!d) d = Roster.add({ name: full, defaultCap: 1e6, kind: 'dungeon-swarm', dtype: 'easy', locationIds: [], swarmMatch: new RegExp('^\\s*' + name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*$', 'i'), fromScan: true });
+  (locs || []).forEach((l) => { if (!d.locationIds.includes(l)) d.locationIds.push(l); }); d.locationIds.sort((x, y) => x - y);
+  return d;
+}
+Object.values(cfg.shadowMobs).forEach((m) => { if (m && m.name && !cfg.ignored.includes((m.name + ' (Shadowbridge)').toLowerCase())) addShadow(m.name, m.locs); });
 
 Object.assign(Dungeons, (() => {
   const LIST = '/guild_dungeon.php', LOC = '/guild_dungeon_location.php';
@@ -1548,7 +1558,30 @@ Object.assign(Dungeons, (() => {
     return out;
   }
 
-  return { nextCheck, refresh, sideMobs, instances, pins, deadMobs, dmgOn, pool, monName, dgmidOf };
+  /* ---- Shadowbridge: read all four locations and give every mob type that is not the Gribbles / a boss its own entry (never ticked for you) ---- */
+  let discAt = 0;
+  async function discover(force) {
+    if (!force && Date.now() - discAt < 120000) return 0; discAt = Date.now();
+    const ins = await instances(), found = [];
+    for (const id of ins.v.easy || []) for (const loc of SHADOW_LOCS) {
+      const r = await getDoc(`${LOC}?instance_id=${id}&location_id=${loc}`, 8000, `ma:dloc:${id}:${loc}`);
+      if (!r) continue; if (!r.doc) return 0; if (/route is still sealed/i.test(r.html)) continue;
+      for (const card of r.doc.querySelectorAll('.mon')) {
+        const name = String(monName(card) || '').trim(); if (!name || Roster.get(name.toLowerCase())) continue;
+        const own = Roster.list.find((x) => x.dtype === 'easy' && x.swarmMatch && x.swarmMatch.test(name));
+        if (own && !own.fromScan) continue;                                                       // the Gribbles
+        const key = (name + ' (Shadowbridge)').toLowerCase(); if (cfg.ignored.includes(key)) continue;
+        const e = cfg.shadowMobs[key] || (cfg.shadowMobs[key] = { name, locs: [] });
+        if (!e.locs.includes(loc)) { e.locs.push(loc); found.push(`${name} @${loc}`); }
+      }
+      await sleep(100);
+    }
+    if (!found.length) return 0;
+    Object.values(cfg.shadowMobs).forEach((m) => addShadow(m.name, m.locs)); saveCfg(); UI.dirty();
+    log(`🌉 Shadowbridge: ${found.length} new mob spot${found.length === 1 ? '' : 's'} — ${esc(found.slice(0, 6).join(', '))}${found.length > 6 ? '…' : ''} (Bosses → Shadowbridge)`, 'info');
+    return found.length;
+  }
+  return { nextCheck, refresh, sideMobs, instances, pins, deadMobs, dmgOn, pool, monName, dgmidOf, discover };
 })());
 
 /* ===================================================================================================================
@@ -1693,8 +1726,8 @@ Object.assign(Loot, (() => {
     hard.forEach((id, i) => (pinSets[i] || []).forEach((p) => { if (!p.isLocked && p.isDone && p.locationId != null) jobs.push({ inst: id, loc: p.locationId }); }));
     const hr = await Dungeons.pool(jobs, counted('Graveyard · Castle rooms', (j) => Dungeons.deadMobs(j.inst, j.loc), jobs.length), 4);
     jobs.forEach((j, i) => push(hr[i] || [], j.inst, j.loc, true));
-    const easy = []; all('easy').forEach((id) => [2, 4].forEach((loc) => easy.push({ inst: id, loc })));
-    const er = await Dungeons.pool(easy, counted('Graveyard · Gribble rooms', (j) => Dungeons.deadMobs(j.inst, j.loc, 'Gribble'), easy.length), 4);
+    const easy = []; all('easy').forEach((id) => SHADOW_LOCS.forEach((loc) => easy.push({ inst: id, loc })));
+    const er = await Dungeons.pool(easy, counted('Graveyard · Shadowbridge rooms', (j) => Dungeons.deadMobs(j.inst, j.loc), easy.length), 4);
     easy.forEach((j, i) => push(er[i] || [], j.inst, j.loc, false));
     return out;
   }
@@ -2548,12 +2581,12 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   }
   function placeOf(m) {
     if (m.kind === 'wave') { const l = bossLoc(m.low); return l ? `Gate ${l.gate} · Wave ${l.wave}` : ''; }
-    return (m.dtype === 'easy' || m.kind === 'dungeon-swarm' ? 'Shadowbridge' : 'Castle') + (m.locationId ? ' · location ' + m.locationId : '');
+    return (m.dtype === 'easy' || m.kind === 'dungeon-swarm' ? 'Shadowbridge' : 'Castle') + (m.locationId ? ' · location ' + m.locationId : m.locationIds ? ' · location' + (m.locationIds.length > 1 ? 's ' : ' ') + m.locationIds.join(', ') : '');
   }
   /* a boss the loot scan added (not in the built-in list): remove it, and the scan will not bring it back */
   function removeAdded(defs) {
     defs.forEach((def) => Roster.members(def).slice().forEach((m) => {
-      LootData.dismiss(m.low); Roster.remove(m.low);
+      LootData.dismiss(m.low); Roster.remove(m.low); delete cfg.shadowMobs[m.low];
       cfg.targets = cfg.targets.filter((l) => l !== m.low); delete cfg.bosses[m.low];
     }));
     if (ui.sel && !Roster.get(ui.sel)) { ui.sel = ''; saveUi(); }
