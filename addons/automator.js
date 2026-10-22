@@ -1536,14 +1536,15 @@ Object.assign(Dungeons, (() => {
 
   /* ---- the Gribble swarm: many small mobs, one fightable target per live Gribble still under the cap ---- */
   async function refreshSwarm(def) {
-    const ins = await instances(), cap = bossCap(def.low), prev = Board.get(def.low) || {}, now = Date.now(), jobs = [];
+    const ins = await instances(), cap = bossCap(def.low), prev = Board.get(def.low) || {}, now = Date.now(), jobs = []; let icon = prev.icon;     // the Gribble's picture, from any Gribble card (dead ones too)
     for (const id of ins.v[def.dtype] || []) for (const loc of def.locationIds) {
       const r = await getDoc(`${LOC}?instance_id=${id}&location_id=${loc}`, 8000, `ma:dloc:${id}:${loc}`);
       if (!r) continue; if (!r.doc) return;
       if (/route is still sealed/i.test(r.html)) continue;
       for (const card of r.doc.querySelectorAll('.mon')) {
-        if (card.classList.contains('dead')) continue;
         if (!def.swarmMatch.test(monName(card))) continue;
+        icon = iconOf(card) || icon;
+        if (card.classList.contains('dead')) continue;
         const dgmid = dgmidOf(card); if (dgmid) { jobs.push({ id: String(id), loc, dgmid, joined: pillTexts(card).includes('joined') }); LootScan.learn({ name: monName(card), kind: 'dungeon', dtype: def.dtype, locationId: loc, boss: false, id: dgmid, instanceId: String(id) }); }
       }
       await sleep(100);
@@ -1557,7 +1558,7 @@ Object.assign(Dungeons, (() => {
       if (cap > 0 && dealt >= cap) return;
       found.push({ monsterId: j.dgmid, instanceId: j.id, locationId: j.loc, userDmg: dealt, chk });
     }, 4);
-    Board.put(def.low, { low: def.low, name: def.name, kind: 'dungeon-swarm', alive: found.length > 0, swarm: found, totalAlive: jobs.length, seenAt: Date.now() });
+    Board.put(def.low, { low: def.low, name: def.name, kind: 'dungeon-swarm', icon, alive: found.length > 0, swarm: found, totalAlive: jobs.length, seenAt: Date.now() });
   }
 
   /* ---- the Scan hooks ---- */
