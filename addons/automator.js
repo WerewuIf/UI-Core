@@ -24,7 +24,7 @@
  * replies were retried instantly instead of honouring their delay.
  */
 Core.module({
-  id: 'automator', name: 'Automator', icon: '🤖', version: '1.7.1',
+  id: 'automator', name: 'Automator', icon: '🤖', version: '1.7.2',
   // Offered to other addons through Core capabilities (guides/CAPABILITIES.md):
   //   automator.status() -> the status string     automator.start() / automator.stop()     automator.scan() -> scan the bosses now
   provides: (api) => api && api.start ? {
@@ -35,7 +35,7 @@ Core.module({
   } : {},
   init(Core) {
 'use strict';
-const ID = 'automator', VERSION = '1.7.1';
+const ID = 'automator', VERSION = '1.7.2';
 if (window.__automatorLoaded) { console.warn('[automator] already loaded', window.__automatorLoaded); return null; }
 window.__automatorLoaded = VERSION;
 
@@ -231,22 +231,16 @@ const Me = {
   maxStam() { const m = Core.me.get(); return m && m.stamina && m.stamina.max ? m.stamina.max : 1; },
   expPct() { const m = Core.me.get(); const e = m && m.exp; return e && e.max > 0 ? (e.cur / e.max) * 100 : null; },
   level() { const m = Core.me.get(); return (m && m.level) || 0; },
-  // HP / MP are not tracked by Core.me: read them off game_dash.php (the same fetch also feeds Core.me stamina/exp/level).
-  async refresh(maxAgeMs = 15000) {
-    if (Date.now() - Me.statsAt < maxAgeMs) return true;
-    const started = Date.now();
-    let html;
-    try { html = await Core.net.fetchText('/game_dash.php', { force: true, ttl: 0 }); }
-    catch (e) { Diag.skip('stats-fetch-failed', e.message); return false; }
-    const doc = parseHtml(html);
-    const st = Guard.pageState(doc); if (st !== 'ok') { Guard.fault(st, 'game_dash.php'); return false; }
+  // HP / MP are not tracked by Core.me. Every page with the sidebar carries them as `.player-resources .res-row` (label + "cur / max"):
+  // the wave pages the scan already fetches feed this for free (Scan.page), game_dash.php and a wave page are the fallbacks of refresh().
+  readRes(doc) {
     let h = null, hMax = null, m = null, mMax = null;
     doc.querySelectorAll('.player-resources .res-row').forEach((row) => {
       const lbl = (row.querySelector('.res-label') || {}).textContent || '';
       const meta = ((row.querySelector('.res-meta') || {}).textContent || '').trim(); if (!meta) return;
       const [a, b] = meta.split('/');
-      if (/hp/i.test(lbl)) { h = parseNum(a, h); if (b) hMax = parseNum(b, hMax); }
-      else if (/mp|mana/i.test(lbl)) { m = parseNum(a, m); if (b) mMax = parseNum(b, mMax); }
+      if (/\bhp\b/i.test(lbl)) { h = parseNum(a, h); if (b) hMax = parseNum(b, hMax); }
+      else if (/\b(mp|mana)\b/i.test(lbl)) { m = parseNum(a, m); if (b) mMax = parseNum(b, mMax); }
     });
     if (h === null) { const el = doc.querySelector('.playerhp .muted'); if (el) { const [a, b] = el.textContent.trim().split('/'); h = parseNum(a, h); if (b) hMax = parseNum(b, hMax); } }
     if (m === null) {
@@ -256,13 +250,29 @@ const Me = {
     if (hMax) Me.maxHp = hMax; if (mMax) Me.maxMp = mMax;
     if (h !== null && h >= 0) { Me.hp = h; Me.hpKnown = true; }
     if (m !== null) { Me.mp = m; if (Me.maxMp > 1) Me.mpKnown = true; }
-    Me.statsAt = started;
-    UI.dirty('status');
+    if (h !== null || m !== null) { Me.statsAt = Date.now(); UI.dirty('status'); }
+    return h !== null;
+  },
+  async refresh(maxAgeMs = 15000) {
+    if (Date.now() - Me.statsAt < maxAgeMs) return true;
+    const read = async (url) => {
+      let html;
+      try { html = await Core.net.fetchText(url, { force: true, ttl: 0 }); } catch (e) { Diag.skip('stats-fetch-failed', e.message); return null; }
+      const doc = parseHtml(html), st = Guard.pageState(doc); if (st !== 'ok') { Guard.fault(st, url); return null; }
+      return Me.readRes(doc);
+    };
+    const got = await read('/game_dash.php');
+    if (got === null) return false;
+    if (!got) {                                          // no HP on the dashboard: take it off a wave page
+      const low = [...cfg.targets, ...Roster.list.map((d) => d.low)].find((l) => bossLoc(l)), loc = low && bossLoc(low);
+      if (loc) await read(`/active_wave.php?gate=${loc.gate}&wave=${loc.wave}`);
+    }
+    Me.statsAt = Date.now();
     return true;
   },
   fromAttack(j) {
     try { Core.me.fromAttack(j); } catch (_) { /* Core older than 3.14 */ }
-    if (j && j.mp !== undefined) Me.mp = parseNum(j.mp, Me.mp);
+    const mana = j && (j.mana !== undefined ? j.mana : j.mp); if (mana !== undefined && mana !== null) Me.mp = parseNum(mana, Me.mp);   // damage.php answers `mana`; `hp` in it is the BOSS's, ours is retaliation.user_hp_after
     const hpAfter = j && j.retaliation && j.retaliation.user_hp_after; if (hpAfter !== undefined) Me.hp = parseNum(hpAfter, Me.hp);
   },
 };
@@ -787,7 +797,7 @@ const Scan = (() => {
     const st = Guard.pageState(doc);
     if (st !== 'ok') { Guard.fault(st, `wave ${gate}/${wave}`); return false; }       // login/maintenance = STOP, never "dead"
     if (!Guard.chromeOk(doc)) { Diag.skip('wave-page-no-chrome', `${gate}/${wave}`); return false; }
-    Guard.ok();
+    Guard.ok(); Me.readRes(doc);                          // the sidebar on this page has our HP / mana
     const now = Date.now(), seen = new Set(), tracked = new Set();
     for (const [low, loc] of Object.entries(Object.fromEntries(Roster.list.map((d) => [d.low, bossLoc(d.low)])))) if (loc && loc.gate === gate && loc.wave === wave) tracked.add(low);
     doc.querySelectorAll('.monster-container .monster-card, .monster-card').forEach((card) => {
@@ -1079,7 +1089,7 @@ const Engine = (() => {
     if (!live(tk)) return { stop: true };
     const j = r.json || {}, msg = String(j.message || j.error || '');
     if (j.status === 'success' || j.totaldmgdealt !== undefined) {
-      Me.mp = j.mp !== undefined ? parseNum(j.mp) : Math.max(0, Me.mp - cs.cost);
+      const mana = j.mana !== undefined ? j.mana : j.mp; Me.mp = mana !== undefined && mana !== null ? parseNum(mana) : Math.max(0, Me.mp - cs.cost);
       try { Core.me.fromAttack(j); } catch (_) { /* */ }
       return { used: true, total: parseNum(j.totaldmgdealt, NaN) };
     }
