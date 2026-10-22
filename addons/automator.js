@@ -2411,9 +2411,9 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
 .ma-bar{height:6px;border-radius:99px;background:#0a0f1c;border:1px solid rgba(255,255,255,.05);overflow:hidden}.ma-bar i{display:block;height:100%;border-radius:99px;background:linear-gradient(90deg,#3657a7,#6ea8ff);transition:width .3s}
 .ma-bar.done i{background:linear-gradient(90deg,#217f5b,#33b57f)}
 .ma-hero .ma-bar{margin-top:8px}
-.ma-vitals{display:grid;grid-template-columns:repeat(auto-fit,minmax(112px,1fr));gap:6px;margin-bottom:7px}
+.ma-vitals{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:6px;margin-bottom:7px}
 .ma-meter{background:#11192d;border:1px solid rgba(255,255,255,.06);border-radius:14px;padding:6px 10px}
-.ma-meter-top{display:flex;justify-content:space-between;gap:6px;font-size:10px;color:#8b97bd;margin-bottom:4px;font-weight:700;text-transform:uppercase;letter-spacing:.04em}.ma-meter-top b{color:#fff;font-size:11px;text-transform:none;letter-spacing:0}
+.ma-meter-top{display:flex;justify-content:space-between;gap:6px;white-space:nowrap;font-size:10px;color:#8b97bd;margin-bottom:4px;font-weight:700;text-transform:uppercase;letter-spacing:.04em}.ma-meter-top span{min-width:0;overflow:hidden;text-overflow:ellipsis}.ma-meter-top b{flex:none;color:#fff;font-size:11px;text-transform:none;letter-spacing:0}
 .ma-meter .ma-bar{height:5px}
 .ma-meter.hp i{background:linear-gradient(90deg,#b4465c,#ff6b7a)}.ma-meter.st i{background:linear-gradient(90deg,#b08a1d,#e3b341)}.ma-meter.mp i{background:linear-gradient(90deg,#3657a7,#6ea8ff)}.ma-meter.xp i{background:linear-gradient(90deg,#7a4fc4,#a371f7)}
 .ma-q{display:flex;align-items:center;gap:9px;padding:5px 6px;border-radius:14px;cursor:pointer}.ma-q:hover{background:rgba(255,255,255,.035)}
@@ -2587,9 +2587,9 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
 
     // vitals
     const xp = Me.expPct();
-    out.push(fold('ov:vitals', true, '❤️ Vitals', () => [h('div', { class: 'ma-vitals', style: { marginTop: '8px', marginBottom: 0 } },
+    out.push(h('div', { class: 'ma-vitals', style: { marginTop: '8px', marginBottom: 0 } },
       meter('HP', Me.hp, Me.maxHp, 'hp', Me.hpKnown), meter('Stamina', Me.stam(), Me.maxStam(), 'st', Me.stamKnown()),
-      meter('Mana', Me.mp, Me.maxMp, 'mp', Me.mpKnown), meter('EXP · Lv ' + (Me.level() || '?'), xp || 0, 100, 'xp', xp != null, xp != null ? xp.toFixed(1) + '%' : ''))]));
+      meter('Mana', Me.mp, Me.maxMp, 'mp', Me.mpKnown), meter('EXP · Lv ' + (Me.level() || '?'), xp || 0, 100, 'xp', xp != null, xp != null ? xp.toFixed(1) + '%' : '')));
 
     // bosses being farmed: a one-line summary, the ones that are up right now, and everything else folded away
     const sel = selectedEntries();
@@ -2776,6 +2776,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     const o = cfg.bosses[low || def.low] || {};
     BK.on = true; BK.sel = new Set(); BK.pick = {}; BK.cap = ''; BK.msg = ''; BK.from = def.name;
     Presets.kinds().forEach((k) => { if (o[k]) BK.pick[k] = o[k]; });
+    const cp = baseCapOf(low || def.low); if (cp > 0) { BK.cap = 'num'; BK.n = cp; } else if (cp === 0) BK.cap = 'skip';      // its damage cap is copied too (tap the chip again to leave it out)
     ui.sel = ''; saveUi(); draw();
     setTimeout(() => { const e = root && root.querySelector('.ma-bulk'); if (e && e.scrollIntoView) e.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); }, 40);
   }
@@ -2820,7 +2821,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
         lnk('All shown', 'Select every boss in the list below (it follows the filter)', () => toggleSel(shownDefs(sec), true)),
         lnk('Farming', 'Select the bosses that are switched on', () => toggleSel(Roster.list.filter((d) => Roster.canon(d) === d && isOn(d)), true)),
         lnk('None', 'Clear the selection', () => toggleSel([...BK.sel].map((l) => Roster.get(l)).filter(Boolean), false))),
-      BK.from ? h('div', { class: 'ma-bk-from' }, `Loadout copied from ${BK.from}. Select the bosses that should get it.`) : null,
+      BK.from ? h('div', { class: 'ma-bk-from' }, `Loadout and cap copied from ${BK.from}. Select the bosses that should get it.`) : null,
       kinds.length ? h('div', { class: 'ma-bk-sel' }, kinds.map(pickBox)) : null,
       h('div', { class: 'ma-bk-cap' }, h('label', {}, '🎯 Cap'),
         capChip('max', 'Max loot', 'Cap at the highest loot level'), capChip('exp', 'EXP cap', 'Cap at the damage that reaches the EXP cap'), capChip('skip', 'Skip', 'Cap 0: the boss is skipped'), capChip('num', 'Set…', 'Type a number'),
