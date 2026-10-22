@@ -7,6 +7,8 @@
  *   PART 0  KERNEL     config, log, diagnostics, action queue, player state, auth guard, part registry, scheduler
  *   PART 1  BOSSES     wave bosses: roster, authoritative page scans, attack engine, side-mob (toggle), potions,
  *                      auto-farm coordination, preset bridge (gear / crystal / pet, found through Core capabilities)
+ *   PART 1b BUILD KIT  crystals + sigils that follow the Build Engine's gear / pets, and the way back (swappable: without it Auto still
+ *                      picks gear + pets, it just leaves crystals and sigils alone)
  *   PART 2  DUNGEONS   Castle bosses (+ Khaal phases), Shadowbridge Gribble swarm. NOT the cube: Cube Suite owns it.
  *                      Swappable: turn the part off (or delete it) and the wave bosses keep working.
  *   PART 3  DUELS      Phase duels, shared by wave and dungeon bosses
@@ -24,7 +26,7 @@
  * replies were retried instantly instead of honouring their delay.
  */
 Core.module({
-  id: 'automator', name: 'Automator', icon: '🤖', version: '1.9.0',
+  id: 'automator', name: 'Automator', icon: '🤖', version: '1.10.0',
   // Offered to other addons through Core capabilities (guides/CAPABILITIES.md):
   //   automator.status() -> the status string     automator.start() / automator.stop()     automator.scan() -> scan the bosses now
   provides: (api) => api && api.start ? {
@@ -35,7 +37,7 @@ Core.module({
   } : {},
   init(Core) {
 'use strict';
-const ID = 'automator', VERSION = '1.9.0';
+const ID = 'automator', VERSION = '1.10.0';
 if (window.__automatorLoaded) { console.warn('[automator] already loaded', window.__automatorLoaded); return null; }
 window.__automatorLoaded = VERSION;
 
@@ -83,7 +85,7 @@ const DEFAULT_CFG = {
   targets: [],                         // nameLow list = enabled bosses, in priority order (first alive + uncapped wins)
   bosses: {},                          // nameLow -> { cap, targeting:'auto|normal|shielded', <kind>:'' | '__keep' | presetId (one per preset kind offered: gear, crystal, pet, …; '' = use the default loadout), schedule:[{ at:'HH:MM', cap }] (server time) }
   loadout: {},                         // preset kind -> preset id applied on every boss without a pick of its own ('' = keep what is equipped)
-  autoBuild: { enabled: false, order: false, maxChanges: 2 },   // enabled: wave bosses get the Build Engine's best gear + pets (crystals: the preset). order: fight bosses with the same / a similar build back to back (maxChanges = how many changes still count as "the same build")
+  autoBuild: { enabled: false, order: false, crystals: true, sigils: true, restore: false },   // enabled: wave bosses get the Build Engine's best gear + pets. crystals: Auto-assign Best on the gear that is on. sigils: move with the pets. order: fewest build changes between bosses. restore: put your own build back when the run stops
   defaultBossCap: 3_000_000_000,
   maxTier: 'WORLD_BREAKER',            // always the strongest; pickTier steps down only when less is left under the cap
   classOverride: 'auto', useClassSkill: true,
@@ -110,8 +112,7 @@ function mergeCfg(saved) {
   const d = JSON.parse(JSON.stringify(DEFAULT_CFG)), s = saved && typeof saved === 'object' ? saved : {};
   const out = Object.assign(d, s);
   for (const k of ['mana', 'hp', 'sideMob', 'autoLoot', 'autoBuild']) out[k] = Object.assign({}, DEFAULT_CFG[k], s[k] || {});
-  out.autoBuild.enabled = !!out.autoBuild.enabled; out.autoBuild.order = !!out.autoBuild.order;
-  out.autoBuild.maxChanges = Number.isFinite(Number(out.autoBuild.maxChanges)) ? Math.min(20, Math.max(0, Math.round(Number(out.autoBuild.maxChanges)))) : DEFAULT_CFG.autoBuild.maxChanges;
+  { const ab = out.autoBuild; ab.enabled = !!ab.enabled; ab.order = !!ab.order; ab.crystals = ab.crystals !== false; ab.sigils = ab.sigils !== false; ab.restore = !!ab.restore; }
   delete out.sideMob.locked; delete out.sideMob.lockedKey; delete out.sideMob.source;      // (old picks: the pierce is automatic now)
   out.autoLoot.mode = 'toLevel';                                     // claims only what levels you up: not a setting any more
   out.parts = Object.assign({}, DEFAULT_CFG.parts); Object.keys(out.parts).forEach((k) => { out.parts[k] = true; });   // modules are always on
@@ -130,7 +131,9 @@ function mergeCfg(saved) {
   out.v = 2;
   delete out.autoLoot.scanMs; delete out.maxIdleRecheckMs;            // retired: the graveyard no longer scans on a timer
   delete out.mana.fullMaxAt0; delete out.mana.fillTo; delete out.mana.name;
-  out.loadout = s.loadout && typeof s.loadout === 'object' ? s.loadout : {};
+  out.loadout = s.loadout && typeof s.loadout === 'object' ? Object.assign({}, s.loadout) : {};
+  if (out.loadout.best && out.loadout.best !== '__keep') out.autoBuild.enabled = true;
+  delete out.loadout.best;
   out.targets = Array.isArray(s.targets) ? s.targets.slice() : [];
   out.bosses = s.bosses && typeof s.bosses === 'object' ? s.bosses : {};
   out.shadowAll = !!s.shadowAll;                                   // show every Shadowbridge mob type (off: only the Gribbles and the boss are loaded)
@@ -139,6 +142,7 @@ function mergeCfg(saved) {
     if (!o) continue;
     if (o.switchAt && o.capAfterSwitch != null && !Array.isArray(o.schedule)) o.schedule = [{ at: o.switchAt, cap: o.capAfterSwitch }];
     delete o.switchAt; delete o.capAfterSwitch;
+    if (o.best && o.best !== '__keep') { if (!o.build) o.build = 'auto'; delete o.best; }                 // the old "Best" dropdown
   }
   return out;
 }
@@ -420,6 +424,7 @@ const Run = (() => {
     persist(false); pausedBy.clear(); Engine.halt(); Kernel.engineStop();
     log('🛑 ' + (reason || 'stopped'), 'info'); Status.set('STOPPED'); UI.dirty();
     if (Tab.isMain()) AF.resumeIfWePaused('stopped').catch(() => {});
+    if (Tab.isMain() && cfg.autoBuild && cfg.autoBuild.restore && Presets.origin.get()) Presets.restore('the run stopped').catch(() => {});
   }
   function pause(why) { pausedBy.add(why); Engine.halt(); Status.set('PAUSED'); UI.dirty(); }
   function resume(why) { pausedBy.delete(why); if (wanted && !pausedBy.size) Kernel.engineStart(true); UI.dirty(); }
@@ -988,6 +993,285 @@ async function detectClass() {
 }
 const effectiveClass = () => { const o = (cfg.classOverride || 'auto').toLowerCase(); if (o !== 'auto' && CLASS_SKILLS[o]) return o; return CLASS_SKILLS[cfg.detectedClass] ? cfg.detectedClass : null; };
 
+/* ---- build kit: crystals and sigils follow the build ----------------------------------------------------------------
+ * The Build Engine chooses gear + pets (+ links). Crystals sit on a piece of gear and sigils on a pet, so once the engine has moved to
+ * other gear / pets they would be on the wrong piece or the wrong pet. This part does the two follow-up jobs on its own (it reads the
+ * pages itself, no other addon is needed):
+ *   crystals.best()          Crystal Presets' "Auto-assign Best", ported: every activated crystal is a candidate, the best attack and
+ *                            defense crystals go on the gear that is equipped NOW
+ *   sigils.carry(teamBefore) the sigils the old pets wore go to the pets that took their place (same main slot / same link level)
+ * and the way back, so a restore never puts anything "on any free piece":
+ *   crystals.restore(snap)   every crystal goes back on the piece of gear it was on (matched by the gear's art)
+ *   sigils.undo(moves)       every sigil that was moved goes back to the pet it came from, in reverse order
+ * The pure parts (choosing, diffing, planning) sit between KIT-BEGIN and KIT-END: tests/kit.test.js loads them as they are.
+ */
+/* KIT-BEGIN */
+const Kit = (() => {
+  const SLOTS = ['attack', 'defense', 'elemental'];
+  const numIn = (s) => { const m = /(\d[\d,]*)/.exec(String(s == null ? '' : s)); return m ? parseInt(m[1].replace(/,/g, ''), 10) || 0 : 0; };
+  // a crystal's effect from its info panel: Attack / Defense value, anything else is "other"
+  function effectOf(infoHtml) {
+    const s = String(infoHtml || '');
+    const a = /<span>\s*Attack\s*<\/span>\s*<strong>\s*([\d,]+)\s*<\/strong>/i.exec(s); if (a) return { type: 'attack', value: numIn(a[1]) };
+    const d = /<span>\s*Defense\s*<\/span>\s*<strong>\s*([\d,]+)\s*<\/strong>/i.exec(s); if (d) return { type: 'defense', value: numIn(d[1]) };
+    return { type: 'other', value: 0 };
+  }
+  // layout: { cardKey: [crystalId] }. cards: [{ key, slotCount, crystalIds }] (page order). catalog: { id: { type, value, level } }.
+  // The same algorithm as Crystal Presets' Auto-assign Best with every equipped card selected: card by card the best attack crystal, the
+  // best defense crystal, then the best remaining type that is not on that card yet. Equal crystals keep the one already worn (then the
+  // lower id), so asking twice gives the same answer and nothing is moved for nothing.
+  function bestLayout(cards, catalog) {
+    const worn = new Set(); cards.forEach((c) => (c.crystalIds || []).forEach((id) => worn.add(String(id))));
+    const all = Object.keys(catalog || {}).map((id) => ({ id: String(id), type: catalog[id].type || 'other', value: Number(catalog[id].value) || 0, level: Number(catalog[id].level) || 0 }));
+    const byBest = (a, b) => (b.value - a.value) || (b.level - a.level) || ((worn.has(b.id) ? 1 : 0) - (worn.has(a.id) ? 1 : 0)) || (Number(a.id) - Number(b.id)) || (a.id < b.id ? -1 : 1);
+    const pools = { attack: all.filter((c) => c.type === 'attack').sort(byBest), defense: all.filter((c) => c.type === 'defense').sort(byBest), other: all.filter((c) => c.type !== 'attack' && c.type !== 'defense').sort(byBest) };
+    const layout = {};
+    cards.forEach((card) => {
+      const ids = [], used = new Set(), take = (t) => { const c = pools[t].shift(); if (!c) return false; ids.push(c.id); used.add(t); return true; };
+      const cap = Math.max(0, card.slotCount | 0);
+      if (cap > ids.length) take('attack'); if (cap > ids.length) take('defense');
+      while (ids.length < cap) {
+        const opts = ['attack', 'defense', 'other'].filter((t) => !used.has(t) && pools[t].length).map((t) => [t, pools[t][0]]).sort((x, y) => byBest(x[1], y[1]));
+        if (!opts.length || !take(opts[0][0])) break;
+      }
+      layout[card.key] = ids;
+    });
+    return layout;
+  }
+  const layoutOf = (cards) => { const l = {}; cards.forEach((c) => { l[c.key] = (c.crystalIds || []).map(String); }); return l; };
+  // current / wanted layouts -> what to take off and what to put on. A crystal that is in the right place is left alone.
+  function layoutDiff(current, wanted) {
+    const at = {}, want = {}, order = [];
+    Object.keys(current || {}).forEach((k) => current[k].forEach((id) => { at[String(id)] = k; }));
+    Object.keys(wanted || {}).forEach((k) => wanted[k].forEach((id) => { want[String(id)] = k; order.push([String(id), k]); }));
+    return { unequip: Object.keys(at).filter((id) => want[id] !== at[id]), equip: order.filter(([id, k]) => at[id] !== k).map(([id, key]) => ({ id, key })) };
+  }
+  // restore: every piece of gear that is on now gets what the snapshot says it had (nothing if it was not in it); gear that is not on is skipped
+  function restoreWanted(snapLayout, cards) {
+    const wanted = {}, skipped = [];
+    cards.forEach((c) => { wanted[c.key] = ((snapLayout || {})[c.key] || []).map(String).slice(0, Math.max(0, c.slotCount | 0)); });
+    Object.keys(snapLayout || {}).forEach((k) => { if (!cards.some((c) => c.key === k) && snapLayout[k].length) skipped.push(k); });
+    return { wanted, skipped };
+  }
+  // sigils: team = { m: { '1': inv, '2': inv, '3': inv }, l: { '1': { '1': inv, '2': inv }, ... } } (PvE team: mains by slot, links by main slot and level).
+  // The positions where a different pet now stands: [{ pos, from, to }]. A pet that stayed where it was is not touched.
+  function positionChanges(before, after) {
+    const out = [], get = (t, a, b) => { const x = t && t[a] && (b == null ? t[a] : t[a][b]); return x ? String(x) : ''; };
+    ['1', '2', '3'].forEach((s) => {
+      const f = get(before, 'm', s), t = get(after, 'm', s); if (f && t && f !== t) out.push({ pos: 'main ' + s, from: f, to: t });
+      ['1', '2'].forEach((lv) => { const lf = before && before.l && before.l[s] ? String(before.l[s][lv] || '') : '', lt = after && after.l && after.l[s] ? String(after.l[s][lv] || '') : ''; if (lf && lt && lf !== lt) out.push({ pos: 'link ' + lv + ' of main ' + s, from: lf, to: lt }); });
+    });
+    return out;
+  }
+  return { SLOTS, effectOf, bestLayout, layoutOf, layoutDiff, restoreWanted, positionChanges };
+})();
+/* KIT-END */
+
+const BuildKit = (() => {
+  const CRYSTALS = '/power_crystals.php', teamUrl = (t) => '/pets.php?team=' + t;
+  const GAP = 120;                                                   // ms between two writes: the game answers each with a full page
+  const getText = async (url) => {
+    const ac = typeof AbortController !== 'undefined' ? new AbortController() : null, timer = ac ? setTimeout(() => ac.abort(), 20000) : 0;
+    try { const r = await window.fetch(url, { credentials: 'include', cache: 'no-store', signal: ac ? ac.signal : undefined }); if (!r.ok) throw new Error('HTTP ' + r.status); return await r.text(); }
+    finally { if (timer) clearTimeout(timer); }
+  };
+  const getJson = async (url) => { const j = Core.parseJson(await getText(url)); if (!j) throw new Error('not JSON: ' + url); return j; };
+  const postUrl = async (url, fields, accept) => {
+    const ac = typeof AbortController !== 'undefined' ? new AbortController() : null, timer = ac ? setTimeout(() => ac.abort(), 20000) : 0;
+    try {
+      const r = await window.fetch(url, { method: 'POST', credentials: 'include', headers: Object.assign({ 'Content-Type': 'application/x-www-form-urlencoded' }, accept ? { Accept: accept } : {}), body: new URLSearchParams(fields).toString(), signal: ac ? ac.signal : undefined });
+      return { ok: r.ok, status: r.status, text: await r.text() };
+    } catch (e) { return { ok: false, status: 0, text: String((e && e.message) || e) }; } finally { if (timer) clearTimeout(timer); }
+  };
+  const heading = (doc, text) => Array.from(doc.querySelectorAll('.panel')).find((p) => { const h2 = p.querySelector('.panel-head h2'); return h2 && h2.textContent.trim() === text; }) || null;
+
+  /* ---------------------------------------------- crystals ---------------------------------------------- */
+  function readCrystals(doc) {
+    if (Guard.pageState(doc) !== 'ok') throw new Error('crystals page: ' + Guard.pageState(doc));
+    const intentEl = doc.querySelector('input[name="crystal_intent"]'), catalog = {}, cards = [], seen = {};
+    const cp = heading(doc, 'Activated Crystals');
+    if (cp) cp.querySelectorAll('.crystal-card').forEach((card) => {
+      const imgBtn = card.querySelector('button.crystal-image'), up = card.querySelector('[onclick^="openUpgradeModal"]'); if (!imgBtn || !up) return;
+      const m = /openUpgradeModal\('(?:level|star)'\s*,\s*(\d+)\)/.exec(up.getAttribute('onclick') || ''); if (!m) return;
+      const eff = Kit.effectOf(imgBtn.getAttribute('data-info') || ''), lv = card.querySelector('.level-line span:first-child');
+      catalog[m[1]] = { type: eff.type, value: eff.value, level: lv ? parseInt(String(lv.textContent).replace(/\D/g, ''), 10) || 0 : 0 };
+    });
+    const ep = heading(doc, 'Equipment');
+    if (ep) ep.querySelectorAll('.equipment-card').forEach((card) => {
+      const img = card.querySelector('.art-frame img'), src = img ? (img.getAttribute('src') || '') : ''; if (!src) return;
+      seen[src] = (seen[src] || 0) + 1;                              // two pieces with the same art: told apart by their order on the page
+      const key = seen[src] > 1 ? src + '#' + seen[src] : src, ids = []; let inv = null;
+      const slots = Array.from(card.querySelectorAll('.slot-row .slot-btn'));
+      slots.forEach((btn) => {
+        const oc = btn.getAttribute('onclick') || '';
+        if (btn.classList.contains('filled')) { const u = /openConfirmUnequip\((\d+)\)/.exec(oc); if (u) ids.push(u[1]); }
+        else { const p = /openPickerModal\((\d+)\)/.exec(oc); if (p && inv == null) inv = p[1]; }
+      });
+      cards.push({ key, label: (img && img.getAttribute('alt')) || '', slotCount: slots.length, crystalIds: ids, equipmentInvId: inv });
+    });
+    return { intent: intentEl ? intentEl.value : '', catalog, cards };
+  }
+  const loadCrystals = async () => readCrystals(parseHtml(await getText(CRYSTALS)));
+  async function crystalAct(st, fields) {
+    const r = await postUrl(CRYSTALS, Object.assign({ crystal_intent: st.intent }, fields));
+    if (!r.ok) return { ok: false, error: 'HTTP ' + (r.status || '?') };
+    const doc = parseHtml(r.text); if (!doc.querySelector('.page-wrap')) return { ok: false, error: 'unexpected reply' };
+    const flash = doc.querySelector('.page-wrap .flash');
+    if (flash && flash.classList.contains('err')) return { ok: false, error: flash.textContent.trim() || 'rejected' };
+    try { return { ok: true, st: readCrystals(doc) }; } catch (e) { return { ok: false, error: e.message }; }
+  }
+  // takes the unequips first, then the equips (a crystal cannot go on while it is still linked); one retry for a crystal that is still linked
+  // to gear that is not on. Never throws.
+  async function runDiff(st, diff) {
+    let moves = 0; const notes = [];
+    const label = (key) => { const c = st.cards.find((x) => x.key === key); return (c && c.label) || key; };
+    for (const id of diff.unequip) {
+      const r = await crystalAct(st, { action: 'unequip_crystal', crystal_id: String(id) });
+      if (!r.ok) return { ok: false, moves, message: `could not take crystal #${id} off: ${r.error}`, notes };
+      st = r.st; moves++; await sleep(GAP);
+    }
+    for (const m of diff.equip) {
+      const put = async () => { const c = st.cards.find((x) => x.key === m.key); if (!c || !c.equipmentInvId) return { ok: false, error: 'no open slot on ' + label(m.key) }; return crystalAct(st, { action: 'equip_crystal', crystal_id: String(m.id), equipment_inv_id: String(c.equipmentInvId) }); };
+      let r = await put();
+      if (!r.ok && !/no open slot/.test(r.error || '')) {              // maybe still linked to a piece that is not on: free it, once
+        try { st = await loadCrystals(); } catch (_) { /* keep the old state */ }                  // a rejected write may have rotated the token
+        const u = await crystalAct(st, { action: 'unequip_crystal', crystal_id: String(m.id) });
+        if (u.ok) { st = u.st; r = await put(); }
+      }
+      if (!r.ok) { notes.push(`crystal #${m.id}: ${r.error}`); continue; }
+      st = r.st; moves++; await sleep(GAP);
+    }
+    return { ok: !notes.length, moves, message: notes.length ? notes.join('; ') : '', notes, st };
+  }
+  const crystals = {
+    ready: () => true,
+    async snapshot() {
+      const st = await loadCrystals(), layout = Kit.layoutOf(st.cards), worn = new Set([].concat(...Object.values(layout)));
+      return { at: Date.now(), layout, free: Object.keys(st.catalog).filter((id) => !worn.has(id)), labels: Object.fromEntries(st.cards.map((c) => [c.key, c.label])) };   // free: not worn at that time
+    },
+    async best() {
+      try {
+        const st = await loadCrystals(), cards = st.cards.filter((c) => c.slotCount > 0);
+        if (!cards.length) return { ok: true, changed: false, moves: 0, message: 'no equipped gear has crystal slots' };
+        if (!Object.keys(st.catalog).length) return { ok: true, changed: false, moves: 0, message: 'no activated crystals' };
+        const diff = Kit.layoutDiff(Kit.layoutOf(st.cards), Kit.bestLayout(cards, st.catalog));
+        if (!diff.unequip.length && !diff.equip.length) return { ok: true, changed: false, moves: 0, message: 'already the best' };
+        const r = await runDiff(st, diff); delete r.st; return Object.assign({ changed: r.moves > 0, placed: diff.equip.map((m) => m.id) }, r);   // placed: so a restore can free the ones that were free before
+      } catch (e) { return { ok: false, changed: false, moves: 0, message: (e && e.message) || String(e) }; }
+    },
+    // snap = snapshot(). placed = what best() put on (ids): those that were free at the time are freed again, also when they sit on gear that
+    // is not on any more (the equipment page cannot show those, so they are asked for by id; a refusal is ignored).
+    async restore(snap, extra) {
+      try {
+        if (!snap || !snap.layout) return { ok: false, moves: 0, message: 'nothing to restore' };
+        let st = await loadCrystals(); const { wanted, skipped } = Kit.restoreWanted(snap.layout, st.cards);
+        const diff = Kit.layoutDiff(Kit.layoutOf(st.cards), wanted), gone = skipped.map((k) => (snap.labels && snap.labels[k]) || k);
+        let r = { ok: true, moves: 0, message: '' };
+        if (diff.unequip.length || diff.equip.length) { r = await runDiff(st, diff); st = r.st || st; }
+        const free = new Set((snap.free || []).map(String)), keep = new Set([].concat(...Object.values(wanted)).map(String));
+        for (const id of ((extra && extra.placed) || []).map(String)) {
+          if (!free.has(id) || keep.has(id)) continue;
+          const u = await crystalAct(st, { action: 'unequip_crystal', crystal_id: id });
+          if (u.ok) { st = u.st; r.moves++; await sleep(GAP); } else { try { st = await loadCrystals(); } catch (_) { /* */ } }
+        }
+        if (gone.length) r.message = (r.message ? r.message + '; ' : '') + `${gone.join(', ')} not equipped: its crystals were left`;
+        r.skipped = gone; delete r.st; return r;
+      } catch (e) { return { ok: false, moves: 0, message: (e && e.message) || String(e) }; }
+    },
+  };
+
+  /* ---------------------------------------------- sigils ---------------------------------------------- */
+  let csrf = '';
+  const readCsrf = async () => { try { const m = /const\s+PET_SIGIL_CSRF\s*=\s*"([^"]*)"/.exec(await getText('/pets.php')); if (m) csrf = m[1]; } catch (_) { /* the ajax reply carries one too */ } return csrf; };
+  async function sigilInfo(inv, slot) {
+    const j = await getJson(`/pet_sigils_ajax.php?pet_inv_id=${encodeURIComponent(inv)}&slot_type=${encodeURIComponent(slot)}`);
+    if (j.status !== 'success') throw new Error(j.message || 'could not read the sigils');
+    if (j.csrf) csrf = j.csrf;
+    const mk = (o) => ({ itemId: String(o.item_id), name: o.name || ('Sigil #' + o.item_id), available: Number(o.available || 0) });
+    return { current: j.current ? mk(j.current) : null, options: (j.options || []).map(mk) };
+  }
+  async function sigilAct(inv, slot, itemId, retried) {
+    if (!csrf) await readCsrf();
+    const f = { action: itemId ? 'equip' : 'remove', pet_inv_id: String(inv), slot_type: slot, csrf_token: csrf || '' }; if (itemId) f.item_id = String(itemId);
+    const r = await postUrl('/pet_sigil_action.php', f, 'application/json'), j = Core.parseJson(r.text);
+    if (!j || j.status !== 'success') {
+      const msg = (j && j.message) || 'sigil update failed';
+      if (!retried && /security token expired/i.test(msg) && (await readCsrf())) return sigilAct(inv, slot, itemId, true);
+      throw new Error(msg);
+    }
+    await sleep(GAP); return j;
+  }
+  // the PvE team now: mains by slot and, for each main, its Link 1 / Link 2 pets
+  async function readTeam() {
+    const doc = parseHtml(await getText(teamUrl('attack'))); if (Guard.pageState(doc) !== 'ok') throw new Error('pets page: ' + Guard.pageState(doc));
+    const sec = Array.from(doc.querySelectorAll('.section')).find((s) => ((s.querySelector('.section-title') || {}).textContent || '').trim() === 'PvE Attack Team');
+    const team = { m: {}, l: {} };
+    if (sec) sec.querySelectorAll('.pet-card[data-pet-inv-id]').forEach((card) => {
+      const b = Array.from(card.querySelectorAll('button')).find((x) => /unequipPet\s*\(\s*\d+\s*\)/.test(x.getAttribute('onclick') || '')), m = b && /unequipPet\s*\(\s*(\d+)\s*\)/.exec(b.getAttribute('onclick') || '');
+      if (m) team.m[m[1]] = card.getAttribute('data-pet-inv-id');
+    });
+    for (const s of Object.keys(team.m)) {
+      try {
+        const j = await getJson('/pet_links_ajax.php?pet_inv_id=' + encodeURIComponent(team.m[s])); team.l[s] = {};
+        if (j.status === 'success') (j.links || []).forEach((x) => { const id = x.inv_id != null ? x.inv_id : (x.link_pet_id != null ? x.link_pet_id : x.pet_inv_id); if (id != null && (x.link_level === 1 || x.link_level === 2)) team.l[s][x.link_level] = String(id); });
+      } catch (_) { /* this main's links stay unknown: no carry for them */ }
+    }
+    return team;
+  }
+  const sigils = {
+    ready: () => true,
+    team: readTeam,
+    // before = readTeam() taken before the engine changed the pets. Moves the sigils of every position whose pet changed. Never throws.
+    async carry(before) {
+      const undo = [], notes = [];
+      try {
+        const changes = Kit.positionChanges(before, await readTeam());
+        for (const c of changes) {
+          for (const slot of Kit.SLOTS) {
+            let old; try { old = await sigilInfo(c.from, slot); } catch (e) { notes.push(`${c.pos} ${slot}: ${e.message}`); continue; }
+            if (!old.current) continue;
+            const want = old.current;
+            try {
+              let now = await sigilInfo(c.to, slot);
+              if (now.current && now.current.itemId === want.itemId) continue;
+              let opt = now.options.find((o) => o.itemId === want.itemId), removedFrom = null;
+              if (!opt) { notes.push(`${c.pos}: ${want.name} is not usable on the new pet`); continue; }
+              if (opt.available <= 0) {                              // every copy is worn: the old pet gives it up
+                await sigilAct(c.from, slot, null); removedFrom = c.from;
+                now = await sigilInfo(c.to, slot); opt = now.options.find((o) => o.itemId === want.itemId);
+                if (!opt || opt.available <= 0) { notes.push(`${c.pos}: no free ${want.name}`); undo.push({ pet: c.from, slot, restore: want.itemId, took: null }); continue; }
+              }
+              const prev = now.current ? now.current.itemId : null;
+              if (prev) await sigilAct(c.to, slot, null);
+              await sigilAct(c.to, slot, want.itemId);
+              undo.push({ pet: c.to, slot, restore: prev, took: want.itemId, giveBack: removedFrom ? { pet: removedFrom, item: want.itemId } : null });
+            } catch (e) { notes.push(`${c.pos} ${slot}: ${e.message}`); }
+          }
+        }
+        return { ok: !notes.length, moved: undo.filter((u) => u.took).length, undo, message: notes.join('; ') };
+      } catch (e) { return { ok: false, moved: undo.filter((u) => u.took).length, undo, message: (e && e.message) || String(e) }; }
+    },
+    // moves = the undo entries of every carry so far, undone newest first
+    async undo(moves) {
+      const notes = []; let n = 0;
+      for (const u of (moves || []).slice().reverse()) {
+        try {
+          if (u.took) {
+            const cur = await sigilInfo(u.pet, u.slot);
+            if (cur.current && cur.current.itemId === u.took) { await sigilAct(u.pet, u.slot, null); n++; }
+            if (u.restore) { const o = (await sigilInfo(u.pet, u.slot)).options.find((x) => x.itemId === u.restore); if (o && o.available > 0) { await sigilAct(u.pet, u.slot, u.restore); n++; } else notes.push(`${u.slot}: the old sigil is not free`); }
+            if (u.giveBack) { const o = (await sigilInfo(u.giveBack.pet, u.slot)).options.find((x) => x.itemId === u.giveBack.item); if (o && o.available > 0) { await sigilAct(u.giveBack.pet, u.slot, u.giveBack.item); n++; } else notes.push(`${u.slot}: could not give it back`); }
+          } else if (u.restore) {                                    // a sigil taken off a pet that could not pass it on
+            const o = (await sigilInfo(u.pet, u.slot)).options.find((x) => x.itemId === u.restore); if (o && o.available > 0) { await sigilAct(u.pet, u.slot, u.restore); n++; }
+          }
+        } catch (e) { notes.push(`${u.slot}: ${e.message}`); }
+      }
+      return { ok: !notes.length, moved: n, message: notes.join('; ') };
+    },
+  };
+  return { crystals, sigils };
+})();
+
 /* ---- preset bridge (found through Core capabilities) ---------------------------------------------------------------
  * The automator knows no preset addon by name and Core knows nothing about presets. Any addon that offers the pair
  *
@@ -1024,51 +1308,138 @@ const Presets = (() => {
   const bossOf = (t) => ({ monsterId: t.monsterId, name: t.name, kind: t.kind });
   const noBest = (t) => !t || t.kind === 'dungeon' || !!t.swarm || /\bGeneral\b/i.test(String(t.name || ''));   // dungeon bosses and Generals stay on saved presets
   const memoOf = (kind, want, t) => (kind === BEST ? 'best@' + (t && t.monsterId != null ? t.monsterId : '') : String(want));   // best is judged per boss
-  // Called between swings, when the engine moves to a boss. Applies the boss's preset of each kind if it is not already on.
-  // Every apply gets { silent: true, boss } (a preset addon may use the boss); kind 'best' also gets target = the boss, which is what the engine searches for.
-  // What this boss gets, per kind: { kind: presetId }. The boss's own pick, else the default loadout.
-  // Auto best build (Settings): a wave boss with NO gear / pet pick of its own takes the engine's best gear + pets instead of the saved
-  // gear / pet presets; its crystals stay the boss's pick or the default loadout (the engine does not search crystals).
-  // A boss with its own gear or pet pick (even "keep equipped") is manual: that pick wins and the engine is left out.
+  // Called between swings, when the engine moves to a boss. Applies what the boss gets, in the order that makes sense: gear and pets first
+  // (the Build Engine's 'best' is one of them), THEN crystals (they sit on the gear that is on now) and sigils (they sit on the pets that
+  // are on now). Every preset apply gets { silent: true, boss }; kind 'best' also gets target = the boss, which is what the engine searches for.
+  //
+  // What a boss gets (Bosses → Loadout → Build; per boss: Default · 🤖 Auto · 📌 Own picks):
+  //   🤖 Auto   the engine's best gear + pets for that boss. Crystals: Auto-assign Best on the gear that is on (unless the boss has a crystal
+  //             pick of its own). Sigils: move to the pets that took their place. Wave bosses only: dungeon bosses, swarms and Generals stay saved.
+  //   📌 Own    the boss's own picks, else the default loadout (saved gear / crystal / pet presets)
+  // A boss with a gear / pet pick from before the Build switch existed counts as Own.
+  const BKIND = ['gear', 'pet'];
+  const pickKinds = () => kinds().filter((k) => k !== BEST);       // what the pickers show: 'best' is the Auto switch, not a preset
+  const buildOf = (low) => { const o = cfg.bosses[low] || {}; return o.build === 'auto' || o.build === 'own' ? o.build : (o.gear || o.pet || o[BEST] === '__keep') ? 'own' : ''; };
   const autoFor = (low, t) => {
-    if (!(cfg.autoBuild && cfg.autoBuild.enabled) || !available(BEST) || noBest(t)) return false;
-    const o = cfg.bosses[low] || {}; return !o.gear && !o.pet && o[BEST] !== '__keep';
+    if (!available(BEST) || noBest(t)) return false;
+    const b = buildOf(low); return b === 'auto' ? true : b === 'own' ? false : !!(cfg.autoBuild && cfg.autoBuild.enabled);
   };
+  const crystalAuto = (low, t) => autoFor(low, t) && (cfg.autoBuild || {}).crystals !== false && !((cfg.bosses[low] || {}).crystal);
+  const sigilAuto = (low, t) => autoFor(low, t) && (cfg.autoBuild || {}).sigils !== false;
   function wanted(low, t) {
-    const o = cfg.bosses[low] || {}, auto = autoFor(low, t), out = {};
+    const o = cfg.bosses[low] || {}, auto = autoFor(low, t), own = buildOf(low) === 'auto' ? {} : o, out = {};
     for (const kind of kinds()) {
-      const mine = o[kind];
+      const mine = own[kind];
       let want = mine === '__keep' ? '' : (mine || (cfg.loadout || {})[kind]);
-      if (auto && (kind === 'gear' || kind === 'pet') && !mine) want = '';
-      if (kind === BEST) want = auto ? BEST : (noBest(t) ? '' : want);
+      if (auto && BKIND.includes(kind)) want = '';                    // the engine picks gear + pets
+      if (kind === BEST) want = auto ? BEST : '';
       if (want) out[kind] = String(want);
     }
+    if (crystalAuto(low, t)) out.crystal = '__best';
     return out;
   }
+
+  /* what was on before the automator first changed anything: gear + pets (the engine's own read), crystals by piece of gear, and the sigils
+   * it moved. Kept until you put it back (or forget it), also across a reload. */
+  const originStore = Core.store(ID + '-origin', { def: null });
+  let capturing = false, buildEpoch = 0;                              // buildEpoch: counts gear changes, so crystals are placed again after each
+  const Origin = {
+    get: () => originStore.get() || null,
+    async ensure(t) {
+      if (Origin.get() || capturing) return;
+      capturing = true;
+      try {
+        const o = { at: Date.now(), boss: t ? t.name : '', sel: null, crystals: null, moves: [] };
+        if (t && available(BEST)) { try { const r = await withTimeout(Promise.resolve(Core.call('build.predict', bossOf(t))), 60000, null); if (r && r.ok !== false && r.sel && r.sel.gear) o.sel = r.sel; } catch (_) { /* no gear / pet read */ } }
+        try { o.crystals = await withTimeout(BuildKit.crystals.snapshot(), 30000, null); } catch (_) { /* no crystal read */ }
+        originStore.set(o);
+        log(`📌 remembered your build (${o.sel ? 'gear + pets' : 'gear / pets NOT read'}${o.crystals ? ' + crystals' : ''}) so it can be put back`, o.sel ? 'info' : 'warn');
+      } finally { capturing = false; }
+    },
+    addPlaced(ids) { if (!ids || !ids.length) return; const o = Origin.get(); if (!o) return; o.placed = Array.from(new Set((o.placed || []).concat(ids.map(String)))); originStore.set(o); },
+    addMoves(list) { if (!list || !list.length) return; const o = Origin.get(); if (!o) return; o.moves = (o.moves || []).concat(list); originStore.set(o); },
+    clear() { originStore.set(null); },
+  };
+  let chain = Promise.resolve();                                      // ensure() and restore() take turns, never overlap
+  const exclusive = (fn) => { const p = chain.then(fn, fn); chain = p.catch(() => {}); return p; };
+
   let ensuring = false;
-  async function ensure(low, t) {
-    const W = wanted(low, t);
+  const ensure = (low, t) => exclusive(() => ensureNow(low, t));
+  async function ensureNow(low, t) {
+    const W = wanted(low, t), auto = autoFor(low, t), sig = sigilAuto(low, t);
     ensuring = true;
     try {
-      for (const kind of kinds()) {
+      if (auto) await Origin.ensure(t);                               // before anything moves
+      const all = kinds(), first = ['gear', 'pet', BEST].filter((k) => all.includes(k));
+      const seq = [...first, ...all.filter((k) => !first.includes(k) && k !== 'crystal'), ...(all.includes('crystal') ? ['crystal'] : [])];
+      for (const kind of seq) {
         const want = W[kind];
-        if (!want) continue;
+        if (!want || (kind === 'crystal' && want === '__best')) continue;
         const memo = memoOf(kind, want, t);
         if (applied[kind] === memo) continue;
         const key = kind + ':' + memo;
         if (Date.now() - (failedAt[key] || 0) < 300000) continue;           // a failed apply is not retried for 5 min (best: per boss)
-        log(`🎒 applying ${kind} preset "${esc(nameOf(kind, want))}" for ${esc(bossName(low))}…`, 'info');
+        const label = kind === BEST ? 'best gear + pets' : `${kind} preset "${esc(nameOf(kind, want))}"`;
+        log(`🎒 applying ${label} for ${esc(bossName(low))}…`, 'info');
         const boss = t ? bossOf(t) : { name: bossName(low) };
         const opts = kind === BEST ? { silent: true, boss, target: boss } : { silent: true, boss };
+        let teamBefore = null;
+        if (kind === BEST && sig) { try { teamBefore = await withTimeout(BuildKit.sigils.team(), 30000, null); } catch (_) { teamBefore = null; } }
         let r;
         try { r = await withTimeout(Core.call('preset.' + kind + '.apply', String(want), opts), 120000, { ok: false, message: 'timed out' }); }
         catch (e) { r = { ok: false, message: (e && e.code === 'NO_CAP') ? 'the addon that offered it is gone' : ((e && e.message) || String(e)) }; }
         if (r && r.ok !== false) {
-          applied[kind] = memo; log(`✅ ${kind} preset applied`, 'ok'); try { await Core.me.sync(); } catch (_) { /* */ } Me.statsAt = 0;
-          if (kind === BEST && r.changed) { delete applied.gear; delete applied.pet; }   // the engine moved gear / pets: those memos no longer describe what is on
-        } else { failedAt[key] = Date.now(); log(`⚠️ ${kind} preset "${esc(nameOf(kind, want))}" failed: ${esc((r && r.message) || 'unknown')}`, 'warn'); }
+          applied[kind] = memo; log(`✅ ${kind === BEST ? 'best gear + pets' : kind + ' preset'} ${r.changed === false ? 'already on' : 'applied'}`, 'ok'); try { await Core.me.sync(); } catch (_) { /* */ } Me.statsAt = 0;
+          if (kind === 'gear' || (kind === BEST && r.changed)) buildEpoch++;
+          if (kind === BEST && r.changed) {
+            delete applied.gear; delete applied.pet;                  // the engine moved gear / pets: those memos no longer describe what is on
+            if (sig && teamBefore) {                                  // sigils sit on pets: move them to the pets that took their place
+              const c = await BuildKit.sigils.carry(teamBefore);
+              Origin.addMoves(c.undo);
+              if (c.moved) log(`✨ ${c.moved} sigil${c.moved === 1 ? '' : 's'} moved to the new pets`, 'ok');
+              if (!c.ok) log(`⚠️ sigils: ${esc(c.message)}`, 'warn');
+            }
+          }
+        } else { failedAt[key] = Date.now(); log(`⚠️ ${label} failed: ${esc((r && r.message) || 'unknown')}`, 'warn'); }
+      }
+      if (W.crystal === '__best') {                                   // crystals sit on the gear that is on now, so after gear
+        const memo = '__best@' + buildEpoch, key = 'crystal:' + memo;
+        if (applied.crystal !== memo && Date.now() - (failedAt[key] || 0) >= 300000) {
+          log(`💎 best crystals on the gear for ${esc(bossName(low))}…`, 'info');
+          const r = await withTimeout(BuildKit.crystals.best(), 180000, { ok: false, message: 'timed out' });
+          Origin.addPlaced(r && r.placed);
+          if (r && r.ok !== false) { applied.crystal = memo; log(r.changed ? `✅ crystals placed (${r.moves} step${r.moves === 1 ? '' : 's'})` : '✅ crystals already the best', 'ok'); }
+          else { failedAt[key] = Date.now(); log(`⚠️ best crystals: ${esc((r && r.message) || 'unknown')}`, 'warn'); }
+        }
       }
     } finally { ensuring = false; }
+  }
+  // Put back what was there before: gear + pets, then the crystals onto the same pieces of gear, then every moved sigil to its pet.
+  const restore = (why) => exclusive(() => restoreNow(why));
+  async function restoreNow(why) {
+    const o = Origin.get(); if (!o) return { ok: false, message: 'nothing remembered to put back' };
+    ensuring = true;
+    const notes = [];
+    try {
+      log(`↩ putting your build back${why ? ' (' + esc(why) + ')' : ''}…`, 'info');
+      if (o.sel && Core.has && Core.has('build.apply')) {
+        const r = await withTimeout(Promise.resolve(Core.call('build.apply', { sel: o.sel }, { label: 'Your build' })), 240000, { ok: false, message: 'timed out' });
+        if (r && r.ok !== false) log(`✅ gear + pets ${r.changed === false ? 'were already as before' : 'put back'}`, 'ok'); else notes.push('gear + pets: ' + ((r && r.message) || 'failed'));
+      } else if (!o.sel) notes.push('gear + pets were not read, so they stay as they are');
+      if (o.crystals) {
+        const r = await withTimeout(BuildKit.crystals.restore(o.crystals, { placed: o.placed }), 240000, { ok: false, message: 'timed out' });
+        if (r && r.ok !== false) log(`✅ crystals ${r.moves ? 'put back on their gear' : 'were already as before'}${r.message ? ' (' + esc(r.message) + ')' : ''}`, 'ok'); else notes.push('crystals: ' + ((r && r.message) || 'failed'));
+      }
+      if ((o.moves || []).length) {
+        const r = await withTimeout(BuildKit.sigils.undo(o.moves), 240000, { ok: false, message: 'timed out' });
+        if (r && r.ok !== false) log(`✅ sigils back on their pets (${r.moved})`, 'ok'); else notes.push('sigils: ' + ((r && r.message) || 'failed'));
+      }
+      Object.keys(applied).forEach((k) => delete applied[k]); buildEpoch++;
+      if (notes.length) { log(`⚠️ not everything went back: ${esc(notes.join(' · '))} — it is still remembered, try again`, 'warn'); return { ok: false, message: notes.join('; ') }; }
+      Origin.clear(); try { await Core.me.sync(); } catch (_) { /* */ } Me.statsAt = 0;
+      return { ok: true, message: 'your build is back' };
+    } catch (e) { log('⚠️ restore: ' + esc((e && e.message) || String(e)), 'warn'); return { ok: false, message: (e && e.message) || String(e) }; }
+    finally { ensuring = false; }
   }
   // Someone else changed the build (a human preset click, another tab, the engine): what this tab remembers applying may be stale.
   // Which memos an owner can invalidate; an unknown owner clears everything.
@@ -1080,21 +1451,21 @@ const Presets = (() => {
   }
   if (typeof Core.on === 'function') Core.on('loadout:end', foreignEnd);
   // "gear: Boss gear · pet: Boss pets" for the Status tab, or an em dash when nothing was applied this session
-  const summary = () => { const a = kinds().filter((k) => applied[k]).map((k) => k + ': ' + nameOf(k, String(applied[k]).split('@')[0])); return a.length ? a.join(' · ') : '—'; };
+  const summary = () => { const a = kinds().filter((k) => applied[k]).map((k) => k + ': ' + (String(applied[k]).startsWith('__best') ? 'best' : nameOf(k, String(applied[k]).split('@')[0]))); if (applied.crystal && !kinds().includes('crystal')) a.push('crystal: best'); return a.length ? a.join(' · ') : '—'; };
   const note = () => !haveCaps() ? 'needs Core 3.16.0+' : (kinds().length ? kinds().map((k) => `${k} (${list(k).length})`).join(' · ') : 'none offered');
-  return { kinds, available, list, ensure, wanted, autoFor, summary, note, applied: () => Object.assign({}, applied), forget: () => { Object.keys(applied).forEach((k) => delete applied[k]); } };
+  return { kinds, pickKinds, available, list, ensure, wanted, autoFor, buildOf, summary, note, restore, origin: Origin, applied: () => Object.assign({}, applied), forget: () => { Object.keys(applied).forEach((k) => delete applied[k]); buildEpoch++; } };
 })();
 
 /* ---- build planner: which boss next, so the build changes as little as possible ------------------------------------------
  * Every boss that is about to be fought has a "build signature": what will be equipped for it (the Build Engine's best gear + pets, or the
  * saved presets' names) and its crystal preset. distance() counts the changes between two builds (one per gear slot, per pet, per link,
  * 1 for another crystal preset); order() puts the bosses in the order that needs the fewest changes from the build that is on now.
- * Up to EXACT_MAX bosses: the cheapest order of all (DP over subsets). More: nearest-first, staying on the build while bosses
- * within maxChanges are left. Ties go to the boss you ranked first. Plan is pure (no Core, no DOM): tests/plan.test.js loads it as it is.
+ * Up to EXACT_MAX bosses: the cheapest order of all (DP over subsets). More: nearest-first, then improved until no
+ * reversal / move makes it cheaper. No cut-off, no setting: it is a sort by distance. Ties go to the boss you ranked first. Plan is pure (no Core, no DOM): tests/plan.test.js loads it as it is.
  */
 /* PLAN-BEGIN */
 const Plan = (() => {
-  const UNRELATED = 20, EXACT_MAX = 9;
+  const UNRELATED = 20, EXACT_MAX = 12;
   const nz = (v) => (v == null ? '' : String(v));
   const cryst = (c) => (c == null || c === '' ? null : String(c));
   // sig: { any, tag, gear:{Slot:name}, mains:[name], links:{main:[l1,l2]}, crystal } — any: needs no change (keeps what is equipped); tag: a saved-preset build, not comparable with a searched one
@@ -1122,13 +1493,16 @@ const Plan = (() => {
   }
   const dist0 = (start, sig) => (start ? distance(start, sig) : 0);
   function cost(start, sigs) { let c = 0, cur = start; sigs.forEach((s) => { c += dist0(cur, s); cur = s; }); return c; }
-  // items: [{ key, sig }] in priority order (index = rank). Returns { keys, cost, mode }.
-  function order(items, start, opts) {
-    const n = items.length, maxCh = opts && Number.isFinite(opts.maxChanges) ? opts.maxChanges : 2;
+  // items: [{ key, sig }] in priority order (index = rank). Returns { keys, cost, mode }. Always a real sort by build distance, no cut-off:
+  // up to EXACT_MAX bosses the cheapest order of all (DP over subsets, starting from the build that is on now); more: nearest-first from
+  // that build, then improved (reverse a stretch / move one boss) until no step makes it cheaper. Ties go to the boss you ranked first.
+  function order(items, start) {
+    const n = items.length;
     if (!n) return { keys: [], cost: 0, mode: 'exact' };
     const sigs = items.map((i) => i.sig), keysOf = (idx) => idx.map((i) => items[i].key);
+    const D = sigs.map((a) => sigs.map((b) => distance(a, b))), S = sigs.map((a) => dist0(start, a));
     if (n <= EXACT_MAX) {
-      const D = sigs.map((a) => sigs.map((b) => distance(a, b))), S = sigs.map((a) => dist0(start, a)), BIG = 1e6, FULL = (1 << n) - 1;
+      const BIG = 1e6, FULL = (1 << n) - 1;
       const best = new Float64Array((FULL + 1) * n).fill(Infinity), from = new Int16Array((FULL + 1) * n).fill(-1);
       const pen = (i, pos) => i * (n - pos);                         // an earlier slot weighs more: a better-ranked boss goes first on a tie
       for (let i = 0; i < n; i++) best[(1 << i) * n + i] = S[i] * BIG + pen(i, 0);
@@ -1149,18 +1523,26 @@ const Plan = (() => {
       idx.reverse();
       return { keys: keysOf(idx), cost: cost(start, idx.map((i) => sigs[i])), mode: 'exact' };
     }
-    const left = items.map((_, i) => i), idx = []; let cur = start;
-    while (left.length) {
-      const d = (i) => dist0(cur, sigs[i]), near = left.filter((i) => d(i) <= maxCh);
-      let pick;
-      if (near.length) pick = near.reduce((a, b) => (d(b) < d(a) ? b : a));              // free ones first, then 1, then 2 changes ...
-      else {                                                                          // nothing close: switch to the build that has the most bosses around it
-        const group = (i) => left.filter((j) => distance(sigs[i], sigs[j]) <= maxCh).length;
-        pick = left.reduce((a, b) => (d(b) < d(a) || (d(b) === d(a) && group(b) > group(a)) ? b : a));
-      }
-      idx.push(pick); left.splice(left.indexOf(pick), 1); cur = sigs[pick];
+    const left = items.map((_, i) => i), idx = []; let last = -1;
+    while (left.length) {                                            // nearest-first (reduce keeps the better-ranked boss on a tie)
+      const d = (i) => (last < 0 ? S[i] : D[last][i]), pick = left.reduce((a, b) => (d(b) < d(a) ? b : a));
+      idx.push(pick); left.splice(left.indexOf(pick), 1); last = pick;
     }
-    return { keys: keysOf(idx), cost: cost(start, idx.map((i) => sigs[i])), mode: 'greedy' };
+    const len = (p) => { let c = 0; for (let i = 0; i < p.length; i++) c += i ? D[p[i - 1]][p[i]] : S[p[i]]; return c; };
+    let bestLen = len(idx), improved = true, guard = 0;
+    while (improved && guard++ < 50) {
+      improved = false;
+      for (let i = 0; i < n - 1; i++) for (let j = i + 1; j < n; j++) {                       // reverse a stretch
+        const p = idx.slice(0, i).concat(idx.slice(i, j + 1).reverse(), idx.slice(j + 1)), c = len(p);
+        if (c < bestLen) { idx.splice(0, n, ...p); bestLen = c; improved = true; }
+      }
+      for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) {                               // move one boss elsewhere
+        if (i === j) continue;
+        const p = idx.slice(), x = p.splice(i, 1)[0]; p.splice(j, 0, x); const c = len(p);
+        if (c < bestLen) { idx.splice(0, n, ...p); bestLen = c; improved = true; }
+      }
+    }
+    return { keys: keysOf(idx), cost: cost(start, idx.map((i) => sigs[i])), mode: 'heuristic' };
   }
   return { sigFromSel, tagSig, anySig, distance, order, cost };
 })();
@@ -1175,7 +1557,7 @@ const Planner = (() => {
   const crystalNow = () => { const c = Presets.applied().crystal; return c ? String(c).split('@')[0] : null; };
   // -> { sig, cur }   cur = the live selection (from the same search), for the starting point
   async function sigFor(t) {
-    const w = Presets.wanted(t.low, t), crystal = w.crystal != null ? w.crystal : null;
+    const w = Presets.wanted(t.low, t), crystal = w.crystal != null && w.crystal !== '__best' ? w.crystal : null;   // auto crystals follow the gear: the gear distance already counts them
     if (w.best) {
       let hit = cache.get(t.low), cur = null;
       if (!hit || Date.now() - hit.at > TTL) {
@@ -1204,10 +1586,10 @@ const Planner = (() => {
         (r.sig.any ? wild : items).push({ key: t.low, sig: r.sig, t });
       }
       const start = fresh || onNow;
-      const res = Plan.order(items, start, { maxChanges: cfg.autoBuild.maxChanges });
+      const res = Plan.order(items, start);
       const byKey = new Map(list.map((t) => [t.low, t]));
       const seq = wild.map((x) => x.key).concat(res.keys).map((k) => byKey.get(k)).filter(Boolean);
-      const line = seq.map((t) => t.name.split(/[ ,]/)[0]).join(' → ') + ` (${res.cost} change${res.cost === 1 ? '' : 's'}${res.mode === 'greedy' ? ', nearest-first' : ''})`;
+      const line = seq.map((t) => t.name.split(/[ ,]/)[0]).join(' → ') + ` (${res.cost} change${res.cost === 1 ? '' : 's'}${res.mode === 'heuristic' ? ', nearest-first' : ''})`;
       if (line !== lastLog) { lastLog = line; log('🧭 build order: ' + esc(line), 'ok'); }
       const first = seq[0] || list[0], fi = items.find((x) => x.key === first.low);
       if (fi) onNow = fi.sig;                                                              // the engine is about to put this build on
@@ -2438,7 +2820,7 @@ const Panel = (() => {
   let root = null, tab = TABS.some((t) => t[0] === ui.tab) ? ui.tab : 'home', shown = false, drawT = 0;
   const phaseSel = {};                                              // boss entry -> which phase the boss page is on
   /* Select mode (Bosses tab): tap bosses to tick them, pick gear / crystal / pet / cap once, apply to all. Not saved: it is a one-off action. */
-  const BK = { on: false, sel: new Set(), ph: null, pick: {}, cap: '', n: 3e9, msg: '', from: '' };
+  const BK = { on: false, sel: new Set(), ph: null, pick: {}, build: '', cap: '', n: 3e9, msg: '', from: '' };
   const isOpen = (key, dflt) => (ui.open[key] != null ? !!ui.open[key] : !!dflt);
 
   (function css() {
@@ -2560,6 +2942,9 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
 .ma-ed{grid-column:1/-1;margin:1px 0 3px;padding:9px 11px 10px;background:#16213f;border:1px solid rgba(110,168,255,.34);border-radius:16px}.ma-ed .ma-in,.ma-bulk .ma-in{background:#101a33}
 .ma-ed-h{display:flex;align-items:center;gap:8px;margin-bottom:4px}.ma-ed-t{flex:1;min-width:0}.ma-ed-t b{display:block;font:800 13px Arial,sans-serif;color:#fff;overflow-wrap:anywhere}
 .ma-ed-t small{display:flex;align-items:center;gap:6px;flex-wrap:wrap;color:#7c88ad;font-size:10.5px;margin-top:1px}
+.ma-bld{margin:0 0 6px}.ma-bld .ma-cap{margin-top:2px}.ma-bld .ma-seg{margin:3px 0 5px}
+.ma-origin{margin:9px 0 0;padding:8px 10px;border-radius:12px;background:#0d1322;border:1px solid rgba(110,168,255,.28)}
+.ma-origin-t b{display:block;font:800 11.5px Arial,sans-serif;color:#d6e5ff}.ma-origin-t small{display:block;color:#8b97bd;font-size:11px;margin-top:2px}
 .ma-ld{display:grid;grid-template-columns:repeat(auto-fit,minmax(96px,1fr));gap:6px;margin:2px 0 2px}
 .ma-ld label{display:block;font:800 9.5px Arial,sans-serif;color:#6e7a9c;text-transform:uppercase;letter-spacing:.06em;margin:0 3px 3px}
 .ma-ld select{width:100%;text-overflow:ellipsis}
@@ -2860,13 +3245,28 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   const cap1 = (s) => s.charAt(0).toUpperCase() + s.slice(1);
   const lvTxt = (n) => 'Lv ' + Number(n).toLocaleString('en-US');
   const presetOpts = (k) => Presets.list(k).map((p) => [p.id, p.name]);
-  const loadoutGrid = (pick) => h('div', { class: 'ma-ld' }, Presets.kinds().map((k) => h('div', {}, h('label', {}, (KIND_ICO[k] || '🎒') + ' ' + cap1(k)), pick(k))));
-  function bossLoadout(low) {                                        // this boss's own pick; "Default" = the default loadout (🎒 Loadout above the list)
-    const o = cfg.bosses[low] || {};
-    return loadoutGrid((k) => {
-      const d = (cfg.loadout || {})[k], dp = d ? Presets.list(k).find((x) => x.id === String(d)) : null;
-      return dropdown([['', d ? 'Default · ' + (dp ? dp.name : d) : 'Default'], ['__keep', 'Keep equipped'], ...presetOpts(k)], o[k] || '', (v) => { if (v) ovr(low)[k] = v; else delete ovr(low)[k]; });
-    });
+  const loadoutGrid = (pick) => h('div', { class: 'ma-ld' }, Presets.pickKinds().map((k) => h('div', {}, h('label', {}, (KIND_ICO[k] || '🎒') + ' ' + cap1(k)), pick(k))));
+  // How a boss gets its build: '' = follows the Loadout panel, 'auto' = the engine's best, 'own' = this boss's own picks.
+  function setBuild(o, v) {
+    if (v === 'auto') { o.build = 'auto'; delete o.gear; delete o.pet; }
+    else if (v === 'own') o.build = 'own';
+    else { delete o.build; delete o.gear; delete o.pet; }
+    delete o.best;
+  }
+  function bossBuild(low) {                                          // "Default" = the Loadout panel
+    const o = cfg.bosses[low] || {}, has = Presets.available('best'), kinds = Presets.pickKinds(), b = Presets.buildOf(low), AB = cfg.autoBuild || {};
+    const dflt = has && AB.enabled ? '🤖 Auto best' : '📌 saved presets';
+    const opts = [['', 'Default'], ...(has ? [['auto', '🤖 Auto']] : []), ['own', '📌 Own picks']];
+    const change = (v) => { const oo = ovr(low); setBuild(oo, v); if (!Object.keys(oo).length) delete cfg.bosses[low]; Presets.forget(); Planner.reset(); };
+    const cd = (cfg.loadout || {}).crystal, cdp = cd ? Presets.list('crystal').find((x) => x.id === String(cd)) : null;
+    return h('div', { class: 'ma-bld' }, caption('🎒 Build'), seg(opts, b, change, { full: true }),
+      b === '' ? note('Follows the Loadout panel: ' + dflt + '.') : null,
+      b === 'auto' ? note('Best gear + pets for this boss' + (AB.crystals !== false ? ', best crystals on that gear' : '') + (AB.sigils !== false ? ', sigils follow the pets' : '') + '.') : null,
+      b === 'auto' && kinds.includes('crystal') ? h('div', { class: 'ma-ld' }, h('div', {}, h('label', {}, '💎 Crystal'), dropdown([['', AB.crystals !== false ? 'Auto-assign best' : (cd ? 'Default · ' + (cdp ? cdp.name : cd) : 'Keep equipped')], ['__keep', 'Keep equipped'], ...presetOpts('crystal')], o.crystal || '', (v) => { if (v) ovr(low).crystal = v; else delete ovr(low).crystal; }))) : null,
+      b === 'own' ? loadoutGrid((k) => {
+        const d = (cfg.loadout || {})[k], dp = d ? Presets.list(k).find((x) => x.id === String(d)) : null;
+        return dropdown([['', d ? 'Default · ' + (dp ? dp.name : d) : 'Default'], ['__keep', 'Keep equipped'], ...presetOpts(k)], o[k] || '', (v) => { if (v) ovr(low)[k] = v; else delete ovr(low)[k]; });
+      }) : null);
   }
 
   /* DAMAGE: the number, then one card per loot level: the damage it takes, with the loot it unlocks as pictures. Tap a card to cap there; bright = the cap reaches it. */
@@ -2922,7 +3322,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     saveCfg(); Engine.poke(true); draw();
   }
   function bossEditor(def) {
-    const ms = Roster.members(def), idx = Math.min(phaseSel[def.low] || 0, ms.length - 1), m = ms[idx], low = m.low, o = cfg.bosses[low] || {}, kinds = Presets.kinds();
+    const ms = Roster.members(def), idx = Math.min(phaseSel[def.low] || 0, ms.length - 1), m = ms[idx], low = m.low, o = cfg.bosses[low] || {}, kinds = Presets.pickKinds();
     const sched = Array.isArray(o.schedule) && o.schedule.length > 0, tOpen = isOpen('time', sched), [txt, kind] = entryState(def), place = placeOf(m);
     const timedBtn = m.kind !== 'wave' ? h('button', { type: 'button', class: 'ma-link', onclick: () => { ui.open.time = !tOpen; saveUi(); draw(); } }, (tOpen ? '▾ ' : '▸ ') + '⏰ Timed cap' + (sched ? ' (' + o.schedule.length + ')' : '')) : null;
     const resetBtn = Object.keys(o).length ? h('button', { type: 'button', class: 'ma-link', onclick: () => { delete cfg.bosses[low]; saveCfg(); draw(); } }, '↺ Reset') : null;
@@ -2933,25 +3333,44 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
         sw(() => isOn(def), (v) => setMany([def], v), { sm: true }),
         h('button', { type: 'button', class: 'ma-x', title: 'Close', onclick: (e) => { stop(e); ui.sel = ''; saveUi(); draw(); } }, '✕')),
       ms.length > 1 ? h('div', { style: { margin: '0 0 6px' } }, seg(ms.map((x, i) => [i, 'Phase ' + (i + 1), x.name]), idx, (v) => { phaseSel[def.low] = v; }, { full: true })) : null,
-      kinds.length ? bossLoadout(low) : null,
+      kinds.length || Presets.available('best') ? bossBuild(low) : null,
       caption('🎯 Damage cap'), ...damageBlock(low),
       timedBtn || resetBtn || removeBtn || copyBtn ? h('div', { class: 'ma-reset' }, timedBtn, h('span', { class: 'sp' }), copyBtn, resetBtn, removeBtn) : null,
       m.kind !== 'wave' && tOpen ? scheduleEditor(low) : null);
   }
-  // Auto best build + fewest-changes order. Needs the Build Engine addon (the 'best' preset kind).
-  function buildRows() {
-    const AB = cfg.autoBuild, has = Presets.available('best'), reset = () => { Presets.forget(); Planner.reset(); };
-    if (!has) return [setting('🤖 Auto best build', 'needs the Build Engine addon (it is not loaded)', null)];
-    return [
-      setting('🤖 Auto best build', 'wave bosses: best gear + pets for each boss, crystals from the preset. A boss with its own gear / pet pick keeps it', sw(() => AB.enabled, (v) => { AB.enabled = v; reset(); })),
-      setting('🧭 Fewest build changes', 'fight bosses with the same or a similar build back to back', sw(() => AB.order, (v) => { AB.order = v; reset(); })),
-      AB.order ? (() => { const e = setting('Same build means up to', 'more bosses than 9: nearest-first within this many changes', num(() => AB.maxChanges, (n) => { AB.maxChanges = n; reset(); }, { parse: parseFloat, min: 0, max: 20, unit: 'changes', w: 44 })); e.classList.add('sub'); return e; })() : null,
-    ];
+  /* ---- Loadout: the one place for how builds are chosen ---------------------------------------------------------------
+   * Build: 🤖 Auto best (the engine picks gear + pets for each boss; crystals and sigils follow) or 📌 Saved presets (the default
+   * gear / crystal / pet presets). Under it only what belongs to the chosen mode. "Apply to several bosses" opens the tick-and-apply bar. */
+  const ageTxt = (t) => { const m = Math.max(0, Math.round((Date.now() - t) / 60000)); return m < 1 ? 'just now' : m < 60 ? m + ' min ago' : m < 1440 ? Math.round(m / 60) + ' h ago' : Math.round(m / 1440) + ' d ago'; };
+  let restoring = false, restoreMsg = '';
+  function originRow() {
+    const o = Presets.origin.get(); if (!o) return null;
+    const parts = [o.sel ? 'gear + pets' : '', o.crystals ? 'crystals' : '', (o.moves || []).length ? 'sigils' : ''].filter(Boolean).join(' · ');
+    return h('div', { class: 'ma-origin' }, h('div', { class: 'ma-origin-t' }, h('b', {}, '📌 Your build is remembered'), h('small', {}, `${ageTxt(o.at)}, before ${o.boss || 'the first boss'} · ${parts || 'nothing readable'}`)),
+      h('div', { class: 'ma-actions', style: { margin: '6px 0 0' } },
+        btn(restoring ? 'Putting back…' : '↩ Put it back now', 'soft', () => { if (restoring) return; restoring = true; restoreMsg = ''; draw(); Presets.restore('you asked').then((r) => { restoreMsg = r.ok ? '✅ ' + r.message : '⚠️ ' + r.message; }).finally(() => { restoring = false; draw(); }); }),
+        btn('Forget it', 'soft', () => { Presets.origin.clear(); restoreMsg = ''; draw(); })),
+      restoreMsg ? h('div', { class: 'ma-note', style: { margin: '4px 0 0' } }, restoreMsg) : null);
   }
-  function loadoutCard() {
-    return h('div', { class: 'ma-card' }, h('div', { class: 'ma-card-h' }, h('span', { class: 'ma-ico' }, '🎒'), h('div', { class: 'ma-card-t' }, h('b', {}, 'Default loadout'), h('small', {}, 'Equipped before any boss that has no pick of its own. Open a boss to change it just for that boss.'))),
-      h('div', { style: { marginTop: '9px' } }, loadoutGrid((k) => dropdown([['', 'Keep equipped'], ...presetOpts(k)], (cfg.loadout || {})[k] || '', (v) => { cfg.loadout = cfg.loadout || {}; if (v) cfg.loadout[k] = v; else delete cfg.loadout[k]; Presets.forget(); Planner.reset(); }))),
-      h('div', { style: { marginTop: '9px' } }, ...buildRows()));
+  function loadoutPanel() {
+    const AB = cfg.autoBuild, has = Presets.available('best'), kinds = Presets.pickKinds(), reset = () => { Presets.forget(); Planner.reset(); };
+    const mode = has && AB.enabled ? 'auto' : 'saved', flag = (title, desc, key, after) => setting(title, desc, sw(() => AB[key], (v) => { AB[key] = v; reset(); if (after) after(v); }));
+    const body = [seg([['auto', '🤖 Auto best', 'The Build Engine picks the best gear + pets for each boss'], ['saved', '📌 Saved presets', 'Equip the gear / crystal / pet presets you choose']], mode, (v) => { if (v === 'auto' && !has) return; AB.enabled = v === 'auto'; reset(); }, { full: true })];
+    if (!has) body.push(note('🤖 Auto needs the Build Engine addon, and it is not loaded.'));
+    if (mode === 'auto') {
+      body.push(note('For every wave boss that does not choose its own: best gear + pets for that boss. Dungeon bosses and Generals use saved presets.'),
+        flag('🧭 Fewest build changes', 'Fight the bosses that need the same, or nearly the same, build back to back (sorted by the gear / pet / link changes between them)', 'order'),
+        flag('💎 Best crystals on the best armor', 'After the gear changes, the best attack + defense crystals go on the gear that is on (Crystal Presets’ Auto-assign Best)', 'crystals'),
+        flag('✨ Sigils follow the pets', 'The sigils and orbs of the pets that leave go to the pets that take their place', 'sigils'),
+        flag('↩ Put my build back when I stop', 'Gear, pets, crystals (on their own gear) and sigils return to what you had before', 'restore'));
+      if (AB.crystals === false && kinds.includes('crystal')) body.push(h('div', { class: 'ma-ld' }, h('div', {}, h('label', {}, '💎 Crystal preset'), dropdown([['', 'Keep equipped'], ...presetOpts('crystal')], (cfg.loadout || {}).crystal || '', (v) => { cfg.loadout = cfg.loadout || {}; if (v) cfg.loadout.crystal = v; else delete cfg.loadout.crystal; reset(); }))));
+    } else if (kinds.length) {
+      body.push(note('Equipped before every boss that has no pick of its own. Open a boss to change it just for that boss.'),
+        loadoutGrid((k) => dropdown([['', 'Keep equipped'], ...presetOpts(k)], (cfg.loadout || {})[k] || '', (v) => { cfg.loadout = cfg.loadout || {}; if (v) cfg.loadout[k] = v; else delete cfg.loadout[k]; reset(); })));
+    } else body.push(note('No gear / crystal / pet preset addon is loaded.'));
+    const o = originRow(); if (o) body.push(o);
+    body.push(h('div', { class: 'ma-actions', style: { margin: '9px 0 0' } }, btn(BK.on ? '✕ Done selecting' : '☑ Apply to several bosses…', BK.on ? 'soft' : '', () => { if (BK.on) endBulk(); else { BK.on = true; ui.sel = ''; saveUi(); draw(); } })));
+    return h('div', { class: 'ma-card' }, h('div', { class: 'ma-card-h' }, h('span', { class: 'ma-ico' }, '🎒'), h('div', { class: 'ma-card-t' }, h('b', {}, 'Loadout'), h('small', {}, 'How a boss gets its gear, pets, crystals and sigils')), ), h('div', { style: { marginTop: '9px' } }, ...body));
   }
 
   /* a boss as a bubble: avatar (dot = state), short name, cap · state, switch. Tap it to select it (one at a time) and open its editor. */
@@ -2962,11 +3381,11 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     const m = /^(.+?)\s+(the\s.+)$/i.exec(n);                         // "Oceanus The Water Titan" -> Oceanus | The Water Titan
     return m && !/\bof$/i.test(m[1]) ? [m[1], m[2]] : [n, ''];
   }
-  const loadoutBits = (def) => {                                     // "gear: PVE Full SS" for the first phase that has its own picks
-    const kinds = Presets.kinds(); if (!kinds.length) return [];
+  const loadoutBits = (def) => {                                     // "build: auto best · gear: PVE Full SS" for the first phase that has its own picks
+    const kinds = Presets.pickKinds();
     for (const m of Roster.members(def)) {
       const o = cfg.bosses[m.low]; if (!o) continue;
-      const a = kinds.filter((k) => o[k]).map((k) => k + ': ' + (o[k] === '__keep' ? 'keep equipped' : (Presets.list(k).find((x) => x.id === String(o[k])) || { name: o[k] }).name));
+      const a = [...(o.build === 'auto' ? ['build: auto best'] : o.build === 'own' ? ['build: own picks'] : []), ...kinds.filter((k) => o[k]).map((k) => k + ': ' + (o[k] === '__keep' ? 'keep equipped' : (Presets.list(k).find((x) => x.id === String(o[k])) || { name: o[k] }).name))];
       if (a.length) return a;
     }
     return [];
@@ -3000,21 +3419,23 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   function startBulk(def, low) {                                      // from a boss's editor: carry its picks over, then tick the bosses to give them to
     const o = cfg.bosses[low || def.low] || {};
     BK.on = true; BK.sel = new Set(); BK.pick = {}; BK.cap = ''; BK.msg = ''; BK.from = def.name;
-    Presets.kinds().forEach((k) => { if (o[k]) BK.pick[k] = o[k]; });
+    Presets.pickKinds().forEach((k) => { if (o[k]) BK.pick[k] = o[k]; });
+    if (o.build) BK.build = o.build;
     const cp = baseCapOf(low || def.low); if (cp > 0) { BK.cap = 'num'; BK.n = cp; } else if (cp === 0) BK.cap = 'skip';      // its damage cap is copied too (tap the chip again to leave it out)
-    const ms = Roster.members(def); BK.ph = ms.length > 1 ? ms.map((m) => { const mo = cfg.bosses[m.low] || {}, r = { cap: baseCapOf(m.low) }; Presets.kinds().forEach((k) => { if (mo[k]) r[k] = mo[k]; }); return r; }) : null;   // a boss with phases: each phase goes to the same phase of the target
+    const ms = Roster.members(def); BK.ph = ms.length > 1 ? ms.map((m) => { const mo = cfg.bosses[m.low] || {}, r = { cap: baseCapOf(m.low) }; Presets.pickKinds().forEach((k) => { if (mo[k]) r[k] = mo[k]; }); return r; }) : null;   // a boss with phases: each phase goes to the same phase of the target
     ui.sel = ''; saveUi(); draw();
     setTimeout(() => { const e = root && root.querySelector('.ma-bulk'); if (e && e.scrollIntoView) e.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); }, 40);
   }
-  function endBulk() { BK.on = false; BK.ph = null; BK.sel = new Set(); BK.pick = {}; BK.cap = ''; BK.msg = ''; BK.from = ''; draw(); }
-  const bulkChanges = () => Presets.kinds().filter((k) => BK.pick[k]).length + (BK.cap ? 1 : 0);
+  function endBulk() { BK.on = false; BK.ph = null; BK.sel = new Set(); BK.pick = {}; BK.build = ''; BK.cap = ''; BK.msg = ''; BK.from = ''; draw(); }
+  const bulkChanges = () => Presets.pickKinds().filter((k) => BK.pick[k]).length + (BK.cap ? 1 : 0) + (BK.build ? 1 : 0);
   function applyBulk() {
-    const defs = [...BK.sel].map((l) => Roster.get(l)).filter(Boolean), kinds = Presets.kinds(), did = new Set(), mode = BK.cap; let capDefs = 0, noExp = 0;
+    const defs = [...BK.sel].map((l) => Roster.get(l)).filter(Boolean), kinds = Presets.pickKinds(), did = new Set(), mode = BK.cap; let capDefs = 0, noExp = 0;
     defs.forEach((def) => {
       let capped = false;
       Roster.members(def).forEach((m, i) => {                                                            // every phase of the boss gets it (phase by phase when the copied boss has phases)
         const o = ovr(m.low), sp = BK.ph && BK.ph[Math.min(i, BK.ph.length - 1)], pk = sp || BK.pick, md = sp ? (sp.cap > 0 ? 'num' : sp.cap === 0 ? 'skip' : '') : mode, nn = sp ? sp.cap : BK.n;
-        kinds.forEach((k) => { const v = pk[k]; if (!v) return; if (v === '__default') delete o[k]; else o[k] = v; did.add(k); });
+        if (BK.build) { setBuild(o, BK.build === 'default' ? '' : BK.build); did.add('build'); }
+        kinds.forEach((k) => { const v = pk[k]; if (!v) return; if (v === '__default') delete o[k]; else { o[k] = v; if (k === 'gear' || k === 'pet') o.build = 'own'; } did.add(k); });
         if (md === 'max') { delete o.cap; capped = true; }
         else if (md === 'skip') { o.cap = 0; capped = true; }
         else if (md === 'num') { o.cap = Math.max(0, Math.round(nn) || 0); capped = true; }
@@ -3026,11 +3447,11 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     saveCfg(); Engine.poke(true);
     const parts = [...did]; if (capDefs) parts.push('cap' + (capDefs < defs.length ? ` (${capDefs} of ${defs.length})` : '')); const cnt = defs.length;
     BK.msg = parts.length ? `✅ ${parts.join(' + ')} applied to ${cnt} boss${cnt === 1 ? '' : 'es'}` + (noExp ? ` · ${noExp} ${noExp === 1 ? 'has' : 'have'} no EXP cap data, so ${noExp === 1 ? 'its' : 'their'} cap was left alone` : '') : '⚠ nothing changed' + (noExp ? ': none of them has EXP cap data (scan the loot first)' : '');
-    BK.pick = {}; BK.cap = ''; BK.ph = null;
+    BK.pick = {}; BK.build = ''; BK.cap = ''; BK.ph = null;
     draw();
   }
   function bulkBar(sec) {
-    const kinds = Presets.kinds(), n = selCount(), chg = bulkChanges();
+    const kinds = Presets.pickKinds(), n = selCount(), chg = bulkChanges();
     const lnk = (label, title, fn) => h('button', { type: 'button', class: 'ma-link', title, onclick: (e) => { stop(e); fn(); } }, label);
     // one dropdown per loadout kind: the unset state IS "no change" and wears the kind's name, so no labels and no "Leave as is"
     const pickBox = (k) => {
@@ -3038,8 +3459,10 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
       return h('select', { class: 'ma-in' + (cur ? ' chg' : ''), title: cap1(k) + ': ' + (cur ? 'will change' : 'no change'), onclick: stop, onchange: (e) => { if (e.target.value) BK.pick[k] = e.target.value; else delete BK.pick[k]; BK.ph = null; BK.msg = ''; draw(); } },
         h('option', { value: '' }, `${ico} ${cap1(k)}`), ...opts.map(([v, l]) => h('option', Object.assign({ value: v }, String(v) === String(cur) ? { selected: true } : {}), `${ico} ${l}`)));
     };
+    const buildBox = () => h('select', { class: 'ma-in' + (BK.build ? ' chg' : ''), title: 'Build: ' + (BK.build ? 'will change' : 'no change'), onclick: stop, onchange: (e) => { BK.build = e.target.value; BK.ph = null; BK.msg = ''; draw(); } },
+      [['', 'Build'], ['default', 'Default'], ['auto', 'Auto best'], ['own', 'Own picks']].map(([v, l]) => h('option', Object.assign({ value: v }, v === BK.build ? { selected: true } : {}), '🎒 ' + (v ? l : 'Build'))));
     const capChip = (v, label, tip) => h('button', { type: 'button', title: tip, class: 'ma-chip' + (BK.cap === v ? ' on' : ''), onclick: (e) => { stop(e); BK.cap = BK.cap === v ? '' : v; BK.ph = null; BK.msg = ''; draw(); } }, label);   // tap again to clear
-    const plan = [...kinds.filter((k) => BK.pick[k]).map((k) => { const o = [['__default', 'default loadout'], ['__keep', 'keep equipped'], ...presetOpts(k)].find(([v]) => v === BK.pick[k]); return `${cap1(k)} → ${o ? o[1] : '…'}`; }),
+    const plan = [...(BK.build ? ['Build → ' + { default: 'default', auto: 'auto best', own: 'own picks' }[BK.build]] : []), ...kinds.filter((k) => BK.pick[k]).map((k) => { const o = [['__default', 'default loadout'], ['__keep', 'keep equipped'], ...presetOpts(k)].find(([v]) => v === BK.pick[k]); return `${cap1(k)} → ${o ? o[1] : '…'}`; }),
       ...(BK.cap ? [{ max: 'Cap → max loot', exp: 'Cap → EXP cap', skip: 'Cap → skip', num: 'Cap → ' + fmtNum(BK.n) }[BK.cap]] : [])].join(' · ');
     const ok = n && chg, go = btn(ok ? `Apply to ${n} boss${n === 1 ? '' : 'es'}` : 'Apply', 'success', applyBulk); go.disabled = !ok;   // greyed out until there is something to apply; Cancel is the way out
     return h('div', { class: 'ma-bulk' },
@@ -3048,7 +3471,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
         lnk('Farming', 'Select the bosses that are switched on', () => toggleSel(Roster.list.filter((d) => Roster.canon(d) === d && isOn(d)), true)),
         lnk('None', 'Clear the selection', () => toggleSel([...BK.sel].map((l) => Roster.get(l)).filter(Boolean), false))),
       BK.from ? h('div', { class: 'ma-bk-from' }, `Loadout and cap copied from ${BK.from}${BK.ph ? ', phase by phase' : ''}. Select the bosses that should get it.`) : null,
-      kinds.length ? h('div', { class: 'ma-bk-sel' }, kinds.map(pickBox)) : null,
+      h('div', { class: 'ma-bk-sel' }, Presets.available('best') ? buildBox() : null, ...kinds.map(pickBox)),
       h('div', { class: 'ma-bk-cap' }, h('label', {}, '🎯 Cap'),
         capChip('max', 'Max loot', 'Cap at the highest loot level'), capChip('exp', 'EXP cap', 'Cap at the damage that reaches the EXP cap'), capChip('skip', 'Skip', 'Cap 0: the boss is skipped'), capChip('num', 'Set…', 'Type a number'),
         BK.cap === 'num' ? num(() => BK.n, (v) => { BK.n = v; BK.ph = null; }, { fmt: fmtNum, w: 90 }) : null),
@@ -3125,11 +3548,10 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     const badge = (id) => { const f = (ui.filter || '').trim().toLowerCase(), defs = sets[id]; return f ? String(defs.filter((d) => Roster.members(d).some((m) => m.name.toLowerCase().includes(f))).length) : `${defs.filter(isOn).length}/${defs.length}`; };
     const badges = {};
     out.push(h('div', { class: 'ma-sec' }, [['waves', '🌊 Waves'], ...(dunOn ? [['dungeons', '🏰 Dungeons']] : [])].map(([id, label]) => h('button', { type: 'button', class: id === sec ? 'on' : '', onclick: () => { ui.bsec = id; saveUi(); draw(); } }, label, (badges[id] = h('i', {}, badge(id)))))));
-    const kinds = Presets.kinds(), box = h('div', {}), fill = () => { box.replaceChildren(...bossSections(sec)); Object.keys(badges).forEach((id) => { badges[id].textContent = badge(id); }); };
+    const kinds = Presets.pickKinds(), box = h('div', {}), fill = () => { box.replaceChildren(...bossSections(sec)); Object.keys(badges).forEach((id) => { badges[id].textContent = badge(id); }); };
     out.push(h('div', { class: 'ma-tool' }, h('input', { class: 'ma-search', placeholder: '🔎 Filter bosses…', value: ui.filter || '', oninput: (e) => { ui.filter = e.target.value; saveUi(); fill(); } }),
-      h('button', { type: 'button', class: 'ma-tbtn' + (BK.on ? ' on' : ''), title: 'Tick several bosses and give them all the same gear / crystal / pet / cap', onclick: () => { if (BK.on) endBulk(); else { BK.on = true; ui.sel = ''; saveUi(); draw(); } } }, '☑ Select'),
-      kinds.length ? h('button', { type: 'button', class: 'ma-tbtn' + (ui.open.loadout ? ' on' : ''), title: 'The loadout equipped before every boss', onclick: () => { ui.open.loadout = !ui.open.loadout; saveUi(); draw(); } }, '🎒 Loadout') : null));
-    if (kinds.length && ui.open.loadout) out.push(loadoutCard());
+      kinds.length || Presets.available('best') ? h('button', { type: 'button', class: 'ma-tbtn' + (ui.open.loadout || BK.on ? ' on' : ''), title: 'How bosses get their gear, pets, crystals and sigils — and apply a setup to several bosses', onclick: () => { ui.open.loadout = !(ui.open.loadout || BK.on); if (!ui.open.loadout && BK.on) endBulk(); saveUi(); draw(); } }, '🎒 Loadout' + (Presets.available('best') ? (cfg.autoBuild.enabled ? ' · Auto' : ' · Saved') : '')) : null));
+    if ((kinds.length || Presets.available('best')) && (ui.open.loadout || BK.on)) out.push(loadoutPanel());
     if (BK.on) out.push(bulkBar(sec));
     fill(); out.push(box);
     return out;
@@ -3181,8 +3603,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
         setting('💧 Mana', null, ctl(dropdown([['S', 'Small · 20'], ['M', 'Medium · 40'], ['L', 'Large · 60'], ['XL', 'XL · 100']], M.type, (v) => { M.type = v; }), sw(() => M.enabled, (v) => { M.enabled = v; }))),
         M.enabled ? sub('Drink at or below', num(() => M.threshold, (n) => { M.threshold = n; }, { w: 52, min: 0, unit: 'MP' })) : null,
         flag('🪦 Auto-loot', 'out of stamina → claims only what levels you up', () => L.enabled, (v) => { L.enabled = v; })),
-      Presets.available('best') ? caption('Builds') : null,
-      Presets.available('best') ? h('div', { class: 'ma-card' }, ...buildRows()) : null,
+      Presets.available('best') ? h('div', { class: 'ma-card' }, setting('🎒 Builds', cfg.autoBuild.enabled ? '🤖 Auto best' + (cfg.autoBuild.order ? ' · fewest changes' : '') : '📌 Saved presets', btn('Open Loadout', 'soft', () => { ui.open.loadout = true; ui.bsec = 'waves'; go('bosses'); }))) : null,
       caption('Fighting'),
       h('div', { class: 'ma-card' },
         flag('Class skill' + (cs ? ' · ' + cs.label : ' · not detected'), 'cast before each World Breaker slash', () => cfg.useClassSkill, (v) => { cfg.useClassSkill = v; }),
