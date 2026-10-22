@@ -2588,7 +2588,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     // vitals
     const xp = Me.expPct();
     out.push(h('div', { class: 'ma-vitals', style: { marginTop: '8px', marginBottom: 0 } },
-      meter('HP', Me.hp, Me.maxHp, 'hp', Me.hpKnown), meter('Stamina', Me.stam(), Me.maxStam(), 'st', Me.stamKnown()),
+      meter('HP', Me.hp, Me.maxHp, 'hp', Me.hpKnown), meter('Stam', Me.stam(), Me.maxStam(), 'st', Me.stamKnown()),
       meter('Mana', Me.mp, Me.maxMp, 'mp', Me.mpKnown), meter('Lv ' + (Me.level() || '?'), xp || 0, 100, 'xp', xp != null, xp != null ? xp.toFixed(1) + '%' : '')));
 
     // bosses being farmed: a one-line summary, the ones that are up right now, and everything else folded away
