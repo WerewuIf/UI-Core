@@ -2960,7 +2960,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
         ms('Wave swing gap', () => cfg.attackDelayMs, (n) => { cfg.attackDelayMs = n; }),
         ms('Dungeon swing gap', () => cfg.dungeonAttackDelayMs, (n) => { cfg.dungeonAttackDelayMs = n; }),
         skillOn ? ms('Skill → attack gap', () => cfg.skillToAttackGapMs, (n) => { cfg.skillToAttackGapMs = n; }) : null,
-        L.enabled ? ms('Graveyard scan every', () => L.scanMs, (n) => { L.scanMs = n; }, { w: 76, min: 10000 }) : null,
+        L.enabled ? setting('Graveyard scan every', 'e.g. 5', num(() => L.scanMs / 60000, (n) => { L.scanMs = Math.round(n * 60000); }, { w: 64, unit: 'min', min: 0.2, parse: parseFloat })) : null,
         L.enabled ? ms('Gap between loot claims', () => L.claimGapMs, (n) => { L.claimGapMs = n; }) : null]),
       h('div', { class: 'ma-note ma-about' }, `v${VERSION} · re-login ${au.status ? (au.status.configured ? 'set up' : 'not set up') : 'unavailable'} · ${Presets.note()}`,
         ' · ', h('button', { type: 'button', class: 'ma-link', onclick: () => { SideMob.forget(); draw(); } }, `forget ${SideMob.shielded()} shielded mob${SideMob.shielded() === 1 ? '' : 's'}`))];
