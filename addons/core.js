@@ -16,6 +16,8 @@
  *   Core.float.open(id) · close(id) · closeAll() · refresh(id) · remove(id)
  *   Core.module({ id, name, icon, version, match, deps, early, float, init(Core, ctx) { return api } })
  *   Core.net.{fetchText,fetchDoc,fetchJson,post,invalidate,invalidateOn,watch}
+ *   Core.model.{define,get,peek,feed,stale,snapshot,watch,writes,status}   (api 6) one parsed, versioned copy of each page, shared by every addon and tab
+ *   Core.tx.{run,busy,idle,recovery,recover,orphan,dismiss,cancel,autoRecover,status}   (api 6) one locked, journaled write lane per domain ('loadout')
  *   Core.pages.{inventory,pets,crystals,stats,pvp,quests,battlePass,dungeons,define}
  *   Core.cookies.withMode · Core.player.id() · Core.state · Core.store · Core.on/once/emit
  *   Core.dom.{watch,when,ready} · Core.ui.{toast,modal,menu,h,btn,css}
@@ -31,7 +33,7 @@
   // >>> Raw URL of addons.json
   const CONFIG = { manifest: 'https://raw.githubusercontent.com/WerewuIf/UI-Core/main/addons.json' };
 
-  const API = 5;   // 5: capabilities (Core.call / cap / caps / has / when, `provides`).  4: Core.auth.  3: Core.potions, Core.me.apply / addExp / fromAttack / ingest / sync
+  const API = 6;   // 6: Core.model (shared parsed page data) + Core.tx (cross-tab locked, journaled write lane).  5: capabilities (Core.call / cap / caps / has / when, `provides`).  4: Core.auth.  3: Core.potions, Core.me.apply / addExp / fromAttack / ingest / sync
   if (root.Core && root.Core.__isCore) {
     if (root.Core.apiLevel < API) console.warn('[Core] an older core (api ' + root.Core.apiLevel + ') is already loaded; this script wants ' + API + '.');
     return;
@@ -2488,13 +2490,619 @@
     return { check, pageState, isSignedOut, ensure, login, register, setCredentials, clearCredentials, importLegacy, addDetector, status };
   })();
 
+  /* ================================================== coordination (API 6) === */
+  // Core.model: one parsed, versioned copy of each page/resource, shared by every addon and every tab.
+  // Core.tx:    one write lane per domain ('loadout'), cross-tab Web Lock + journal + announced begin/end.
+  // Both are game-agnostic: addons register what a resource means (define) and how to change it (tx.run).
+  // The block between the markers is a factory that only touches `env`, so tests/coord.test.js can load it on its own.
+  // >>> core-coord:begin
+  function createCoordination(env) {
+    const { root, net, store, player, on, dispatch, emit, sleep, warn, TAB } = env;
+    const auth = env.auth || { pageState: () => 'ok' };
+    const dlog = env.dlog || (() => {});
+    const now = () => Date.now();
+    const NOOP = () => {};
+    const abs = (u) => new URL(u, root.location.origin).href;
+    const same = (a, b) => a === b;
+    const unref = (t) => { if (t && typeof t.unref === 'function') t.unref(); return t; };
+    const msg = (e) => String((e && e.message) || e);
+
+    /* ------------------------------------------------------------ model --- */
+    const model = (() => {
+      const defs = new Map();       // kind -> definition
+      const recs = new Map();       // key  -> record
+      const flights = new Map();    // key  -> Promise (single flight)
+      const own = new Map();        // href -> count of fetches the model itself has in flight (harvest skips those)
+      const watchers = new Map();   // id | '*' -> Set(cb)
+      const rules = [];             // { re, ids, body } : "a POST to re makes ids stale"
+      const bc = root.BroadcastChannel ? new root.BroadcastChannel('core-model') : null;
+      const DEF = { maxAge: 5 * 60e3, hardMaxAge: 30 * 60e3, scope: 'player', domain: 'loadout' };
+
+      const split = (id) => { const i = id.indexOf(':'); return i < 0 ? [id, ''] : [id.slice(0, i), id.slice(i + 1)]; };
+      const defOf = (id) => defs.get(split(String(id))[0]) || null;
+      const keyOf = (id, def) => ((def && def.scope === 'global') ? '' : player.id() + '|') + id;
+      const pidOfKey = (k) => { const i = k.indexOf('|'); return i < 0 ? null : k.slice(0, i); };
+
+      function ensure(id, def) {
+        const k = keyOf(id, def);
+        let r = recs.get(k);
+        if (!r) recs.set(k, r = { id, key: k, value: undefined, sig: null, epoch: 0, at: 0, staleAt: 0, staleSeq: 0, stale: false, error: null, source: null });
+        return r;
+      }
+      const ageOf = (r) => now() - r.at;
+      const isStale = (r, def, maxAge) => r.stale || ageOf(r) > (def.hardMaxAge ?? DEF.hardMaxAge) || (maxAge != null && ageOf(r) > maxAge);
+      const view = (r, def, extra) => Object.assign({ id: r.id, value: r.value, epoch: r.epoch, at: r.at, stale: r.stale || ageOf(r) > (def.hardMaxAge ?? DEF.hardMaxAge), error: r.error, source: r.source }, extra || {});
+
+      /* persistence: only for defs that ask (static things like mob stats) */
+      const pkey = (r) => 'core:model:' + r.key;
+      function persist(r, def) {
+        if (!def.persist || !r.sig || r.sig.length > 200000) return;
+        try { root.localStorage.setItem(pkey(r), JSON.stringify({ value: r.value, at: r.at, epoch: r.epoch })); } catch (_) { /* storage full: memory only */ }
+      }
+      function loadPersisted(r, def) {
+        if (!def.persist || r.value !== undefined) return;
+        try {
+          const o = JSON.parse(root.localStorage.getItem(pkey(r)) || 'null');
+          if (o && o.value !== undefined) { r.value = o.value; r.sig = JSON.stringify(o.value); r.at = o.at || 0; r.epoch = Math.max(r.epoch, o.epoch || 1); r.source = 'persisted'; }
+        } catch (_) { /* unreadable: ignore */ }
+      }
+
+      /* events + watchers */
+      function notify(r, why, source, remote) {
+        const p = { id: r.id, epoch: r.epoch, why, source: source || r.source, stale: r.stale, remote: !!remote };
+        dispatch('model:changed', p);
+        [watchers.get(r.id), watchers.get('*')].forEach((s) => { if (s) [...s].forEach((cb) => { try { cb(p); } catch (e) { warn('model watcher threw', e); } }); });
+      }
+      function send(m) {
+        if (!bc) return;
+        try { bc.postMessage(Object.assign({ from: TAB }, m)); } catch (_) { /* not cloneable: other tabs just refetch */ }
+      }
+
+      /* commit a value that was READ at time `at` (the moment the request started) */
+      function commit(r, def, value, o) {
+        const at = o.at || now();
+        if (at < r.staleAt) return false;                       // the read began before the latest write we know of: it may predate it
+        const sig = JSON.stringify(value);
+        const changed = r.value === undefined || sig !== r.sig;
+        r.value = value; r.sig = sig; r.at = at; r.source = o.source || null; r.error = null; r.stale = false;
+        if (changed) r.epoch += 1;
+        persist(r, def);
+        if (def.share !== false && sig.length < 400000) send({ t: 'value', key: r.key, id: r.id, epoch: r.epoch, at, value, source: r.source });
+        if (changed) notify(r, 'changed', r.source);
+        if (def.canary) runCanary(r, def);
+        return true;
+      }
+      function fail(r, why) { r.error = { why, at: now() }; }
+
+      /* canary: when a canary resource (stats) is read, every resource that declared verifyAgainst:<canary> checks itself against it */
+      function runCanary(cr, cdef) {
+        const kind = split(cr.id)[0], pid = player.id();
+        recs.forEach((r) => {
+          const def = defOf(r.id);
+          if (!def || def.verifyAgainst !== kind || typeof def.verify !== 'function' || r.value === undefined || r.stale) return;
+          if (pidOfKey(r.key) && pidOfKey(r.key) !== pid) return;
+          let res = true;
+          try { res = def.verify(r.value, cr.value, { id: r.id }); } catch (e) { warn('verify for "' + r.id + '" threw', e); return; }
+          const bad = res === false || (res && typeof res === 'object' && res.ok === false);
+          if (bad) stale(r.id, 'canary' + (res && res.why ? ': ' + res.why : ''));
+        });
+      }
+
+      /* ---- define / get / peek / feed ---- */
+      function define(id, def) {
+        if (!id || !def || typeof def.parse !== 'function') { warn('Core.model.define needs (id, { parse, url | load })'); return; }
+        if (!def.url && typeof def.load !== 'function') { warn('Core.model.define("' + id + '") needs url or load'); return; }
+        if (defs.has(id) && dlog) dlog('model: redefining', id);
+        defs.set(id, Object.assign({}, DEF, def, { kind: id }));
+        if (def.live) feedLive(id);
+      }
+      const hrefFor = (def, arg) => abs(typeof def.url === 'function' ? def.url(arg) : def.url);
+      function ctxFor(id, def, href, text, docIn) {
+        const arg = split(id)[1];
+        let doc = docIn || null;
+        return { id, kind: def.kind, arg, href, text, doc() { if (!doc) doc = new root.DOMParser().parseFromString(text || '', 'text/html'); return doc; } };
+      }
+      function runParse(def, id, href, text, docIn) {
+        const ctx = ctxFor(id, def, href, text, docIn);
+        try { const v = def.parse(text, ctx); return v === undefined ? null : v; } catch (e) { warn('parse of "' + id + '" threw', e); return null; }
+      }
+      const waitTx = async (def, o) => {
+        if (o.during || !def.domain || !tx.busy(def.domain)) return;
+        await Promise.race([tx.idle(def.domain), sleep(o.txWaitMs || 30000)]);   // never wait forever: a reader inside a tx that forgot `during` must not deadlock
+      };
+
+      async function load(id, def, r, o) {
+        let last = null;
+        for (let attempt = 0; attempt < 3; attempt++) {
+          const seq = r.staleSeq, started = now();
+          let text, href = null, value;
+          try {
+            if (typeof def.load === 'function') text = await def.load(ctxFor(id, def, null, null));
+            else { href = hrefFor(def, split(id)[1]); own.set(href, (own.get(href) || 0) + 1); try { text = await net.fetchText(href, { force: true, ttl: 0 }); } finally { own.set(href, own.get(href) - 1); } }
+          } catch (e) { fail(r, msg(e)); last = e; break; }
+          value = runParse(def, id, href, text);
+          if (value === null) {
+            const st = typeof text === 'string' ? auth.pageState(text) : 'ok';
+            fail(r, st !== 'ok' ? st : 'unreadable');
+            break;
+          }
+          if (r.staleSeq !== seq) { dlog('model: "' + id + '" went stale while loading, reading again'); continue; }   // a write landed mid-request
+          commit(r, def, value, { at: started, source: 'fetch' });
+          return;
+        }
+        if (r.value === undefined) throw last || new Error('Core.model: could not read "' + id + '" (' + ((r.error && r.error.why) || 'unknown') + ')');
+      }
+
+      async function get(id, o = {}) {
+        const def = defOf(id);
+        if (!def) throw new Error('Core.model: "' + id + '" is not defined');
+        await waitTx(def, o);
+        const r = ensure(id, def);
+        loadPersisted(r, def);
+        const maxAge = o.maxAge != null ? o.maxAge : def.maxAge;
+        if (!o.force && r.value !== undefined && !isStale(r, def, maxAge)) return view(r, def);
+        let f = flights.get(r.key);
+        if (!f) {
+          f = load(id, def, r, o).finally(() => flights.delete(r.key));
+          flights.set(r.key, f);
+        }
+        await f;
+        return view(r, def);
+      }
+      function peek(id) {
+        const def = defOf(id); if (!def) return null;
+        const r = recs.get(keyOf(id, def)) || ensure(id, def);
+        loadPersisted(r, def);
+        return r.value === undefined ? null : view(r, def);
+      }
+      // Harvest: you already hold the page (or the parsed value). src = html string | Document | already-parsed value.
+      function feed(id, src, o = {}) {
+        const def = defOf(id); if (!def) return null;
+        const r = ensure(id, def);
+        let value = src;
+        const isDoc = src && typeof src === 'object' && src.nodeType === 9, isText = typeof src === 'string';
+        if (isDoc || isText) value = runParse(def, id, o.href || null, isText ? src : null, isDoc ? src : null);
+        if (value === null || value === undefined) return null;
+        return commit(r, def, value, { at: o.at || now(), source: o.source || 'feed' }) ? view(r, def) : null;
+      }
+      function feedLive(id) {
+        env.ready.then(() => {
+          const def = defOf(id); if (!def || !def.url || typeof def.url !== 'string' || !matchHref(def, root.location.href)) return;
+          feed(id, root.document, { href: root.location.href, source: 'live-page' });
+        });
+      }
+
+      /* ---- harvest from real fetches by any addon ---- */
+      function matchHref(def, href) {
+        let u; try { u = new URL(href, root.location.origin); } catch (_) { return null; }
+        if (typeof def.match === 'function') { const a = def.match(u); return a === false || a == null ? null : String(a === true ? '' : a); }
+        if (typeof def.url !== 'string') return null;
+        const w = new URL(def.url, root.location.origin);
+        if (w.pathname !== u.pathname) return null;
+        for (const [k, v] of w.searchParams) if (u.searchParams.get(k) !== v) return null;
+        return '';
+      }
+      net.onText((href, text, startedAt) => {
+        if (own.get(href) > 0) return;
+        defs.forEach((def, kind) => {
+          if (def.harvest === false || (!def.url && !def.match)) return;
+          const arg = matchHref(def, href); if (arg === null) return;
+          const id = arg ? kind + ':' + arg : kind;
+          const r = ensure(id, def);
+          if (r.at > startedAt || startedAt < r.staleAt) return;                // we already hold something newer
+          if (def.domain && tx.busy(def.domain)) return;                        // mid-write pages show a half-built state
+          const v = runParse(def, id, href, text);
+          if (v !== null) commit(r, def, v, { at: startedAt, source: 'harvest' });
+        });
+      });
+
+      /* ---- stale: bump the epoch, tell everyone, never refetch ---- */
+      function stale(ids, why = 'stale', o = {}) {
+        const pid = player.id();
+        [].concat(ids).forEach((want) => {
+          recs.forEach((r) => {
+            if (!(r.id === want || r.id.startsWith(want + ':'))) return;
+            const pk = pidOfKey(r.key); if (pk && pk !== pid) return;
+            if (r.value === undefined && !flights.has(r.key)) return;
+            r.stale = true; r.staleSeq += 1; r.staleAt = now(); r.epoch += 1;
+            const def = defOf(r.id) || DEF;
+            if (def.share !== false) send({ t: 'stale', key: r.key, id: r.id, epoch: r.epoch, at: r.staleAt, why });
+            notify(r, why, null, false);
+          });
+        });
+      }
+      if (bc) bc.onmessage = (e) => {
+        const m = e.data; if (!m || m.from === TAB || !m.key) return;
+        const pk = pidOfKey(m.key); if (pk && pk !== player.id()) return;
+        const def = defOf(m.id); if (!def) return;
+        const r = ensure(m.id, def);
+        if (m.t === 'value') {
+          if (!(m.epoch > r.epoch || (m.epoch === r.epoch && m.at > r.at))) return;
+          if (m.at < r.staleAt) { r.epoch = Math.max(r.epoch, m.epoch); return; }     // read before a write we already know about
+          const sig = JSON.stringify(m.value), changed = sig !== r.sig;
+          r.value = m.value; r.sig = sig; r.at = m.at; r.epoch = Math.max(r.epoch, m.epoch); r.source = 'bus:' + (m.source || ''); r.error = null; r.stale = false;
+          persist(r, def);
+          if (changed) notify(r, 'changed', r.source, true);
+        } else if (m.t === 'stale') {
+          r.epoch = Math.max(r.epoch, m.epoch);
+          if (m.at > r.at && !(m.at <= r.staleAt)) { r.stale = true; r.staleSeq += 1; r.staleAt = m.at; notify(r, m.why, null, true); }
+        }
+      };
+
+      /* ---- write rules: "a POST to X changes Y" ---- */
+      function writes(re, ids, bodyMatch) {
+        rules.push({ re, ids: [].concat(ids), body: bodyMatch || null });
+        net.invalidateOn(re, [], bodyMatch);       // registers interest, so Core's fetch hook reports these POSTs
+      }
+      on('net:response', (ev) => {
+        if (!ev || ev.method === 'GET' || ev.method === 'HEAD') return;
+        const hit = rules.filter((r) => r.re.test(ev.url) && (!r.body || r.body.test(ev.body || '')));
+        if (!hit.length) return;
+        const ids = [...new Set([].concat(...hit.map((r) => r.ids)))];
+        const path = new URL(ev.url).pathname;
+        const mine = tx._claim(ev);
+        stale(ids, mine ? 'tx-write:' + path : 'write:' + path);
+        if (!mine) tx._external(ev, ids);
+      });
+      writes(/\/stats_ajax\.php/, ['stats']);
+      writes(/\/inventory_ajax\.php/, ['gear', 'team']);
+      writes(/\/pet_link_action\.php|\/pet_sigil_action\.php/, ['team', 'links']);
+      writes(/\/power_crystals\.php/, ['crystals']);
+      writes(/\/use_item\.php|\/user_heal_potion\.php/, ['stats']);
+
+      /* ---- snapshot / watch / status ---- */
+      async function snapshot(ids, o = {}) {
+        ids = [].concat(ids);
+        for (let i = 0; i < (o.retries ?? 3); i++) {
+          const got = await Promise.all(ids.map((id) => get(id, o)));
+          const moved = ids.some((id, j) => { const p = peek(id); return !p || p.epoch !== got[j].epoch; });
+          if (!moved) return { values: Object.fromEntries(ids.map((id, j) => [id, got[j].value])), epochs: Object.fromEntries(ids.map((id, j) => [id, got[j].epoch])), stable: true };
+        }
+        const got = await Promise.all(ids.map((id) => get(id, o)));
+        return { values: Object.fromEntries(ids.map((id, j) => [id, got[j].value])), epochs: Object.fromEntries(ids.map((id, j) => [id, got[j].epoch])), stable: false };
+      }
+      const sig = (ids) => [].concat(ids).map((id) => { const p = peek(id); return id + '@' + (p ? p.epoch + (p.stale ? 's' : '') : 0); }).join('|');
+      function watch(id, cb) {
+        let s = watchers.get(id); if (!s) watchers.set(id, s = new Set());
+        s.add(cb); return () => s.delete(cb);
+      }
+      function status() {
+        const rows = [...recs.values()].map((r) => ({ id: r.id, epoch: r.epoch, 'age s': r.value === undefined ? null : Math.round(ageOf(r) / 1000), stale: r.stale, source: r.source, error: r.error ? r.error.why : '', inflight: flights.has(r.key) }));
+        if (root.console && root.console.table) { root.console.table(rows); root.console.table(tx.status()); }
+        return { resources: rows, tx: tx.status() };
+      }
+      return { define, get, peek, feed, stale, snapshot, sig, watch, writes, status, defined: (id) => !!defOf(id), _recs: recs };
+    })();
+
+    /* --------------------------------------------------------------- tx --- */
+    const tx = (() => {
+      const doms = new Map();
+      const AUTO_KEY = 'core:tx:auto';
+      let seq = 0;
+      const uid = () => TAB.slice(0, 4) + '-' + now().toString(36) + '-' + (++seq);
+      const lockName = (d) => 'core:tx:' + d;
+      const locks = () => (env.locks && typeof env.locks.request === 'function' ? env.locks : null);
+
+      function D(name) {
+        let d = doms.get(name);
+        if (d) return d;
+        d = { name, cur: null, queue: [], remote: null, epoch: 0, recov: null, expected: [], journal: store('tx:' + name), timer: null, orphanBusy: false, last: null };
+        doms.set(name, d);
+        on(name + ':begin', (p) => { if (p && p.tab !== TAB) { d.remote = Object.assign({ since: now() }, p); watchRemote(d); } });
+        on(name + ':end', (p) => { if (p && p.tab !== TAB) { d.epoch = Math.max(d.epoch, p.epoch || 0); clearRemote(d); } });
+        probe(d);
+        return d;
+      }
+      // A tab that opened in the middle of somebody else's tx never saw `begin`: ask the lock table.
+      async function probe(d) {
+        const l = locks(); if (!l || !l.query) return;
+        try {
+          const q = await l.query();
+          if (q.held.some((x) => x.name === lockName(d.name)) && !d.cur && !d.remote) { d.remote = { unknown: true, since: now() }; watchRemote(d); }
+        } catch (_) { /* no query support */ }
+      }
+      function clearRemote(d) { d.remote = null; if (d.timer) { clearInterval(d.timer); d.timer = null; } }
+      // A remote tx whose tab died never sends `end`; the browser frees its lock, which is how we notice.
+      function watchRemote(d) {
+        if (d.timer || !locks() || !locks().query) return;
+        d.timer = unref(setInterval(async () => {
+          try {
+            const q = await locks().query();
+            if (!q.held.some((x) => x.name === lockName(d.name))) {
+              const gone = d.remote; clearRemote(d);
+              if (gone) dispatch(d.name + ':end', { tx: gone.tx, owner: gone.owner, kind: gone.kind, ok: false, error: 'tab-lost', tab: gone.tab, lost: true });
+              scheduleOrphanCheck(d.name, 'tab-lost');
+            }
+          } catch (_) { /* keep waiting */ }
+        }, 2500));
+      }
+
+      function acquire(name, ifBusy, waitMs) {
+        const l = locks();
+        if (!l) return Promise.resolve(NOOP);
+        return new Promise((resolve) => {
+          const opts = ifBusy === 'fail' ? { ifAvailable: true } : {};
+          let timer = null;
+          if (ifBusy !== 'fail' && waitMs > 0 && typeof root.AbortController === 'function') { const ctl = new root.AbortController(); opts.signal = ctl.signal; timer = unref(setTimeout(() => ctl.abort(), waitMs)); }
+          let once = false;
+          try {
+            l.request(lockName(name), opts, (lk) => {
+              clearTimeout(timer);
+              if (!lk) { resolve(null); return undefined; }
+              return new Promise((release) => resolve(() => { if (!once) { once = true; release(); } }));
+            }).catch(() => resolve(null));
+          } catch (_) { resolve(NOOP); }
+        });
+      }
+
+      const info = (c) => c && { tx: c.id, owner: c.owner, kind: c.kind, label: c.label, since: c.since, tab: TAB };
+      const busy = (name) => { const d = D(name); return d.cur ? info(d.cur) : d.remote ? Object.assign({}, d.remote) : null; };
+      async function idle(name, o = {}) {
+        const d = D(name);
+        while (d.cur) await new Promise((r) => d.queue.push(r));
+        if (d.remote || locks()) { const rel = await acquire(name, 'wait', o.timeoutMs || 120000); if (rel) rel(); }
+        if (!d.cur) clearRemote(d);
+      }
+      const announce = (d, what, p) => emit(d.name + ':' + what, p, { shared: true });
+
+      /* ---- journal ---- */
+      const readJ = (d) => { try { return d.journal.get() || null; } catch (_) { return null; } };
+      const writeJ = (d, j) => { try { d.journal.set(j); } catch (_) { /* storage blocked */ } };
+      const clearJ = (d) => { try { d.journal.set(null); } catch (_) { /* */ } };
+
+      /* ---- the run ---- */
+      async function run(name, o) {
+        o = o || {};
+        const d = D(name), kind = o.kind || 'apply', owner = o.owner || 'unknown', label = o.label || '';
+        // 1) in-tab mutex (synchronous, so two callers in the same tick cannot both pass)
+        const me = { id: uid(), owner, kind, label, since: now(), phase: 'waiting', t: null };
+        for (;;) {
+          if (!d.cur) { d.cur = me; break; }
+          if (o.ifBusy === 'wait') { await new Promise((r) => d.queue.push(r)); continue; }
+          return { ok: false, error: 'busy', busy: info(d.cur), tx: null };
+        }
+        const free = () => { d.cur = null; const q = d.queue.splice(0); q.forEach((r) => r()); };
+        // 2) cross-tab lock
+        const release = await acquire(name, o.ifBusy === 'wait' ? 'wait' : 'fail', o.waitMs || 120000);
+        if (!release) { free(); return { ok: false, error: 'busy', busy: d.remote || { unknown: true }, tx: null }; }
+        const done = (r) => { release(); free(); return r; };
+
+        // 3) never write over an unrecovered interrupted tx: its "before" is the only copy of the original state
+        const old = readJ(d);
+        if (old && old.status === 'open' && old.pid === player.id() && kind !== 'recover') {
+          dispatch(name + ':orphan', { journal: old, domain: name });
+          return done({ ok: false, error: 'orphan', orphan: old, tx: null });
+        }
+
+        // 4) begin
+        let ended = false, cancelled = false, abortReason = '';
+        const external = [];
+        const t = {
+          id: me.id, owner, kind, label, external,
+          get cancelled() { return cancelled; },
+          get abortReason() { return abortReason; },
+          cancel(why) { if (!cancelled) { cancelled = true; abortReason = why || 'cancelled'; } },
+          step(text, i, n) { if (!ended) announce(d, 'step', { tx: me.id, i: i == null ? ++t._i : i, n: n == null ? (o.plan && o.plan.steps) || null : n, text: String(text || ''), tab: TAB }); },
+          _i: 0,
+          get: (id, g) => model.get(id, Object.assign({}, g, { during: true })),
+          async post(url, params, po) {
+            if (ended) throw new Error('Core.tx: this transaction has ended');
+            const body = (params instanceof root.URLSearchParams ? params : new root.URLSearchParams(params || {})).toString();
+            const sig = { href: abs(url), body, at: now() };
+            d.expected.push(sig);
+            let r;
+            try { r = await net.post(url, params, po); }
+            finally { setTimeout(() => { const i = d.expected.indexOf(sig); if (i >= 0) d.expected.splice(i, 1); }, 5000); }
+            const st = r && typeof r.text === 'string' ? auth.pageState(r.text) : 'ok';
+            if (st !== 'ok') t.cancel('session: ' + st);        // logged out / maintenance mid-write: stop, leave the journal
+            return r;
+          },
+        };
+        me.t = t; me.phase = 'begin'; me.stale = [].concat(o.stale || []); me.onExternal = o.onExternal;
+        const j = { id: me.id, pid: player.id(), owner, kind, label, status: 'open', phase: 'begin', startedAt: me.since, tab: TAB, plan: o.plan || null, before: null };
+        if (kind === 'recover' && o._journal) { j.before = o._journal.before; j.recovers = o._journal.id; j.label = o._journal.label; }
+        writeJ(d, j);
+        announce(d, 'begin', { tx: me.id, owner, kind, label, plan: o.plan || null, tab: TAB, domain: name });
+
+        const result = { ok: false, tx: me.id, epoch: d.epoch, changed: false, error: null, restored: false, external: false };
+        const upd = (phase) => { me.phase = phase; j.phase = phase; writeJ(d, j); };
+        const guard = async (fn) => {
+          const p = Promise.resolve().then(fn);
+          const ms = o.maxMs || 180000;
+          let timer;
+          const timeout = new Promise((res) => { timer = unref(setTimeout(() => res('timeout'), ms)); });
+          const first = await Promise.race([p.then((v) => ({ v }), (e) => ({ e })), timeout]);
+          clearTimeout(timer);
+          if (first === 'timeout') {
+            t.cancel('timeout');
+            const second = await Promise.race([p.then((v) => ({ v }), (e) => ({ e })), sleep(o.graceMs || 15000).then(() => 'late')]);
+            if (second === 'late') throw new Error('timed out after ' + Math.round(ms / 1000) + 's');
+            if (second.e) throw second.e;
+            return second.v;
+          }
+          if (first.e) throw first.e;
+          return first.v;
+        };
+        const verify = async (phase) => {
+          if (typeof o.verify !== 'function') return { ok: true, why: [] };
+          try { const v = await guard(() => o.verify({ phase, before: j.before, t })); return v && typeof v === 'object' ? { ok: v.ok !== false, why: v.why || [] } : { ok: v !== false, why: [] }; }
+          catch (e) { return { ok: false, why: ['verify threw: ' + msg(e)] }; }
+        };
+        const touch = () => { if (me.stale.length) model.stale(me.stale, 'tx:' + kind); };
+
+        try {
+          // 5) snapshot the "before"
+          if (kind !== 'recover' && typeof o.snapshot === 'function') {
+            try { j.before = await guard(() => o.snapshot(t)); upd('snapshotted'); }
+            catch (e) { result.error = 'snapshot failed: ' + msg(e); clearJ(d); announce(d, 'end', { tx: me.id, owner, kind, ok: false, epoch: ++d.epoch, error: result.error, tab: TAB }); result.epoch = d.epoch; ended = true; return done(result); }
+          }
+          // 6) apply
+          upd('applying');
+          let err = null, applied = null;
+          try { applied = await guard(() => o.apply(t)); } catch (e) { err = e; }
+          if (!err && cancelled) err = new Error(abortReason || 'cancelled');
+          if (!err && external.length) err = new Error('external-change');
+          result.changed = !!(applied && typeof applied === 'object' ? (applied.changed ?? true) : applied !== false);
+          if (applied && typeof applied === 'object' && applied.ok === false) err = new Error(applied.message || applied.error || 'apply reported failure');
+          upd('applied');
+          let ok = !err;
+          if (ok) announce(d, 'applied', { tx: me.id, changed: result.changed, tab: TAB });
+
+          // 7) check: the "during" step (the Slash) runs on the applied state
+          if (ok && kind === 'check' && typeof o.during === 'function') {
+            try { result.during = await guard(() => o.during(t)); } catch (e) { err = e; ok = false; }
+            if (!err && external.length) { err = new Error('external-change'); ok = false; }
+          }
+          touch();
+
+          // 8) verify what was applied (check verifies the restored state instead)
+          if (ok && kind !== 'check') {
+            const v = await verify('apply');
+            if (!v.ok) { ok = false; err = new Error('verify: ' + (v.why.join('; ') || 'state does not match')); }
+          }
+
+          // 9) restore: after a failure, or always for a check. Never against the user's own manual change.
+          const wantRestore = (kind === 'check' || !ok) && kind !== 'recover';
+          if (external.length) { result.external = true; if (!ok) { result.error = msg(err || 'external-change'); } }
+          if (wantRestore && !external.length && typeof o.restore === 'function' && j.before != null) {
+            upd('restoring'); announce(d, 'restoring', { tx: me.id, tab: TAB });
+            try { await guard(() => o.restore(j.before, t)); } catch (e) { warn('restore threw', e); result.restoreError = msg(e); }
+            touch(); announce(d, 'restored', { tx: me.id, tab: TAB });
+            const v = await verify('restore');
+            result.restored = v.ok && !result.restoreError;
+            if (!result.restored) result.restoreWhy = v.why;
+            if (kind === 'check') ok = ok && result.restored;
+          }
+
+          // 10) outcome + journal
+          result.ok = ok;
+          if (err && !result.error) result.error = msg(err);
+          const clean = ok || result.restored || result.external || (kind === 'apply' && !!err && j.before == null && !wantRestore);
+          if (kind === 'recover' && !ok) { /* a failed recovery keeps the original journal */ }
+          else if (clean || (kind === 'check' && ok)) { clearJ(d); }
+          else { j.failed = true; j.error = result.error; j.phase = 'failed'; writeJ(d, j); }
+          if (kind === 'recover' && ok) clearJ(d);
+
+          // 11) canary re-read (stats), epoch, end
+          if (model.defined('stats')) { try { await model.get('stats', { during: true, maxAge: 0 }); } catch (_) { /* the next read will tell */ } }
+          d.epoch += 1; result.epoch = d.epoch;
+          ended = true;
+          d.last = { tx: me.id, owner, kind, label, ok: result.ok, at: now(), error: result.error };
+          announce(d, 'end', { tx: me.id, owner, kind, label, ok: result.ok, epoch: d.epoch, changed: result.changed, error: result.error || undefined, restored: result.restored, external: result.external, tab: TAB });
+          return done(result);
+        } catch (e) {
+          // anything unexpected: the journal stays open so the next load can recover
+          ended = true; result.error = msg(e); j.failed = true; j.error = result.error; writeJ(d, j);
+          d.epoch += 1; result.epoch = d.epoch;
+          announce(d, 'end', { tx: me.id, owner, kind, ok: false, epoch: d.epoch, error: result.error, tab: TAB });
+          return done(result);
+        }
+      }
+
+      /* ---- writes seen by Core's fetch hook ---- */
+      function claim(ev) {
+        for (const d of doms.values()) {
+          const i = d.expected.findIndex((s) => s.href === ev.url && s.body === (ev.body || ''));
+          if (i >= 0) { d.expected.splice(i, 1); return true; }
+        }
+        return false;
+      }
+      function external(ev, ids) {
+        doms.forEach((d) => {
+          const c = d.cur; if (!c || !c.t || !['applying', 'applied'].includes(c.phase)) return;
+          if (c.stale.length && !ids.some((id) => c.stale.some((s) => id === s || id.startsWith(s + ':')))) return;
+          flagExternal(d, c, ev.url);
+        });
+      }
+      function flagExternal(d, c, url) {
+        c.t.external.push(url);
+        announce(d, 'external-change', { tx: c.id, url, tab: TAB });
+        let verdict = 'abort';
+        try { if (typeof c.onExternal === 'function') verdict = c.onExternal(c.t, { url }) || 'abort'; } catch (e) { warn('onExternal threw', e); }
+        if (verdict !== 'continue') c.t.cancel('external-change');
+      }
+      // Another tab wrote something this tx touches (the other tab's own fetch hook told the model, the model told us).
+      on('model:changed', (p) => {
+        if (!p || !p.remote || !p.why || !String(p.why).startsWith('write:')) return;
+        doms.forEach((d) => { const c = d.cur; if (c && c.t && ['applying', 'applied'].includes(c.phase) && c.stale.some((s) => p.id === s || p.id.startsWith(s + ':'))) flagExternal(d, c, p.why); });
+      });
+
+      /* ---- orphans: journal open + lock free = the tab that held it is gone ---- */
+      const timers = {};
+      function scheduleOrphanCheck(name, why) { clearTimeout(timers[name]); timers[name] = unref(setTimeout(() => checkOrphan(name, why), 800)); }
+      async function checkOrphan(name, why) {
+        const d = D(name);
+        if (d.orphanBusy || d.cur) return null;
+        const j = readJ(d);
+        if (!j || j.status !== 'open' || j.pid !== player.id()) return null;
+        d.orphanBusy = true;
+        try {
+          const l = locks();
+          if (l) { const rel = await acquire(name, 'fail'); if (!rel) return null; rel(); }            // lock taken: that tx is alive
+          else if (j.tab !== TAB && now() - (j.startedAt || 0) < 4 * 60e3) return null;                  // no Web Locks: only call it an orphan after a while
+          if (readJ(d) && readJ(d).id !== j.id) return null;
+          dispatch(name + ':orphan', { journal: j, domain: name, why });
+          offer(d, j);
+          return j;
+        } finally { d.orphanBusy = false; }
+      }
+      const autoOn = (name) => { try { return !!(JSON.parse(root.localStorage.getItem(AUTO_KEY) || '{}')[name]); } catch (_) { return false; } };
+      function autoRecover(name, v) {
+        if (v === undefined) return autoOn(name);
+        try { const o = JSON.parse(root.localStorage.getItem(AUTO_KEY) || '{}'); o[name] = !!v; root.localStorage.setItem(AUTO_KEY, JSON.stringify(o)); } catch (_) { /* */ }
+        return !!v;
+      }
+      function offer(d, j) {
+        if (!d.recov) return;                                   // nobody knows how to restore yet: wait for recovery()
+        if (autoOn(d.name)) { recover(d.name); return; }
+        if (env.ui && env.ui.toast) env.ui.toast('An interrupted ' + (j.label || d.name) + ' change was found. Click to restore the previous state.', false, 20000, () => recover(d.name));
+      }
+      // Register who knows how to put an orphan back: fn(journal, t) -> { ok, message } | boolean. Uses journal.before.
+      function recovery(name, fn, o = {}) {
+        const d = D(name);
+        d.recov = typeof fn === 'function' ? { fn, verify: o.verify, stale: o.stale } : fn;
+        scheduleOrphanCheck(name, 'recovery-registered');
+      }
+      async function recover(name) {
+        const d = D(name), j = readJ(d);
+        if (!j || j.status !== 'open' || j.pid !== player.id()) return { ok: false, error: 'nothing to recover' };
+        if (!d.recov) return { ok: false, error: 'no recovery handler registered' };
+        return run(name, {
+          owner: 'core', kind: 'recover', label: 'Restore ' + (j.label || name), ifBusy: 'wait', _journal: j, stale: d.recov.stale,
+          apply: (t) => d.recov.fn(j, t),
+          verify: d.recov.verify ? (c) => d.recov.verify(Object.assign({}, c, { journal: j })) : undefined,
+        });
+      }
+      const orphan = (name) => { const j = readJ(D(name)); return j && j.status === 'open' && j.pid === player.id() ? j : null; };
+      const dismiss = (name) => { clearJ(D(name)); };
+      const cancel = (name, why) => { const d = D(name); if (d.cur && d.cur.t) { d.cur.t.cancel(why || 'cancelled'); return true; } return false; };
+      const status = () => [...doms.values()].map((d) => { const j = readJ(d); return { domain: d.name, running: d.cur ? d.cur.owner + '/' + d.cur.kind + ' (' + d.cur.phase + ')' : '', remote: d.remote ? (d.remote.owner || '?') + '/' + (d.remote.kind || '?') : '', epoch: d.epoch, journal: j ? j.status + '/' + (j.phase || '') + (j.failed ? ' FAILED' : '') : '', last: d.last ? (d.last.ok ? 'ok' : 'failed: ' + d.last.error) : '', locks: !!locks() }; });
+
+      // On load, on sign-in and when an addon becomes ready, look for an interrupted tx of the current player.
+      env.ready.then(() => scheduleOrphanCheck('loadout', 'load'));
+      on('auth:signedin', () => doms.forEach((d) => scheduleOrphanCheck(d.name, 'signedin')));
+      on('module:ready', () => doms.forEach((d) => { if (readJ(d)) scheduleOrphanCheck(d.name, 'module'); }));
+      D('loadout');
+
+      return { run, busy, idle, recovery, recover, orphan, dismiss, cancel, autoRecover, status, checkOrphan, _claim: claim, _external: external, _D: D };
+    })();
+
+    return { model, tx };
+  }
+  // <<< core-coord:end
+  const coord = createCoordination({
+    root, net, store, player, on, dispatch, emit, sleep, warn, dlog, TAB, auth, ready, ui,
+    locks: root.navigator && root.navigator.locks,
+  });
+
   /* ------------------------------------------------------------ export --- */
   const Core = {
-    __isCore: true, apiLevel: API, version: '3.16.0', debug: false, tabId: TAB,
+    __isCore: true, apiLevel: API, version: '3.17.0', debug: false, tabId: TAB,
     esc, sleep, debounce, fmt, int, compact, parseNum, parseJson,
     on, off, once, emit,
     state, store, player,
     net, pages, dom, cookies, ui, me, clock, csrf, lock, keepAlive, tab, potions, auth,
+    model: coord.model, tx: coord.tx,
     module: module_, use, get, status,
     caps, has, cap, call, when,
     float, addons: { list: entries, add: addCustom, remove: removeCustom, enable: setEnabled, status: rt, reload: startOne },
