@@ -3080,7 +3080,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
 .ma-ed{grid-column:1/-1;margin:1px 0 3px;padding:9px 11px 10px;background:#16213f;border:1px solid rgba(110,168,255,.34);border-radius:16px}.ma-ed .ma-in,.ma-bulk .ma-in{background:#101a33}
 .ma-ed-h{display:flex;align-items:center;gap:8px;margin-bottom:4px}.ma-ed-t{flex:1;min-width:0}.ma-ed-t b{display:block;font:800 13px Arial,sans-serif;color:#fff;overflow-wrap:anywhere}
 .ma-ed-t small{display:flex;align-items:center;gap:6px;flex-wrap:wrap;color:#7c88ad;font-size:10.5px;margin-top:1px}
-.ma-in.off{opacity:1;cursor:default;color:#9fc1ff;border-style:dashed;border-color:rgba(110,168,255,.35);-webkit-text-fill-color:#9fc1ff}   /* Auto is choosing: read-only, but not dimmed */
+.ma-in.off,.ma-in:disabled{opacity:.45;cursor:not-allowed}   /* Auto is choosing: plain greyed-out disabled, same look as any disabled control */
 .ma-origin{margin:9px 0 0;padding:8px 10px;border-radius:12px;background:#0d1322;border:1px solid rgba(110,168,255,.28)}
 .ma-origin-t b{display:block;font:800 11.5px Arial,sans-serif;color:#d6e5ff}.ma-origin-t small{display:block;color:#8b97bd;font-size:11px;margin-top:2px}
 .ma-ld{display:grid;grid-template-columns:repeat(auto-fit,minmax(96px,1fr));gap:6px;margin:2px 0 2px}
