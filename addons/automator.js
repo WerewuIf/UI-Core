@@ -3033,6 +3033,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
 .ma-opt .ma-num{position:relative;display:flex;width:100%}.ma-opt .ma-num .ma-in{flex:1 1 auto;width:auto;padding-right:44px}
 .ma-opt .ma-num i{position:absolute;right:11px;top:50%;transform:translateY(-50%);pointer-events:none}
 .ma-opt .ma-seg{width:100%}.ma-opt .ma-seg-btn{padding:5px 9px;font-size:11px}
+.ma-opt-l small{margin-left:6px;color:#6e7a9c;font-size:10px;font-weight:400;letter-spacing:0;text-transform:none}
 .ma-opt.wide{grid-column:1/-1}
 @media (max-width:420px){.ma-sr-o{grid-template-columns:minmax(0,1fr);margin-left:0}}
 .ma-card.off .ma-ico{opacity:.55}.ma-card.off .ma-card-t b{color:#aeb9dc}
@@ -3157,6 +3158,8 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
 .ma-srow{display:grid;grid-template-columns:minmax(0,1.1fr) auto minmax(0,1fr) 24px;align-items:center;gap:7px;margin:4px 0}.ma-srow .arrow{color:#53608a}
 .ma-srow .ma-num{display:flex;width:100%}.ma-srow .ma-num .ma-in{flex:1 1 auto;width:auto;min-width:0}
 .ma-srow .ma-in,.ma-time{height:30px;box-sizing:border-box}
+.ma-srow.now{background:rgba(61,220,151,.08);box-shadow:0 0 0 3px rgba(61,220,151,.08);border-radius:10px}
+.ma-srow.fixed .ma-tfix,.ma-srow.fixed .ma-cfix{display:flex;align-items:center;height:30px;box-sizing:border-box;min-width:0;padding:0 10px;border-radius:10px;background:rgba(255,255,255,.03);border:1px dashed rgba(255,255,255,.1);color:#8b97bd;font:12.5px Arial,sans-serif}.ma-srow.fixed .ma-tfix{justify-content:center}
 .ma-time{display:flex;align-items:stretch;width:100%;min-width:0;border:1px solid rgba(255,255,255,.12);border-radius:10px;overflow:hidden;background:#101a33;transition:.15s}
 .ma-time:focus-within{border-color:#6ea8ff;box-shadow:0 0 0 2px rgba(110,168,255,.18)}
 .ma-time input{flex:1 1 0;min-width:0;border:none;background:transparent;color:#eef3ff;font:12.5px Arial,sans-serif;font-variant-numeric:tabular-nums;width:auto;padding:0 2px;text-align:center}
@@ -3412,15 +3415,19 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
 
   /* ==================================================== BOSSES ==================================================== */
   function scheduleEditor(low) {
-    const o = cfg.bosses[low] || {}, list = Array.isArray(o.schedule) ? o.schedule : [], now = serverMinutes();
+    const o = cfg.bosses[low] || {}, list = Array.isArray(o.schedule) ? o.schedule : [], now = serverMinutes(), base = baseCapOf(low);
     const sortSave = () => { ovr(low).schedule.sort((a, b) => toMin(a.at) - toMin(b.at)); saveCfg(); draw(); };
-    const rows = list.map((b, i) => h('div', { class: 'ma-srow' },
+    let act = -1; if (now != null) list.forEach((b, i) => { if (toMin(b.at) <= now && (act < 0 || toMin(b.at) >= toMin(list[act].at))) act = i; });   // the row bossCap() is on right now (-1 = the default)
+    const nxt = nextChange(low), inTxt = (m) => (m >= 60 ? Math.floor(m / 60) + ' h ' + (m % 60) + ' min' : m + ' min');
+    const rows = list.map((b, i) => h('div', { class: 'ma-srow' + (i === act ? ' now' : '') },
       timePicker(b.at, (at) => { ovr(low).schedule[i].at = at; sortSave(); }), h('span', { class: 'arrow' }, '→'),
       num(() => b.cap, (n) => { ovr(low).schedule[i].cap = n; saveCfg(); }, { fmt: fmtNum }),
       h('button', { type: 'button', class: 'ma-x', title: 'Remove', onclick: (e) => { stop(e); ovr(low).schedule.splice(i, 1); if (!ovr(low).schedule.length) delete ovr(low).schedule; saveCfg(); draw(); } }, '✕')));
+    const first = h('div', { class: 'ma-srow fixed' + (act < 0 && now != null ? ' now' : '') }, h('span', { class: 'ma-tfix' }, '12:00 AM'), h('span', { class: 'arrow' }, '→'), h('span', { class: 'ma-cfix' }, fmtNum(base) + ' · default'), h('span', {}));
     return h('div', { class: 'ma-sched' },
-      now != null ? h('div', { class: 'ma-sub-h' }, h('small', {}, 'server time now ' + fmtClock(now))) : null,
-      rows.length ? rows : h('div', { class: 'ma-note', style: { margin: '2px 0 6px' } }, 'The cap stays the same all day. Add a change to raise or lower it from a set server time (it starts over at midnight).'),
+      h('div', { class: 'ma-sub-h' }, 'Server clock', h('span', { class: 'sp' }), h('small', {}, now != null ? fmtClock(now) + ' IST' : 'not read yet')),
+      rows.length ? [first, ...rows] : h('div', { class: 'ma-note', style: { margin: '2px 0 6px' } }, 'The cap stays the same all day. Add a change to raise or lower it from a set time. Times follow the game’s server clock (IST) and repeat every day.'),
+      rows.length ? h('div', { class: 'ma-note', style: { margin: '4px 2px 6px' } }, now == null ? 'Waiting for the server clock (open any game page).' : nxt ? `Next change at ${fmtClock(nxt.t)} → ${fmtNum(nxt.cap)}, in ${inTxt(nxt.t - now)}.` : 'No more changes today. At 12:00 AM server time the day starts again at the default.') : null,
       h('button', { type: 'button', class: 'ma-add', onclick: (e) => { stop(e); const t = now != null ? hhmm((Math.floor(now / 60) + 1) * 60) : '12:00'; (ovr(low).schedule = ovr(low).schedule || []).push({ at: t, cap: bossCap(low) }); sortSave(); } }, '+ Add a cap change'));
   }
   /* ---- the picker under a boss row: ONE flat card, no tabs, nothing to scroll through.
@@ -3498,7 +3505,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   function bossEditor(def) {
     const ms = Roster.members(def), idx = Math.min(phaseSel[def.low] || 0, ms.length - 1), m = ms[idx], low = m.low, o = cfg.bosses[low] || {}, kinds = Presets.pickKinds();
     const sched = Array.isArray(o.schedule) && o.schedule.length > 0, tOpen = isOpen('time', sched), [txt, kind] = entryState(def), place = placeOf(m);
-    const timedBtn = m.kind !== 'wave' ? h('button', { type: 'button', class: 'ma-timed-bar' + (tOpen ? ' open' : ''), onclick: () => { ui.open.time = !tOpen; saveUi(); draw(); } }, h('span', {}, '⏰ Timed cap' + (sched ? ' · ' + o.schedule.length + ' set' : '')), h('i', {}, tOpen ? '▾' : '▸')) : null;
+    const timedBtn = m.kind !== 'wave' ? h('button', { type: 'button', class: 'ma-timed-bar' + (tOpen ? ' open' : ''), onclick: () => { ui.open.time = !tOpen; saveUi(); draw(); } }, h('span', {}, '⏰ Timed cap' + (sched ? ' · ' + o.schedule.length + ' set' + (serverMinutes() != null ? ' · now ' + short(bossCap(low)) : '') : '')), h('i', {}, tOpen ? '▾' : '▸')) : null;
     const resetBtn = Object.keys(o).length ? h('button', { type: 'button', class: 'ma-link', onclick: () => { delete cfg.bosses[low]; saveCfg(); draw(); } }, '↺ Reset') : null;
     const copyBtn = kinds.length ? h('button', { type: 'button', class: 'ma-link', title: 'Give other bosses this boss’s gear / crystal / pet picks', onclick: (e) => { stop(e); startBulk(def, low); } }, '⧉ Copy loadout to…') : null;
     const removeBtn = def.fromScan ? h('button', { type: 'button', class: 'ma-link warn', title: 'The loot scan added this boss. Remove it from the list (a rescan will not bring it back).', onclick: (e) => { stop(e); removeAdded([def]); } }, '🗑 Remove') : null;
@@ -3777,11 +3784,11 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
       group(
         srow('⚡', 'Stamina', 'Drinks a potion when you run out', sw(() => S.enabled, (v) => { S.enabled = v; }), S.enabled ? [
           opt('Potion', dropdown([['Large Stamina Potion', 'Large'], ['Full Stamina Potion', 'Full']], S.item, (v) => { S.item = v; })),
-          opt('Save past', num(() => SV.thresholdPct, (n) => { SV.thresholdPct = n; }, { parse: parseFloat, min: 1, max: 100, unit: '% EXP', w: 52 }), '100 = never')] : null),
+          opt(['Save past', h('small', {}, '100 = never')], num(() => SV.thresholdPct, (n) => { SV.thresholdPct = n; }, { parse: parseFloat, min: 1, max: 100, unit: '% EXP' }))] : null),
         srow('❤️', 'Health', 'Drinks when HP hits 0', sw(() => H.enabled, (v) => { H.enabled = v; H.thresholdPct = 0; }, { redraw: false })),
         srow('💧', 'Mana', 'Drinks when MP runs low', sw(() => M.enabled, (v) => { M.enabled = v; }), M.enabled ? [
           opt('Potion', dropdown([['S', 'Small · 20'], ['M', 'Medium · 40'], ['L', 'Large · 60'], ['XL', 'XL · 100']], M.type, (v) => { M.type = v; })),
-          opt('Drink at or below', num(() => M.threshold, (n) => { M.threshold = n; }, { w: 52, min: 0, unit: 'MP' }))] : null),
+          opt('Drink at or below', num(() => M.threshold, (n) => { M.threshold = n; }, { min: 0, unit: 'MP' }))] : null),
         srow('🪦', 'Auto-loot', 'Out of stamina: claims only what levels you up', sw(() => L.enabled, (v) => { L.enabled = v; }))),
       caption('Fighting'),
       group(
