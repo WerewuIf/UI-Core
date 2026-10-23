@@ -3079,7 +3079,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
 .ma-big{display:flex;align-items:center;gap:10px;margin-bottom:7px}.ma-big .ma-in{font:800 17px Arial,sans-serif;padding:7px 10px}.ma-big small{color:#7c88ad;font-size:11px;line-height:1.35}
 .ma-ed{grid-column:1/-1;margin:1px 0 3px;padding:9px 11px 10px;background:#16213f;border:1px solid rgba(110,168,255,.34);border-radius:16px}.ma-ed .ma-in,.ma-bulk .ma-in{background:#101a33}
 .ma-ed-h{display:flex;align-items:center;gap:8px;margin-bottom:4px}.ma-ed-t{flex:1;min-width:0}.ma-ed-t b{display:block;font:800 13px Arial,sans-serif;color:#fff;overflow-wrap:anywhere}
-.ma-ed-t small{display:flex;align-items:center;gap:6px;flex-wrap:wrap;color:#7c88ad;font-size:10.5px;margin-top:1px}
+.ma-ed-s{display:flex;align-items:center;gap:6px;flex-wrap:wrap;justify-content:flex-end;color:#7c88ad;font-size:10.5px}
 .ma-in.off,.ma-in:disabled{opacity:.45;cursor:not-allowed}   /* Auto is choosing: plain greyed-out disabled, same look as any disabled control */
 .ma-origin{margin:9px 0 0;padding:8px 10px;border-radius:12px;background:#0d1322;border:1px solid rgba(110,168,255,.28)}
 .ma-origin-t b{display:block;font:800 11.5px Arial,sans-serif;color:#d6e5ff}.ma-origin-t small{display:block;color:#8b97bd;font-size:11px;margin-top:2px}
@@ -3468,8 +3468,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     const copyBtn = kinds.length ? h('button', { type: 'button', class: 'ma-link', title: 'Give other bosses this boss’s gear / crystal / pet picks', onclick: (e) => { stop(e); startBulk(def, low); } }, '⧉ Copy loadout to…') : null;
     const removeBtn = def.fromScan ? h('button', { type: 'button', class: 'ma-link warn', title: 'The loot scan added this boss. Remove it from the list (a rescan will not bring it back).', onclick: (e) => { stop(e); removeAdded([def]); } }, '🗑 Remove') : null;
     return h('div', { class: 'ma-ed' },
-      h('div', { class: 'ma-ed-h' }, h('div', { class: 'ma-ed-t' }, h('b', { title: m.name }, m.name), h('small', {}, place, pill(txt, kind))),
-        sw(() => isOn(def), (v) => setMany([def], v), { sm: true }),
+      h('div', { class: 'ma-ed-h' }, h('div', { class: 'ma-ed-t' }, h('b', { title: m.name }, m.name)), h('small', { class: 'ma-ed-s' }, place, pill(txt, kind)),
         h('button', { type: 'button', class: 'ma-x', title: 'Close', onclick: (e) => { stop(e); ui.sel = ''; saveUi(); draw(); } }, '✕')),
       ms.length > 1 ? h('div', { style: { margin: '0 0 6px' } }, seg(ms.map((x, i) => [i, 'Phase ' + (i + 1), x.name]), idx, (v) => { phaseSel[def.low] = v; }, { full: true })) : null,
       Presets.pickKinds().length ? bossLoadout(low) : null,
