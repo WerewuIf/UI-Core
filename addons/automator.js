@@ -3078,8 +3078,8 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
 /* the editor of an open boss */
 .ma-big{display:flex;align-items:center;gap:10px;margin-bottom:7px}.ma-big .ma-in{font:800 17px Arial,sans-serif;padding:7px 10px}.ma-big small{color:#7c88ad;font-size:11px;line-height:1.35}
 .ma-ed{grid-column:1/-1;margin:1px 0 3px;padding:9px 11px 10px;background:#16213f;border:1px solid rgba(110,168,255,.34);border-radius:16px}.ma-ed .ma-in,.ma-bulk .ma-in{background:#101a33}
-.ma-ed-h{display:flex;align-items:center;gap:8px;margin-bottom:4px}.ma-ed-t{flex:1;min-width:0}.ma-ed-t b{display:block;font:800 13px Arial,sans-serif;color:#fff;overflow-wrap:anywhere}
-.ma-ed-s{display:flex;align-items:center;gap:6px;flex-wrap:wrap;justify-content:flex-end;color:#7c88ad;font-size:10.5px}
+.ma-ed-h{display:flex;align-items:center;gap:8px;margin-bottom:4px}.ma-ed-t{flex:1;min-width:0;display:flex;align-items:center;gap:4px 8px;flex-wrap:wrap}.ma-ed-t b{font:800 13px Arial,sans-serif;color:#fff;overflow-wrap:anywhere}
+.ma-ed-t small{display:flex;align-items:center;gap:6px;flex-wrap:wrap;color:#7c88ad;font-size:10.5px}
 .ma-in.off,.ma-in:disabled{opacity:.45;cursor:not-allowed}   /* Auto is choosing: plain greyed-out disabled, same look as any disabled control */
 .ma-origin{margin:9px 0 0;padding:8px 10px;border-radius:12px;background:#0d1322;border:1px solid rgba(110,168,255,.28)}
 .ma-origin-t b{display:block;font:800 11.5px Arial,sans-serif;color:#d6e5ff}.ma-origin-t small{display:block;color:#8b97bd;font-size:11px;margin-top:2px}
@@ -3101,6 +3101,19 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
 .ma-lv.on{background:linear-gradient(180deg,#2a3c72,#1f2f5d);border-color:#6ea8ff;box-shadow:0 0 0 2px rgba(110,168,255,.28),0 6px 16px rgba(20,40,110,.35)}.ma-lv.on::before{background:#b4d0ff}
 .ma-lv.on .ma-lvh::after{content:'✓';display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:#6ea8ff;color:#0b1430;font:800 10px Arial,sans-serif}
 .ma-lv b{font:800 14px Arial,sans-serif;color:#7c89b2;letter-spacing:.01em}.ma-lv.got b{color:#fff}.ma-lv.exp b{color:#d9c4ff}
+.ma-rgs{display:flex;flex-direction:column}
+.ma-rg{position:relative;display:grid;grid-template-columns:16px 52px minmax(0,1fr);align-items:center;gap:6px;padding:7px 8px 7px 6px;border-radius:12px;cursor:pointer;transition:.15s;min-width:0}
+.ma-rg::before{content:'';position:absolute;left:13px;top:0;bottom:0;width:2px;background:#27324f}.ma-rg:first-child::before{top:50%}.ma-rg:last-child::before{bottom:50%}.ma-rg.got::before{background:#4b73e0}
+.ma-rg-n{position:relative;z-index:1;width:12px;height:12px;margin-left:2px;box-sizing:border-box;border-radius:50%;background:#131c36;border:2px solid #34416b}
+.ma-rg.got .ma-rg-n{background:#4b73e0;border-color:#6ea8ff}.ma-rg.on .ma-rg-n{background:#dce9ff;border-color:#6ea8ff;box-shadow:0 0 0 3px rgba(110,168,255,.3)}
+.ma-rg:hover{background:rgba(110,168,255,.08)}.ma-rg.on{background:linear-gradient(90deg,rgba(75,115,224,.24),rgba(75,115,224,.05));box-shadow:inset 0 0 0 1px rgba(110,168,255,.45)}
+.ma-rg-b{display:flex;align-items:center;gap:4px}.ma-rg-b b{font:800 14px Arial,sans-serif;color:#7c89b2}.ma-rg.got .ma-rg-b b{color:#fff}.ma-rg.exp .ma-rg-b b{color:#d9c4ff}
+.ma-rg-i{display:flex;flex-wrap:wrap;gap:5px 6px;align-items:center;min-width:0}
+.ma-it{display:inline-flex;align-items:center;gap:5px;min-width:0;opacity:.5}.ma-it.new{opacity:1;background:rgba(110,168,255,.1);border-radius:8px;padding-right:7px}
+.ma-rg:not(.got) .ma-it{opacity:.35;filter:grayscale(.8)}.ma-rg:not(.got) .ma-it.new{opacity:.65}
+.ma-it .ma-ti{width:26px;height:26px;aspect-ratio:auto;flex:0 0 26px;border-radius:7px}.ma-rg.got .ma-ti{border-color:rgba(110,168,255,.7)}
+.ma-it em{font:700 10.5px Arial,sans-serif;font-style:normal;color:#cfe0ff;max-width:96px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ma-rg .ma-none{justify-self:start;color:#d9c4ff;background:rgba(160,122,216,.14);border:1px solid rgba(160,122,216,.35);border-radius:999px;font:700 10px Arial,sans-serif;padding:3px 8px;letter-spacing:.03em}
 .ma-lvt{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:4px;align-content:start}
 .ma-ti{aspect-ratio:1;min-width:0;box-sizing:border-box;border-radius:8px;overflow:hidden;border:1px solid #33406a;background:#131c38;display:flex;align-items:center;justify-content:center}.ma-ti.more{font:800 10px Arial,sans-serif;color:#9caad0}
 .ma-lv.got .ma-ti{border-color:rgba(110,168,255,.7)}
@@ -3428,23 +3441,26 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
         rl && rl.have != null ? h('span', { title: `${rl.relic}: ${rl.have}/10 (each relic adds 5% damage, 10 = full)` }, pill(`✨ ${rl.have}/10 · ${rl.pct}% dmg`, rl.short ? 'warn' : 'ok')) : null,
         info && info.expCapPct != null ? pill(`EXP cap ${info.expCapPct}%`, 'xp') : null,
         rungs.length && base > 0 ? pill(`${reached}/${rungs.length} levels`, reached === rungs.length ? 'ok' : '') : null,
-        rungs.length && base > 0 ? h('span', { class: 'ma-segs', title: `${reached} of ${rungs.length} loot levels reached` }, rungs.map((r) => h('i', { class: r.req <= base ? 'on' : '' }))) : null,
+        exp && base > 0 ? h('small', {}, base >= exp ? '★ EXP cap reached' : '★ EXP cap needs +' + short(exp - base)) : null,
         h('small', {}, '0 = skip')));
     if (!rungs.length) {
       return [head, chips([[1e8, '100M'], [5e8, '500M'], [1e9, '1B'], [2e9, '2B'], [3e9, '3B'], [5e9, '5B']], base, (v) => { ovr(low).cap = v; }),
         h('div', { class: 'ma-what' }, base <= 0 ? 'Cap 0: this boss is skipped.' : !info ? (LootScan.available ? 'No loot data yet. Press Scan at the top to read it.' : 'No loot data for this boss yet.') : '')];
     }
-    const got = rungs.filter((r) => r.req <= base), topReq = rungs[rungs.length - 1].req;
+    const topReq = rungs[rungs.length - 1].req;
     const at = new Map();                                              // item -> every level that drops it (for the hover text)
     rungs.forEach((r) => r.items.forEach((nm) => { const e = at.get(nm) || []; e.push(r.req); at.set(nm, e); }));
-    const cards = rungs.map((r) => {
-      const MAXT = 6, tiles = r.items.slice(0, MAXT).map((nm) => h('span', { class: 'ma-ti', title: `${nm}\nDrops at ${at.get(nm).map(short).join(' · ')} damage` }, lootIcon(nm)));
-      if (r.items.length > MAXT) tiles.push(h('span', { class: 'ma-ti more', title: r.items.slice(MAXT).join(', ') }, '+' + (r.items.length - MAXT)));
-      return h('div', { class: 'ma-lv' + (r.req <= base ? ' got' : '') + (r.req === base ? ' on' : '') + (r.exp ? ' exp' : ''), title: `Cap at ${fmtNum(r.req)}` + (r.items.length ? ': ' + r.items.join(', ') : ''), onclick: setCap(r.req) },
-        h('div', { class: 'ma-lvh' }, h('b', {}, short(r.req)), r.exp ? h('span', { class: 'ma-lvx', title: `Reaches the EXP cap${pctTxt}` }, '★') : null),
-        tiles.length ? h('div', { class: 'ma-lvt' }, tiles) : h('span', { class: 'ma-none' }, 'EXP cap'));
+    const seen = new Set();                                            // a loot ladder: one row per level; loot first unlocked at that level shows its name, loot carried over from a lower level is just a dim icon
+    const rows = rungs.map((r) => {
+      const fresh = r.items.map((nm) => !seen.has(nm)); r.items.forEach((nm) => seen.add(nm));
+      const MAXT = 12, tiles = r.items.slice(0, MAXT).map((nm, k) => h('span', { class: 'ma-it' + (fresh[k] ? ' new' : ''), title: `${nm}\nDrops at ${at.get(nm).map(short).join(' · ')} damage` }, h('span', { class: 'ma-ti' }, lootIcon(nm)), fresh[k] ? h('em', {}, nm) : null));
+      if (r.items.length > MAXT) tiles.push(h('span', { class: 'ma-it', title: r.items.slice(MAXT).join(', ') }, h('span', { class: 'ma-ti more' }, '+' + (r.items.length - MAXT))));
+      return h('div', { class: 'ma-rg' + (r.req <= base ? ' got' : '') + (r.req === base ? ' on' : '') + (r.exp ? ' exp' : ''), title: `Cap at ${fmtNum(r.req)}` + (r.items.length ? ': ' + r.items.join(', ') : ''), onclick: setCap(r.req) },
+        h('span', { class: 'ma-rg-n' }),
+        h('div', { class: 'ma-rg-b' }, h('b', {}, short(r.req)), r.exp ? h('span', { class: 'ma-lvx', title: `Reaches the EXP cap${pctTxt}` }, '★') : null),
+        tiles.length ? h('div', { class: 'ma-rg-i' }, tiles) : h('span', { class: 'ma-none' }, 'EXP cap'));
     });
-    return [head, h('div', { class: 'ma-lvs' }, cards),
+    return [head, h('div', { class: 'ma-rgs' }, rows),
       base <= 0 ? h('div', { class: 'ma-what' }, 'Cap 0: this boss is skipped.') : base > topReq ? h('div', { class: 'ma-what' }, `Above the top level (${short(topReq)}): the extra damage adds nothing.`) : null];
   }
   function placeOf(m) {
@@ -3468,7 +3484,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     const copyBtn = kinds.length ? h('button', { type: 'button', class: 'ma-link', title: 'Give other bosses this boss’s gear / crystal / pet picks', onclick: (e) => { stop(e); startBulk(def, low); } }, '⧉ Copy loadout to…') : null;
     const removeBtn = def.fromScan ? h('button', { type: 'button', class: 'ma-link warn', title: 'The loot scan added this boss. Remove it from the list (a rescan will not bring it back).', onclick: (e) => { stop(e); removeAdded([def]); } }, '🗑 Remove') : null;
     return h('div', { class: 'ma-ed' },
-      h('div', { class: 'ma-ed-h' }, h('div', { class: 'ma-ed-t' }, h('b', { title: m.name }, m.name)), h('small', { class: 'ma-ed-s' }, place, pill(txt, kind)),
+      h('div', { class: 'ma-ed-h' }, h('div', { class: 'ma-ed-t' }, h('b', { title: m.name }, m.name), h('small', {}, place, pill(txt, kind))),
         h('button', { type: 'button', class: 'ma-x', title: 'Close', onclick: (e) => { stop(e); ui.sel = ''; saveUi(); draw(); } }, '✕')),
       ms.length > 1 ? h('div', { style: { margin: '0 0 6px' } }, seg(ms.map((x, i) => [i, 'Phase ' + (i + 1), x.name]), idx, (v) => { phaseSel[def.low] = v; }, { full: true })) : null,
       Presets.pickKinds().length ? bossLoadout(low) : null,
