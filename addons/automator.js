@@ -2995,13 +2995,13 @@ const Panel = (() => {
 .ma-chip:hover{border-color:#3b4a73;color:#cfd8f7}.ma-chip.on{background:rgba(75,115,224,.2);border-color:#6ea8ff;color:#d6e5ff}
 .ma-chip i{font-style:normal;margin-left:5px;opacity:.7}
 /* inputs */
-.ma-in{box-sizing:border-box;width:92px;background:#0d1322;border:1px solid rgba(255,255,255,.12);color:#eef3ff;border-radius:10px;padding:5px 9px;font:12.5px Arial,sans-serif;transition:.15s}
+.ma-in{box-sizing:border-box;width:92px;background:#101a33;border:1px solid rgba(255,255,255,.12);color:#eef3ff;border-radius:10px;padding:5px 9px;font:12.5px Arial,sans-serif;transition:.15s}
 .ma-in:focus{outline:none;border-color:#6ea8ff;box-shadow:0 0 0 2px rgba(110,168,255,.18)}
 select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
 .ma-num{display:inline-flex;align-items:center;gap:5px}.ma-num i{font-style:normal;color:#6e7a9c;font-size:11px;line-height:1}
 .ma-in.flash{animation:ma-flash .9s ease-out}
 @keyframes ma-flash{0%{background:rgba(110,168,255,.55);border-color:#6ea8ff}100%{background:#0d1322}}
-.ma-search{box-sizing:border-box;flex:1;min-width:0;background:#0d1322;border:1px solid rgba(255,255,255,.12);color:#eef3ff;border-radius:12px;padding:6px 11px;font:12.5px Arial,sans-serif}
+.ma-search{box-sizing:border-box;flex:1;min-width:0;background:#101a33;border:1px solid rgba(255,255,255,.12);color:#eef3ff;border-radius:12px;padding:6px 11px;font:12.5px Arial,sans-serif}
 .ma-search:focus{outline:none;border-color:#6ea8ff}
 /* label + control rows */
 .ma-set{display:flex;align-items:center;gap:10px;padding:5px 0}
@@ -3077,7 +3077,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
 .ma-bb-n small .capv{color:#aeb9dc;font-weight:700}.ma-bb-n small .ma-rl{color:#ffd978;font-weight:800}
 /* the editor of an open boss */
 .ma-big{display:flex;align-items:center;gap:10px;margin-bottom:7px}.ma-big .ma-in{font:800 17px Arial,sans-serif;padding:7px 10px}.ma-big small{color:#7c88ad;font-size:11px;line-height:1.35}
-.ma-ed{grid-column:1/-1;margin:1px 0 3px;padding:9px 11px 10px;background:#16213f;border:1px solid rgba(110,168,255,.34);border-radius:16px}.ma-ed .ma-in,.ma-bulk .ma-in{background:#0d1322}
+.ma-ed{grid-column:1/-1;margin:1px 0 3px;padding:9px 11px 10px;background:#16213f;border:1px solid rgba(110,168,255,.34);border-radius:16px}.ma-ed .ma-in,.ma-bulk .ma-in{background:#101a33}
 .ma-ed-h{display:flex;align-items:center;gap:8px;margin-bottom:4px}.ma-ed-t{flex:1;min-width:0}.ma-ed-t b{display:block;font:800 13px Arial,sans-serif;color:#fff;overflow-wrap:anywhere}
 .ma-ed-t small{display:flex;align-items:center;gap:6px;flex-wrap:wrap;color:#7c88ad;font-size:10.5px;margin-top:1px}
 .ma-in.off{opacity:1;cursor:default;color:#9fc1ff;border-style:dashed;border-color:rgba(110,168,255,.35);-webkit-text-fill-color:#9fc1ff}   /* Auto is choosing: read-only, but not dimmed */
