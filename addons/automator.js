@@ -3208,7 +3208,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   const seg = (opts, cur, set, o = {}) => h('div', { class: 'ma-seg' + (o.full ? ' full' : '') }, opts.map(([v, label, tip]) =>
     h('button', { type: 'button', title: tip || null, class: 'ma-seg-btn' + (String(v) === String(cur) ? ' on' : ''), onclick: (e) => { stop(e); if (String(v) !== String(cur)) { set(v); saveCfg(); draw(); } } }, label)));
   const chips = (opts, cur, set) => h('div', { class: 'ma-chips' }, opts.map(([v, label]) => h('button', { type: 'button', class: 'ma-chip' + (String(v) === String(cur) ? ' on' : ''), onclick: (e) => { stop(e); set(v); saveCfg(); draw(); } }, label)));
-  const dropdown = (opts, cur, set, off) => h('select', Object.assign({ class: 'ma-in' + (off ? ' off' : ''), onclick: stop, onchange: (e) => { set(e.target.value); saveCfg(); draw(); } }, off ? { disabled: true, title: 'Off while Auto is on' } : {}),
+  const dropdown = (opts, cur, set, off, tip) => h('select', Object.assign({ class: 'ma-in' + (off ? ' off' : ''), onclick: stop, onchange: (e) => { set(e.target.value); saveCfg(); draw(); } }, off ? { disabled: true, title: tip || 'Off while Auto is on' } : {}),
     opts.map(([v, l]) => h('option', Object.assign({ value: v }, String(v) === String(cur) ? { selected: true } : {}), l)));
   const num = (get, set, o = {}) => h('span', { class: 'ma-num' }, h('input', { class: 'ma-in', inputmode: 'decimal', style: o.w ? { width: o.w + 'px' } : null, value: o.fmt ? o.fmt(get()) : get(), onclick: stop,
     onchange: (e) => { const n = (o.parse || parseCap)(e.target.value); if (n != null && Number.isFinite(n) && (o.min == null || n >= o.min) && (o.max == null || n <= o.max)) { set(n); saveCfg(); e.target.value = o.fmt ? o.fmt(n) : n; } else e.target.value = o.fmt ? o.fmt(get()) : get(); } }),
@@ -3499,7 +3499,8 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     body.push(note(auto ? 'Best gear, pets, crystals and sigils for every boss, dungeons included. Your build is put back when nothing is left to fight.' : 'Equipped before every boss without its own pick. Your build is put back when nothing is left to fight.'));
     if (kinds.length) body.push(loadoutGrid((k) => {
       const off = auto && (k !== 'crystal' || AB.crystals !== false);           // Auto is choosing it: the dropdown says so instead of showing a preset
-      return dropdown(off ? [['', k === 'crystal' ? '🤖 Best crystals on the gear' : '🤖 Auto']] : [['', 'Keep equipped'], ...presetOpts(k)], off ? '' : (cfg.loadout || {})[k] || '', (v) => { cfg.loadout = cfg.loadout || {}; if (v) cfg.loadout[k] = v; else delete cfg.loadout[k]; reset(); }, off);
+      const AUTO_TIP = { gear: 'Auto: the Build Engine equips the best gear for each boss.', pet: 'Auto: the Build Engine picks the best pets for each boss; sigils follow them.', crystal: 'Auto: best attack crystals assigned on whatever gear is equipped.' };
+      return dropdown(off ? [['', '🤖 Auto']] : [['', 'Keep equipped'], ...presetOpts(k)], off ? '' : (cfg.loadout || {})[k] || '', (v) => { cfg.loadout = cfg.loadout || {}; if (v) cfg.loadout[k] = v; else delete cfg.loadout[k]; reset(); }, off, AUTO_TIP[k] || 'Auto is choosing this for every boss.');
     }));
     else body.push(note('No gear / crystal / pet preset addon is loaded.'));
     const o = originRow(); if (o) body.push(o);
