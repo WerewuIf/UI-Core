@@ -2921,7 +2921,10 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
 .ma-set.sub{margin:0 0 3px 6px;padding:0 0 0 10px;gap:8px;border-top:0;border-left:2px solid rgba(110,168,255,.25)}
 .ma-set.sub .ma-set-t b{display:inline;font:400 11.5px Arial,sans-serif;color:#aeb9dc}.ma-set.sub .ma-set-t small{display:inline;margin-left:6px;font-size:10.5px;color:#6e7a9c}
 .ma-set.sub .ma-in{padding:3px 7px;font-size:12px;border-radius:8px}
-.ma-about{margin:8px 3px 2px}
+.ma-about{margin:10px 3px 2px;text-align:center;opacity:.8}
+.ma-card.off .ma-ico{opacity:.55}.ma-card.off .ma-card-t b{color:#aeb9dc}
+.ma-card-b .ma-set{padding:6px 0}.ma-card-b .ma-fld{margin:2px 0 4px}
+.ma-fold-t small{margin-left:2px}
 .ma-set-t{flex:1;min-width:0}.ma-set-t b{display:block;font:600 12.5px Arial,sans-serif;color:#e8edff}.ma-set-t small{display:block;color:#8b97bd;font-size:11px;line-height:1.3}
 .ma-fld{margin:7px 0}.ma-fld>label,.ma-fld>.ma-lbl{display:flex;align-items:baseline;gap:8px;color:#c4cdeb;font:700 11.5px Arial,sans-serif;margin-bottom:4px}.ma-fld>label small,.ma-lbl small{font-weight:400;color:#6e7a9c;font-size:11px}
 .ma-two{display:grid;grid-template-columns:1fr 1fr;gap:8px}
@@ -3099,7 +3102,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   const seg = (opts, cur, set, o = {}) => h('div', { class: 'ma-seg' + (o.full ? ' full' : '') }, opts.map(([v, label, tip]) =>
     h('button', { type: 'button', title: tip || null, class: 'ma-seg-btn' + (String(v) === String(cur) ? ' on' : ''), onclick: (e) => { stop(e); if (String(v) !== String(cur)) { set(v); saveCfg(); draw(); } } }, label)));
   const chips = (opts, cur, set) => h('div', { class: 'ma-chips' }, opts.map(([v, label]) => h('button', { type: 'button', class: 'ma-chip' + (String(v) === String(cur) ? ' on' : ''), onclick: (e) => { stop(e); set(v); saveCfg(); draw(); } }, label)));
-  const dropdown = (opts, cur, set, off) => h('select', Object.assign({ class: 'ma-in' + (off ? ' off' : ''), onclick: stop, onchange: (e) => { set(e.target.value); saveCfg(); draw(); } }, off ? { disabled: true, title: 'Off while Auto best is on' } : {}),
+  const dropdown = (opts, cur, set, off) => h('select', Object.assign({ class: 'ma-in' + (off ? ' off' : ''), onclick: stop, onchange: (e) => { set(e.target.value); saveCfg(); draw(); } }, off ? { disabled: true, title: 'Off while Auto is on' } : {}),
     opts.map(([v, l]) => h('option', Object.assign({ value: v }, String(v) === String(cur) ? { selected: true } : {}), l)));
   const num = (get, set, o = {}) => h('span', { class: 'ma-num' }, h('input', { class: 'ma-in', inputmode: 'decimal', style: o.w ? { width: o.w + 'px' } : null, value: o.fmt ? o.fmt(get()) : get(), onclick: stop,
     onchange: (e) => { const n = (o.parse || parseCap)(e.target.value); if (n != null && Number.isFinite(n) && (o.min == null || n >= o.min) && (o.max == null || n <= o.max)) { set(n); saveCfg(); e.target.value = o.fmt ? o.fmt(n) : n; } else e.target.value = o.fmt ? o.fmt(get()) : get(); } }),
@@ -3287,7 +3290,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     return loadoutGrid((k) => {
       const d = Presets.defaultPick(k), dp = d ? Presets.list(k).find((x) => x.id === String(d)) : null;
       const auto = k === 'crystal' ? Presets.crystalAuto(low, t) : Presets.autoFor(low, t), saved = !!(AB.enabled && Presets.available('best')) && !d;
-      const dflt = auto ? 'Default · 🤖 Auto best' : d ? 'Default · ' + (dp ? dp.name : d) : saved ? 'Default · keep equipped' : 'Default';
+      const dflt = auto ? 'Default · 🤖 Auto' : d ? 'Default · ' + (dp ? dp.name : d) : saved ? 'Default · keep equipped' : 'Default';
       return dropdown([['', dflt], ['__keep', 'Keep equipped'], ...presetOpts(k)], o[k] || '', (v) => { if (v) ovr(low)[k] = v; else delete ovr(low)[k]; Presets.forget(); Planner.reset(); });
     });
   }
@@ -3380,14 +3383,14 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     const auto = has && AB.enabled;
     const body = [];
     if (!has) body.push(note('🤖 Auto needs the Build Engine addon, and it is not loaded.'));
-    body.push(note(auto ? 'Auto best: every boss gets the best gear + pets for it (best crystals on that gear, sigils following the pets), so the presets are off. A boss you pick for yourself keeps its pick. When nothing is left to fight, your own build is put back.' : 'Equipped before every boss that has no pick of its own. Open a boss to change it just for that boss. When nothing is left to fight, your own build is put back.'));
+    body.push(note(auto ? 'Best gear, pets, crystals and sigils for every boss. Your build is put back when nothing is left to fight.' : 'Equipped before every boss without its own pick. Your build is put back when nothing is left to fight.'));
     if (kinds.length) body.push(loadoutGrid((k) => {
       const off = auto && (k !== 'crystal' || AB.crystals !== false);           // Auto is choosing it: the dropdown says so instead of showing a preset
-      return dropdown(off ? [['', k === 'crystal' ? '🤖 Best crystals on the gear' : '🤖 Auto best']] : [['', 'Keep equipped'], ...presetOpts(k)], off ? '' : (cfg.loadout || {})[k] || '', (v) => { cfg.loadout = cfg.loadout || {}; if (v) cfg.loadout[k] = v; else delete cfg.loadout[k]; reset(); }, off);
+      return dropdown(off ? [['', k === 'crystal' ? '🤖 Best crystals on the gear' : '🤖 Auto']] : [['', 'Keep equipped'], ...presetOpts(k)], off ? '' : (cfg.loadout || {})[k] || '', (v) => { cfg.loadout = cfg.loadout || {}; if (v) cfg.loadout[k] = v; else delete cfg.loadout[k]; reset(); }, off);
     }));
     else body.push(note('No gear / crystal / pet preset addon is loaded.'));
     const o = originRow(); if (o) body.push(o);
-    const autoBtn = h('div', { class: 'ma-seg' }, h('button', { type: 'button', disabled: !has || null, title: has ? 'The Build Engine picks the best gear + pets for each boss; the presets below are off' : 'Needs the Build Engine addon', class: 'ma-seg-btn' + (auto ? ' on' : ''), onclick: (e) => { stop(e); if (!has) return; AB.enabled = !AB.enabled; reset(); saveCfg(); draw(); } }, '🤖 Auto best'));
+    const autoBtn = h('div', { class: 'ma-seg' }, h('button', { type: 'button', disabled: !has || null, title: has ? 'Picks the best gear, pets, crystals and sigils for each boss, so the presets are off' : 'Needs the Build Engine addon', class: 'ma-seg-btn' + (auto ? ' on' : ''), onclick: (e) => { stop(e); if (!has) return; AB.enabled = !AB.enabled; reset(); saveCfg(); draw(); } }, '🤖 Auto'));
     body.push(h('div', { class: 'ma-actions', style: { margin: '9px 0 0' } }, btn(BK.on ? '✕ Done selecting' : '☑ Apply to several bosses…', BK.on ? 'soft' : '', () => { if (BK.on) endBulk(); else { BK.on = true; ui.sel = ''; saveUi(); draw(); } })));
     return h('div', { class: 'ma-card' }, h('div', { class: 'ma-card-h' }, h('span', { class: 'ma-ico' }, '🎒'), h('div', { class: 'ma-card-t' }, h('b', {}, 'Loadout'), h('small', {}, 'How a boss gets its gear, pets, crystals and sigils')), autoBtn), h('div', { style: { marginTop: '9px' } }, ...body));
   }
@@ -3604,30 +3607,30 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   function tSettings() {
     const S = cfg.stam, SV = S.save, H = cfg.hp, M = cfg.mana, L = cfg.autoLoot;
     const au = Guard.info(), cls = effectiveClass(), cs = cls ? CLASS_SKILLS[cls] : null;
-    const ctl = (...k) => h('div', { class: 'ma-ctl' }, ...k);
-    const sub = (title, c, desc) => { const e = setting(title, desc || null, c); e.classList.add('sub'); return e; };
     const flag = (title, desc, get, set, o) => setting(title, desc, sw(get, set, o));
     const ms = (label, get, set, o = {}) => setting(label, null, num(get, set, Object.assign({ w: 64, unit: 'ms', min: 0 }, o)));
     const skillOn = cfg.useClassSkill;
+    const rows = (...r) => { r = r.filter(Boolean); return r.length ? r : null; };
     return [
       caption('Potions'),
-      h('div', { class: 'ma-card' },
-        setting('⚡ Stamina', null, ctl(dropdown([['Large Stamina Potion', 'Large'], ['Full Stamina Potion', 'Full']], S.item, (v) => { S.item = v; }), sw(() => S.enabled, (v) => { S.enabled = v; }))),
-        S.enabled ? sub('Save potions past', num(() => SV.thresholdPct, (n) => { SV.thresholdPct = n; }, { parse: parseFloat, min: 1, max: 100, unit: '% EXP', w: 52 }), '100 = never') : null,
-        flag('❤️ HP', 'drinks when HP hits 0', () => H.enabled, (v) => { H.enabled = v; H.thresholdPct = 0; }, { redraw: false }),
-        setting('💧 Mana', null, ctl(dropdown([['S', 'Small · 20'], ['M', 'Medium · 40'], ['L', 'Large · 60'], ['XL', 'XL · 100']], M.type, (v) => { M.type = v; }), sw(() => M.enabled, (v) => { M.enabled = v; }))),
-        M.enabled ? sub('Drink at or below', num(() => M.threshold, (n) => { M.threshold = n; }, { w: 52, min: 0, unit: 'MP' })) : null,
-        flag('🪦 Auto-loot', 'out of stamina → claims only what levels you up', () => L.enabled, (v) => { L.enabled = v; })),
-      Presets.available('best') ? h('div', { class: 'ma-card' }, setting('🎒 Builds', cfg.autoBuild.enabled ? '🤖 Auto best' : '📌 Saved presets', btn('Open Loadout', 'soft', () => { ui.open.loadout = true; ui.bsec = 'waves'; go('bosses'); }))) : null,
+      card('⚡', 'Stamina', 'Drinks one when you run out', S.enabled, (v) => { S.enabled = v; },
+        rows(setting('Potion', null, dropdown([['Large Stamina Potion', 'Large'], ['Full Stamina Potion', 'Full']], S.item, (v) => { S.item = v; })),
+          setting('Save potions past', '100 = never', num(() => SV.thresholdPct, (n) => { SV.thresholdPct = n; }, { parse: parseFloat, min: 1, max: 100, unit: '% EXP', w: 52 })))),
+      card('❤️', 'Health', 'Drinks when HP hits 0', H.enabled, (v) => { H.enabled = v; H.thresholdPct = 0; }, null),
+      card('💧', 'Mana', 'Drinks when MP runs low', M.enabled, (v) => { M.enabled = v; },
+        rows(setting('Potion', null, dropdown([['S', 'Small · 20'], ['M', 'Medium · 40'], ['L', 'Large · 60'], ['XL', 'XL · 100']], M.type, (v) => { M.type = v; })),
+          setting('Drink at or below', null, num(() => M.threshold, (n) => { M.threshold = n; }, { w: 52, min: 0, unit: 'MP' })))),
+      card('🪦', 'Auto-loot', 'Out of stamina: claims only what levels you up', L.enabled, (v) => { L.enabled = v; }, null),
       caption('Fighting'),
-      h('div', { class: 'ma-card' },
-        flag('Class skill' + (cs ? ' · ' + cs.label : ' · not detected'), 'cast before each World Breaker slash', () => cfg.useClassSkill, (v) => { cfg.useClassSkill = v; }),
-        skillOn && !cs ? field('Class', 'pick yours', seg([['warrior', 'Warrior'], ['cleric', 'Cleric'], ['hunter', 'Hunter'], ['mage', 'Mage']], cfg.classOverride, (v) => { cfg.classOverride = v; }, { full: true })) : null,
-        skillOn ? sub('Pierce shielded mobs', sw(() => cfg.sideMob.enabled, (v) => { cfg.sideMob.enabled = v; }, { redraw: false, sm: true }), `${cs ? cs.label : 'class skill'} on a regular mob`) : null,
-        flag('Phase duels', 'fought automatically', () => cfg.autoDuel, (v) => { cfg.autoDuel = v; }, { redraw: false }),
-        flag('Pause server auto-farm', 'so the two never fight over stamina', () => cfg.autoFarmControl, (v) => { cfg.autoFarmControl = v; }, { redraw: false })),
-      fold('adv', false, '⏱ Timing', () => [note('Pauses between requests, in ms. Lower numbers risk rejected requests.'),
-        setting('Scan every', 'waves and dungeons, e.g. 5', num(() => cfg.fightScanMs / 60000, (n) => { cfg.fightScanMs = Math.round(n * 60000); }, { w: 64, unit: 'min', min: 0.1, parse: parseFloat })),
+      card('✨', 'Class skill', cs ? cs.label + ' · cast before each World Breaker slash' : 'Not detected · cast before each World Breaker slash', skillOn, (v) => { cfg.useClassSkill = v; },
+        rows(!cs ? field('Class', 'pick yours', seg([['warrior', 'Warrior'], ['cleric', 'Cleric'], ['hunter', 'Hunter'], ['mage', 'Mage']], cfg.classOverride, (v) => { cfg.classOverride = v; }, { full: true })) : null,
+          setting('Pierce shielded mobs', `${cs ? cs.label : 'Class skill'} on a regular mob`, sw(() => cfg.sideMob.enabled, (v) => { cfg.sideMob.enabled = v; }, { redraw: false, sm: true })))),
+      card('⚔️', 'Run behaviour', 'What it does around the fight', true, null,
+        rows(flag('Phase duels', 'Fought automatically', () => cfg.autoDuel, (v) => { cfg.autoDuel = v; }, { redraw: false }),
+          flag('Pause server auto-farm', 'So the two never fight over stamina', () => cfg.autoFarmControl, (v) => { cfg.autoFarmControl = v; }, { redraw: false }))),
+      caption('Advanced'),
+      fold('adv', false, ['⏱ Timing', h('small', {}, 'pauses between requests')], () => [note('In ms. Lower numbers risk rejected requests.'),
+        setting('Scan every', 'Waves and dungeons, e.g. 5', num(() => cfg.fightScanMs / 60000, (n) => { cfg.fightScanMs = Math.round(n * 60000); }, { w: 64, unit: 'min', min: 0.1, parse: parseFloat })),
         ms('Wave swing gap', () => cfg.attackDelayMs, (n) => { cfg.attackDelayMs = n; }),
         ms('Dungeon swing gap', () => cfg.dungeonAttackDelayMs, (n) => { cfg.dungeonAttackDelayMs = n; }),
         skillOn ? ms('Skill → attack gap', () => cfg.skillToAttackGapMs, (n) => { cfg.skillToAttackGapMs = n; }) : null,
