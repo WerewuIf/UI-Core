@@ -3035,6 +3035,8 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
 .ma-opt .ma-seg{width:100%}.ma-opt .ma-seg-btn{padding:5px 9px;font-size:11px}
 .ma-opt-l small{margin-left:6px;color:#6e7a9c;font-size:10px;font-weight:400;letter-spacing:0;text-transform:none}
 .ma-opt.wide{grid-column:1/-1}
+/* timing: the labels may wrap, the fields stay level */
+.ma-sr-o.tm{margin:0 0 2px}.ma-sr-o.tm .ma-opt-l{white-space:normal;line-height:1.25}
 @media (max-width:420px){.ma-sr-o{grid-template-columns:minmax(0,1fr);margin-left:0}}
 .ma-card.off .ma-ico{opacity:.55}.ma-card.off .ma-card-t b{color:#aeb9dc}
 .ma-card-b .ma-set{padding:6px 0}.ma-card-b .ma-fld{margin:2px 0 4px}
@@ -3156,7 +3158,8 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
 .ma-sched{margin-top:8px;padding:7px 10px;background:#101a33;border:1px solid rgba(255,255,255,.06);border-radius:14px}
 .ma-sub-h{display:flex;align-items:center;gap:8px;color:#c4cdeb;font:700 11.5px Arial,sans-serif;margin-bottom:4px}.ma-sub-h .sp{flex:1}.ma-sub-h small{font-weight:400;color:#6e7a9c}
 .ma-srow{display:grid;grid-template-columns:112px auto minmax(0,1fr) 24px;align-items:center;gap:7px;margin:1px -5px;padding:3px 5px;border-radius:12px}.ma-srow .arrow{color:#53608a}
-.ma-srow.now{background:rgba(61,220,151,.09)}.ma-srow.now .arrow{color:#3ddc97}
+.ma-srow{position:relative}.ma-srow>*{position:relative;z-index:1}
+.ma-srow.now::before{content:'';position:absolute;z-index:0;left:0;top:0;bottom:0;right:36px;border-radius:12px;background:rgba(61,220,151,.09)}.ma-srow.now .arrow{color:#3ddc97}
 .ma-srow .ma-num{position:relative;display:flex;width:100%}.ma-srow .ma-num .ma-in{flex:1 1 auto;width:auto;min-width:0}
 .ma-srow .ma-num i{position:absolute;right:11px;top:50%;transform:translateY(-50%);pointer-events:none}.ma-srow .ma-num.u .ma-in{padding-right:58px}
 .ma-srow .ma-in,.ma-time{height:30px;box-sizing:border-box}
@@ -3778,7 +3781,6 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   function tSettings() {
     const S = cfg.stam, SV = S.save, H = cfg.hp, M = cfg.mana, L = cfg.autoLoot;
     const au = Guard.info(), cls = effectiveClass(), cs = cls ? CLASS_SKILLS[cls] : null;
-    const ms = (label, get, set, o = {}) => setting(label, null, num(get, set, Object.assign({ w: 64, unit: 'ms', min: 0 }, o)));
     const skillOn = cfg.useClassSkill;
     return [
       caption('Potions & loot'),
@@ -3799,12 +3801,12 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
         srow('⚔️', 'Phase duels', 'Fought automatically', sw(() => cfg.autoDuel, (v) => { cfg.autoDuel = v; }, { redraw: false })),
         srow('⏸️', 'Pause server auto-farm', 'So the two never fight over stamina', sw(() => cfg.autoFarmControl, (v) => { cfg.autoFarmControl = v; }, { redraw: false }))),
       caption('Advanced'),
-      fold('adv', false, ['⏱ Timing', h('small', {}, 'pauses between requests')], () => [
-        setting('Scan every', 'Waves, dungeons, and loot', num(() => cfg.fightScanMs / 60000, (n) => { cfg.fightScanMs = Math.round(n * 60000); }, { w: 64, unit: 'min', min: 0.1, parse: parseFloat })),
-        ms('Wave attack cooldown', () => cfg.attackDelayMs, (n) => { cfg.attackDelayMs = n; }),
-        ms('Dungeon attack cooldown', () => cfg.dungeonAttackDelayMs, (n) => { cfg.dungeonAttackDelayMs = n; }),
-        skillOn ? ms('Skill → attack gap', () => cfg.skillToAttackGapMs, (n) => { cfg.skillToAttackGapMs = n; }) : null,
-        L.enabled ? ms('Gap between loot claims', () => L.claimGapMs, (n) => { L.claimGapMs = n; }) : null]),
+      fold('adv', false, ['⏱ Timing', h('small', {}, 'pauses between requests')], () => [h('div', { class: 'ma-sr-o tm' },
+        opt(['Scan every', h('small', {}, 'Waves, dungeons, and loot')], num(() => cfg.fightScanMs / 60000, (n) => { cfg.fightScanMs = Math.round(n * 60000); }, { unit: 'min', min: 0.1, parse: parseFloat }), null, 'wide'),
+        opt('Wave attack cooldown', num(() => cfg.attackDelayMs, (n) => { cfg.attackDelayMs = n; }, { unit: 'ms', min: 0 })),
+        opt('Dungeon attack cooldown', num(() => cfg.dungeonAttackDelayMs, (n) => { cfg.dungeonAttackDelayMs = n; }, { unit: 'ms', min: 0 })),
+        skillOn ? opt('Skill → attack gap', num(() => cfg.skillToAttackGapMs, (n) => { cfg.skillToAttackGapMs = n; }, { unit: 'ms', min: 0 })) : null,
+        L.enabled ? opt('Gap between loot claims', num(() => L.claimGapMs, (n) => { L.claimGapMs = n; }, { unit: 'ms', min: 0 })) : null)]),
       h('div', { class: 'ma-note ma-about' }, `v${VERSION} · re-login ${au.status ? (au.status.configured ? 'set up' : 'not set up') : 'unavailable'} · ${Presets.note()}`,
         ' · ', h('button', { type: 'button', class: 'ma-link', onclick: () => { SideMob.forget(); draw(); } }, `forget ${SideMob.shielded()} shielded mob${SideMob.shielded() === 1 ? '' : 's'}`))];
   }
