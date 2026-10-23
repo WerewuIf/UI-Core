@@ -395,7 +395,7 @@ const UI = (() => { let fn = null; return { dirty(what) { if (fn) fn(what); }, h
 // What is being worked on right now, by key ('scan' = boss scan / graveyard / start-up): { label, done, total }. Shown in the Overview and Graveyard.
 const Work = (() => {
   const m = new Map(), ping = () => UI.dirty('status');
-  return { set(k, label, done, total) { m.set(k, { label, done: done || 0, total: total || 0 }); ping(k); }, clear(k) { if (m.delete(k)) ping(k); }, get: (k) => m.get(k) || null };
+  return { set(k, label, done, total, step) { m.set(k, { label, done: done || 0, total: total || 0, step: step || '' }); ping(k); }, clear(k) { if (m.delete(k)) ping(k); }, get: (k) => m.get(k) || null };
 })();
 const pctOf = (w) => (w && w.total > 0 ? Math.min(100, w.done / w.total * 100) : 0);
 
@@ -409,6 +409,18 @@ const Status = (() => {
   }
   const get = () => (Tab.isMain() ? local : (stateStore.get() || {}).status || 'FOLLOWER');
   return { set, get };
+})();
+
+/* What the build switch is doing right now: Status SWITCHING + Work 'build' = { title, step label, done of total }, so the footer and the Overview
+ * show "Switching build for X · Crystals · step 3 of 3" with a bar. start() with no steps shows nothing (everything was already on). */
+const Prog = (() => {
+  let steps = [], title = '', prev = '';
+  const show = (i) => Work.set('build', title, i, steps.length, steps[i] || '');
+  return {
+    start(t, list) { if (!list || !list.length) { steps = []; return; } steps = list.slice(); title = t; prev = Status.get(); Status.set('SWITCHING'); show(0); },
+    at(label) { if (!steps.length) return; const i = steps.indexOf(label); if (i >= 0) show(i); },
+    end() { if (!steps.length) return; steps = []; Work.clear('build'); if (Status.get() === 'SWITCHING') Status.set(prev && prev !== 'SWITCHING' ? prev : (Run.wanted() ? 'RUNNING' : 'STOPPED')); },
+  };
 })();
 
 const Run = (() => {
@@ -1377,7 +1389,7 @@ const Presets = (() => {
       if (Origin.get() || capturing) return;
       capturing = true;
       try {
-        const o = { at: Date.now(), boss: t ? t.name : '', sel: null, crystals: null, moves: [] };
+        const o = { at: Date.now(), boss: t ? t.name : '', sel: null, crystals: null, moves: [], left: null, probe: t ? { low: t.low, name: t.name, kind: t.kind, monsterId: t.monsterId, instanceId: t.instanceId, locationId: t.locationId, cap: t.cap, userDmg: t.userDmg } : null };   // left: the build this automator put on last (to see whether you changed it yourself); probe: the boss to read it against
         if (t && available(BEST)) { try { const r = await withTimeout(Promise.resolve(Core.call('build.predict', (await engineMob(t)) || bossOf(t))), 60000, null); if (r && r.ok !== false && r.sel && r.sel.gear) o.sel = r.sel; } catch (_) { /* no gear / pet read */ } }
         try { o.crystals = await withTimeout(BuildKit.crystals.snapshot(), 30000, null); } catch (_) { /* no crystal read */ }
         originStore.set(o);
@@ -1387,19 +1399,37 @@ const Presets = (() => {
     addPlaced(ids) { if (!ids || !ids.length) return; const o = Origin.get(); if (!o) return; o.placed = Array.from(new Set((o.placed || []).concat(ids.map(String)))); originStore.set(o); },
     addMoves(list) { if (!list || !list.length) return; const o = Origin.get(); if (!o) return; o.moves = (o.moves || []).concat(list); originStore.set(o); },
     clear() { originStore.set(null); },
+    // Someone else (you, another tab, another addon) changed the build: whatever that touched is no longer "what was on before", so it is NOT put back
+    // over your change. gear / pets / crystals each only lose their own part; when nothing is left to put back, the memory goes.
+    touched(owner) {
+      const o = Origin.get(); if (!o || capturing) return;
+      const parts = { 'gear-presets': ['sel', 'crystals'], 'pet-presets': ['sel'], 'build-engine': ['sel', 'crystals'], 'crystal-presets': ['crystals'] }[owner] || ['sel', 'crystals', 'moves'];
+      parts.forEach((k) => { if (k === 'moves') o.moves = []; else o[k] = null; }); if (parts.includes('crystals')) o.placed = [];
+      if (!o.sel && !o.crystals && !(o.moves || []).length) { Origin.clear(); log('📌 you changed your build yourself, so the automator will not put the old one back over it', 'info'); }
+      else { originStore.set(o); log(`📌 you changed ${parts.map((k) => ({ sel: 'gear + pets', crystals: 'crystals', moves: 'sigils' }[k])).join(' + ')} yourself, so that part will not be put back`, 'info'); }
+    },
+    // read the build that is on right now (gear + pets) the way the capture did
+    async read(t) { try { const r = await withTimeout(Promise.resolve(Core.call('build.predict', (t && (await engineMob(t))) || (t && bossOf(t)) || {})), 45000, null); return r && r.ok !== false && r.sel && r.sel.gear ? r.sel : null; } catch (_) { return null; } },
+    async markLeft(t) { const o = Origin.get(); if (!o || !o.sel || !available(BEST)) return; const sel = await Origin.read(t); const o2 = Origin.get(); if (sel && o2) { o2.left = sel; originStore.set(o2); } },
   };
   let chain = Promise.resolve();                                      // ensure() and restore() take turns, never overlap
   const exclusive = (fn) => { const p = chain.then(fn, fn); chain = p.catch(() => {}); return p; };
 
-  let ensuring = false;
+  let ensuring = false, ownUntil = 0;                                   // ownUntil: loadout events of this tab right after our own change are ours
   const ensure = (low, t) => exclusive(() => ensureNow(low, t));
   async function ensureNow(low, t) {
     const W = wanted(low, t), auto = autoFor(low, t), sig = sigilAuto(low, t);
     ensuring = true;
+    let changedAny = false;
     try {
-      if (auto) await Origin.ensure(t);                               // before anything moves
       const all = kinds(), first = ['gear', 'pet', BEST].filter((k) => all.includes(k));
       const seq = [...first, ...all.filter((k) => !first.includes(k) && k !== 'crystal'), ...(all.includes('crystal') ? ['crystal'] : [])];
+      const stepOf = (k) => (k === BEST ? 'Gear + pets' : k === 'gear' ? 'Gear' : k === 'pet' ? 'Pets' : k === 'crystal' ? 'Crystals' : k.charAt(0).toUpperCase() + k.slice(1));
+      const todo = []; if (Object.keys(W).length && !Origin.get()) todo.push('Remembering your build');
+      for (const kind of seq) { const want = W[kind]; if (!want || (kind === 'crystal' && want === '__best') || applied[kind] === memoOf(kind, want, t)) continue; todo.push(stepOf(kind)); if (kind === BEST && sig) todo.push('Sigils'); }
+      if (W.crystal === '__best' && (todo.length || applied.crystal !== '__best@' + buildEpoch)) todo.push('Crystals');
+      Prog.start('Switching build for ' + bossName(low), todo);
+      if (Object.keys(W).length) { Prog.at('Remembering your build'); await Origin.ensure(t); }   // before anything moves: what is on now is what gets put back
       for (const kind of seq) {
         const want = W[kind];
         if (!want || (kind === 'crystal' && want === '__best')) continue;
@@ -1408,6 +1438,7 @@ const Presets = (() => {
         const key = kind + ':' + memo;
         if (Date.now() - (failedAt[key] || 0) < 300000) continue;           // a failed apply is not retried for 5 min (best: per boss)
         const label = kind === BEST ? 'best gear + pets' : `${kind} preset "${esc(nameOf(kind, want))}"`;
+        Prog.at(stepOf(kind));
         log(`🎒 applying ${label} for ${esc(bossName(low))}…`, 'info');
         const boss = t ? await engineMob(t) : { name: bossName(low) };
         if (!boss) { failedAt[key] = Date.now(); log(`⚠️ ${label}: could not read ${esc(bossName(low))}'s stats, so what is equipped stays`, 'warn'); continue; }
@@ -1420,9 +1451,11 @@ const Presets = (() => {
         if (r && r.ok !== false) {
           applied[kind] = memo; log(`✅ ${kind === BEST ? 'best gear + pets' : kind + ' preset'} ${r.changed === false ? 'already on' : 'applied'}`, 'ok'); try { await Core.me.sync(); } catch (_) { /* */ } Me.statsAt = 0;
           if (kind === 'gear' || (kind === BEST && r.changed)) buildEpoch++;
+          if (r.changed !== false) changedAny = true;
           if (kind === BEST && r.changed) {
             delete applied.gear; delete applied.pet;                  // the engine moved gear / pets: those memos no longer describe what is on
             if (sig && teamBefore) {                                  // sigils sit on pets: move them to the pets that took their place
+              Prog.at('Sigils');
               const c = await BuildKit.sigils.carry(teamBefore);
               Origin.addMoves(c.undo);
               if (c.moved) log(`✨ ${c.moved} sigil${c.moved === 1 ? '' : 's'} moved to the new pets`, 'ok');
@@ -1431,9 +1464,11 @@ const Presets = (() => {
           }
         } else { failedAt[key] = Date.now(); log(`⚠️ ${label} failed: ${esc((r && r.message) || 'unknown')}`, 'warn'); }
       }
+      if (changedAny) await Origin.markLeft(t);                       // what we leave on: a later restore checks you did not change it yourself
       if (W.crystal === '__best') {                                   // crystals sit on the gear that is on now, so after gear
         const memo = '__best@' + buildEpoch, key = 'crystal:' + memo;
         if (applied.crystal !== memo && Date.now() - (failedAt[key] || 0) >= 300000) {
+          Prog.at('Crystals');
           log(`💎 best crystals on the gear for ${esc(bossName(low))}…`, 'info');
           const r = await withTimeout(BuildKit.crystals.best(), 180000, { ok: false, message: 'timed out' });
           Origin.addPlaced(r && r.placed);
@@ -1441,7 +1476,7 @@ const Presets = (() => {
           else { failedAt[key] = Date.now(); log(`⚠️ best crystals: ${esc((r && r.message) || 'unknown')}`, 'warn'); }
         }
       }
-    } finally { ensuring = false; }
+    } finally { ensuring = false; ownUntil = Date.now() + 2500; Prog.end(); }
   }
   // Put back what was there before: gear + pets, then the crystals onto the same pieces of gear, then every moved sigil to its pet.
   const restore = (why) => exclusive(() => restoreNow(why));
@@ -1450,16 +1485,29 @@ const Presets = (() => {
     ensuring = true;
     const notes = [];
     try {
+      // The build on now is not the one this automator left (you changed it while it was paused / idle / the page was closed): leave it alone.
+      if (o.sel && o.left && o.probe && why !== 'you asked') {
+        const live = await Origin.read(o.probe);
+        if (live && Plan.distance(Plan.sigFromSel(live, null), Plan.sigFromSel(o.left, null)) > 0) {
+          Origin.clear(); Object.keys(applied).forEach((k) => delete applied[k]); buildEpoch++;   // what we remembered applying is not on any more
+          log('📌 your gear / pets are not what the automator left, so they were changed by you: they stay as they are', 'info');
+          return { ok: true, message: 'you changed your build yourself, so it was left as it is' };
+        }
+      }
+      Prog.start('Putting your build back', [...(o.sel ? ['Gear + pets'] : []), ...(o.crystals ? ['Crystals'] : []), ...((o.moves || []).length ? ['Sigils'] : [])]);
       log(`↩ putting your build back${why ? ' (' + esc(why) + ')' : ''}…`, 'info');
       if (o.sel && Core.has && Core.has('build.apply')) {
+        Prog.at('Gear + pets');
         const r = await withTimeout(Promise.resolve(Core.call('build.apply', { sel: o.sel }, { label: 'Your build' })), 240000, { ok: false, message: 'timed out' });
         if (r && r.ok !== false) log(`✅ gear + pets ${r.changed === false ? 'were already as before' : 'put back'}`, 'ok'); else notes.push('gear + pets: ' + ((r && r.message) || 'failed'));
       } else if (!o.sel) notes.push('gear + pets were not read, so they stay as they are');
       if (o.crystals) {
+        Prog.at('Crystals');
         const r = await withTimeout(BuildKit.crystals.restore(o.crystals, { placed: o.placed }), 240000, { ok: false, message: 'timed out' });
         if (r && r.ok !== false) log(`✅ crystals ${r.moves ? 'put back on their gear' : 'were already as before'}${r.message ? ' (' + esc(r.message) + ')' : ''}`, 'ok'); else notes.push('crystals: ' + ((r && r.message) || 'failed'));
       }
       if ((o.moves || []).length) {
+        Prog.at('Sigils');
         const r = await withTimeout(BuildKit.sigils.undo(o.moves), 240000, { ok: false, message: 'timed out' });
         if (r && r.ok !== false) log(`✅ sigils back on their pets (${r.moved})`, 'ok'); else notes.push('sigils: ' + ((r && r.message) || 'failed'));
       }
@@ -1468,15 +1516,16 @@ const Presets = (() => {
       Origin.clear(); try { await Core.me.sync(); } catch (_) { /* */ } Me.statsAt = 0;
       return { ok: true, message: 'your build is back' };
     } catch (e) { log('⚠️ restore: ' + esc((e && e.message) || String(e)), 'warn'); return { ok: false, message: (e && e.message) || String(e) }; }
-    finally { ensuring = false; }
+    finally { ensuring = false; ownUntil = Date.now() + 2500; Prog.end(); }
   }
   // Someone else changed the build (a human preset click, another tab, the engine): what this tab remembers applying may be stale.
   // Which memos an owner can invalidate; an unknown owner clears everything.
   const OWNS = { 'gear-presets': ['gear', BEST], 'pet-presets': ['pet', BEST], 'crystal-presets': ['crystal'], 'build-engine': ['gear', 'pet', BEST] };
   function foreignEnd(d) {
-    if (ensuring && d && d.tab === Core.tabId) return;                 // our own applies (this tab): ensure() keeps its memo itself
+    if (d && d.tab === Core.tabId && (ensuring || Date.now() < ownUntil)) return;   // our own applies (this tab): ensure() keeps its memo itself
     const ks = (d && OWNS[d.owner]) || Object.keys(applied);
     ks.forEach((k) => { delete applied[k]; });
+    if (Tab.isMain()) Origin.touched(d && d.owner);                    // you (or another tab) changed the build: that part is no longer ours to put back
   }
   if (typeof Core.on === 'function') Core.on('loadout:end', foreignEnd);
   // "gear: Boss gear · pet: Boss pets" for the Status tab, or an em dash when nothing was applied this session
@@ -2910,7 +2959,7 @@ const Panel = (() => {
 .ma-in{box-sizing:border-box;width:92px;background:#0d1322;border:1px solid rgba(255,255,255,.12);color:#eef3ff;border-radius:10px;padding:5px 9px;font:12.5px Arial,sans-serif;transition:.15s}
 .ma-in:focus{outline:none;border-color:#6ea8ff;box-shadow:0 0 0 2px rgba(110,168,255,.18)}
 select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
-.ma-num{display:inline-flex;align-items:center;gap:5px}.ma-num i{font-style:normal;color:#6e7a9c;font-size:11px}
+.ma-num{display:inline-flex;align-items:center;gap:5px}.ma-num i{font-style:normal;color:#6e7a9c;font-size:11px;line-height:1}
 .ma-in.flash{animation:ma-flash .9s ease-out}
 @keyframes ma-flash{0%{background:rgba(110,168,255,.55);border-color:#6ea8ff}100%{background:#0d1322}}
 .ma-search{box-sizing:border-box;flex:1;min-width:0;background:#0d1322;border:1px solid rgba(255,255,255,.12);color:#eef3ff;border-radius:12px;padding:6px 11px;font:12.5px Arial,sans-serif}
@@ -2922,6 +2971,12 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
 .ma-set.sub .ma-set-t b{display:inline;font:400 11.5px Arial,sans-serif;color:#aeb9dc}.ma-set.sub .ma-set-t small{display:inline;margin-left:6px;font-size:10.5px;color:#6e7a9c}
 .ma-set.sub .ma-in{padding:3px 7px;font-size:12px;border-radius:8px}
 .ma-about{margin:10px 3px 2px;text-align:center;opacity:.8}
+.ma-grp{padding:1px 12px}.ma-sr-w+.ma-sr-w{border-top:1px solid rgba(255,255,255,.05)}
+.ma-sr{display:flex;align-items:center;gap:10px;padding:8px 0}
+.ma-sr-o{display:flex;flex-wrap:wrap;align-items:center;gap:6px 16px;margin:0 0 9px 38px;padding:6px 10px;background:#0d1322;border:1px solid rgba(255,255,255,.05);border-radius:11px}
+.ma-opt{display:inline-flex;align-items:center;gap:7px;color:#aeb9dc;font-size:11.5px}.ma-opt small{color:#6e7a9c;font-size:10.5px}
+.ma-opt .ma-in{width:auto;min-width:60px;padding:4px 8px;font-size:12px}.ma-opt .ma-num .ma-in{width:56px;min-width:0}
+.ma-opt .ma-seg-btn{padding:4px 9px;font-size:11px}
 .ma-card.off .ma-ico{opacity:.55}.ma-card.off .ma-card-t b{color:#aeb9dc}
 .ma-card-b .ma-set{padding:6px 0}.ma-card-b .ma-fld{margin:2px 0 4px}
 .ma-fold-t small{margin-left:2px}
@@ -3062,6 +3117,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
 .ma-q small{color:#7c88ad;font-size:10.5px;margin-top:2px;display:block}
 .ma-stats{display:flex;gap:5px;flex-wrap:wrap;margin:2px 0 6px}
 .ma-stat{background:#0d1322;border:1px solid rgba(255,255,255,.06);border-radius:999px;padding:4px 10px;font-size:11px;color:#9aa7cf}.ma-stat b{color:#fff;margin-left:4px}
+.ma-actions.ma-block{margin:9px 0 0}.ma-actions.ma-block .core-btn{flex:1 1 100%;width:100%;text-align:center}
 .ma-actions{display:flex;gap:6px;flex-wrap:wrap;margin:0 0 8px}.ma-actions .core-btn{padding:6px 12px;font-size:11.5px}
 /* graveyard */
 .ma-lc{display:flex;align-items:center;gap:10px;padding:7px 10px;border-radius:16px;background:#11192d;border:1px solid rgba(255,255,255,.06);margin-bottom:5px}
@@ -3079,6 +3135,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
 .ma-foot{position:sticky;bottom:0;z-index:2;display:flex;align-items:center;gap:10px;margin:8px -14px 0;padding:9px 14px 12px;background:#0e1422;border-top:1px solid rgba(255,255,255,.08);border-radius:0 0 24px 24px}
 .ma-foot-st{flex:1;min-width:0}.ma-foot-st b{display:flex;align-items:center;gap:7px;font:800 11.5px Arial,sans-serif;color:#eef3ff;text-transform:uppercase;letter-spacing:.04em}
 .ma-foot-st span{display:block;color:#8b97bd;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ma-foot-st .ma-bar{height:4px;margin-top:5px}
 .ma-foot .core-btn{padding:8px 18px;font-size:12.5px;border-radius:12px}
 .ma-foot .core-btn-success{box-shadow:0 8px 18px rgba(33,127,91,.3)}.ma-foot .core-btn-danger{box-shadow:0 8px 18px rgba(180,70,92,.3)}
 .ma-kv{display:flex;justify-content:space-between;gap:10px;padding:3px 2px;font-size:11.5px;color:#aeb9dc}.ma-kv b{color:#fff}
@@ -3121,6 +3178,13 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   const card = (icon, title, desc, on, setOn, body) => h('div', { class: 'ma-card' + (on ? '' : ' off') },
     h('div', { class: 'ma-card-h' }, h('span', { class: 'ma-ico' }, icon), h('div', { class: 'ma-card-t' }, h('b', {}, title), h('small', {}, desc)), setOn ? sw(() => on, setOn) : null),
     body ? h('div', { class: 'ma-card-b' }, ...[].concat(body)) : null);
+
+  // settings rows: [icon] title / description ........ control; the options of an enabled row sit in a line under it
+  const srow = (icon, title, desc, ctl, opts) => { opts = (opts || []).filter(Boolean); return h('div', { class: 'ma-sr-w' },
+    h('div', { class: 'ma-sr' }, h('span', { class: 'ma-ico' }, icon), h('div', { class: 'ma-set-t' }, h('b', {}, title), desc ? h('small', {}, desc) : null), ctl),
+    opts.length ? h('div', { class: 'ma-sr-o' }, ...opts) : null); };
+  const opt = (label, ctl, hint) => h('div', { class: 'ma-opt' }, h('span', {}, label), ctl, hint ? h('small', {}, hint) : null);
+  const group = (...rows) => h('div', { class: 'ma-card ma-grp' }, ...rows.filter(Boolean));
 
   /* ---- time helpers (server clock) ---- */
   const toMin = (at) => { const [hr, mi] = String(at || '00:00').split(':').map(Number); return (hr || 0) * 60 + (mi || 0); };
@@ -3183,13 +3247,13 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   const selectedEntries = () => { const seen = new Set(), out = []; cfg.targets.forEach((low) => { const d = Roster.get(low); if (!d) return; const c = Roster.canon(d); if (!seen.has(c.low)) { seen.add(c.low); out.push(c); } }); return out.sort((x, y) => rIdx(x.low) - rIdx(y.low)); };
 
   /* ---- footer (always visible): status + Start / Stop ---- */
-  const STATE_TXT = { FIGHTING: 'Fighting', RUNNING: 'Running', SCANNING: '🔎 Scanning bosses', GRAVEYARD: '🪦 Scanning graveyard', WAITING: 'Waiting for a boss', 'NO STAMINA': 'Out of stamina', DUEL: 'Phase duel', PAUSED: 'Paused', STOPPED: 'Stopped', FOLLOWER: 'Another tab is running it' };
-  const dotOf = (st) => (!Tab.isMain() ? 'follower' : /FIGHT|RUN|DUEL|SCAN|GRAVE/.test(st) ? 'running' : /WAIT|STAMINA/.test(st) ? 'waiting' : /PAUSE/.test(st) ? 'follower' : '');
+  const STATE_TXT = { FIGHTING: 'Fighting', RUNNING: 'Running', SCANNING: '🔎 Scanning bosses', GRAVEYARD: '🪦 Scanning graveyard', WAITING: 'Waiting for a boss', 'NO STAMINA': 'Out of stamina', DUEL: 'Phase duel', SWITCHING: '🎒 Switching build', PAUSED: 'Paused', STOPPED: 'Stopped', FOLLOWER: 'Another tab is running it' };
+  const dotOf = (st) => (!Tab.isMain() ? 'follower' : /FIGHT|RUN|DUEL|SCAN|GRAVE|SWITCH/.test(st) ? 'running' : /WAIT|STAMINA/.test(st) ? 'waiting' : /PAUSE/.test(st) ? 'follower' : '');
   function footer() {
     const st = Status.get(), cur = Engine.current(), run = Run.wanted() && !Run.paused();
-    const wk = Work.get('scan'), sub = wk ? wk.label : cur ? '🎯 ' + cur.name : (Tab.isMain() ? (cfg.targets.length ? 'no target right now' : 'no bosses selected') : 'this tab is following');
+    const wk = Work.get('build') || Work.get('scan'), sub = wk ? (wk.step ? `${wk.label} · ${wk.step}${wk.total > 1 ? ` (${Math.min(wk.done + 1, wk.total)}/${wk.total})` : ''}` : wk.label) : cur ? '🎯 ' + cur.name : (Tab.isMain() ? (cfg.targets.length ? 'no target right now' : 'no bosses selected') : 'this tab is following');
     return h('div', { class: 'ma-foot' },
-      h('div', { class: 'ma-foot-st' }, h('b', {}, h('i', { class: 'ma-dot ' + dotOf(st) }), STATE_TXT[st] || st), h('span', { title: sub }, sub)),
+      h('div', { class: 'ma-foot-st' }, h('b', {}, h('i', { class: 'ma-dot ' + dotOf(st) }), STATE_TXT[st] || st), h('span', { title: sub }, sub), wk && wk.total > 1 ? h('div', { class: 'ma-bar' }, h('i', { style: { width: Math.max(6, pctOf({ done: wk.done + 0.5, total: wk.total })).toFixed(1) + '%' } })) : null),
       run ? btn('⏹ Stop', 'danger', () => { Run.stop('stopped from the panel'); draw(); }) : btn('▶ Start', 'success', () => { Run.start(); draw(); }));
   }
   const go = (t) => { tab = t; ui.tab = t; saveUi(); draw(); };
@@ -3209,17 +3273,17 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     // hero: what it is doing right now
     let nextIn = null; try { const n = Scan.nextDueIn(); if (Number.isFinite(n)) nextIn = n; } catch (_) { /* */ }
     if (cur) {
-      const ev = Board.get(cur.low) || {}, cap = bossCap(cur.low), dmg = Math.max(ev.userDmg || 0, Board.dealt(cur)), pct = cap > 0 ? Math.min(100, dmg / cap * 100) : 0;
+      const ev = Board.get(cur.low) || {}, cap = bossCap(cur.low), dmg = Math.max(ev.userDmg || 0, Board.dealt(cur)), bw = Work.get('build'), pct = bw && bw.total ? pctOf({ done: bw.done + 0.5, total: bw.total }) : cap > 0 ? Math.min(100, dmg / cap * 100) : 0;
       out.push(h('div', { class: 'ma-hero' }, h('div', { class: 'ma-hero-top' }, avatar(cur.name, ev.icon, { size: 'lg', boss: true }),
-        h('div', { class: 'ma-hero-t' }, h('div', { class: 'ma-state' }, h('i', { class: 'ma-dot ' + dotOf(st) }), STATE_TXT[st] || st), h('div', { class: 'ma-hero-name' }, cur.name), h('div', { class: 'ma-hero-sub' }, `${fmtNum(dmg)} of ${fmtNum(cap)} damage · ${pct.toFixed(0)}%`))),
-        h('div', { class: 'ma-bar' + (pct >= 100 ? ' done' : '') }, h('i', { style: { width: pct.toFixed(1) + '%' } }))));
+        h('div', { class: 'ma-hero-t' }, h('div', { class: 'ma-state' }, h('i', { class: 'ma-dot ' + dotOf(st) }), STATE_TXT[st] || st), h('div', { class: 'ma-hero-name' }, cur.name), h('div', { class: 'ma-hero-sub' }, bw ? `🎒 ${bw.step || bw.label}${bw.total > 1 ? ` · step ${Math.min(bw.done + 1, bw.total)} of ${bw.total}` : ''}` : `${fmtNum(dmg)} of ${fmtNum(cap)} damage · ${pct.toFixed(0)}%`))),
+        h('div', { class: 'ma-bar' + (!bw && pct >= 100 ? ' done' : '') }, h('i', { style: { width: pct.toFixed(1) + '%' } }))));
     } else {
-      const l = Diag.last(), why = l.reason ? `${l.reason}${l.detail ? ' — ' + l.detail : ''}` : '', wk = Work.get('scan');
-      out.push(h('div', { class: 'ma-hero' }, h('div', { class: 'ma-hero-top' }, h('span', { class: 'ma-ico', style: { width: '50px', height: '50px', fontSize: '24px', borderRadius: '13px' } }, wk ? (st === 'GRAVEYARD' ? '🪦' : '🔎') : Run.wanted() ? '⏳' : '💤'),
+      const l = Diag.last(), why = l.reason ? `${l.reason}${l.detail ? ' — ' + l.detail : ''}` : '', wk = Work.get('build') || Work.get('scan');
+      out.push(h('div', { class: 'ma-hero' }, h('div', { class: 'ma-hero-top' }, h('span', { class: 'ma-ico', style: { width: '50px', height: '50px', fontSize: '24px', borderRadius: '13px' } }, wk ? (st === 'GRAVEYARD' ? '🪦' : st === 'SWITCHING' ? '🎒' : '🔎') : Run.wanted() ? '⏳' : '💤'),
         h('div', { class: 'ma-hero-t' }, h('div', { class: 'ma-state' }, h('i', { class: 'ma-dot ' + dotOf(st) }), STATE_TXT[st] || st),
           h('div', { class: 'ma-hero-name' }, wk ? wk.label : !cfg.targets.length ? 'No bosses selected' : Run.wanted() ? 'No target right now' : 'Ready when you are'),
-          h('div', { class: 'ma-hero-sub' }, wk ? (wk.total ? `Step ${Math.min(wk.done + 1, wk.total)} of ${wk.total}` : 'One moment…') : !cfg.targets.length ? 'Pick what to farm in the Bosses tab.' : Run.wanted() && nextIn != null ? 'Next check in ' + fmtDur(nextIn) + (why ? ' · last skip: ' + why : '') : (why ? 'Last skip: ' + why : 'Press Start to begin.')))),
-        wk && wk.total ? h('div', { class: 'ma-bar' }, h('i', { style: { width: pctOf(wk).toFixed(1) + '%' } })) : null));
+          h('div', { class: 'ma-hero-sub' }, wk ? (wk.total ? `${wk.step ? wk.step + ' · ' : ''}Step ${Math.min(wk.done + 1, wk.total)} of ${wk.total}` : 'One moment…') : !cfg.targets.length ? 'Pick what to farm in the Bosses tab.' : Run.wanted() && nextIn != null ? 'Next check in ' + fmtDur(nextIn) + (why ? ' · last skip: ' + why : '') : (why ? 'Last skip: ' + why : 'Press Start to begin.')))),
+        wk && wk.total ? h('div', { class: 'ma-bar' }, h('i', { style: { width: pctOf({ done: wk.done + (wk.step ? 0.5 : 0), total: wk.total }).toFixed(1) + '%' } })) : null));
     }
 
     // vitals
@@ -3383,15 +3447,15 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     const auto = has && AB.enabled;
     const body = [];
     if (!has) body.push(note('🤖 Auto needs the Build Engine addon, and it is not loaded.'));
-    body.push(note(auto ? 'Best gear, pets, crystals and sigils for every boss. Your build is put back when nothing is left to fight.' : 'Equipped before every boss without its own pick. Your build is put back when nothing is left to fight.'));
+    body.push(note(auto ? 'Best gear, pets, crystals and sigils for every boss, dungeons included. Your build is put back when nothing is left to fight.' : 'Equipped before every boss without its own pick. Your build is put back when nothing is left to fight.'));
     if (kinds.length) body.push(loadoutGrid((k) => {
       const off = auto && (k !== 'crystal' || AB.crystals !== false);           // Auto is choosing it: the dropdown says so instead of showing a preset
       return dropdown(off ? [['', k === 'crystal' ? '🤖 Best crystals on the gear' : '🤖 Auto']] : [['', 'Keep equipped'], ...presetOpts(k)], off ? '' : (cfg.loadout || {})[k] || '', (v) => { cfg.loadout = cfg.loadout || {}; if (v) cfg.loadout[k] = v; else delete cfg.loadout[k]; reset(); }, off);
     }));
     else body.push(note('No gear / crystal / pet preset addon is loaded.'));
     const o = originRow(); if (o) body.push(o);
-    const autoBtn = h('div', { class: 'ma-seg' }, h('button', { type: 'button', disabled: !has || null, title: has ? 'Picks the best gear, pets, crystals and sigils for each boss, so the presets are off' : 'Needs the Build Engine addon', class: 'ma-seg-btn' + (auto ? ' on' : ''), onclick: (e) => { stop(e); if (!has) return; AB.enabled = !AB.enabled; reset(); saveCfg(); draw(); } }, '🤖 Auto'));
-    body.push(h('div', { class: 'ma-actions', style: { margin: '9px 0 0' } }, btn(BK.on ? '✕ Done selecting' : '☑ Apply to several bosses…', BK.on ? 'soft' : '', () => { if (BK.on) endBulk(); else { BK.on = true; ui.sel = ''; saveUi(); draw(); } })));
+    const autoBtn = h('div', { class: 'ma-seg' }, h('button', { type: 'button', disabled: !has || null, title: has ? 'Picks the best gear, pets, crystals and sigils for each boss, so the presets are off' : 'Needs the Build Engine addon', class: 'ma-seg-btn' + (auto ? ' on' : ''), onclick: (e) => { stop(e); if (!has) return; AB.enabled = !AB.enabled; if (AB.enabled && BK.on) { endBulk(); } reset(); saveCfg(); draw(); } }, '🤖 Auto'));
+    if ((!auto && kinds.length) || BK.on) body.push(h('div', { class: 'ma-actions ma-block' }, btn(BK.on ? 'Done selecting' : 'Apply to several bosses…', 'soft', () => { if (BK.on) endBulk(); else { BK.on = true; ui.sel = ''; saveUi(); draw(); } })));   // Auto picks for every boss, and with no presets there is nothing to give them
     return h('div', { class: 'ma-card' }, h('div', { class: 'ma-card-h' }, h('span', { class: 'ma-ico' }, '🎒'), h('div', { class: 'ma-card-t' }, h('b', {}, 'Loadout'), h('small', {}, 'How a boss gets its gear, pets, crystals and sigils')), autoBtn), h('div', { style: { marginTop: '9px' } }, ...body));
   }
 
@@ -3607,27 +3671,26 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   function tSettings() {
     const S = cfg.stam, SV = S.save, H = cfg.hp, M = cfg.mana, L = cfg.autoLoot;
     const au = Guard.info(), cls = effectiveClass(), cs = cls ? CLASS_SKILLS[cls] : null;
-    const flag = (title, desc, get, set, o) => setting(title, desc, sw(get, set, o));
     const ms = (label, get, set, o = {}) => setting(label, null, num(get, set, Object.assign({ w: 64, unit: 'ms', min: 0 }, o)));
     const skillOn = cfg.useClassSkill;
-    const rows = (...r) => { r = r.filter(Boolean); return r.length ? r : null; };
     return [
-      caption('Potions'),
-      card('⚡', 'Stamina', 'Drinks one when you run out', S.enabled, (v) => { S.enabled = v; },
-        rows(setting('Potion', null, dropdown([['Large Stamina Potion', 'Large'], ['Full Stamina Potion', 'Full']], S.item, (v) => { S.item = v; })),
-          setting('Save potions past', '100 = never', num(() => SV.thresholdPct, (n) => { SV.thresholdPct = n; }, { parse: parseFloat, min: 1, max: 100, unit: '% EXP', w: 52 })))),
-      card('❤️', 'Health', 'Drinks when HP hits 0', H.enabled, (v) => { H.enabled = v; H.thresholdPct = 0; }, null),
-      card('💧', 'Mana', 'Drinks when MP runs low', M.enabled, (v) => { M.enabled = v; },
-        rows(setting('Potion', null, dropdown([['S', 'Small · 20'], ['M', 'Medium · 40'], ['L', 'Large · 60'], ['XL', 'XL · 100']], M.type, (v) => { M.type = v; })),
-          setting('Drink at or below', null, num(() => M.threshold, (n) => { M.threshold = n; }, { w: 52, min: 0, unit: 'MP' })))),
-      card('🪦', 'Auto-loot', 'Out of stamina: claims only what levels you up', L.enabled, (v) => { L.enabled = v; }, null),
+      caption('Potions & loot'),
+      group(
+        srow('⚡', 'Stamina', 'Drinks a potion when you run out', sw(() => S.enabled, (v) => { S.enabled = v; }), S.enabled ? [
+          opt('Potion', dropdown([['Large Stamina Potion', 'Large'], ['Full Stamina Potion', 'Full']], S.item, (v) => { S.item = v; })),
+          opt('Save past', num(() => SV.thresholdPct, (n) => { SV.thresholdPct = n; }, { parse: parseFloat, min: 1, max: 100, unit: '% EXP', w: 52 }), '100 = never')] : null),
+        srow('❤️', 'Health', 'Drinks when HP hits 0', sw(() => H.enabled, (v) => { H.enabled = v; H.thresholdPct = 0; }, { redraw: false })),
+        srow('💧', 'Mana', 'Drinks when MP runs low', sw(() => M.enabled, (v) => { M.enabled = v; }), M.enabled ? [
+          opt('Potion', dropdown([['S', 'Small · 20'], ['M', 'Medium · 40'], ['L', 'Large · 60'], ['XL', 'XL · 100']], M.type, (v) => { M.type = v; })),
+          opt('Drink at or below', num(() => M.threshold, (n) => { M.threshold = n; }, { w: 52, min: 0, unit: 'MP' }))] : null),
+        srow('🪦', 'Auto-loot', 'Out of stamina: claims only what levels you up', sw(() => L.enabled, (v) => { L.enabled = v; }))),
       caption('Fighting'),
-      card('✨', 'Class skill', cs ? cs.label + ' · cast before each World Breaker slash' : 'Not detected · cast before each World Breaker slash', skillOn, (v) => { cfg.useClassSkill = v; },
-        rows(!cs ? field('Class', 'pick yours', seg([['warrior', 'Warrior'], ['cleric', 'Cleric'], ['hunter', 'Hunter'], ['mage', 'Mage']], cfg.classOverride, (v) => { cfg.classOverride = v; }, { full: true })) : null,
-          setting('Pierce shielded mobs', `${cs ? cs.label : 'Class skill'} on a regular mob`, sw(() => cfg.sideMob.enabled, (v) => { cfg.sideMob.enabled = v; }, { redraw: false, sm: true })))),
-      card('⚔️', 'Run behaviour', 'What it does around the fight', true, null,
-        rows(flag('Phase duels', 'Fought automatically', () => cfg.autoDuel, (v) => { cfg.autoDuel = v; }, { redraw: false }),
-          flag('Pause server auto-farm', 'So the two never fight over stamina', () => cfg.autoFarmControl, (v) => { cfg.autoFarmControl = v; }, { redraw: false }))),
+      group(
+        srow('✨', 'Class skill', (cs ? cs.label : 'Not detected') + ' · cast before each World Breaker slash', sw(() => cfg.useClassSkill, (v) => { cfg.useClassSkill = v; }), skillOn ? [
+          !cs ? opt('Class', seg([['warrior', 'Warrior'], ['cleric', 'Cleric'], ['hunter', 'Hunter'], ['mage', 'Mage']], cfg.classOverride, (v) => { cfg.classOverride = v; })) : null,
+          opt('Pierce shielded mobs', sw(() => cfg.sideMob.enabled, (v) => { cfg.sideMob.enabled = v; }, { redraw: false, sm: true }), `${cs ? cs.label : 'class skill'} on a regular mob`)] : null),
+        srow('⚔️', 'Phase duels', 'Fought automatically', sw(() => cfg.autoDuel, (v) => { cfg.autoDuel = v; }, { redraw: false })),
+        srow('⏸️', 'Pause server auto-farm', 'So the two never fight over stamina', sw(() => cfg.autoFarmControl, (v) => { cfg.autoFarmControl = v; }, { redraw: false }))),
       caption('Advanced'),
       fold('adv', false, ['⏱ Timing', h('small', {}, 'pauses between requests')], () => [note('In ms. Lower numbers risk rejected requests.'),
         setting('Scan every', 'Waves and dungeons, e.g. 5', num(() => cfg.fightScanMs / 60000, (n) => { cfg.fightScanMs = Math.round(n * 60000); }, { w: 64, unit: 'min', min: 0.1, parse: parseFloat })),
