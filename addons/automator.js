@@ -2,7 +2,6 @@
  *
  * Plain script, no ==UserScript== header. `Core` is in scope (>= 3.16.0: Core.auth, Core.potions, Core.tab, Core.me, and Core.caps/call for presets;
  * on an older Core everything works except the per-boss preset dropdowns).
- * Replaces "Boss DMG Automator 3.0.0" (and must not run together with it or with Rahik's DMG Boss Script).
  *
  *   PART 0  KERNEL     config, log, diagnostics, action queue, player state, auth guard, part registry, scheduler
  *   PART 1  BOSSES     wave bosses: roster, authoritative page scans, attack engine, side-mob (toggle), potions,
@@ -20,13 +19,9 @@
  * LOOT DATA: the Loot scan (PART 4b, the Scan button at the top of the Bosses tab) reads every boss's battle page and saves its loot DMG
  * requirements, Level Req and EXP Cap into one store ('automator-loot'). Here they become the cap choices of each boss, the
  * default cap of a boss is its highest loot requirement, and bosses the roster did not know yet are added. Export .txt writes it all out.
- *
- * Why this exists (3.0.0 bugs fixed here, see the notes): a login/maintenance page used to parse as "no bosses";
- * boss timers were never reloaded after a tab took over; nothing scanned while a boss was being fought; error
- * replies were retried instantly instead of honouring their delay.
  */
 Core.module({
-  id: 'automator', name: 'Automator', icon: '🤖', version: '1.10.0',
+  id: 'automator', name: 'Automator', icon: '🤖', version: '1.10.1',
   // Offered to other addons through Core capabilities (guides/CAPABILITIES.md):
   //   automator.status() -> the status string     automator.start() / automator.stop()     automator.scan() -> scan the bosses now
   provides: (api) => api && api.start ? {
@@ -37,7 +32,7 @@ Core.module({
   } : {},
   init(Core) {
 'use strict';
-const ID = 'automator', VERSION = '1.10.0';
+const ID = 'automator', VERSION = '1.10.1';
 if (window.__automatorLoaded) { console.warn('[automator] already loaded', window.__automatorLoaded); return null; }
 window.__automatorLoaded = VERSION;
 
@@ -77,7 +72,6 @@ function parseCap(str) {
   return Math.round(parseFloat(m[1]) * mult);
 }
 const parseHtml = (html) => new DOMParser().parseFromString(html, 'text/html');
-const loadJSON = (k, fb) => { try { const r = localStorage.getItem(k); return r ? JSON.parse(r) : fb; } catch (_) { return fb; } };
 
 /* ---- config (one Core.store, per player, shared across tabs) ---------------------------------------------------- */
 const DEFAULT_CFG = {
@@ -422,6 +416,7 @@ const Prog = (() => {
     // swaps one step for the finer steps it is made of (each crystal / sigil move); go(i) shows one of them. sub() returns the index of the first, or -1
     sub(label, list) { if (!steps.length || !list || !list.length) return -1; const i = steps.indexOf(label); if (i < 0) return -1; steps.splice(i, 1, ...list); show(i); return i; },
     go(i) { if (steps.length && i >= 0 && i < steps.length) show(i); },
+    note(label, text) { const i = steps.indexOf(label); if (i < 0) return; steps[i] = text; show(i); },        // a step keeps its place but says more about what it is doing
     end() { if (!steps.length) return; steps = []; Work.clear('build'); if (Status.get() === mine) Status.set(prev && prev !== mine ? prev : (Run.wanted() ? 'RUNNING' : 'STOPPED')); },
   };
 })();
@@ -433,7 +428,6 @@ const Run = (() => {
   function start() {
     if (wanted && !pausedBy.size) return;
     if (!cfg.targets.length) { log('⚠️ no bosses selected — tick at least one in Bosses', 'warn'); return; }
-    if (Conflicts.check()) return;
     pausedBy.clear(); persist(true); Kernel.engineStart(true); log('🚀 started', 'ok'); UI.dirty();
   }
   function stop(reason) {
@@ -460,25 +454,6 @@ const Run = (() => {
     start, stop, pause, resume,
   };
 })();
-
-/* ---- never run next to Rahik's script or the old standalone Boss DMG Automator (double attacks) ------------------ */
-const Conflicts = {
-  list() {
-    const out = [];
-    if (window._rahikHeartbeatStarted) out.push("Rahik's DMG Boss Script is active on this page");
-    try {
-      const run = localStorage.getItem('dmgbot_run_v1') === 'true';
-      const lead = loadJSON('dmgbot_leader_v1', null);
-      if (run && lead && lead.expiresAt && lead.expiresAt > Date.now()) out.push('Boss DMG Automator 3.0.0 is still running in another tab (turn that userscript off)');
-    } catch (_) { /* */ }
-    return out;
-  },
-  check() {
-    const c = Conflicts.list(); if (!c.length) return false;
-    c.forEach((m) => log('⛔ ' + m + ' — not starting, it would attack twice', 'err'));
-    Diag.skip('conflict', c.join('; ')); return true;
-  },
-};
 
 /* ---- part registry + scheduler ---------------------------------------------------------------------------------- */
 // A part is { id, name, icon, every?: ms | () => ms, tick?: async (ctx) => {}, panel?: (el) => {}, onMain?, onIdle? }.
@@ -1119,7 +1094,8 @@ const BuildKit = (() => {
       const imgBtn = card.querySelector('button.crystal-image'), up = card.querySelector('[onclick^="openUpgradeModal"]'); if (!imgBtn || !up) return;
       const m = /openUpgradeModal\('(?:level|star)'\s*,\s*(\d+)\)/.exec(up.getAttribute('onclick') || ''); if (!m) return;
       const eff = Kit.effectOf(imgBtn.getAttribute('data-info') || ''), lv = card.querySelector('.level-line span:first-child');
-      catalog[m[1]] = { type: eff.type, value: eff.value, level: lv ? parseInt(String(lv.textContent).replace(/\D/g, ''), 10) || 0 : 0 };
+      const cimg = card.querySelector('img'), cnm = card.querySelector('.crystal-name, .crystal-title, .name, .title, h3, h4, strong');
+      catalog[m[1]] = { type: eff.type, value: eff.value, level: lv ? parseInt(String(lv.textContent).replace(/\D/g, ''), 10) || 0 : 0, name: String((cnm && cnm.textContent) || (cimg && (cimg.getAttribute('alt') || cimg.getAttribute('title'))) || '').trim().slice(0, 40) };
     });
     const ep = heading(doc, 'Equipment');
     if (ep) ep.querySelectorAll('.equipment-card').forEach((card) => {
@@ -1132,7 +1108,8 @@ const BuildKit = (() => {
         if (btn.classList.contains('filled')) { const u = /openConfirmUnequip\((\d+)\)/.exec(oc); if (u) ids.push(u[1]); }
         else { const p = /openPickerModal\((\d+)\)/.exec(oc); if (p && inv == null) inv = p[1]; }
       });
-      cards.push({ key, label: (img && img.getAttribute('alt')) || '', slotCount: slots.length, crystalIds: ids, equipmentInvId: inv });
+      const gnm = card.querySelector('.equipment-name, .item-name, .eq-name, .name, .title, h3, h4, strong'), glabel = String((img && (img.getAttribute('alt') || img.getAttribute('title'))) || (gnm && gnm.textContent) || '').trim().slice(0, 40);
+      cards.push({ key, label: /\.(webp|png|jpe?g|gif)$/i.test(glabel) ? '' : glabel, slotCount: slots.length, crystalIds: ids, equipmentInvId: inv });
     });
     return { intent: intentEl ? intentEl.value : '', catalog, cards };
   }
@@ -1149,8 +1126,8 @@ const BuildKit = (() => {
   // to gear that is not on. Never throws.
   async function runDiff(st, diff) {
     let moves = 0; const notes = [];
-    const label = (key) => { const c = st.cards.find((x) => x.key === key); return (c && c.label) || key; };
-    const nm = (id) => { const c = st.catalog[String(id)]; return c ? (typeof c.type === 'string' && c.type ? c.type.charAt(0).toUpperCase() + c.type.slice(1) + ' ' : '') + 'crystal' + (c.level ? ' Lv' + c.level : '') : 'crystal #' + id; };
+    const label = (key) => { const i = st.cards.findIndex((x) => x.key === key), c = st.cards[i]; return (c && c.label) || 'gear piece ' + (i + 1); };   // never the picture's path
+    const nm = (id) => { const c = st.catalog[String(id)]; return c ? (c.name || (typeof c.type === 'string' && c.type ? c.type.charAt(0).toUpperCase() + c.type.slice(1) + ' crystal' : 'crystal')) + (c.level ? ' Lv' + c.level : '') : 'crystal #' + id; };
     const plan = [...diff.unequip.map((id) => 'Take off ' + nm(id)), ...diff.equip.map((m) => 'Put ' + nm(m.id) + ' on ' + label(m.key))];
     const base = Prog.sub('Crystals', plan); let k = 0; const tick = () => { if (base >= 0) Prog.go(base + k); k++; };   // every move is a step of the status bar
     for (const id of diff.unequip) {
@@ -1350,19 +1327,32 @@ const Presets = (() => {
   async function engineMob(t) {
     if (!t || t.kind !== 'dungeon' || t.instanceId == null) return t ? bossOf(t) : null;
     const key = t.monsterId + ':' + t.instanceId, hit = dgMobs.get(key);
-    if (hit && Date.now() - hit.at < 20 * 60000) return hit.mob ? Object.assign(bossOf(t), hit.mob) : null;
+    if (hit && Date.now() - hit.at < (hit.mob ? 20 * 60000 : 45000)) return hit.mob ? Object.assign(bossOf(t), hit.mob) : null;
     let mob = null;
     try {
       const html = await Core.net.fetchText(`/battle.php?dgmid=${encodeURIComponent(t.monsterId)}&instance_id=${encodeURIComponent(t.instanceId)}`, { ttl: 60000 });
       if (Guard.pageState(html) === 'ok') {
-        const m = {}, num = (x) => parseInt(String(x).replace(/[^0-9]/g, ''), 10) || 0;
-        parseHtml(html).querySelectorAll('.stat-block').forEach((sb) => {          // the same blocks the engine reads on a wave boss's page
+        const m = {}, num = (x) => parseInt(String(x).replace(/[^0-9]/g, ''), 10) || 0, doc = parseHtml(html);
+        doc.querySelectorAll('.stat-block').forEach((sb) => {          // the same blocks the engine reads on a wave boss's page
           const l = sb.querySelector('.label'), v = sb.querySelector('strong'); if (!l || !v) return;
           const lab = l.textContent.trim(), txt = v.textContent.trim();
           if (lab === 'ATK') m.atk = num(txt); else if (lab === 'DEF') m.def = num(txt);
           else if (lab === "MONSTER PET'S DEF") m.petDef = num(txt); else if (lab === "MONSTER EQ'S DEF") m.eqDef = num(txt);
           else if (lab === 'Element') { m.element = txt.toUpperCase(); const r = /Element\s*Rate:\s*([0-9.]+)%/i.exec((sb.querySelector('div') || {}).textContent || ''); if (r) m.elemRate = parseFloat(r[1]); }
         });
+        doc.querySelectorAll('.monster-stat-cell').forEach((c) => {   // the View Monster Stats popup (it is in the page's own HTML): Attack, Defense, Pet Defense, Equipment Defense, Element, Element Rate + the four resistances
+          const l = c.querySelector('.label'), v = c.querySelector('strong'); if (!l || !v) return;
+          const lab = l.textContent.trim().toLowerCase(), txt = v.textContent.trim();
+          if (lab === 'attack') m.atk = m.atk || num(txt); else if (lab === 'defense') m.def = m.def || num(txt);
+          else if (lab === 'pet defense') m.petDef = m.petDef || num(txt); else if (lab === 'equipment defense') m.eqDef = m.eqDef || num(txt);
+          else if (lab === 'element') { if (m.element == null && !/^none$/i.test(txt)) m.element = txt.toUpperCase(); }
+          else if (lab === 'element rate') { if (m.elemRate == null) { const r = /([0-9.]+)\s*%/.exec(txt); if (r) m.elemRate = parseFloat(r[1]); } }
+          else if (lab === 'crit rate resistance') m.critRateRes = parseFloat(txt) || 0;           // the engine uses these in its damage maths, the same names it fills for a wave boss
+          else if (lab === 'crit damage resistance') m.critDmgRes = parseFloat(txt) || 0;
+          else if (lab === 'final damage resistance') m.finalDmgRes = parseFloat(txt) || 0;
+          else if (lab === 'passive damage resistance') m.passiveDmgRes = parseFloat(txt) || 0;
+        });
+        { const dm = /Damage\s*Multiplier:\s*([0-9.]+)\s*%/i.exec((doc.body && doc.body.textContent) || ''); if (dm) m.divineMult = parseFloat(dm[1]) / 100; }   // Divine Shield, as the engine reads it on a wave boss
         if (m.atk && m.def) mob = Object.assign({ petDef: 0, eqDef: 0, element: 'None' }, m);
       }
     } catch (_) { mob = null; }
@@ -1510,7 +1500,7 @@ const Presets = (() => {
   async function restoreNow(why) {
     const o = Origin.get(); if (!o) return { ok: false, message: 'nothing remembered to put back' };
     ensuring = true;
-    const notes = [];
+    const notes = []; let liveSel = null;
     try {
       // Crystals: the Crystal Presets / the crystals page do not announce a change, so it is read: what sits on the gear now (still the gear we left)
       // against what we left there. Different = you moved them yourself: they stay as they are.
@@ -1521,17 +1511,18 @@ const Presets = (() => {
       }
       // The build on now is not the one this automator left (you changed it while it was paused / idle / the page was closed): leave it alone.
       if (o.sel && o.left && o.probe && why !== 'you asked') {
-        const live = await Origin.read(o.probe);
+        const live = liveSel = await Origin.read(o.probe);
         if (live && Plan.distance(Plan.sigFromSel(live, null), Plan.sigFromSel(o.left, null)) > 0) {
           Origin.clear(); Object.keys(applied).forEach((k) => delete applied[k]); buildEpoch++;   // what we remembered applying is not on any more
           log('📌 your gear / pets are not what the automator left, so they were changed by you: they stay as they are', 'info');
           return { ok: true, message: 'you changed your build yourself, so it was left as it is' };
         }
       }
+      let backWhat = ''; try { if (o.sel && o.probe) { const live = liveSel || await Origin.read(o.probe); if (live) backWhat = Plan.describe(Plan.sigFromSel(live, null), Plan.sigFromSel(o.sel, null)); } } catch (_) { /* no detail */ }   // what will change, for the status text
       Prog.start('Putting your build back', [...(o.sel ? ['Gear + pets'] : []), ...(o.crystals ? ['Crystals'] : []), ...((o.moves || []).length ? ['Sigils'] : [])]);
       log(`↩ putting your build back${why ? ' (' + esc(why) + ')' : ''}…`, 'info');
       if (o.sel && Core.has && Core.has('build.apply')) {
-        Prog.at('Gear + pets');
+        Prog.at('Gear + pets'); if (backWhat) Prog.note('Gear + pets', 'Gear + pets · ' + backWhat);
         const r = await withTimeout(Promise.resolve(Core.call('build.apply', { sel: o.sel }, { label: 'Your build' })), 240000, { ok: false, message: 'timed out' });
         if (r && r.ok !== false) log(`✅ gear + pets ${r.changed === false ? 'were already as before' : 'put back'}`, 'ok'); else notes.push('gear + pets: ' + ((r && r.message) || 'failed'));
       } else if (!o.sel) notes.push('gear + pets were not read, so they stay as they are');
@@ -1659,7 +1650,16 @@ const Plan = (() => {
     }
     return { keys: keysOf(idx), cost: cost(start, idx.map((i) => sigs[i])), mode: 'heuristic' };
   }
-  return { sigFromSel, tagSig, anySig, distance, order, cost };
+  // "Weapon, Ring + 2 pets": what changing from build a to build b touches (for the status text)
+  function describe(a, b) {
+    const slots = [...new Set([...Object.keys(a.gear), ...Object.keys(b.gear)])].filter((k) => nz(a.gear[k]) !== nz(b.gear[k]));
+    let pets = 0; const am = new Set(a.mains);
+    b.mains.forEach((m) => { if (!am.has(m)) { pets += 1 + (b.links[m] || []).filter(Boolean).length; return; } const la = a.links[m] || ['', ''], lb = b.links[m] || ['', '']; for (let i = 0; i < 2; i++) if (nz(la[i]) !== nz(lb[i])) pets++; });
+    am.forEach((m) => { if (!b.mains.includes(m)) pets++; });
+    const parts = [...slots.slice(0, 4), ...(slots.length > 4 ? ['+' + (slots.length - 4) + ' more'] : []), ...(pets ? [pets + ' pet' + (pets === 1 ? '' : 's')] : [])];
+    return parts.join(', ');
+  }
+  return { sigFromSel, tagSig, anySig, distance, order, cost, describe };
 })();
 /* PLAN-END */
 
@@ -3093,8 +3093,9 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
 .ma-ed-h{display:flex;align-items:center;gap:8px;margin-bottom:4px}.ma-ed-t{flex:1;min-width:0;display:flex;align-items:center;gap:4px 8px;flex-wrap:wrap}.ma-ed-t b{font:800 13px Arial,sans-serif;color:#fff;overflow-wrap:anywhere}
 .ma-ed-t small{display:flex;align-items:center;gap:6px;flex-wrap:wrap;color:#7c88ad;font-size:10.5px}
 .ma-in.off,.ma-in:disabled{opacity:.45;cursor:not-allowed}   /* Auto is choosing: plain greyed-out disabled, same look as any disabled control */
-.ma-origin{margin:9px 0 0;padding:8px 10px;border-radius:12px;background:#0d1322;border:1px solid rgba(110,168,255,.28)}
-.ma-origin-t b{display:block;font:800 11.5px Arial,sans-serif;color:#d6e5ff}.ma-origin-t small{display:block;color:#8b97bd;font-size:11px;margin-top:2px}
+.ma-origin{margin:9px 0 0;padding:9px 11px;border-radius:14px;background:linear-gradient(180deg,#1c2a52,#162241);border:1px solid rgba(255,255,255,.08)}
+.ma-origin-r{display:flex;align-items:center;gap:8px 12px;flex-wrap:wrap}.ma-origin-t{flex:1;min-width:150px}.ma-origin-b{display:flex;align-items:center;gap:6px;flex:0 0 auto}.ma-origin-b .core-btn{padding:6px 14px;font-size:12px}
+.ma-origin-t b{display:block;font:800 12px Arial,sans-serif;color:#fff}.ma-origin-t small{display:block;color:#8b97bd;font-size:10.5px;margin-top:2px;line-height:1.35}
 .ma-ld{display:grid;grid-template-columns:repeat(auto-fit,minmax(96px,1fr));gap:6px;margin:2px 0 2px}
 .ma-ld label{display:block;font:800 9.5px Arial,sans-serif;color:#6e7a9c;text-transform:uppercase;letter-spacing:.06em;margin:0 3px 3px}
 .ma-ld select{width:100%;text-overflow:ellipsis}
@@ -3344,7 +3345,6 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   };
   function tHome() {
     const st = Status.get(), cur = Engine.current(), out = [];
-    const conf = Conflicts.list(); if (conf.length) out.push(h('div', { class: 'ma-alert' }, '⛔ ' + conf.join(' · ')));
     const gi = Guard.info(); if (gi.faulted || gi.lastInfo) out.push(h('div', { class: 'ma-alert' }, '🔒 ' + (gi.lastInfo || gi.faulted) + (gi.lastInfo === 'unconfigured' ? ' — add a login source (Account Switcher) or sign in by hand' : '')));
     if (!Tab.isMain()) out.push(h('div', { class: 'ma-alert info' }, 'Another tab is the main one and does the attacking. This tab only shows what it is doing.', h('div', {}, btn('Take over this tab', 'soft', () => { Tab.takeOver(); }))));
 
@@ -3514,12 +3514,14 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   let restoring = false, restoreMsg = '';
   function originRow() {
     const o = Presets.origin.get(); if (!o) return null;
-    const parts = [o.sel ? 'gear + pets' : '', o.crystals ? 'crystals' : '', (o.moves || []).length ? 'sigils' : ''].filter(Boolean).join(' · ');
-    return h('div', { class: 'ma-origin' }, h('div', { class: 'ma-origin-t' }, h('b', {}, '📌 Your build is remembered'), h('small', {}, `${ageTxt(o.at)}, before ${o.boss || 'the first boss'} · ${parts || 'nothing readable'}`)),
-      h('div', { class: 'ma-actions', style: { margin: '6px 0 0' } },
-        btn(restoring ? 'Putting back…' : '↩ Put it back now', 'soft', () => { if (restoring) return; restoring = true; restoreMsg = ''; draw(); Presets.restore('you asked').then((r) => { restoreMsg = r.ok ? '✅ ' + r.message : '⚠️ ' + r.message; }).finally(() => { restoring = false; draw(); }); }),
-        btn('Forget it', 'soft', () => { Presets.origin.clear(); restoreMsg = ''; draw(); })),
-      restoreMsg ? h('div', { class: 'ma-note', style: { margin: '4px 0 0' } }, restoreMsg) : null);
+    const parts = [o.sel ? 'gear + pets' : '', o.crystals ? 'crystals' : '', (o.moves || []).length ? 'sigils' : ''].filter(Boolean).join(', ');
+    return h('div', { class: 'ma-origin' },
+      h('div', { class: 'ma-origin-r' },
+        h('div', { class: 'ma-origin-t' }, h('b', {}, '📌 Saved build'), h('small', {}, `${ageTxt(o.at)} · before ${o.boss || 'the first boss'} · ${parts || 'nothing readable'}`)),
+        h('div', { class: 'ma-origin-b' },
+          btn(restoring ? 'Restoring…' : '↩ Restore', 'success', () => { if (restoring) return; restoring = true; restoreMsg = ''; draw(); Presets.restore('you asked').then((r) => { restoreMsg = r.ok ? '✅ ' + r.message : '⚠️ ' + r.message; }).finally(() => { restoring = false; draw(); }); }),
+          h('button', { type: 'button', class: 'ma-link', title: 'Throw the saved build away: it will not be put back', onclick: () => { Presets.origin.clear(); restoreMsg = ''; draw(); } }, 'Forget'))),
+      restoreMsg ? h('div', { class: 'ma-note', style: { margin: '6px 0 0' } }, restoreMsg) : null);
   }
   function loadoutPanel() {
     const AB = cfg.autoBuild, has = Presets.available('best'), kinds = Presets.pickKinds(), reset = () => { Presets.forget(); Planner.reset(); };
@@ -3741,15 +3743,21 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     return [
       h('div', { class: 'ma-alert info' }, L.enabled ? 'Auto-loot is on: it claims these when you run out of stamina.' : 'Auto-loot is off.', ' ', h('button', { type: 'button', class: 'ma-link', onclick: () => go('settings') }, 'Change in Settings')),
       h('div', { class: 'ma-actions' }, btn(s.scanning ? 'Scanning…' : '🔎 Scan graveyard', 'soft', () => { Loot.scan(true); }), btn(s.looting ? 'Looting…' : '🎒 Loot now', 'success', () => { Loot.scanAndPass(); })),
-      note(!s.lastScanAt ? 'Not scanned yet.' : `${total} lootable · scanned ${ago(s.lastScanAt)}${need != null ? ' · ' + fmtNum(need) + ' EXP to next level' : ''}`),
-      ...(s.lastScanAt && total ? [(() => {
+      (() => {                                                       // one line: lootable · XP · level-ups · when scanned · EXP to the next level
+        if (!s.lastScanAt) return note('Not scanned yet.');
         const rows = [...groups.values()].flatMap((g) => g.rows), known = rows.filter((r) => Number.isFinite(r.est)), xp = known.reduce((n, r) => n + r.est, 0), unk = rows.length - known.length;
         const me = Core.me.get(), ex = me && me.exp, cost = ex && ex.max > 0 ? ex.max : 0;      // levels: the first needs what is left of this one, each next one is guessed at the same size
         const lvUp = cost && need != null && xp > 0 ? (xp >= need ? 1 + Math.floor((xp - need) / cost) : 0) : null;
-        return h('div', { class: 'ma-stats' }, h('div', { class: 'ma-stat' }, '✨ Total XP', h('b', {}, s.estimating && !known.length ? 'estimating…' : '~' + fmtNum(xp))),
-          lvUp == null ? null : h('div', { class: 'ma-stat', title: 'Estimate: the first level needs what is left of the one you are on, every next level is assumed to need about as much as this one' }, '📈 Est. level-ups', h('b', {}, lvUp > 0 ? '~+' + lvUp : '0 · ' + Math.round((ex.cur + xp) / cost * 100) + '% to next')),
-          s.estimating ? h('div', { class: 'ma-stat' }, 'estimating…') : unk ? h('div', { class: 'ma-stat' }, 'unknown', h('b', {}, unk)) : null);
-      })()] : []),
+        const bits = [`${total} lootable`];
+        if (total) {
+          bits.push(s.estimating && !known.length ? '✨ estimating…' : '✨ ~' + fmtNum(xp) + ' XP');
+          if (lvUp != null) bits.push(lvUp > 0 ? '📈 ~+' + lvUp + ' level' + (lvUp === 1 ? '' : 's') : '📈 0 levels · ' + Math.round((ex.cur + xp) / cost * 100) + '% to next');
+          if (s.estimating && known.length) bits.push('estimating…'); else if (unk) bits.push(unk + ' unknown');
+        }
+        bits.push('scanned ' + ago(s.lastScanAt));
+        if (need != null) bits.push(fmtNum(need) + ' EXP to next level');
+        return h('div', { class: 'ma-note', title: 'Level-ups are an estimate: the first level needs what is left of the one you are on, every next level is assumed to need about as much as this one' }, bits.join(' · '));
+      })(),
       ...(list.length ? sections
         : [h('div', { class: 'ma-empty' }, s.lastScanAt ? 'Nothing lootable right now.' : 'Not scanned yet, press Scan graveyard.')])];
   }
