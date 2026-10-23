@@ -3024,13 +3024,14 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
 .ma-about{margin:10px 3px 2px;text-align:center;opacity:.8}
 .ma-grp{padding:1px 12px}.ma-sr-w+.ma-sr-w{border-top:1px solid rgba(255,255,255,.05)}
 .ma-sr{display:flex;align-items:center;gap:10px;padding:8px 0}
-.ma-sr-o{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px 12px;margin:0 0 10px 38px;padding:10px 12px 11px;background:#0d1322;border:1px solid rgba(255,255,255,.05);border-radius:12px}
+.ma-sr-o{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));align-items:end;gap:10px 12px;margin:0 0 10px 38px;padding:10px 12px 11px;background:#0d1322;border:1px solid rgba(255,255,255,.05);border-radius:12px}
 .ma-opt{display:flex;flex-direction:column;align-items:stretch;gap:5px;min-width:0}
-.ma-opt>.ma-opt-l{color:#7f8bb1;font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase}
+.ma-opt>.ma-opt-l{color:#7f8bb1;font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .ma-opt.row{flex-direction:row;flex-wrap:wrap;align-items:center;gap:2px 10px}.ma-opt.row>.ma-opt-l{flex:1;color:#c3cdef;font-size:12px;font-weight:600;letter-spacing:0;text-transform:none}.ma-opt.row>small{flex-basis:100%}
 .ma-opt>small{color:#6e7a9c;font-size:10.5px;line-height:1.2}
-.ma-opt .ma-in{width:100%;min-width:0;box-sizing:border-box;padding:6px 9px;font-size:12.5px;border-radius:9px}
-.ma-opt .ma-num{display:flex;width:100%}.ma-opt .ma-num .ma-in{flex:1 1 auto;width:auto}
+.ma-opt .ma-in{width:100%;min-width:0;box-sizing:border-box;height:32px;padding:0 10px;font-size:12.5px;border-radius:9px}
+.ma-opt .ma-num{position:relative;display:flex;width:100%}.ma-opt .ma-num .ma-in{flex:1 1 auto;width:auto;padding-right:44px}
+.ma-opt .ma-num i{position:absolute;right:11px;top:50%;transform:translateY(-50%);pointer-events:none}
 .ma-opt .ma-seg{width:100%}.ma-opt .ma-seg-btn{padding:5px 9px;font-size:11px}
 .ma-opt.wide{grid-column:1/-1}
 @media (max-width:420px){.ma-sr-o{grid-template-columns:minmax(0,1fr);margin-left:0}}
@@ -3153,11 +3154,14 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
 .ma-link.warn{color:#ff9b9b}.ma-link.warn:hover{color:#ffc4c4;background:rgba(255,120,120,.1)}
 .ma-sched{margin-top:8px;padding:7px 10px;background:#101a33;border:1px solid rgba(255,255,255,.06);border-radius:14px}
 .ma-sub-h{display:flex;align-items:center;gap:8px;color:#c4cdeb;font:700 11.5px Arial,sans-serif;margin-bottom:4px}.ma-sub-h .sp{flex:1}.ma-sub-h small{font-weight:400;color:#6e7a9c}
-.ma-srow{display:flex;align-items:center;gap:7px;margin:4px 0}.ma-srow .arrow{color:#53608a}
-.ma-time{display:inline-flex;align-items:stretch;height:28px;border:1px solid rgba(255,255,255,.12);border-radius:10px;overflow:hidden;background:#0d1322;flex:0 0 auto}
-.ma-time input{border:none;background:transparent;color:#eef3ff;font:12.5px Arial,sans-serif;font-variant-numeric:tabular-nums;width:22px;padding:0 2px;text-align:center}
+.ma-srow{display:grid;grid-template-columns:minmax(0,1.1fr) auto minmax(0,1fr) 24px;align-items:center;gap:7px;margin:4px 0}.ma-srow .arrow{color:#53608a}
+.ma-srow .ma-num{display:flex;width:100%}.ma-srow .ma-num .ma-in{flex:1 1 auto;width:auto;min-width:0}
+.ma-srow .ma-in,.ma-time{height:30px;box-sizing:border-box}
+.ma-time{display:flex;align-items:stretch;width:100%;min-width:0;border:1px solid rgba(255,255,255,.12);border-radius:10px;overflow:hidden;background:#101a33;transition:.15s}
+.ma-time:focus-within{border-color:#6ea8ff;box-shadow:0 0 0 2px rgba(110,168,255,.18)}
+.ma-time input{flex:1 1 0;min-width:0;border:none;background:transparent;color:#eef3ff;font:12.5px Arial,sans-serif;font-variant-numeric:tabular-nums;width:auto;padding:0 2px;text-align:center}
 .ma-time input:focus{outline:none;background:rgba(75,115,224,.2)}.ma-time span{display:flex;align-items:center;color:#6e7a9c}
-.ma-ampm{border:none;border-left:1px solid rgba(255,255,255,.12);background:transparent;color:#9fb0e0;font:800 10px Arial,sans-serif;padding:0 8px;cursor:pointer;letter-spacing:.03em}.ma-ampm:hover{background:#18213b;color:#fff}
+.ma-ampm{flex:0 0 auto;border:none;border-left:1px solid rgba(255,255,255,.12);background:transparent;color:#9fb0e0;font:800 10px Arial,sans-serif;padding:0 10px;cursor:pointer;letter-spacing:.03em}.ma-ampm:hover{background:#18213b;color:#fff}
 .ma-x{background:transparent;border:none;color:#6e7a9c;cursor:pointer;width:24px;height:24px;border-radius:50%;font-size:11px;flex:0 0 auto}.ma-x:hover{background:#1c2644;color:#ff9aa6}
 .ma-add{width:100%;margin-top:3px;background:transparent;border:1px dashed #33406a;color:#9fb0e0;border-radius:12px;padding:5px 0;font:700 11px Arial,sans-serif;cursor:pointer}.ma-add:hover{border-color:#6ea8ff;color:#fff}
 /* avatars */
@@ -3412,8 +3416,8 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     const sortSave = () => { ovr(low).schedule.sort((a, b) => toMin(a.at) - toMin(b.at)); saveCfg(); draw(); };
     const rows = list.map((b, i) => h('div', { class: 'ma-srow' },
       timePicker(b.at, (at) => { ovr(low).schedule[i].at = at; sortSave(); }), h('span', { class: 'arrow' }, '→'),
-      num(() => b.cap, (n) => { ovr(low).schedule[i].cap = n; saveCfg(); }, { fmt: fmtNum, w: 96 }),
-      h('span', { style: { flex: 1 } }), h('button', { type: 'button', class: 'ma-x', title: 'Remove', onclick: (e) => { stop(e); ovr(low).schedule.splice(i, 1); if (!ovr(low).schedule.length) delete ovr(low).schedule; saveCfg(); draw(); } }, '✕')));
+      num(() => b.cap, (n) => { ovr(low).schedule[i].cap = n; saveCfg(); }, { fmt: fmtNum }),
+      h('button', { type: 'button', class: 'ma-x', title: 'Remove', onclick: (e) => { stop(e); ovr(low).schedule.splice(i, 1); if (!ovr(low).schedule.length) delete ovr(low).schedule; saveCfg(); draw(); } }, '✕')));
     return h('div', { class: 'ma-sched' },
       now != null ? h('div', { class: 'ma-sub-h' }, h('small', {}, 'server time now ' + fmtClock(now))) : null,
       rows.length ? rows : h('div', { class: 'ma-note', style: { margin: '2px 0 6px' } }, 'The cap stays the same all day. Add a change to raise or lower it from a set server time (it starts over at midnight).'),
@@ -3787,10 +3791,10 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
         srow('⚔️', 'Phase duels', 'Fought automatically', sw(() => cfg.autoDuel, (v) => { cfg.autoDuel = v; }, { redraw: false })),
         srow('⏸️', 'Pause server auto-farm', 'So the two never fight over stamina', sw(() => cfg.autoFarmControl, (v) => { cfg.autoFarmControl = v; }, { redraw: false }))),
       caption('Advanced'),
-      fold('adv', false, ['⏱ Timing', h('small', {}, 'pauses between requests')], () => [note('In ms. Lower numbers risk rejected requests.'),
-        setting('Scan every', 'Waves and dungeons, e.g. 5', num(() => cfg.fightScanMs / 60000, (n) => { cfg.fightScanMs = Math.round(n * 60000); }, { w: 64, unit: 'min', min: 0.1, parse: parseFloat })),
-        ms('Wave swing gap', () => cfg.attackDelayMs, (n) => { cfg.attackDelayMs = n; }),
-        ms('Dungeon swing gap', () => cfg.dungeonAttackDelayMs, (n) => { cfg.dungeonAttackDelayMs = n; }),
+      fold('adv', false, ['⏱ Timing', h('small', {}, 'pauses between requests')], () => [
+        setting('Scan every', 'Waves, dungeons, and loot', num(() => cfg.fightScanMs / 60000, (n) => { cfg.fightScanMs = Math.round(n * 60000); }, { w: 64, unit: 'min', min: 0.1, parse: parseFloat })),
+        ms('Wave attack cooldown', () => cfg.attackDelayMs, (n) => { cfg.attackDelayMs = n; }),
+        ms('Dungeon attack cooldown', () => cfg.dungeonAttackDelayMs, (n) => { cfg.dungeonAttackDelayMs = n; }),
         skillOn ? ms('Skill → attack gap', () => cfg.skillToAttackGapMs, (n) => { cfg.skillToAttackGapMs = n; }) : null,
         L.enabled ? ms('Gap between loot claims', () => L.claimGapMs, (n) => { L.claimGapMs = n; }) : null]),
       h('div', { class: 'ma-note ma-about' }, `v${VERSION} · re-login ${au.status ? (au.status.configured ? 'set up' : 'not set up') : 'unavailable'} · ${Presets.note()}`,
