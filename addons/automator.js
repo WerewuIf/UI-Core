@@ -1171,14 +1171,16 @@ const BuildKit = (() => {
       const st = await loadCrystals(), layout = Kit.layoutOf(st.cards), worn = new Set([].concat(...Object.values(layout)));
       return { at: Date.now(), layout, free: Object.keys(st.catalog).filter((id) => !worn.has(id)), labels: Object.fromEntries(st.cards.map((c) => [c.key, c.label])) };   // free: not worn at that time
     },
+    // the crystals on the gear that is on right now ({ gearKey: [crystalId] }), or null when the page could not be read
+    async current() { try { return Kit.layoutOf((await loadCrystals()).cards); } catch (_) { return null; } },
     async best() {
       try {
         const st = await loadCrystals(), cards = st.cards.filter((c) => c.slotCount > 0);
         if (!cards.length) return { ok: true, changed: false, moves: 0, message: 'no equipped gear has crystal slots' };
         if (!Object.keys(st.catalog).length) return { ok: true, changed: false, moves: 0, message: 'no activated crystals' };
         const diff = Kit.layoutDiff(Kit.layoutOf(st.cards), Kit.bestLayout(cards, st.catalog));
-        if (!diff.unequip.length && !diff.equip.length) return { ok: true, changed: false, moves: 0, message: 'already the best' };
-        const r = await runDiff(st, diff); delete r.st; return Object.assign({ changed: r.moves > 0, placed: diff.equip.map((m) => m.id) }, r);   // placed: so a restore can free the ones that were free before
+        if (!diff.unequip.length && !diff.equip.length) return { ok: true, changed: false, moves: 0, message: 'already the best', layout: Kit.layoutOf(st.cards) };
+        const r = await runDiff(st, diff), layout = r.st ? Kit.layoutOf(r.st.cards) : null; delete r.st; return Object.assign({ changed: r.moves > 0, placed: diff.equip.map((m) => m.id), layout }, r);   // placed: so a restore can free the ones that were free before
       } catch (e) { return { ok: false, changed: false, moves: 0, message: (e && e.message) || String(e) }; }
     },
     // snap = snapshot(). placed = what best() put on (ids): those that were free at the time are freed again, also when they sit on gear that
@@ -1419,6 +1421,8 @@ const Presets = (() => {
     },
     // read the build that is on right now (gear + pets) the way the capture did
     async read(t) { try { const r = await withTimeout(Promise.resolve(Core.call('build.predict', (t && (await engineMob(t))) || (t && bossOf(t)) || {})), 45000, null); return r && r.ok !== false && r.sel && r.sel.gear ? r.sel : null; } catch (_) { return null; } },
+    // the crystals this automator left on the gear (so a restore can tell you moved them yourself). layout: given, or read now.
+    async markCrystals(layout) { const o = Origin.get(); if (!o || !o.crystals) return; const l = layout || await BuildKit.crystals.current(); const o2 = Origin.get(); if (l && o2) { o2.crystalsLeft = l; originStore.set(o2); } },
     async markLeft(t) { const o = Origin.get(); if (!o || !o.sel || !available(BEST)) return; const sel = await Origin.read(t); const o2 = Origin.get(); if (sel && o2) { o2.left = sel; originStore.set(o2); } },
   };
   let chain = Promise.resolve();                                      // ensure() and restore() take turns, never overlap
@@ -1461,6 +1465,7 @@ const Presets = (() => {
           applied[kind] = memo; log(`✅ ${kind === BEST ? 'best gear + pets' : kind + ' preset'} ${r.changed === false ? 'already on' : 'applied'}`, 'ok'); try { await Core.me.sync(); } catch (_) { /* */ } Me.statsAt = 0;
           if (kind === 'gear' || (kind === BEST && r.changed)) buildEpoch++;
           if (r.changed !== false) changedAny = true;
+          if (kind === 'crystal') await Origin.markCrystals();
           if (kind === BEST && r.changed) {
             delete applied.gear; delete applied.pet;                  // the engine moved gear / pets: those memos no longer describe what is on
             if (sig && teamBefore) {                                  // sigils sit on pets: move them to the pets that took their place
@@ -1481,6 +1486,7 @@ const Presets = (() => {
           log(`💎 best crystals on the gear for ${esc(bossName(low))}…`, 'info');
           const r = await withTimeout(BuildKit.crystals.best(), 180000, { ok: false, message: 'timed out' });
           Origin.addPlaced(r && r.placed);
+          if (r && r.ok !== false) { await Origin.markCrystals(r.layout); }
           if (r && r.ok !== false) { applied.crystal = memo; log(r.changed ? `✅ crystals placed (${r.moves} step${r.moves === 1 ? '' : 's'})` : '✅ crystals already the best', 'ok'); }
           else { failedAt[key] = Date.now(); log(`⚠️ best crystals: ${esc((r && r.message) || 'unknown')}`, 'warn'); }
         }
@@ -1494,6 +1500,13 @@ const Presets = (() => {
     ensuring = true;
     const notes = [];
     try {
+      // Crystals: the Crystal Presets / the crystals page do not announce a change, so it is read: what sits on the gear now (still the gear we left)
+      // against what we left there. Different = you moved them yourself: they stay as they are.
+      if (o.crystals && !o.crystalsLeft && !(o.placed || []).length && why !== 'you asked') { o.crystals = null; originStore.set(o); }   // never moved by this automator: nothing to put back
+      if (o.crystals && o.crystalsLeft && why !== 'you asked') {
+        const now = await BuildKit.crystals.current(), norm = (l) => JSON.stringify(Object.keys(l || {}).sort().map((k) => [k, (l[k] || []).map(String).sort()]));
+        if (now && norm(now) !== norm(o.crystalsLeft)) { o.crystals = null; o.placed = []; originStore.set(o); log('📌 your crystals are not what the automator left, so they were moved by you: they stay as they are', 'info'); }
+      }
       // The build on now is not the one this automator left (you changed it while it was paused / idle / the page was closed): leave it alone.
       if (o.sel && o.left && o.probe && why !== 'you asked') {
         const live = await Origin.read(o.probe);
@@ -3064,10 +3077,10 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
 .ma-bb-n small .capv{color:#aeb9dc;font-weight:700}.ma-bb-n small .ma-rl{color:#ffd978;font-weight:800}
 /* the editor of an open boss */
 .ma-big{display:flex;align-items:center;gap:10px;margin-bottom:7px}.ma-big .ma-in{font:800 17px Arial,sans-serif;padding:7px 10px}.ma-big small{color:#7c88ad;font-size:11px;line-height:1.35}
-.ma-ed{grid-column:1/-1;margin:1px 0 3px;padding:9px 11px 10px;background:#16213f;border:1px solid rgba(110,168,255,.34);border-radius:16px}.ma-ed .ma-in,.ma-bulk .ma-in{background:#101a33}
+.ma-ed{grid-column:1/-1;margin:1px 0 3px;padding:9px 11px 10px;background:#16213f;border:1px solid rgba(110,168,255,.34);border-radius:16px}.ma-ed .ma-in,.ma-bulk .ma-in{background:#0d1322}
 .ma-ed-h{display:flex;align-items:center;gap:8px;margin-bottom:4px}.ma-ed-t{flex:1;min-width:0}.ma-ed-t b{display:block;font:800 13px Arial,sans-serif;color:#fff;overflow-wrap:anywhere}
 .ma-ed-t small{display:flex;align-items:center;gap:6px;flex-wrap:wrap;color:#7c88ad;font-size:10.5px;margin-top:1px}
-.ma-in.off{opacity:.42;cursor:not-allowed}
+.ma-in.off{opacity:1;cursor:default;color:#9fc1ff;border-style:dashed;border-color:rgba(110,168,255,.35);-webkit-text-fill-color:#9fc1ff}   /* Auto is choosing: read-only, but not dimmed */
 .ma-origin{margin:9px 0 0;padding:8px 10px;border-radius:12px;background:#0d1322;border:1px solid rgba(110,168,255,.28)}
 .ma-origin-t b{display:block;font:800 11.5px Arial,sans-serif;color:#d6e5ff}.ma-origin-t small{display:block;color:#8b97bd;font-size:11px;margin-top:2px}
 .ma-ld{display:grid;grid-template-columns:repeat(auto-fit,minmax(96px,1fr));gap:6px;margin:2px 0 2px}
@@ -3104,7 +3117,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
 .ma-bk-h{display:flex;align-items:center;gap:2px;flex-wrap:wrap;margin-top:9px}.ma-bk-l{font:800 9.5px Arial,sans-serif;color:#6e7a9c;text-transform:uppercase;letter-spacing:.06em;margin:0 6px 0 3px}
 .ma-bulk .ma-card-h .core-btn{padding:5px 12px;font-size:11.5px}
 .ma-bk-from{margin:2px 0 0;color:#9fc1ff;font-size:11px}
-.ma-bulk .ma-ld{margin-top:9px}.ma-bulk .ma-in.chg{border-color:#6ea8ff;background:#101b36}
+.ma-bulk .ma-ld{margin-top:9px}.ma-bulk .ma-in.chg{border-color:#6ea8ff}
 .ma-bk-cap{display:flex;align-items:center;gap:5px;flex-wrap:wrap;margin-top:7px}.ma-bk-cap label{font:800 9.5px Arial,sans-serif;color:#6e7a9c;text-transform:uppercase;letter-spacing:.06em;margin:0 3px}
 .ma-bk-go{display:flex;align-items:center;gap:9px;margin-top:8px}.ma-bk-go span{flex:1;min-width:0;font-size:11px;color:#9fb0dc;line-height:1.35}.ma-bk-go .core-btn{padding:7px 16px;font-size:12px}.ma-bk-go .core-btn:disabled{opacity:.4;cursor:default;pointer-events:none}
 .ma-what{margin:7px 3px 0;color:#7c88ad;font-size:11px;line-height:1.35;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
@@ -3491,7 +3504,8 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     else body.push(note('No gear / crystal / pet preset addon is loaded.'));
     const o = originRow(); if (o) body.push(o);
     const autoBtn = h('div', { class: 'ma-seg' }, h('button', { type: 'button', disabled: !has || null, title: has ? 'Picks the best gear, pets, crystals and sigils for each boss, so the presets are off' : 'Needs the Build Engine addon', class: 'ma-seg-btn' + (auto ? ' on' : ''), onclick: (e) => { stop(e); if (!has) return; AB.enabled = !AB.enabled; if (AB.enabled && BK.on) { endBulk(); } reset(); saveCfg(); draw(); } }, '🤖 Auto'));
-    if ((!auto && kinds.length) || BK.on) body.push(h('div', { class: 'ma-actions ma-block' }, btn(BK.on ? 'Done selecting' : 'Apply to several bosses…', BK.on ? 'soft' : 'success', () => { if (BK.on) endBulk(); else { BK.on = true; ui.sel = ''; saveUi(); draw(); } })));   // Auto picks for every boss, and with no presets there is nothing to give them
+    const picks = kinds.filter((k) => cfg.loadout && cfg.loadout[k]);     // the presets above that are set: that is what there is to give to other bosses
+    if (!auto && picks.length) body.push(h('div', { class: 'ma-actions ma-block' }, btn('Apply these to several bosses…', 'success', () => { BK.on = true; BK.sel = new Set(); BK.pick = {}; BK.cap = ''; BK.msg = ''; BK.from = ''; BK.ph = null; picks.forEach((k) => { BK.pick[k] = String(cfg.loadout[k]); }); ui.sel = ''; saveUi(); draw(); })));   // nothing set (or Auto on) = nothing to apply, no button
     return h('div', { class: 'ma-card' }, h('div', { class: 'ma-card-h' }, h('span', { class: 'ma-ico' }, '🎒'), h('div', { class: 'ma-card-t' }, h('b', {}, 'Loadout'), h('small', {}, 'How a boss gets its gear, pets, crystals and sigils')), autoBtn), h('div', { style: { marginTop: '9px' } }, ...body));
   }
 
