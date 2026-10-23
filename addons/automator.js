@@ -419,6 +419,9 @@ const Prog = (() => {
   return {
     start(t, list, status) { if (!list || !list.length) { steps = []; return; } steps = list.slice(); title = t; mine = status || 'SWITCHING'; prev = Status.get(); Status.set(mine); show(0); },
     at(label) { if (!steps.length) return; const i = steps.indexOf(label); if (i >= 0) show(i); },
+    // swaps one step for the finer steps it is made of (each crystal / sigil move); go(i) shows one of them. sub() returns the index of the first, or -1
+    sub(label, list) { if (!steps.length || !list || !list.length) return -1; const i = steps.indexOf(label); if (i < 0) return -1; steps.splice(i, 1, ...list); show(i); return i; },
+    go(i) { if (steps.length && i >= 0 && i < steps.length) show(i); },
     end() { if (!steps.length) return; steps = []; Work.clear('build'); if (Status.get() === mine) Status.set(prev && prev !== mine ? prev : (Run.wanted() ? 'RUNNING' : 'STOPPED')); },
   };
 })();
@@ -1147,12 +1150,17 @@ const BuildKit = (() => {
   async function runDiff(st, diff) {
     let moves = 0; const notes = [];
     const label = (key) => { const c = st.cards.find((x) => x.key === key); return (c && c.label) || key; };
+    const nm = (id) => { const c = st.catalog[String(id)]; return c ? (typeof c.type === 'string' && c.type ? c.type.charAt(0).toUpperCase() + c.type.slice(1) + ' ' : '') + 'crystal' + (c.level ? ' Lv' + c.level : '') : 'crystal #' + id; };
+    const plan = [...diff.unequip.map((id) => 'Take off ' + nm(id)), ...diff.equip.map((m) => 'Put ' + nm(m.id) + ' on ' + label(m.key))];
+    const base = Prog.sub('Crystals', plan); let k = 0; const tick = () => { if (base >= 0) Prog.go(base + k); k++; };   // every move is a step of the status bar
     for (const id of diff.unequip) {
+      tick();
       const r = await crystalAct(st, { action: 'unequip_crystal', crystal_id: String(id) });
       if (!r.ok) return { ok: false, moves, message: `could not take crystal #${id} off: ${r.error}`, notes };
       st = r.st; moves++; await sleep(GAP);
     }
     for (const m of diff.equip) {
+      tick();
       const put = async () => { const c = st.cards.find((x) => x.key === m.key); if (!c || !c.equipmentInvId) return { ok: false, error: 'no open slot on ' + label(m.key) }; return crystalAct(st, { action: 'equip_crystal', crystal_id: String(m.id), equipment_inv_id: String(c.equipmentInvId) }); };
       let r = await put();
       if (!r.ok && !/no open slot/.test(r.error || '')) {              // maybe still linked to a piece that is not on: free it, once
@@ -1250,7 +1258,9 @@ const BuildKit = (() => {
       const undo = [], notes = [];
       try {
         const changes = Kit.positionChanges(before, await readTeam());
+        const base = Prog.sub('Sigils', changes.map((c) => 'Move sigils · ' + c.pos)); let k = 0;
         for (const c of changes) {
+          if (base >= 0) Prog.go(base + k); k++;
           for (const slot of Kit.SLOTS) {
             let old; try { old = await sigilInfo(c.from, slot); } catch (e) { notes.push(`${c.pos} ${slot}: ${e.message}`); continue; }
             if (!old.current) continue;
@@ -1278,7 +1288,9 @@ const BuildKit = (() => {
     // moves = the undo entries of every carry so far, undone newest first
     async undo(moves) {
       const notes = []; let n = 0;
-      for (const u of (moves || []).slice().reverse()) {
+      const list = (moves || []).slice().reverse(), base = Prog.sub('Sigils', list.map((u) => 'Put back ' + u.slot + ' sigil')); let k = 0;
+      for (const u of list) {
+        if (base >= 0) Prog.go(base + k); k++;
         try {
           if (u.took) {
             const cur = await sigilInfo(u.pet, u.slot);
@@ -3101,6 +3113,8 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
 .ma-lv.on{background:linear-gradient(180deg,#2a3c72,#1f2f5d);border-color:#6ea8ff;box-shadow:0 0 0 2px rgba(110,168,255,.28),0 6px 16px rgba(20,40,110,.35)}.ma-lv.on::before{background:#b4d0ff}
 .ma-lv.on .ma-lvh::after{content:'✓';display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:#6ea8ff;color:#0b1430;font:800 10px Arial,sans-serif}
 .ma-lv b{font:800 14px Arial,sans-serif;color:#7c89b2;letter-spacing:.01em}.ma-lv.got b{color:#fff}.ma-lv.exp b{color:#d9c4ff}
+.ma-timed-bar{display:flex;align-items:center;justify-content:space-between;width:100%;box-sizing:border-box;margin-top:9px;padding:10px 13px;background:#101a33;border:1px solid rgba(255,255,255,.1);border-radius:12px;color:#cfe0ff;font:700 12px Arial,sans-serif;cursor:pointer;text-align:left}.ma-timed-bar:hover{border-color:rgba(159,193,255,.4);background:#14203d}.ma-timed-bar.open{border-color:rgba(110,168,255,.5)}.ma-timed-bar i{font-style:normal;color:#7fa6ff}
+.ma-lc{content-visibility:auto;contain-intrinsic-size:auto 56px}
 .ma-rgs{display:flex;flex-direction:column}
 .ma-rg{position:relative;display:grid;grid-template-columns:16px 52px minmax(0,1fr);align-items:center;gap:6px;padding:7px 8px 7px 6px;border-radius:12px;cursor:pointer;transition:.15s;min-width:0}
 .ma-rg::before{content:'';position:absolute;left:13px;top:0;bottom:0;width:2px;background:#27324f}.ma-rg:first-child::before{top:50%}.ma-rg:last-child::before{bottom:50%}.ma-rg.got::before{background:#4b73e0}
@@ -3209,10 +3223,12 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   const ago = (t) => (t ? fmtDur(Date.now() - t) + ' ago' : 'never');
   const hueOf = (s) => { let x = 0; for (const c of String(s)) x = (x * 31 + c.charCodeAt(0)) >>> 0; return `hsl(${x % 360} 48% 40%)`; };
   const iconUrl = (i) => { if (!i) return null; try { return new URL(i, BASE).href; } catch (_) { return null; } };
+  const badIcons = new Set();                                         // an icon that failed once is not requested again on every redraw
+  const imgTag = (src, cls, fb) => (badIcons.has(src) ? fb() : h('img', Object.assign({ src, loading: 'lazy', decoding: 'async', alt: '', onerror: (e) => { badIcons.add(src); e.target.replaceWith(fb()); } }, cls ? { class: cls } : {})));
   function avatar(name, icon, o = {}) {
     const bg = hueOf(String(name || '?').toLowerCase()), letter = (String(name || '?').trim().charAt(0) || '?').toUpperCase();
     const fb = () => h('div', { class: 'ma-av-fb', style: { background: bg } }, letter), src = iconUrl(icon);
-    const inner = src ? h('img', { class: 'ma-av', src, loading: 'lazy', alt: '', onerror: (e) => e.target.replaceWith(fb()) }) : fb();
+    const inner = src ? imgTag(src, 'ma-av', fb) : fb();
     return h('span', { class: 'ma-av-wrap' + (o.size ? ' ' + o.size : '') }, inner, o.boss ? h('span', { class: 'ma-crown', title: 'Boss' }, '♛') : null, o.dot ? h('i', { class: 'ma-dot s-' + o.dot }) : null);
   }
   const stop = (e) => e.stopPropagation();
@@ -3425,7 +3441,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   const initials = (n) => String(n || '?').split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w.charAt(0).toUpperCase()).join('');
   function lootIcon(name) {
     const src = iconUrl(LootData.icon(name)), fb = () => h('span', { class: 'ma-ti-fb', style: { background: hueOf(String(name).toLowerCase()) } }, initials(name));
-    return src ? h('img', { src, loading: 'lazy', alt: '', onerror: (e) => e.target.replaceWith(fb()) }) : fb();
+    return src ? imgTag(src, '', fb) : fb();
   }
   function damageBlock(low) {
     const base = baseCap(low), info = LootData.get(low);
@@ -3478,18 +3494,18 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   function bossEditor(def) {
     const ms = Roster.members(def), idx = Math.min(phaseSel[def.low] || 0, ms.length - 1), m = ms[idx], low = m.low, o = cfg.bosses[low] || {}, kinds = Presets.pickKinds();
     const sched = Array.isArray(o.schedule) && o.schedule.length > 0, tOpen = isOpen('time', sched), [txt, kind] = entryState(def), place = placeOf(m);
-    const timedBtn = m.kind !== 'wave' ? h('button', { type: 'button', class: 'ma-link', onclick: () => { ui.open.time = !tOpen; saveUi(); draw(); } }, (tOpen ? '▾ ' : '▸ ') + '⏰ Timed cap' + (sched ? ' (' + o.schedule.length + ')' : '')) : null;
+    const timedBtn = m.kind !== 'wave' ? h('button', { type: 'button', class: 'ma-timed-bar' + (tOpen ? ' open' : ''), onclick: () => { ui.open.time = !tOpen; saveUi(); draw(); } }, h('span', {}, '⏰ Timed cap' + (sched ? ' · ' + o.schedule.length + ' set' : '')), h('i', {}, tOpen ? '▾' : '▸')) : null;
     const resetBtn = Object.keys(o).length ? h('button', { type: 'button', class: 'ma-link', onclick: () => { delete cfg.bosses[low]; saveCfg(); draw(); } }, '↺ Reset') : null;
     const copyBtn = kinds.length ? h('button', { type: 'button', class: 'ma-link', title: 'Give other bosses this boss’s gear / crystal / pet picks', onclick: (e) => { stop(e); startBulk(def, low); } }, '⧉ Copy loadout to…') : null;
     const removeBtn = def.fromScan ? h('button', { type: 'button', class: 'ma-link warn', title: 'The loot scan added this boss. Remove it from the list (a rescan will not bring it back).', onclick: (e) => { stop(e); removeAdded([def]); } }, '🗑 Remove') : null;
     return h('div', { class: 'ma-ed' },
-      h('div', { class: 'ma-ed-h' }, h('div', { class: 'ma-ed-t' }, h('b', { title: m.name }, m.name), h('small', {}, place, pill(txt, kind))),
+      h('div', { class: 'ma-ed-h' }, h('div', { class: 'ma-ed-t' }, h('b', { title: m.name }, m.name), place ? h('small', {}, place) : null), pill(txt, kind),
         h('button', { type: 'button', class: 'ma-x', title: 'Close', onclick: (e) => { stop(e); ui.sel = ''; saveUi(); draw(); } }, '✕')),
       ms.length > 1 ? h('div', { style: { margin: '0 0 6px' } }, seg(ms.map((x, i) => [i, 'Phase ' + (i + 1), x.name]), idx, (v) => { phaseSel[def.low] = v; }, { full: true })) : null,
       Presets.pickKinds().length ? bossLoadout(low) : null,
       caption('🎯 Damage cap'), ...damageBlock(low),
-      timedBtn || resetBtn || removeBtn || copyBtn ? h('div', { class: 'ma-reset' }, timedBtn, h('span', { class: 'sp' }), copyBtn, resetBtn, removeBtn) : null,
-      m.kind !== 'wave' && tOpen ? scheduleEditor(low) : null);
+      timedBtn, m.kind !== 'wave' && tOpen ? scheduleEditor(low) : null,
+      resetBtn || removeBtn || copyBtn ? h('div', { class: 'ma-reset' }, h('span', { class: 'sp' }), copyBtn, resetBtn, removeBtn) : null);
   }
   /* ---- Loadout: the one place for how builds are chosen ---------------------------------------------------------------
    * The default gear / crystal / pet presets, plus one 🤖 Auto best button (top right): the engine picks gear + pets for each boss, crystals and
@@ -3728,7 +3744,10 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
       note(!s.lastScanAt ? 'Not scanned yet.' : `${total} lootable · scanned ${ago(s.lastScanAt)}${need != null ? ' · ' + fmtNum(need) + ' EXP to next level' : ''}`),
       ...(s.lastScanAt && total ? [(() => {
         const rows = [...groups.values()].flatMap((g) => g.rows), known = rows.filter((r) => Number.isFinite(r.est)), xp = known.reduce((n, r) => n + r.est, 0), unk = rows.length - known.length;
+        const me = Core.me.get(), ex = me && me.exp, cost = ex && ex.max > 0 ? ex.max : 0;      // levels: the first needs what is left of this one, each next one is guessed at the same size
+        const lvUp = cost && need != null && xp > 0 ? (xp >= need ? 1 + Math.floor((xp - need) / cost) : 0) : null;
         return h('div', { class: 'ma-stats' }, h('div', { class: 'ma-stat' }, '✨ Total XP', h('b', {}, s.estimating && !known.length ? 'estimating…' : '~' + fmtNum(xp))),
+          lvUp == null ? null : h('div', { class: 'ma-stat', title: 'Estimate: the first level needs what is left of the one you are on, every next level is assumed to need about as much as this one' }, '📈 Est. level-ups', h('b', {}, lvUp > 0 ? '~+' + lvUp : '0 · ' + Math.round((ex.cur + xp) / cost * 100) + '% to next')),
           s.estimating ? h('div', { class: 'ma-stat' }, 'estimating…') : unk ? h('div', { class: 'ma-stat' }, 'unknown', h('b', {}, unk)) : null);
       })()] : []),
       ...(list.length ? sections
