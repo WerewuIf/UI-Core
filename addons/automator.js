@@ -910,7 +910,16 @@ const Scan = (() => {
     if (force && total) { const up = due.filter((l) => (Board.get(l) || {}).alive === true).length; log(`🔎 scan done · ${up} of ${due.length} boss${due.length === 1 ? '' : 'es'} up · ${((Date.now() - t0) / 1000).toFixed(1)}s`, 'info'); }
   }
   const run = (force) => Lane.run(() => scanNow(force));
-  return { page, run, anyDue, nextDueIn, nextCheck, cardAlive, cardId };
+  // just this boss's own page (its wave page, or its dungeon): after a phase duel only that boss changed, not the other waves
+  const one = (low) => Lane.run(async () => {
+    const def = Roster.get(low); if (!def) return;
+    try {
+      if (def.kind !== 'wave') { Work.set('scan', `Checking ${bossName(low)}`, 0, 1); await Dungeons.refresh([low], () => {}); return; }
+      const loc = bossLoc(low); if (!loc) return;
+      Work.set('scan', `Checking Gate ${loc.gate} · Wave ${loc.wave}`, 0, 1); await page(loc.gate, loc.wave);
+    } finally { Work.clear('scan'); }
+  });
+  return { page, run, one, anyDue, nextDueIn, nextCheck, cardAlive, cardId };
 })();
 
 /* ---- auto-farm coordination (crash-safe: the flag is written BEFORE pausing, and recovered on boot) --------------- */
@@ -1637,14 +1646,15 @@ const Planner = (() => {
   const reset = () => { cache.clear(); lastLog = ''; onNow = null; };
   const crystalNow = () => { const c = Presets.applied().crystal; return c ? String(c).split('@')[0] : null; };
   // -> { sig, cur }   cur = the live selection (from the same search), for the starting point
+  const ckey = (t) => t.low + ':' + (t.monsterId != null ? t.monsterId : '');            // a dungeon swarm is many mobs with one name: one search per kind of mob
   async function sigFor(t) {
     const w = Presets.wanted(t.low, t), crystal = w.crystal != null && w.crystal !== '__best' ? w.crystal : null;   // auto crystals follow the gear: the gear distance already counts them
     if (w.best) {
-      let hit = cache.get(t.low), cur = null;
+      let hit = cache.get(ckey(t)), cur = null;
       if (!hit || Date.now() - hit.at > TTL) {
         let r = null; const mob = await Presets.engineMob(t);
         try { r = mob ? await withTimeout(Promise.resolve(Core.call('build.best', mob)), SEARCH_MS, null) : null; } catch (_) { r = null; }
-        if (r && r.ok !== false && r.best && r.best.sel) { hit = { at: Date.now(), sel: r.best.sel }; cache.set(t.low, hit); cur = r.current && r.current.sel; }
+        if (r && r.ok !== false && r.best && r.best.sel) { hit = { at: Date.now(), sel: r.best.sel }; cache.set(ckey(t), hit); cur = r.current && r.current.sel; }
         else hit = null;
       }
       if (hit) return { sig: Plan.sigFromSel(hit.sel, crystal), cur };
@@ -1661,25 +1671,34 @@ const Planner = (() => {
     try {
       // Every boss that has no fresh search yet costs one Build Engine search (up to a minute or two each, one after another: the engine does
       // one at a time). Searches are kept for 15 min, so the next pick is instant. The status shows which boss is being searched.
-      const stale = list.filter((t) => Presets.wanted(t.low, t).best && !((cache.get(t.low) || {}).at > Date.now() - TTL));
+      const seenK = new Set(), stale = list.filter((t) => { const k = ckey(t); if (seenK.has(k) || !Presets.wanted(t.low, t).best || (cache.get(k) || {}).at > Date.now() - TTL) return false; seenK.add(k); return true; });
       if (stale.length) { log(`🧭 planning the order for ${list.length} bosses (${stale.length} to search)…`, 'info'); await Promise.all(stale.map((t) => Presets.engineMob(t).catch(() => null))); }
       const label = (t) => (t.name || t.low).split(/[ ,]/)[0], names = stale.map((t, i) => `${label(t)} (${i + 1}/${stale.length})`);
       Prog.start('Planning the build order', names, 'PLANNING');
-      const items = [], wild = []; let fresh = null;
+      // Bosses that need the very same build are ONE stop (15 Gribbles = one build, fought back to back), so the order is a real shortest chain
+      // over the different builds only, and equal builds always sit together. Within a stop: by name.
+      const canon = (v) => (Array.isArray(v) ? v.map(canon) : v && typeof v === 'object' ? Object.keys(v).sort().reduce((o, k) => { o[k] = canon(v[k]); return o; }, {}) : v);
+      const groups = new Map(), wild = []; let fresh = null;
       for (const t of list) {
         const si = stale.indexOf(t); if (si >= 0) Prog.at(names[si]);
         const r = await sigFor(t);
         if (r.cur && !fresh) fresh = Plan.sigFromSel(r.cur, crystalNow());
-        (r.sig.any ? wild : items).push({ key: t.low, sig: r.sig, t });
+        if (r.sig.any) { wild.push(t); continue; }
+        const fp = JSON.stringify(canon(r.sig)); if (!groups.has(fp)) groups.set(fp, { sig: r.sig, ts: [], fp }); groups.get(fp).ts.push(t);
       }
+      const byName = (a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : String(a.instanceId || '').localeCompare(String(b.instanceId || ''), undefined, { numeric: true }) || (a.monsterId > b.monsterId ? 1 : a.monsterId < b.monsterId ? -1 : 0));
+      const gl = [...groups.values()]; gl.forEach((g) => { g.ts.sort(byName); g.key = (g.ts[0].name || g.ts[0].low) + '|' + g.fp; });
       const start = fresh || onNow;
-      const res = Plan.order(items, start);
-      const byKey = new Map(list.map((t) => [t.low, t]));
-      const seq = wild.map((x) => x.key).concat(res.keys).map((k) => byKey.get(k)).filter(Boolean);
-      const line = seq.map((t) => t.name.split(/[ ,]/)[0]).join(' → ') + ` (${res.cost} change${res.cost === 1 ? '' : 's'}${res.mode === 'heuristic' ? ', nearest-first' : ''})`;
+      const res = Plan.order(gl.map((g) => ({ key: g.key, sig: g.sig })), start);
+      const byKey = new Map(gl.map((g) => [g.key, g]));
+      const stops = res.keys.map((k) => byKey.get(k)).filter(Boolean);
+      const seq = wild.slice().sort(byName).concat(...stops.map((g) => g.ts));
+      // "Gribbles ×15 → Oceanus": the same boss in a row is one entry
+      const parts = []; seq.forEach((t) => { const n = label(t), l = parts[parts.length - 1]; if (l && l.n === n) l.c++; else parts.push({ n, c: 1 }); });
+      const line = parts.map((x) => (x.c > 1 ? `${x.n} ×${x.c}` : x.n)).join(' → ') + ` (${res.cost} change${res.cost === 1 ? '' : 's'}${res.mode === 'heuristic' ? ', nearest-first' : ''})`;
       if (line !== lastLog) { lastLog = line; log('🧭 build order: ' + esc(line), 'ok'); }
-      const first = seq[0] || list[0], fi = items.find((x) => x.key === first.low);
-      if (fi) onNow = fi.sig;                                                              // the engine is about to put this build on
+      const first = seq[0] || list[0], fg = stops.find((g) => g.ts.includes(first));
+      if (fg) onNow = fg.sig;                                                              // the engine is about to put this build on
       return first;
     } catch (e) { log('⚠️ build planner: ' + esc((e && e.message) || String(e)) + ' — using your order', 'warn'); return list[0]; }
     finally { Prog.end(); }
@@ -1956,7 +1975,7 @@ const Engine = (() => {
           Status.set('DUEL');
           const won = await Duels.fight(t, () => live(tk));
           if (won === null) return;                                  // halted / not possible: the retry timer holds it back
-          if (won) { Board.patch(low, { needsDuel: false, duelRetryAt: 0 }); forceScan = true; log(`✅ Phase Duel for ${esc(t.name)} won — resuming`, 'ok'); }
+          if (won) { Board.patch(low, { needsDuel: false, duelRetryAt: 0 }); log(`✅ Phase Duel for ${esc(t.name)} won — resuming`, 'ok'); try { await Scan.one(low); } catch (_) { /* the next regular scan finds the new phase */ } }   // only this boss's page: the new phase shows up there, the other waves did not change
           else log(`⚠️ Phase Duel for ${esc(t.name)} not won — retrying in 60s`, 'warn');
         } else Diag.skip('duel-needed', `${t.name}: auto-duel is off`);
         return;
