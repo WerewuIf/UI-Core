@@ -3077,30 +3077,34 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
 .ma-capmeta{display:flex;align-items:center;gap:5px;flex-wrap:wrap;flex:1;min-width:120px}.ma-capmeta small{color:#6e7a9c;font-size:10.5px}
 .ma-pill.xp{color:#d9c4ff;border-color:rgba(160,122,216,.4);background:rgba(160,122,216,.12)}
 .ma-segs{display:inline-flex;gap:2px;align-items:center}.ma-segs i{width:9px;height:5px;border-radius:2px;background:#27324f}.ma-segs i.on{background:#4b73e0}
-.ma-lvs{display:grid;grid-template-columns:repeat(auto-fill,minmax(92px,1fr));gap:6px}
-.ma-lv{position:relative;display:flex;flex-direction:column;gap:6px;padding:10px 8px 8px;background:#1a2647;border:1px solid rgba(255,255,255,.07);border-radius:12px;cursor:pointer;opacity:.5;transition:.15s;overflow:hidden;min-width:0}
-.ma-lvh{display:flex;align-items:center;justify-content:space-between;gap:4px}.ma-lvx{color:#d9c4ff;font-size:12px;line-height:1}
-.ma-lv::before{content:'';position:absolute;left:0;right:0;top:0;height:3px;background:#2f3d66}
-.ma-lv:hover{opacity:.92}
-.ma-lv.got{opacity:1}.ma-lv.got::before{background:#4b73e0}
-.ma-lv.on{background:#243462;border-color:#6ea8ff;box-shadow:0 0 0 2px rgba(110,168,255,.24)}.ma-lv.on::before{background:#9fc1ff}
-.ma-lv b{font:800 12.5px Arial,sans-serif;color:#8b97bd;letter-spacing:.01em}.ma-lv.got b{color:#fff}.ma-lv.exp b{color:#d9c4ff}
-.ma-lvt{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:3px;align-content:start}
-.ma-ti{aspect-ratio:1;min-width:0;box-sizing:border-box;border-radius:7px;overflow:hidden;border:1px solid #33406a;background:#131c38;display:flex;align-items:center;justify-content:center}.ma-ti.more{font:800 10px Arial,sans-serif;color:#9caad0}
-.ma-lv.got .ma-ti{border-color:#6ea8ff}
+.ma-lvs{display:grid;grid-template-columns:repeat(auto-fill,minmax(100px,1fr));gap:8px}
+.ma-lv{position:relative;display:flex;flex-direction:column;gap:9px;padding:13px 9px 9px;background:linear-gradient(180deg,#1c2a52,#162241);border:1px solid rgba(255,255,255,.08);border-radius:14px;cursor:pointer;transition:.15s;overflow:hidden;min-width:0}
+.ma-lvh{display:flex;align-items:center;gap:5px;min-height:16px}.ma-lvh b{margin-right:auto}.ma-lvx{color:#d9c4ff;font-size:12px;line-height:1}
+.ma-lv::before{content:'';position:absolute;left:0;right:0;top:0;height:3px;background:#2a375f}
+.ma-lv:hover{border-color:rgba(159,193,255,.4)}
+.ma-lv.got::before{background:linear-gradient(90deg,#3f6be0,#6ea8ff)}
+.ma-lv:not(.got){background:#131c36;border-style:dashed;border-color:rgba(255,255,255,.1)}
+.ma-lv:not(.got) .ma-lvt{opacity:.5;filter:grayscale(.8)}
+.ma-lv.on{background:linear-gradient(180deg,#2a3c72,#1f2f5d);border-color:#6ea8ff;box-shadow:0 0 0 2px rgba(110,168,255,.28),0 6px 16px rgba(20,40,110,.35)}.ma-lv.on::before{background:#b4d0ff}
+.ma-lv.on .ma-lvh::after{content:'✓';display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:#6ea8ff;color:#0b1430;font:800 10px Arial,sans-serif}
+.ma-lv b{font:800 14px Arial,sans-serif;color:#7c89b2;letter-spacing:.01em}.ma-lv.got b{color:#fff}.ma-lv.exp b{color:#d9c4ff}
+.ma-lvt{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:4px;align-content:start}
+.ma-ti{aspect-ratio:1;min-width:0;box-sizing:border-box;border-radius:8px;overflow:hidden;border:1px solid #33406a;background:#131c38;display:flex;align-items:center;justify-content:center}.ma-ti.more{font:800 10px Arial,sans-serif;color:#9caad0}
+.ma-lv.got .ma-ti{border-color:rgba(110,168,255,.7)}
 .ma-ti img{width:100%;height:100%;object-fit:contain;display:block}
 .ma-ti-fb{width:100%;height:100%;display:flex;align-items:center;justify-content:center;font:800 9px Arial,sans-serif;color:#fff}
 .ma-ti.xp{border-color:#a07ad8;background:#2a2050;color:#e3d3ff;font:800 17px Arial,sans-serif}
-.ma-lv .ma-none{color:#6e7a9c;font-size:11px;padding:4px 2px}
+.ma-lv .ma-none{align-self:flex-start;color:#d9c4ff;background:rgba(160,122,216,.14);border:1px solid rgba(160,122,216,.35);border-radius:999px;font:700 10px Arial,sans-serif;padding:3px 8px;letter-spacing:.03em}
 /* select several bosses: the check on a bubble, and the bar that applies one setup to all of them */
 .ma-ck{flex:0 0 auto;width:20px;height:20px;box-sizing:border-box;border-radius:50%;border:2px solid #33406a;display:flex;align-items:center;justify-content:center;font:900 11px Arial,sans-serif;color:#fff}
 .ma-bb.pick{background:rgba(75,115,224,.2);border-color:#6ea8ff}.ma-bb.rlw{border-color:#e3b341;box-shadow:0 0 0 1px rgba(227,179,65,.25)}.ma-bb.pick .ma-ck{background:#4b73e0;border-color:#6ea8ff}
-.ma-bulk{position:sticky;top:0;z-index:3;margin:0 0 8px;padding:7px 10px 9px;background:#131d38;border:1px solid rgba(110,168,255,.45);border-radius:14px;box-shadow:0 6px 16px rgba(0,0,0,.35)}
+.ma-bulk{position:sticky;top:0;z-index:3;margin:0 0 8px;padding:12px 12px 12px;background:#131d38;border:1px solid rgba(110,168,255,.45);border-radius:14px;box-shadow:0 6px 16px rgba(0,0,0,.35)}
 .ma-bk-sel{display:grid;grid-template-columns:repeat(auto-fit,minmax(104px,1fr));gap:6px;margin-top:7px}.ma-bk-sel select{width:100%;text-overflow:ellipsis}
 @media (max-height:720px){.ma-bulk{position:static}}
-.ma-bk-h{display:flex;align-items:center;gap:2px;flex-wrap:wrap}.ma-bk-h b{font:800 12.5px Arial,sans-serif;color:#fff;margin-right:auto}
+.ma-bk-h{display:flex;align-items:center;gap:2px;flex-wrap:wrap;margin-top:9px}.ma-bk-l{font:800 9.5px Arial,sans-serif;color:#6e7a9c;text-transform:uppercase;letter-spacing:.06em;margin:0 6px 0 3px}
+.ma-bulk .ma-card-h .core-btn{padding:5px 12px;font-size:11.5px}
 .ma-bk-from{margin:2px 0 0;color:#9fc1ff;font-size:11px}
-.ma-bulk .ma-ld{margin-top:7px}.ma-bulk .ma-in.chg{border-color:#6ea8ff;background:#101b36}
+.ma-bulk .ma-ld{margin-top:9px}.ma-bulk .ma-in.chg{border-color:#6ea8ff;background:#101b36}
 .ma-bk-cap{display:flex;align-items:center;gap:5px;flex-wrap:wrap;margin-top:7px}.ma-bk-cap label{font:800 9.5px Arial,sans-serif;color:#6e7a9c;text-transform:uppercase;letter-spacing:.06em;margin:0 3px}
 .ma-bk-go{display:flex;align-items:center;gap:9px;margin-top:8px}.ma-bk-go span{flex:1;min-width:0;font-size:11px;color:#9fb0dc;line-height:1.35}.ma-bk-go .core-btn{padding:7px 16px;font-size:12px}.ma-bk-go .core-btn:disabled{opacity:.4;cursor:default;pointer-events:none}
 .ma-what{margin:7px 3px 0;color:#7c88ad;font-size:11px;line-height:1.35;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
@@ -3573,23 +3577,26 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     const pickBox = (k) => {
       const ico = KIND_ICO[k] || '🎒', cur = BK.pick[k] || '', opts = [['__default', 'Default loadout'], ['__keep', 'Keep equipped'], ...presetOpts(k)];
       return h('select', { class: 'ma-in' + (cur ? ' chg' : ''), title: cap1(k) + ': ' + (cur ? 'will change' : 'no change'), onclick: stop, onchange: (e) => { if (e.target.value) BK.pick[k] = e.target.value; else delete BK.pick[k]; BK.ph = null; BK.msg = ''; draw(); } },
-        h('option', { value: '' }, `${ico} ${cap1(k)}`), ...opts.map(([v, l]) => h('option', Object.assign({ value: v }, String(v) === String(cur) ? { selected: true } : {}), `${ico} ${l}`)));
+        h('option', { value: '' }, 'No change'), ...opts.map(([v, l]) => h('option', Object.assign({ value: v }, String(v) === String(cur) ? { selected: true } : {}), l)));
     };
     const capChip = (v, label, tip) => h('button', { type: 'button', title: tip, class: 'ma-chip' + (BK.cap === v ? ' on' : ''), onclick: (e) => { stop(e); BK.cap = BK.cap === v ? '' : v; BK.ph = null; BK.msg = ''; draw(); } }, label);   // tap again to clear
     const plan = [...kinds.filter((k) => BK.pick[k]).map((k) => { const o = [['__default', 'default loadout'], ['__keep', 'keep equipped'], ...presetOpts(k)].find(([v]) => v === BK.pick[k]); return `${cap1(k)} → ${o ? o[1] : '…'}`; }),
       ...(BK.cap ? [{ max: 'Cap → max loot', exp: 'Cap → EXP cap', skip: 'Cap → skip', num: 'Cap → ' + fmtNum(BK.n) }[BK.cap]] : [])].join(' · ');
     const ok = n && chg, go = btn(ok ? `Apply to ${n} boss${n === 1 ? '' : 'es'}` : 'Apply', ok ? 'success' : 'soft', applyBulk); go.disabled = !ok;   // greyed out until there is something to apply; Cancel is the way out
     return h('div', { class: 'ma-bulk' },
-      h('div', { class: 'ma-bk-h' }, h('b', {}, n ? `☑ ${n} selected` : '☑ Tap bosses to select'),
+      h('div', { class: 'ma-card-h' }, h('span', { class: 'ma-ico' }, '🎒'),
+        h('div', { class: 'ma-card-t' }, h('b', {}, BK.from ? `Copy from ${BK.from}` : 'Apply to several bosses'), h('small', {}, n ? `${n} boss${n === 1 ? '' : 'es'} selected` : 'Tap bosses below to select them')),
+        btn('Cancel', 'soft', endBulk)),
+      h('div', { class: 'ma-bk-h' }, h('span', { class: 'ma-bk-l' }, 'Select'),
         lnk('All shown', 'Select every boss in the list below (it follows the filter)', () => toggleSel(shownDefs(sec), true)),
         lnk('Farming', 'Select the bosses that are switched on', () => toggleSel(Roster.list.filter((d) => Roster.canon(d) === d && isOn(d)), true)),
         lnk('None', 'Clear the selection', () => toggleSel([...BK.sel].map((l) => Roster.get(l)).filter(Boolean), false))),
       BK.from ? h('div', { class: 'ma-bk-from' }, `Loadout and cap copied from ${BK.from}${BK.ph ? ', phase by phase' : ''}. Select the bosses that should get it.`) : null,
-      h('div', { class: 'ma-bk-sel' }, ...kinds.map(pickBox)),
+      kinds.length ? loadoutGrid(pickBox) : null,
       h('div', { class: 'ma-bk-cap' }, h('label', {}, '🎯 Cap'),
         capChip('max', 'Max loot', 'Cap at the highest loot level'), capChip('exp', 'EXP cap', 'Cap at the damage that reaches the EXP cap'), capChip('skip', 'Skip', 'Cap 0: the boss is skipped'), capChip('num', 'Set…', 'Type a number'),
         BK.cap === 'num' ? num(() => BK.n, (v) => { BK.n = v; BK.ph = null; }, { fmt: fmtNum, w: 90 }) : null),
-      h('div', { class: 'ma-bk-go' }, go, btn('Cancel', 'soft', endBulk), h('span', {}, BK.msg || (plan ? plan + (n ? '' : ' · now select bosses') : 'Pick a cap or a loadout to apply. Anything you leave alone stays as it is.'))));
+      h('div', { class: 'ma-bk-go' }, go, h('span', {}, BK.msg || (plan ? plan + (n ? '' : ' · now select bosses') : 'Pick a cap or a loadout to apply. Anything you leave alone stays as it is.'))));
   }
   function waveGroups(defs) {
     const groups = new Map();
@@ -3665,8 +3672,8 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     const kinds = Presets.pickKinds(), box = h('div', {}), fill = () => { box.replaceChildren(...bossSections(sec)); Object.keys(badges).forEach((id) => { badges[id].textContent = badge(id); }); };
     out.push(h('div', { class: 'ma-tool' }, h('input', { class: 'ma-search', placeholder: '🔎 Filter bosses…', value: ui.filter || '', oninput: (e) => { ui.filter = e.target.value; saveUi(); fill(); } }),
       kinds.length || Presets.available('best') ? h('button', { type: 'button', class: 'ma-tbtn' + (ui.open.loadout || BK.on ? ' on' : ''), title: 'How bosses get their gear, pets, crystals and sigils — and apply a setup to several bosses', onclick: () => { ui.open.loadout = !(ui.open.loadout || BK.on); if (!ui.open.loadout && BK.on) endBulk(); saveUi(); draw(); } }, '🎒 Loadout' + (Presets.available('best') ? (cfg.autoBuild.enabled ? ' · Auto' : ' · Saved') : '')) : null));
-    if ((kinds.length || Presets.available('best')) && (ui.open.loadout || BK.on)) out.push(loadoutPanel());
-    if (BK.on) out.push(bulkBar(sec));
+    if (BK.on) out.push(bulkBar(sec));                                // selecting: this ONE panel (it wears the Loadout card's look); otherwise the Loadout card
+    else if ((kinds.length || Presets.available('best')) && ui.open.loadout) out.push(loadoutPanel());
     fill(); out.push(box);
     return out;
   }
