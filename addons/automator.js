@@ -3107,10 +3107,10 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
 .ma-rg-n{position:relative;z-index:1;width:12px;height:12px;margin-left:2px;box-sizing:border-box;border-radius:50%;background:#131c36;border:2px solid #34416b}
 .ma-rg.got .ma-rg-n{background:#4b73e0;border-color:#6ea8ff}.ma-rg.on .ma-rg-n{background:#dce9ff;border-color:#6ea8ff;box-shadow:0 0 0 3px rgba(110,168,255,.3)}
 .ma-rg:hover{background:rgba(110,168,255,.08)}.ma-rg.on{background:linear-gradient(90deg,rgba(75,115,224,.24),rgba(75,115,224,.05));box-shadow:inset 0 0 0 1px rgba(110,168,255,.45)}
-.ma-rg-b{display:flex;flex-direction:column;align-items:flex-start;gap:1px}.ma-rg-v{display:flex;align-items:center;gap:4px}.ma-rg-b small{font:700 9.5px Arial,sans-serif;color:#6e7a9c;white-space:nowrap}.ma-rg.got .ma-rg-b small{color:#8fb4ff}.ma-rg-b b{font:800 14px Arial,sans-serif;color:#7c89b2}.ma-rg.got .ma-rg-b b{color:#fff}.ma-rg.exp .ma-rg-b b{color:#d9c4ff}
+.ma-rg-b{display:flex;flex-direction:column;align-items:flex-start;gap:1px}.ma-rg-v{display:flex;align-items:center;gap:4px}.ma-rg-b b{font:800 14px Arial,sans-serif;color:#7c89b2}.ma-rg.got .ma-rg-b b{color:#fff}.ma-rg.exp .ma-rg-b b{color:#d9c4ff}
 .ma-rg-i{display:flex;flex-wrap:wrap;gap:5px 6px;justify-content:flex-start;align-items:center;min-width:0}
-.ma-it{display:inline-flex;align-items:center;gap:5px;min-width:0;opacity:.55;border-radius:8px;padding-right:7px}.ma-it.new{opacity:1;background:rgba(110,168,255,.12)}
-.ma-rg:not(.got) .ma-it{opacity:.35;filter:grayscale(.8)}.ma-rg:not(.got) .ma-it.new{opacity:.65}
+.ma-it{display:inline-flex;align-items:center;gap:5px;min-width:0;border-radius:8px;padding-right:7px;background:rgba(110,168,255,.12)}
+.ma-rg:not(.got) .ma-it{opacity:.4;filter:grayscale(.8);background:none}
 .ma-it .ma-ti{width:26px;height:26px;aspect-ratio:auto;flex:0 0 26px;border-radius:7px}.ma-rg.got .ma-ti{border-color:rgba(110,168,255,.7)}
 .ma-it em{font:700 10.5px Arial,sans-serif;font-style:normal;color:#cfe0ff;max-width:110px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .ma-rg .ma-none{justify-self:start;color:#d9c4ff;background:rgba(160,122,216,.14);border:1px solid rgba(160,122,216,.35);border-radius:999px;font:700 10px Arial,sans-serif;padding:3px 8px;letter-spacing:.03em}
@@ -3450,14 +3450,13 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     const topReq = rungs[rungs.length - 1].req;
     const at = new Map();                                              // item -> every level that drops it (for the hover text)
     rungs.forEach((r) => r.items.forEach((nm) => { const e = at.get(nm) || []; e.push(r.req); at.set(nm, e); }));
-    const seen = new Set();                                            // a loot ladder: one row per level; loot first unlocked at that level shows its name, loot carried over from a lower level is just a dim icon
+    // a loot ladder: one row per level; levels the cap reaches are bright, the rest are greyed out
     const rows = rungs.map((r) => {
-      const fresh = r.items.map((nm) => !seen.has(nm)); r.items.forEach((nm) => seen.add(nm));
-      const MAXT = 12, tiles = r.items.slice(0, MAXT).map((nm, k) => h('span', { class: 'ma-it' + (fresh[k] ? ' new' : ''), title: `${nm}\nDrops at ${at.get(nm).map(short).join(' · ')} damage` }, h('span', { class: 'ma-ti' }, lootIcon(nm)), h('em', {}, nm)));
+      const MAXT = 12, tiles = r.items.slice(0, MAXT).map((nm) => h('span', { class: 'ma-it', title: `${nm}\nDrops at ${at.get(nm).map(short).join(' · ')} damage` }, h('span', { class: 'ma-ti' }, lootIcon(nm)), h('em', {}, nm)));
       if (r.items.length > MAXT) tiles.push(h('span', { class: 'ma-it', title: r.items.slice(MAXT).join(', ') }, h('span', { class: 'ma-ti more' }, '+' + (r.items.length - MAXT))));
       return h('div', { class: 'ma-rg' + (r.req <= base ? ' got' : '') + (r.req === base ? ' on' : '') + (r.exp ? ' exp' : ''), title: `Cap at ${fmtNum(r.req)}` + (r.items.length ? ': ' + r.items.join(', ') : ''), onclick: setCap(r.req) },
         h('span', { class: 'ma-rg-n' }),
-        h('div', { class: 'ma-rg-b' }, h('span', { class: 'ma-rg-v' }, h('b', {}, short(r.req)), r.exp ? h('span', { class: 'ma-lvx', title: `Reaches the EXP cap${pctTxt}` }, '★') : null), fresh.some(Boolean) ? h('small', {}, '+' + fresh.filter(Boolean).length + ' new') : null),
+        h('div', { class: 'ma-rg-b' }, h('span', { class: 'ma-rg-v' }, h('b', {}, short(r.req)), r.exp ? h('span', { class: 'ma-lvx', title: `Reaches the EXP cap${pctTxt}` }, '★') : null)),
         tiles.length ? h('div', { class: 'ma-rg-i' }, tiles) : h('span', { class: 'ma-none' }, 'EXP cap'));
     });
     return [head, h('div', { class: 'ma-rgs' }, rows),
