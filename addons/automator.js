@@ -414,12 +414,12 @@ const Status = (() => {
 /* What the build switch is doing right now: Status SWITCHING + Work 'build' = { title, step label, done of total }, so the footer and the Overview
  * show "Switching build for X · Crystals · step 3 of 3" with a bar. start() with no steps shows nothing (everything was already on). */
 const Prog = (() => {
-  let steps = [], title = '', prev = '';
+  let steps = [], title = '', prev = '', mine = 'SWITCHING';
   const show = (i) => Work.set('build', title, i, steps.length, steps[i] || '');
   return {
-    start(t, list) { if (!list || !list.length) { steps = []; return; } steps = list.slice(); title = t; prev = Status.get(); Status.set('SWITCHING'); show(0); },
+    start(t, list, status) { if (!list || !list.length) { steps = []; return; } steps = list.slice(); title = t; mine = status || 'SWITCHING'; prev = Status.get(); Status.set(mine); show(0); },
     at(label) { if (!steps.length) return; const i = steps.indexOf(label); if (i >= 0) show(i); },
-    end() { if (!steps.length) return; steps = []; Work.clear('build'); if (Status.get() === 'SWITCHING') Status.set(prev && prev !== 'SWITCHING' ? prev : (Run.wanted() ? 'RUNNING' : 'STOPPED')); },
+    end() { if (!steps.length) return; steps = []; Work.clear('build'); if (Status.get() === mine) Status.set(prev && prev !== mine ? prev : (Run.wanted() ? 'RUNNING' : 'STOPPED')); },
   };
 })();
 
@@ -1659,9 +1659,15 @@ const Planner = (() => {
     const keep = curLow ? list.find((t) => t.low === curLow) : null;
     if (keep) return keep;                                                              // finish the boss you are on: leaving it is a build change too
     try {
-      log(`🧭 planning the order for ${list.length} bosses…`, 'info');
+      // Every boss that has no fresh search yet costs one Build Engine search (up to a minute or two each, one after another: the engine does
+      // one at a time). Searches are kept for 15 min, so the next pick is instant. The status shows which boss is being searched.
+      const stale = list.filter((t) => Presets.wanted(t.low, t).best && !((cache.get(t.low) || {}).at > Date.now() - TTL));
+      if (stale.length) { log(`🧭 planning the order for ${list.length} bosses (${stale.length} to search)…`, 'info'); await Promise.all(stale.map((t) => Presets.engineMob(t).catch(() => null))); }
+      const label = (t) => (t.name || t.low).split(/[ ,]/)[0], names = stale.map((t, i) => `${label(t)} (${i + 1}/${stale.length})`);
+      Prog.start('Planning the build order', names, 'PLANNING');
       const items = [], wild = []; let fresh = null;
       for (const t of list) {
+        const si = stale.indexOf(t); if (si >= 0) Prog.at(names[si]);
         const r = await sigFor(t);
         if (r.cur && !fresh) fresh = Plan.sigFromSel(r.cur, crystalNow());
         (r.sig.any ? wild : items).push({ key: t.low, sig: r.sig, t });
@@ -1676,6 +1682,7 @@ const Planner = (() => {
       if (fi) onNow = fi.sig;                                                              // the engine is about to put this build on
       return first;
     } catch (e) { log('⚠️ build planner: ' + esc((e && e.message) || String(e)) + ' — using your order', 'warn'); return list[0]; }
+    finally { Prog.end(); }
   }
   return { on, pick, reset };
 })();
@@ -2973,10 +2980,16 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
 .ma-about{margin:10px 3px 2px;text-align:center;opacity:.8}
 .ma-grp{padding:1px 12px}.ma-sr-w+.ma-sr-w{border-top:1px solid rgba(255,255,255,.05)}
 .ma-sr{display:flex;align-items:center;gap:10px;padding:8px 0}
-.ma-sr-o{display:flex;flex-wrap:wrap;align-items:center;gap:6px 16px;margin:0 0 9px 38px;padding:6px 10px;background:#0d1322;border:1px solid rgba(255,255,255,.05);border-radius:11px}
-.ma-opt{display:inline-flex;align-items:center;gap:7px;color:#aeb9dc;font-size:11.5px}.ma-opt small{color:#6e7a9c;font-size:10.5px}
-.ma-opt .ma-in{width:auto;min-width:60px;padding:4px 8px;font-size:12px}.ma-opt .ma-num .ma-in{width:56px;min-width:0}
-.ma-opt .ma-seg-btn{padding:4px 9px;font-size:11px}
+.ma-sr-o{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px 12px;margin:0 0 10px 38px;padding:10px 12px 11px;background:#0d1322;border:1px solid rgba(255,255,255,.05);border-radius:12px}
+.ma-opt{display:flex;flex-direction:column;align-items:stretch;gap:5px;min-width:0}
+.ma-opt>.ma-opt-l{color:#7f8bb1;font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase}
+.ma-opt.row{flex-direction:row;flex-wrap:wrap;align-items:center;gap:2px 10px}.ma-opt.row>.ma-opt-l{flex:1;color:#c3cdef;font-size:12px;font-weight:600;letter-spacing:0;text-transform:none}.ma-opt.row>small{flex-basis:100%}
+.ma-opt>small{color:#6e7a9c;font-size:10.5px;line-height:1.2}
+.ma-opt .ma-in{width:100%;min-width:0;box-sizing:border-box;padding:6px 9px;font-size:12.5px;border-radius:9px}
+.ma-opt .ma-num{display:flex;width:100%}.ma-opt .ma-num .ma-in{flex:1 1 auto;width:auto}
+.ma-opt .ma-seg{width:100%}.ma-opt .ma-seg-btn{padding:5px 9px;font-size:11px}
+.ma-opt.wide{grid-column:1/-1}
+@media (max-width:420px){.ma-sr-o{grid-template-columns:minmax(0,1fr);margin-left:0}}
 .ma-card.off .ma-ico{opacity:.55}.ma-card.off .ma-card-t b{color:#aeb9dc}
 .ma-card-b .ma-set{padding:6px 0}.ma-card-b .ma-fld{margin:2px 0 4px}
 .ma-fold-t small{margin-left:2px}
@@ -3183,7 +3196,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   const srow = (icon, title, desc, ctl, opts) => { opts = (opts || []).filter(Boolean); return h('div', { class: 'ma-sr-w' },
     h('div', { class: 'ma-sr' }, h('span', { class: 'ma-ico' }, icon), h('div', { class: 'ma-set-t' }, h('b', {}, title), desc ? h('small', {}, desc) : null), ctl),
     opts.length ? h('div', { class: 'ma-sr-o' }, ...opts) : null); };
-  const opt = (label, ctl, hint) => h('div', { class: 'ma-opt' }, h('span', {}, label), ctl, hint ? h('small', {}, hint) : null);
+  const opt = (label, ctl, hint, mode) => h('div', { class: 'ma-opt' + (mode ? ' wide' : '') + (mode === 'row' ? ' row' : '') }, h('span', { class: 'ma-opt-l' }, label), ctl, hint ? h('small', {}, hint) : null);
   const group = (...rows) => h('div', { class: 'ma-card ma-grp' }, ...rows.filter(Boolean));
 
   /* ---- time helpers (server clock) ---- */
@@ -3247,8 +3260,8 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   const selectedEntries = () => { const seen = new Set(), out = []; cfg.targets.forEach((low) => { const d = Roster.get(low); if (!d) return; const c = Roster.canon(d); if (!seen.has(c.low)) { seen.add(c.low); out.push(c); } }); return out.sort((x, y) => rIdx(x.low) - rIdx(y.low)); };
 
   /* ---- footer (always visible): status + Start / Stop ---- */
-  const STATE_TXT = { FIGHTING: 'Fighting', RUNNING: 'Running', SCANNING: '🔎 Scanning bosses', GRAVEYARD: '🪦 Scanning graveyard', WAITING: 'Waiting for a boss', 'NO STAMINA': 'Out of stamina', DUEL: 'Phase duel', SWITCHING: '🎒 Switching build', PAUSED: 'Paused', STOPPED: 'Stopped', FOLLOWER: 'Another tab is running it' };
-  const dotOf = (st) => (!Tab.isMain() ? 'follower' : /FIGHT|RUN|DUEL|SCAN|GRAVE|SWITCH/.test(st) ? 'running' : /WAIT|STAMINA/.test(st) ? 'waiting' : /PAUSE/.test(st) ? 'follower' : '');
+  const STATE_TXT = { FIGHTING: 'Fighting', RUNNING: 'Running', SCANNING: '🔎 Scanning bosses', GRAVEYARD: '🪦 Scanning graveyard', WAITING: 'Waiting for a boss', 'NO STAMINA': 'Out of stamina', DUEL: 'Phase duel', SWITCHING: '🎒 Switching build', PLANNING: '🧭 Planning build order', PAUSED: 'Paused', STOPPED: 'Stopped', FOLLOWER: 'Another tab is running it' };
+  const dotOf = (st) => (!Tab.isMain() ? 'follower' : /FIGHT|RUN|DUEL|SCAN|GRAVE|SWITCH|PLAN/.test(st) ? 'running' : /WAIT|STAMINA/.test(st) ? 'waiting' : /PAUSE/.test(st) ? 'follower' : '');
   function footer() {
     const st = Status.get(), cur = Engine.current(), run = Run.wanted() && !Run.paused();
     const wk = Work.get('build') || Work.get('scan'), sub = wk ? (wk.step ? `${wk.label} · ${wk.step}${wk.total > 1 ? ` (${Math.min(wk.done + 1, wk.total)}/${wk.total})` : ''}` : wk.label) : cur ? '🎯 ' + cur.name : (Tab.isMain() ? (cfg.targets.length ? 'no target right now' : 'no bosses selected') : 'this tab is following');
@@ -3279,7 +3292,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
         h('div', { class: 'ma-bar' + (!bw && pct >= 100 ? ' done' : '') }, h('i', { style: { width: pct.toFixed(1) + '%' } }))));
     } else {
       const l = Diag.last(), why = l.reason ? `${l.reason}${l.detail ? ' — ' + l.detail : ''}` : '', wk = Work.get('build') || Work.get('scan');
-      out.push(h('div', { class: 'ma-hero' }, h('div', { class: 'ma-hero-top' }, h('span', { class: 'ma-ico', style: { width: '50px', height: '50px', fontSize: '24px', borderRadius: '13px' } }, wk ? (st === 'GRAVEYARD' ? '🪦' : st === 'SWITCHING' ? '🎒' : '🔎') : Run.wanted() ? '⏳' : '💤'),
+      out.push(h('div', { class: 'ma-hero' }, h('div', { class: 'ma-hero-top' }, h('span', { class: 'ma-ico', style: { width: '50px', height: '50px', fontSize: '24px', borderRadius: '13px' } }, wk ? (st === 'GRAVEYARD' ? '🪦' : st === 'SWITCHING' ? '🎒' : st === 'PLANNING' ? '🧭' : '🔎') : Run.wanted() ? '⏳' : '💤'),
         h('div', { class: 'ma-hero-t' }, h('div', { class: 'ma-state' }, h('i', { class: 'ma-dot ' + dotOf(st) }), STATE_TXT[st] || st),
           h('div', { class: 'ma-hero-name' }, wk ? wk.label : !cfg.targets.length ? 'No bosses selected' : Run.wanted() ? 'No target right now' : 'Ready when you are'),
           h('div', { class: 'ma-hero-sub' }, wk ? (wk.total ? `${wk.step ? wk.step + ' · ' : ''}Step ${Math.min(wk.done + 1, wk.total)} of ${wk.total}` : 'One moment…') : !cfg.targets.length ? 'Pick what to farm in the Bosses tab.' : Run.wanted() && nextIn != null ? 'Next check in ' + fmtDur(nextIn) + (why ? ' · last skip: ' + why : '') : (why ? 'Last skip: ' + why : 'Press Start to begin.')))),
@@ -3455,7 +3468,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     else body.push(note('No gear / crystal / pet preset addon is loaded.'));
     const o = originRow(); if (o) body.push(o);
     const autoBtn = h('div', { class: 'ma-seg' }, h('button', { type: 'button', disabled: !has || null, title: has ? 'Picks the best gear, pets, crystals and sigils for each boss, so the presets are off' : 'Needs the Build Engine addon', class: 'ma-seg-btn' + (auto ? ' on' : ''), onclick: (e) => { stop(e); if (!has) return; AB.enabled = !AB.enabled; if (AB.enabled && BK.on) { endBulk(); } reset(); saveCfg(); draw(); } }, '🤖 Auto'));
-    if ((!auto && kinds.length) || BK.on) body.push(h('div', { class: 'ma-actions ma-block' }, btn(BK.on ? 'Done selecting' : 'Apply to several bosses…', 'soft', () => { if (BK.on) endBulk(); else { BK.on = true; ui.sel = ''; saveUi(); draw(); } })));   // Auto picks for every boss, and with no presets there is nothing to give them
+    if ((!auto && kinds.length) || BK.on) body.push(h('div', { class: 'ma-actions ma-block' }, btn(BK.on ? 'Done selecting' : 'Apply to several bosses…', BK.on ? 'soft' : 'success', () => { if (BK.on) endBulk(); else { BK.on = true; ui.sel = ''; saveUi(); draw(); } })));   // Auto picks for every boss, and with no presets there is nothing to give them
     return h('div', { class: 'ma-card' }, h('div', { class: 'ma-card-h' }, h('span', { class: 'ma-ico' }, '🎒'), h('div', { class: 'ma-card-t' }, h('b', {}, 'Loadout'), h('small', {}, 'How a boss gets its gear, pets, crystals and sigils')), autoBtn), h('div', { style: { marginTop: '9px' } }, ...body));
   }
 
@@ -3546,7 +3559,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     const capChip = (v, label, tip) => h('button', { type: 'button', title: tip, class: 'ma-chip' + (BK.cap === v ? ' on' : ''), onclick: (e) => { stop(e); BK.cap = BK.cap === v ? '' : v; BK.ph = null; BK.msg = ''; draw(); } }, label);   // tap again to clear
     const plan = [...kinds.filter((k) => BK.pick[k]).map((k) => { const o = [['__default', 'default loadout'], ['__keep', 'keep equipped'], ...presetOpts(k)].find(([v]) => v === BK.pick[k]); return `${cap1(k)} → ${o ? o[1] : '…'}`; }),
       ...(BK.cap ? [{ max: 'Cap → max loot', exp: 'Cap → EXP cap', skip: 'Cap → skip', num: 'Cap → ' + fmtNum(BK.n) }[BK.cap]] : [])].join(' · ');
-    const ok = n && chg, go = btn(ok ? `Apply to ${n} boss${n === 1 ? '' : 'es'}` : 'Apply', 'success', applyBulk); go.disabled = !ok;   // greyed out until there is something to apply; Cancel is the way out
+    const ok = n && chg, go = btn(ok ? `Apply to ${n} boss${n === 1 ? '' : 'es'}` : 'Apply', ok ? 'success' : 'soft', applyBulk); go.disabled = !ok;   // greyed out until there is something to apply; Cancel is the way out
     return h('div', { class: 'ma-bulk' },
       h('div', { class: 'ma-bk-h' }, h('b', {}, n ? `☑ ${n} selected` : '☑ Tap bosses to select'),
         lnk('All shown', 'Select every boss in the list below (it follows the filter)', () => toggleSel(shownDefs(sec), true)),
@@ -3687,8 +3700,8 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
       caption('Fighting'),
       group(
         srow('✨', 'Class skill', (cs ? cs.label : 'Not detected') + ' · cast before each World Breaker slash', sw(() => cfg.useClassSkill, (v) => { cfg.useClassSkill = v; }), skillOn ? [
-          !cs ? opt('Class', seg([['warrior', 'Warrior'], ['cleric', 'Cleric'], ['hunter', 'Hunter'], ['mage', 'Mage']], cfg.classOverride, (v) => { cfg.classOverride = v; })) : null,
-          opt('Pierce shielded mobs', sw(() => cfg.sideMob.enabled, (v) => { cfg.sideMob.enabled = v; }, { redraw: false, sm: true }), `${cs ? cs.label : 'class skill'} on a regular mob`)] : null),
+          !cs ? opt('Class', seg([['warrior', 'Warrior'], ['cleric', 'Cleric'], ['hunter', 'Hunter'], ['mage', 'Mage']], cfg.classOverride, (v) => { cfg.classOverride = v; }), null, true) : null,
+          opt('Pierce shielded mobs', sw(() => cfg.sideMob.enabled, (v) => { cfg.sideMob.enabled = v; }, { redraw: false, sm: true }), `${cs ? cs.label : 'class skill'} on a regular mob`, 'row')] : null),
         srow('⚔️', 'Phase duels', 'Fought automatically', sw(() => cfg.autoDuel, (v) => { cfg.autoDuel = v; }, { redraw: false })),
         srow('⏸️', 'Pause server auto-farm', 'So the two never fight over stamina', sw(() => cfg.autoFarmControl, (v) => { cfg.autoFarmControl = v; }, { redraw: false }))),
       caption('Advanced'),
