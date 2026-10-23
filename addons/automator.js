@@ -85,7 +85,7 @@ const DEFAULT_CFG = {
   targets: [],                         // nameLow list = enabled bosses, in priority order (first alive + uncapped wins)
   bosses: {},                          // nameLow -> { cap, targeting:'auto|normal|shielded', <kind>:'' | '__keep' | presetId (one per preset kind offered: gear, crystal, pet, …; '' = use the default loadout), schedule:[{ at:'HH:MM', cap }] (server time) }
   loadout: {},                         // preset kind -> preset id applied on every boss without a pick of its own ('' = keep what is equipped)
-  autoBuild: { enabled: false, order: false, crystals: true, sigils: true, restore: false },   // enabled: every boss (wave, Generals, dungeon bosses and mobs) gets the Build Engine's best gear + pets. crystals: Auto-assign Best on the gear that is on. sigils: move with the pets. order: fewest build changes between bosses. restore: put your own build back when the run stops
+  autoBuild: { enabled: false, order: true, crystals: true, sigils: true, restore: true },   // enabled: every boss (wave, Generals, dungeon bosses and mobs) gets the Build Engine's best gear + pets. crystals: Auto-assign Best on the gear that is on. sigils: move with the pets. order: fewest build changes between bosses. restore: put your own build back when the run stops
   defaultBossCap: 3_000_000_000,
   maxTier: 'WORLD_BREAKER',            // always the strongest; pickTier steps down only when less is left under the cap
   classOverride: 'auto', useClassSkill: true,
@@ -112,7 +112,7 @@ function mergeCfg(saved) {
   const d = JSON.parse(JSON.stringify(DEFAULT_CFG)), s = saved && typeof saved === 'object' ? saved : {};
   const out = Object.assign(d, s);
   for (const k of ['mana', 'hp', 'sideMob', 'autoLoot', 'autoBuild']) out[k] = Object.assign({}, DEFAULT_CFG[k], s[k] || {});
-  { const ab = out.autoBuild; ab.enabled = !!ab.enabled; ab.order = !!ab.order; ab.crystals = ab.crystals !== false; ab.sigils = ab.sigils !== false; ab.restore = !!ab.restore; }
+  { const ab = out.autoBuild; ab.enabled = !!ab.enabled; ab.order = ab.crystals = ab.sigils = ab.restore = true; }   // only Auto is a choice: fewest changes, best crystals, sigils following the pets and putting your build back are always on (old saves with them off are overridden)
   delete out.sideMob.locked; delete out.sideMob.lockedKey; delete out.sideMob.source;      // (old picks: the pierce is automatic now)
   out.autoLoot.mode = 'toLevel';                                     // claims only what levels you up: not a setting any more
   out.parts = Object.assign({}, DEFAULT_CFG.parts); Object.keys(out.parts).forEach((k) => { out.parts[k] = true; });   // modules are always on
@@ -425,7 +425,7 @@ const Run = (() => {
     persist(false); pausedBy.clear(); Engine.halt(); Kernel.engineStop();
     log('🛑 ' + (reason || 'stopped'), 'info'); Status.set('STOPPED'); UI.dirty();
     if (Tab.isMain()) AF.resumeIfWePaused('stopped').catch(() => {});
-    if (Tab.isMain() && cfg.autoBuild && cfg.autoBuild.restore && Presets.origin.get()) Presets.restore('the run stopped').catch(() => {});
+    if (Tab.isMain() && Presets.origin.get()) Presets.restore('the run stopped').catch(() => {});
   }
   function pause(why) { pausedBy.add(why); Engine.halt(); Status.set('PAUSED'); UI.dirty(); }
   function resume(why) { pausedBy.delete(why); if (wanted && !pausedBy.size) Kernel.engineStart(true); UI.dirty(); }
@@ -1697,7 +1697,7 @@ const SideMob = (() => {
  * reply is never retried instantly.
  */
 const Engine = (() => {
-  let token = 0, loopRunning = false, forceScan = true, current = null, curLow = '', idleSince = 0, wake = false;
+  let token = 0, loopRunning = false, forceScan = true, current = null, curLow = '', idleSince = 0, wake = false, idleRestoreAt = 0;
   let skillOffUntil = 0, stallLogAt = 0, lastFightAt = 0;
   const skip = new Map(), fails = new Map(), capLogged = new Set();
   const live = (tk) => tk === token && Run.active();
@@ -1934,6 +1934,9 @@ const Engine = (() => {
           Status.set('WAITING');
           Diag.skip('no-target', `${cfg.targets.length} selected — none alive and under its cap`);
           if (now - idleSince > 15000) await AF.resumeIfWePaused('nothing to fight');
+          if (now - idleSince > 20000 && now - idleRestoreAt > 300000 && Tab.isMain() && Presets.origin.get()) {   // nothing queued and nothing in action: your own build goes back (a failed try waits 5 min)
+            idleRestoreAt = now; await Presets.restore('nothing to fight'); if (!live(tk)) break;
+          }
           const next = Scan.nextDueIn();
           await sleepLive(tk, Math.min(5000, Math.max(500, Number.isFinite(next) ? next : 5000)));
           continue;
@@ -2898,7 +2901,7 @@ const Panel = (() => {
 /* segmented + chips: pills */
 .ma-seg{display:flex;gap:4px}.ma-seg.full .ma-seg-btn{flex:1}
 .ma-seg-btn{background:#0d1322;border:1px solid #27324f;color:#aeb9dc;font:700 11.5px Arial,sans-serif;padding:5px 11px;border-radius:999px;cursor:pointer;transition:.15s;white-space:nowrap}
-.ma-seg-btn:hover{border-color:#3b4a73}.ma-seg-btn.on{background:rgba(75,115,224,.2);border-color:#6ea8ff;color:#d6e5ff}
+.ma-seg-btn:disabled{opacity:.45;cursor:not-allowed}.ma-seg-btn:hover{border-color:#3b4a73}.ma-seg-btn.on{background:rgba(75,115,224,.2);border-color:#6ea8ff;color:#d6e5ff}
 .ma-chips{display:flex;gap:4px;flex-wrap:wrap}
 .ma-chip{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:#0d1322;border:1px solid #27324f;color:#9caad0;font:700 11.5px Arial,sans-serif;padding:5px 11px;border-radius:999px;cursor:pointer;transition:.15s}
 .ma-chip:hover{border-color:#3b4a73;color:#cfd8f7}.ma-chip.on{background:rgba(75,115,224,.2);border-color:#6ea8ff;color:#d6e5ff}
@@ -3359,8 +3362,8 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
       m.kind !== 'wave' && tOpen ? scheduleEditor(low) : null);
   }
   /* ---- Loadout: the one place for how builds are chosen ---------------------------------------------------------------
-   * Build: 🤖 Auto best (the engine picks gear + pets for each boss; crystals and sigils follow) or 📌 Saved presets (the default
-   * gear / crystal / pet presets). Under it only what belongs to the chosen mode. "Apply to several bosses" opens the tick-and-apply bar. */
+   * The default gear / crystal / pet presets, plus one 🤖 Auto best button (top right): the engine picks gear + pets for each boss, crystals and
+   * sigils follow. Fewest build changes and putting your build back are always on. "Apply to several bosses" opens the tick-and-apply bar. */
   const ageTxt = (t) => { const m = Math.max(0, Math.round((Date.now() - t) / 60000)); return m < 1 ? 'just now' : m < 60 ? m + ' min ago' : m < 1440 ? Math.round(m / 60) + ' h ago' : Math.round(m / 1440) + ' d ago'; };
   let restoring = false, restoreMsg = '';
   function originRow() {
@@ -3374,23 +3377,19 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   }
   function loadoutPanel() {
     const AB = cfg.autoBuild, has = Presets.available('best'), kinds = Presets.pickKinds(), reset = () => { Presets.forget(); Planner.reset(); };
-    const auto = has && AB.enabled, flag = (title, desc, key) => setting(title, desc, sw(() => AB[key], (v) => { AB[key] = v; reset(); }));
-    const body = [seg([['auto', '🤖 Auto best', 'The Build Engine picks the best gear + pets for each boss; the presets below are off'], ['saved', '📌 Saved presets', 'Equip the gear / crystal / pet presets you choose']], auto ? 'auto' : 'saved', (v) => { if (v === 'auto' && !has) return; AB.enabled = v === 'auto'; reset(); }, { full: true })];
+    const auto = has && AB.enabled;
+    const body = [];
     if (!has) body.push(note('🤖 Auto needs the Build Engine addon, and it is not loaded.'));
-    body.push(note(auto ? 'Auto best: every boss gets the best gear + pets for it, so the presets are off. A boss you pick for yourself keeps its pick.' : 'Equipped before every boss that has no pick of its own. Open a boss to change it just for that boss.'));
+    body.push(note(auto ? 'Auto best: every boss gets the best gear + pets for it (best crystals on that gear, sigils following the pets), so the presets are off. A boss you pick for yourself keeps its pick. When nothing is left to fight, your own build is put back.' : 'Equipped before every boss that has no pick of its own. Open a boss to change it just for that boss. When nothing is left to fight, your own build is put back.'));
     if (kinds.length) body.push(loadoutGrid((k) => {
       const off = auto && (k !== 'crystal' || AB.crystals !== false);           // Auto is choosing it: the dropdown says so instead of showing a preset
       return dropdown(off ? [['', k === 'crystal' ? '🤖 Best crystals on the gear' : '🤖 Auto best']] : [['', 'Keep equipped'], ...presetOpts(k)], off ? '' : (cfg.loadout || {})[k] || '', (v) => { cfg.loadout = cfg.loadout || {}; if (v) cfg.loadout[k] = v; else delete cfg.loadout[k]; reset(); }, off);
     }));
     else body.push(note('No gear / crystal / pet preset addon is loaded.'));
-    if (has) body.push(flag('🧭 Fewest build changes', 'Fight the bosses that need the same, or nearly the same, build back to back: always the cheapest chain of changes, whatever order the bosses are listed in', 'order'));
-    if (auto) body.push(
-      flag('💎 Best crystals on the best armor', 'After the gear changes, the best attack + defense crystals go on the gear that is on (Crystal Presets’ Auto-assign Best). Off: the crystal preset above is used', 'crystals'),
-      flag('✨ Sigils follow the pets', 'The sigils and orbs of the pets that leave go to the pets that take their place', 'sigils'));
-    body.push(flag('↩ Put my build back when I stop', 'Gear, pets, crystals (each on its own gear) and sigils return to what you had before the run', 'restore'));
     const o = originRow(); if (o) body.push(o);
+    const autoBtn = h('div', { class: 'ma-seg' }, h('button', { type: 'button', disabled: !has || null, title: has ? 'The Build Engine picks the best gear + pets for each boss; the presets below are off' : 'Needs the Build Engine addon', class: 'ma-seg-btn' + (auto ? ' on' : ''), onclick: (e) => { stop(e); if (!has) return; AB.enabled = !AB.enabled; reset(); saveCfg(); draw(); } }, '🤖 Auto best'));
     body.push(h('div', { class: 'ma-actions', style: { margin: '9px 0 0' } }, btn(BK.on ? '✕ Done selecting' : '☑ Apply to several bosses…', BK.on ? 'soft' : '', () => { if (BK.on) endBulk(); else { BK.on = true; ui.sel = ''; saveUi(); draw(); } })));
-    return h('div', { class: 'ma-card' }, h('div', { class: 'ma-card-h' }, h('span', { class: 'ma-ico' }, '🎒'), h('div', { class: 'ma-card-t' }, h('b', {}, 'Loadout'), h('small', {}, 'How a boss gets its gear, pets, crystals and sigils'))), h('div', { style: { marginTop: '9px' } }, ...body));
+    return h('div', { class: 'ma-card' }, h('div', { class: 'ma-card-h' }, h('span', { class: 'ma-ico' }, '🎒'), h('div', { class: 'ma-card-t' }, h('b', {}, 'Loadout'), h('small', {}, 'How a boss gets its gear, pets, crystals and sigils')), autoBtn), h('div', { style: { marginTop: '9px' } }, ...body));
   }
 
   /* a boss as a bubble: avatar (dot = state), short name, cap · state, switch. Tap it to select it (one at a time) and open its editor. */
@@ -3619,7 +3618,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
         setting('💧 Mana', null, ctl(dropdown([['S', 'Small · 20'], ['M', 'Medium · 40'], ['L', 'Large · 60'], ['XL', 'XL · 100']], M.type, (v) => { M.type = v; }), sw(() => M.enabled, (v) => { M.enabled = v; }))),
         M.enabled ? sub('Drink at or below', num(() => M.threshold, (n) => { M.threshold = n; }, { w: 52, min: 0, unit: 'MP' })) : null,
         flag('🪦 Auto-loot', 'out of stamina → claims only what levels you up', () => L.enabled, (v) => { L.enabled = v; })),
-      Presets.available('best') ? h('div', { class: 'ma-card' }, setting('🎒 Builds', cfg.autoBuild.enabled ? '🤖 Auto best' + (cfg.autoBuild.order ? ' · fewest changes' : '') : '📌 Saved presets', btn('Open Loadout', 'soft', () => { ui.open.loadout = true; ui.bsec = 'waves'; go('bosses'); }))) : null,
+      Presets.available('best') ? h('div', { class: 'ma-card' }, setting('🎒 Builds', cfg.autoBuild.enabled ? '🤖 Auto best' : '📌 Saved presets', btn('Open Loadout', 'soft', () => { ui.open.loadout = true; ui.bsec = 'waves'; go('bosses'); }))) : null,
       caption('Fighting'),
       h('div', { class: 'ma-card' },
         flag('Class skill' + (cs ? ' · ' + cs.label : ' · not detected'), 'cast before each World Breaker slash', () => cfg.useClassSkill, (v) => { cfg.useClassSkill = v; }),
