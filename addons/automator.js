@@ -3155,15 +3155,16 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
 .ma-link.warn{color:#ff9b9b}.ma-link.warn:hover{color:#ffc4c4;background:rgba(255,120,120,.1)}
 .ma-sched{margin-top:8px;padding:7px 10px;background:#101a33;border:1px solid rgba(255,255,255,.06);border-radius:14px}
 .ma-sub-h{display:flex;align-items:center;gap:8px;color:#c4cdeb;font:700 11.5px Arial,sans-serif;margin-bottom:4px}.ma-sub-h .sp{flex:1}.ma-sub-h small{font-weight:400;color:#6e7a9c}
-.ma-srow{display:grid;grid-template-columns:minmax(0,1.1fr) auto minmax(0,1fr) 24px;align-items:center;gap:7px;margin:4px 0}.ma-srow .arrow{color:#53608a}
-.ma-srow .ma-num{display:flex;width:100%}.ma-srow .ma-num .ma-in{flex:1 1 auto;width:auto;min-width:0}
+.ma-srow{display:grid;grid-template-columns:112px auto minmax(0,1fr) 24px;align-items:center;gap:7px;margin:1px -5px;padding:3px 5px;border-radius:12px}.ma-srow .arrow{color:#53608a}
+.ma-srow.now{background:rgba(61,220,151,.09)}.ma-srow.now .arrow{color:#3ddc97}
+.ma-srow .ma-num{position:relative;display:flex;width:100%}.ma-srow .ma-num .ma-in{flex:1 1 auto;width:auto;min-width:0}
+.ma-srow .ma-num i{position:absolute;right:11px;top:50%;transform:translateY(-50%);pointer-events:none}.ma-srow .ma-num.u .ma-in{padding-right:58px}
 .ma-srow .ma-in,.ma-time{height:30px;box-sizing:border-box}
-.ma-srow.now{background:rgba(61,220,151,.08);box-shadow:0 0 0 3px rgba(61,220,151,.08);border-radius:10px}
-.ma-srow.fixed .ma-tfix,.ma-srow.fixed .ma-cfix{display:flex;align-items:center;height:30px;box-sizing:border-box;min-width:0;padding:0 10px;border-radius:10px;background:rgba(255,255,255,.03);border:1px dashed rgba(255,255,255,.1);color:#8b97bd;font:12.5px Arial,sans-serif}.ma-srow.fixed .ma-tfix{justify-content:center}
 .ma-time{display:flex;align-items:stretch;width:100%;min-width:0;border:1px solid rgba(255,255,255,.12);border-radius:10px;overflow:hidden;background:#101a33;transition:.15s}
 .ma-time:focus-within{border-color:#6ea8ff;box-shadow:0 0 0 2px rgba(110,168,255,.18)}
-.ma-time input{flex:1 1 0;min-width:0;border:none;background:transparent;color:#eef3ff;font:12.5px Arial,sans-serif;font-variant-numeric:tabular-nums;width:auto;padding:0 2px;text-align:center}
-.ma-time input:focus{outline:none;background:rgba(75,115,224,.2)}.ma-time span{display:flex;align-items:center;color:#6e7a9c}
+.ma-time input,.ma-time .t{flex:1 1 0;min-width:0;border:none;background:transparent;color:#eef3ff;font:12.5px Arial,sans-serif;font-variant-numeric:tabular-nums;width:auto;padding:0;text-align:center}
+.ma-time input:focus{outline:none;background:rgba(75,115,224,.2)}.ma-time span{display:flex;align-items:center;justify-content:center;color:#6e7a9c}.ma-time .ma-ampm{display:flex;align-items:center}
+.ma-time.ro{opacity:.45}
 .ma-ampm{flex:0 0 auto;border:none;border-left:1px solid rgba(255,255,255,.12);background:transparent;color:#9fb0e0;font:800 10px Arial,sans-serif;padding:0 10px;cursor:pointer;letter-spacing:.03em}.ma-ampm:hover{background:#18213b;color:#fff}
 .ma-x{background:transparent;border:none;color:#6e7a9c;cursor:pointer;width:24px;height:24px;border-radius:50%;font-size:11px;flex:0 0 auto}.ma-x:hover{background:#1c2644;color:#ff9aa6}
 .ma-add{width:100%;margin-top:3px;background:transparent;border:1px dashed #33406a;color:#9fb0e0;border-radius:12px;padding:5px 0;font:700 11px Arial,sans-serif;cursor:pointer}.ma-add:hover{border-color:#6ea8ff;color:#fff}
@@ -3423,9 +3424,9 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
       timePicker(b.at, (at) => { ovr(low).schedule[i].at = at; sortSave(); }), h('span', { class: 'arrow' }, '→'),
       num(() => b.cap, (n) => { ovr(low).schedule[i].cap = n; saveCfg(); }, { fmt: fmtNum }),
       h('button', { type: 'button', class: 'ma-x', title: 'Remove', onclick: (e) => { stop(e); ovr(low).schedule.splice(i, 1); if (!ovr(low).schedule.length) delete ovr(low).schedule; saveCfg(); draw(); } }, '✕')));
-    const first = h('div', { class: 'ma-srow fixed' + (act < 0 && now != null ? ' now' : '') }, h('span', { class: 'ma-tfix' }, '12:00 AM'), h('span', { class: 'arrow' }, '→'), h('span', { class: 'ma-cfix' }, fmtNum(base) + ' · default'), h('span', {}));
+    const first = h('div', { class: 'ma-srow' + (act < 0 && now != null ? ' now' : '') }, h('div', { class: 'ma-time ro', title: 'Every day starts here' }, h('span', { class: 't' }, '12'), h('span', {}, ':'), h('span', { class: 't' }, '00'), h('span', { class: 'ma-ampm' }, 'AM')), h('span', { class: 'arrow' }, '→'), h('span', { class: 'ma-num u' }, h('input', { class: 'ma-in', disabled: true, value: fmtNum(base), title: 'The default cap: every day starts here' }), h('i', {}, 'default')), h('span', {}));
     return h('div', { class: 'ma-sched' },
-      h('div', { class: 'ma-sub-h' }, 'Server clock', h('span', { class: 'sp' }), h('small', {}, now != null ? fmtClock(now) + ' IST' : 'not read yet')),
+      h('div', { class: 'ma-sub-h' }, 'Server clock', h('span', { class: 'sp' }), h('small', { style: { whiteSpace: 'nowrap' } }, now != null ? fmtClock(now) + ' IST' : 'not read yet')),
       rows.length ? [first, ...rows] : h('div', { class: 'ma-note', style: { margin: '2px 0 6px' } }, 'The cap stays the same all day. Add a change to raise or lower it from a set time. Times follow the game’s server clock (IST) and repeat every day.'),
       rows.length ? h('div', { class: 'ma-note', style: { margin: '4px 2px 6px' } }, now == null ? 'Waiting for the server clock (open any game page).' : nxt ? `Next change at ${fmtClock(nxt.t)} → ${fmtNum(nxt.cap)}, in ${inTxt(nxt.t - now)}.` : 'No more changes today. At 12:00 AM server time the day starts again at the default.') : null,
       h('button', { type: 'button', class: 'ma-add', onclick: (e) => { stop(e); const t = now != null ? hhmm((Math.floor(now / 60) + 1) * 60) : '12:00'; (ovr(low).schedule = ovr(low).schedule || []).push({ at: t, cap: bossCap(low) }); sortSave(); } }, '+ Add a cap change'));
