@@ -32,7 +32,7 @@ Core.module({
   } : {},
   init(Core) {
 'use strict';
-const ID = 'automator', VERSION = '1.10.13';
+const ID = 'automator', VERSION = '1.10.14';
 if (window.__automatorLoaded) { console.warn('[automator] already loaded', window.__automatorLoaded); return null; }
 window.__automatorLoaded = VERSION;
 
@@ -3710,7 +3710,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     const pickMode = BK.on, picked = pickMode && BK.sel.has(def.low);
     const on = isOn(def), op = !pickMode && ui.sel === def.low, ms = Roster.members(def), cap = bossCap(def.low), [txt, kind] = entryState(def), nx = nextChange(def.low), ld = loadoutBits(def);
     const loc = def.kind === 'wave' ? '' : def.locationId ? 'Loc ' + def.locationId : def.locationIds ? 'Loc ' + def.locationIds.join('/') : '';
-    const rl = Relics.info(def.low), bits = [h('span', { class: 'capv' }, cap > 0 ? 'cap ' + short(cap) : 'skipped'), rl && rl.short ? h('span', { class: 'ma-rl', title: `${rl.relic}: ${rl.have}/10 — only ${rl.pct}% of your damage gets through` }, `✨ ${rl.pct}%`) : '', nx ? `→ ${short(nx.cap)} ${fmtClock(nx.t)}` : '', ld.length ? h('span', { title: ld.join('\n') }, '🎒') : '', loc, on ? h('span', { class: 'st-' + (kind || 'x') }, txt) : ''].filter(Boolean);
+    const rl = Relics.info(def.low), bits = [h('span', { class: 'capv' }, cap > 0 ? 'cap ' + short(cap) : 'skipped'), rl && rl.short ? h('span', { class: 'ma-rl', title: `${rl.relic}: ${rl.have}/10 — only ${rl.pct}% of your damage gets through` }, `✨ ${rl.pct}%`) : '', nx ? `→ ${short(nx.cap)} ${fmtClock(nx.t)}` : '', ld.length ? h('span', { title: ld.join('\n') }, '🎒') : '', loc, on && !(cap <= 0 && txt === 'skipped') ? h('span', { class: 'st-' + (kind || 'x') }, txt) : ''].filter(Boolean);   // cap 0 already says "skipped": not twice
     const sub = []; bits.forEach((b, i) => { if (i) sub.push(' · '); sub.push(b); });
     return h('div', { class: 'ma-bb' + (on ? ' on' : '') + (op ? ' open' : '') + (picked ? ' pick' : '') + (rl && rl.short ? ' rlw' : ''), title: def.name + (ld.length ? '\n' + ld.join('\n') : ''),
       onclick: pickMode ? () => toggleSel([def]) : () => { ui.sel = op ? '' : def.low; saveUi(); draw(); if (!op) setTimeout(() => { const e = root && root.querySelector('.ma-ed'); if (e && e.scrollIntoView) e.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); }, 40); } },
