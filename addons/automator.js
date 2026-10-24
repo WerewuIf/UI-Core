@@ -32,7 +32,7 @@ Core.module({
   } : {},
   init(Core) {
 'use strict';
-const ID = 'automator', VERSION = '1.10.11';
+const ID = 'automator', VERSION = '1.10.12';
 if (window.__automatorLoaded) { console.warn('[automator] already loaded', window.__automatorLoaded); return null; }
 window.__automatorLoaded = VERSION;
 
@@ -705,12 +705,15 @@ const LootData = (() => {
   // both ways: loot of a LATER phase that another phase's record knows (phase 1 saw it locked, or phase 2 was read live) shows locked here too
   function wave2(f, rec) {
     if (!rec || !f || f.kind !== 'wave') return rec;
-    const own = ownPhase(f.low), have = new Set((rec.loot || []).map((it) => it && it.name)), extra = [];
+    const own = ownPhase(f.low), have = new Set((rec.loot || []).map((it) => it && it.name)), extra = []; let exp = null;
     for (const m of Roster.members(f)) {
       const o = m.low === f.low ? null : get(m.low); if (!o || o === rec) continue;
       for (const it of o.loot || []) if (it && it.name && it.gp > own && !have.has(it.name)) { have.add(it.name); extra.push(it); }
+      if (!exp && o.expCapDmg > 0) exp = o;
     }
-    return extra.length ? Object.assign({}, rec, { loot: (rec.loot || []).concat(extra) }) : rec;
+    const out = extra.length ? Object.assign({}, rec, { loot: (rec.loot || []).concat(extra) }) : rec;
+    // this phase's own page was not read (or showed no EXP cap): the boss's EXP cap row comes from the phase that was
+    return exp && !(out.expCapDmg > 0) ? Object.assign({}, out, { expCapDmg: exp.expCapDmg, expCapPct: out.expCapPct != null ? out.expCapPct : exp.expCapPct, expPerDmg: out.expPerDmg != null ? out.expPerDmg : exp.expPerDmg, levelReq: out.levelReq || exp.levelReq }) : out;
   }
   // the game's phase number of a boss form: wave bosses have a PvP duel that counts as a phase (our phase 2 = game phase 3). Dungeon bosses have no phase-only loot: old behaviour
   const ownPhase = (low) => { const d = Roster.get(low), i = d ? Roster.members(d).indexOf(d) : 0; return i < 1 || !d || d.kind !== 'wave' ? 1 : i + 2; };
