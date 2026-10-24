@@ -32,7 +32,7 @@ Core.module({
   } : {},
   init(Core) {
 'use strict';
-const ID = 'automator', VERSION = '1.10.17';
+const ID = 'automator', VERSION = '1.10.19';
 if (window.__automatorLoaded) { console.warn('[automator] already loaded', window.__automatorLoaded); return null; }
 window.__automatorLoaded = VERSION;
 
@@ -207,6 +207,25 @@ const Act = (() => {
 const Lane = (() => { let tail = Promise.resolve(), n = 0; return { busy: () => n > 0, run(fn) { n++; const p = tail.then(fn).finally(() => n--); tail = p.catch(() => {}); return p; } }; })();
 
 const withTimeout = (p, ms, dflt) => Promise.race([p, new Promise((res) => setTimeout(() => res(dflt), ms))]);
+// Core.net.fetchText is a bare fetch: a request that never answers parks whoever awaits it, and inside Core.cookies.withMode it also holds
+// the browser-wide cookie lock, so NO tab can scan until it dies (that was the half-finished scan / ~2 min "next check"). This goes through
+// Core.net (cache + the stamina/HP hooks still fire) but the request itself is aborted after FETCH_MS, which releases the lock.
+const FETCH_MS = 20000;
+function netText(url, o, mode) {
+  const href = new URL(url, location.origin).href;
+  const run = () => {
+    const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), FETCH_MS);
+    return fetch(href, { credentials: 'include', cache: 'no-store', signal: ctl.signal })
+      .then((r) => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.text(); })
+      .catch((e) => { throw ctl.signal.aborted ? new Error('timeout after ' + FETCH_MS / 1000 + 's') : e; })
+      .finally(() => clearTimeout(timer));
+  };
+  return Core.net.fetchText(url, Object.assign({}, o, { via: () => (mode ? Core.cookies.withMode(mode, run) : run()) }));
+}
+// syncMe() single-flights one bare fetch, so one hung reply made every later sync hang too. Same page, abortable; Core still reads
+// the numbers off it (net.onText hook), so Core.me.get() is current afterwards.
+let syncJob = null;
+const syncMe = () => syncJob || (syncJob = netText('/game_dash.php', { force: true, ttl: 0 }).catch(() => null).finally(() => { syncJob = null; }));
 // POST through Core.net (keeps the page caches honest). Never throws.
 async function post(url, params) {
   try {
@@ -268,14 +287,14 @@ const Me = {
     if (Date.now() - Me.statsAt < maxAgeMs) return true;
     const read = async (url) => {
       let html;
-      try { html = await Core.net.fetchText(url, { force: true, ttl: 0 }); } catch (e) { Diag.skip('stats-fetch-failed', e.message); return null; }
+      try { html = await netText(url, { force: true, ttl: 0 }); } catch (e) { Diag.skip('stats-fetch-failed', e.message); return null; }
       const doc = parseHtml(html), st = Guard.pageState(doc); if (st !== 'ok') { Guard.fault(st, url); return null; }
       return Me.readRes(doc);
     };
     const low = [...cfg.targets, ...Roster.list.map((d) => d.low)].find((l) => bossLoc(l)), loc = low && bossLoc(low);
     const got = (loc && (await read(`/active_wave.php?gate=${loc.gate}&wave=${loc.wave}`))) || (await read('/game_dash.php'));      // game_dash.php has no resource block: only a fallback
     if (got === null) return false;
-    if (Date.now() - Me.syncAt > 60000) { Me.syncAt = Date.now(); try { Promise.resolve(Core.me.sync()).catch(() => {}); } catch (_) { /* */ } }   // stamina / EXP / level came with the dashboard fetch
+    if (Date.now() - Me.syncAt > 60000) { Me.syncAt = Date.now(); try { Promise.resolve(syncMe()).catch(() => {}); } catch (_) { /* */ } }   // stamina / EXP / level came with the dashboard fetch
     Me.statsAt = Date.now();
     return true;
   },
@@ -673,7 +692,7 @@ const Relics = (() => {
   async function refresh() {
     const s = load(); if (s.at > data.at) data = s; if (busy || Date.now() - data.at < TTL) return; busy = true;
     try {
-      const doc = parseHtml(await Core.net.fetchText('/inventory.php', { ttl: 30000, key: 'ma:inv-relics' })), n = {};
+      const doc = parseHtml(await netText('/inventory.php', { ttl: 30000, key: 'ma:inv-relics' })), n = {};
       if (Guard.pageState(doc) !== 'ok' || !doc.querySelector('.slot-box')) return;   // not the inventory: keep the last counts
       Object.values(MAP).forEach((r) => { n[r.toLowerCase() + ' relic'] = 0; }); doc.querySelectorAll('.slot-box').forEach((b) => { const k = String(((b.querySelector('.info-btn') || { dataset: {} }).dataset.name) || '').trim().toLowerCase(), m = /\bx\s*(\d[\d,]*)/i.exec(b.textContent || ''); if (k in n && m) n[k] = parseInt(m[1].replace(/,/g, ''), 10) || 0; });
       data = { at: Date.now(), n }; store.set(data); UI.dirty('relics');
@@ -859,8 +878,10 @@ function pickTier(low, remaining, maxTier, stam) {
   while (idx < floor) { const t = TIER_CHAIN[idx]; if (DmgProfile.est(low, t) <= remaining && SKILLS[t].cost <= stam) break; idx++; }
   return TIER_CHAIN[idx];
 }
+const AF_MSG = /auto.?farm is on|while your auto.?farm/i;   // damage.php: "You can't attack monsters while your auto farm is on."
 function classifyReject(msg) {
   const m = String(msg || '').toLowerCase();
+  if (AF_MSG.test(m)) return { reason: 'autofarm', backoffMs: 0 };
   if (/you are dead|you have died|you died/.test(m)) return { reason: 'player-dead', backoffMs: 0 };
   if (m.includes('pvp duel phase')) return { reason: 'duel-phase' };
   if (/too quickly|slow down|cooldown/.test(m)) return { reason: 'cooldown', backoffMs: 1200 };
@@ -869,6 +890,8 @@ function classifyReject(msg) {
   if (/invalid monster|already dead|not found/.test(m)) return { reason: 'dead' };
   return { reason: 'unknown', backoffMs: 800 };
 }
+
+const spawnAtMs = (e) => { let sk = 0; try { const k = Core.me.server().skew; if (Number.isFinite(k)) sk = k; } catch (_) { /* */ } return e.nextTs * 1000 - sk; };
 
 /* ---- wave scanning: a page only changes the board when it is VALID (signed in, site chrome present) --------------- */
 const Scan = (() => {
@@ -887,8 +910,8 @@ const Scan = (() => {
   // returns true when the page was valid and the board was updated
   async function page(gate, wave) {
     let html;
-    try { html = await Core.net.fetchText(`/active_wave.php?gate=${gate}&wave=${wave}`, { force: true, ttl: 0, key: `ma:wave:${gate}:${wave}`, via: (run) => Core.cookies.withMode('alive', run) }); }
-    catch (e) { Diag.skip('wave-fetch-failed', `${gate}/${wave} ${e.message}`); return false; }
+    try { html = await netText(`/active_wave.php?gate=${gate}&wave=${wave}`, { force: true, ttl: 0, key: `ma:wave:${gate}:${wave}` }, 'alive'); }
+    catch (e) { Diag.skip('wave-fetch-failed', `${gate}/${wave} ${e.message}`); return /timeout/.test(e.message) ? false : null; }   // null: a quick failure (HTTP error / dropped connection): scanNow tries once more at once. A timeout already cost FETCH_MS: no second wait, the next pass retries
     const doc = parseHtml(html);
     const st = Guard.pageState(doc);
     if (st !== 'ok') { Guard.fault(st, `wave ${gate}/${wave}`); return false; }       // login/maintenance = STOP, never "dead"
@@ -929,7 +952,7 @@ const Scan = (() => {
     if (def.kind !== 'wave') return Dungeons.nextCheck(def);
     const e = Board.get(low); if (!e || !e.seenAt) return now;
     if (e.alive) return e.seenAt + cfg.fightScanMs;
-    if (e.nextTs && e.nextTs * 1000 + 120000 > now) return Math.max(e.seenAt + 5000, Math.min(e.nextTs * 1000 - cfg.spawnLeadMs, e.seenAt + cfg.fightScanMs));
+    if (e.nextTs && spawnAtMs(e) + 120000 > now) return Math.max(e.seenAt + 5000, Math.min(spawnAtMs(e) - cfg.spawnLeadMs, e.seenAt + cfg.fightScanMs));
     return e.seenAt + cfg.fightScanMs;
   }
   const dueLows = (force) => cfg.targets.filter((l) => force || nextCheck(l) <= Date.now());
@@ -946,11 +969,17 @@ const Scan = (() => {
     }
     const total = pages.size + dd.length; let n = 0;
     if (force && total) log(`🔎 scanning ${total} place${total === 1 ? '' : 's'} for your bosses…`, 'info');
+    let failed = 0;
     try {
-      for (const loc of pages.values()) { if (!Run.active()) return; Work.set('scan', `Scanning Gate ${loc.gate} · Wave ${loc.wave}`, n++, total); await page(loc.gate, loc.wave); await sleep(150); }
-      if (dd.length) await Dungeons.refresh(dd, (label) => Work.set('scan', label, n++, total));
+      for (const loc of pages.values()) {
+        if (!Run.active()) return; Work.set('scan', `Scanning Gate ${loc.gate} · Wave ${loc.wave}`, n++, total);
+        try { let ok = await page(loc.gate, loc.wave); if (ok === null) ok = await page(loc.gate, loc.wave); if (!ok) failed++; } catch (e) { failed++; Diag.skip('wave-scan-error', `${loc.gate}/${loc.wave} ${e.message}`); log(`⚠️ Gate ${loc.gate} · Wave ${loc.wave} could not be read: ${esc(e.message)}`, 'warn'); }
+        await sleep(150);
+      }
+      if (dd.length) { try { await Dungeons.refresh(dd, (label) => Work.set('scan', label, n++, total)); } catch (e) { failed++; Diag.skip('dungeon-scan-error', e.message); log(`⚠️ dungeon scan failed: ${esc(e.message)}`, 'warn'); } }
     } finally { Work.clear('scan'); }
-    if (force && total) { const up = due.filter((l) => (Board.get(l) || {}).alive === true).length; log(`🔎 scan done · ${up} of ${due.length} boss${due.length === 1 ? '' : 'es'} up · ${((Date.now() - t0) / 1000).toFixed(1)}s`, 'info'); }
+    if (failed && !force) log(`⚠️ scan: ${failed} of ${total} place${total === 1 ? '' : 's'} could not be read — they are tried again on the next pass`, 'warn');
+    if (force && total) { const up = due.filter((l) => (Board.get(l) || {}).alive === true).length; log(`🔎 scan done · ${up} of ${due.length} boss${due.length === 1 ? '' : 'es'} up · ${((Date.now() - t0) / 1000).toFixed(1)}s${failed ? ` · ⚠️ ${failed} could not be read (tried again next pass)` : ''}`, failed ? 'warn' : 'info'); }
   }
   const run = (force) => Lane.run(() => scanNow(force));
   // just this boss's own page (its wave page, or its dungeon): after a phase duel only that boss changed, not the other waves
@@ -967,16 +996,18 @@ const Scan = (() => {
 
 /* ---- auto-farm coordination (crash-safe: the flag is written BEFORE pausing, and recovered on boot) --------------- */
 const AF = (() => {
-  const raw = (url, body) => fetch(url + (body ? '' : '?_=' + Date.now()), body ? { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-Requested-With': 'XMLHttpRequest' }, body } : { credentials: 'include' }).then((r) => r.json()).catch(() => null);
-  const getEnabled = async () => { const j = await raw('/auto_farm_status.php'); return j && j.ok ? j.settings.IS_ENABLED === 1 : null; };
+  const raw = (url, body) => { const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), 15000); return fetch(url + (body ? '' : '?_=' + Date.now()), body ? { method: 'POST', credentials: 'include', signal: ctl.signal, headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-Requested-With': 'XMLHttpRequest' }, body } : { credentials: 'include', signal: ctl.signal }).then((r) => r.json()).catch(() => null).finally(() => clearTimeout(timer)); };
   const set = async (en) => { const j = await Act.run(() => raw('/auto_farm_actions.php', `action=toggle&enabled=${en ? 1 : 0}`)); return !!(j && j.ok); };
   const paused = () => !!(stateStore.get() || {}).afPaused;
+  // Called only when damage.php / the join said "auto farm is on": the site's own reply is the check, so there is no status request per swing
+  // (or per fighting stretch). true = it is off now; false = it could not be turned off (or you disabled "Pause server auto-farm").
   async function pauseIfNeeded() {
-    if (!cfg.autoFarmControl || paused()) return;
-    if ((await getEnabled()) === true) {
-      stateStore.update((s) => { s.afPaused = Date.now(); });
-      if (await set(false)) log('🛑 paused server Auto-Farm', 'info'); else stateStore.update((s) => { s.afPaused = 0; });
-    }
+    if (!cfg.autoFarmControl) return false;
+    const was = paused();
+    if (!was) stateStore.update((s) => { s.afPaused = Date.now(); });       // flag first: a crash between the two steps still gets it resumed on reload
+    if (await set(false)) { log('🛑 paused server Auto-Farm', 'info'); return true; }
+    if (!was) stateStore.update((s) => { s.afPaused = 0; });
+    return false;
   }
   async function resumeIfWePaused(why) {
     if (!paused()) return;
@@ -1030,7 +1061,7 @@ const Potions = (() => {
     const c = cfg.stam; if (!c.enabled || !canUseStam()) return false;
     const r = await Core.potions.stamina({ item: c.item });
     if (r.ok) {
-      try { await Core.me.sync(); } catch (_) { /* */ }
+      try { await syncMe(); } catch (_) { /* */ }
       stats.stamA++; log(`🧪 ${esc(c.item)} ${r.used ? 'used' : 'covered by another script'} · stamina ${Me.stam()}/${Me.maxStam()}`, 'info'); return true;
     }
     if (r.reason === 'none-available') warn(`⚠️ no ${esc(c.item)} left`);
@@ -1050,7 +1081,7 @@ const stats = { hits: 0, dmg: 0, cycles: 0, stamA: 0, stamB: 0, hpUses: 0, mpRef
 /* ---- class detection ---------------------------------------------------------------------------------------------- */
 async function detectClass() {
   try {
-    const doc = parseHtml(await Core.net.fetchText('/classes.php', { ttl: 600000 }));
+    const doc = parseHtml(await netText('/classes.php', { ttl: 600000 }));
     const t = ((doc.querySelector('.section-classes-pill') || {}).textContent || '').toLowerCase();
     const c = ['warrior', 'cleric', 'hunter', 'mage'].find((k) => t.includes(k));
     if (c && cfg.detectedClass !== c) { cfg.detectedClass = c; saveCfg(); log(`🧙 class detected: ${c}`, 'info'); }
@@ -1192,7 +1223,7 @@ const BuildKit = (() => {
   const picPath = (src) => String(src || '').replace(/#\d+$/, '').split('?')[0].replace(/^https?:\/\/[^/]+/, '').replace(/^\//, '');
   async function gearNames() {                                       // picture -> gear name, from the inventory page (the crystals page has the picture only)
     const m = {};
-    try { parseHtml(await Core.net.fetchText('/inventory.php', { ttl: 60000, key: 'ma:inv-gearnames' })).querySelectorAll('.slot-box img[alt]').forEach((im) => { const a = (im.getAttribute('alt') || '').trim(), p = picPath(im.getAttribute('src')); if (a && p && !m[p]) m[p] = a; }); } catch (_) { /* labels fall back to the piece number */ }
+    try { parseHtml(await netText('/inventory.php', { ttl: 60000, key: 'ma:inv-gearnames' })).querySelectorAll('.slot-box img[alt]').forEach((im) => { const a = (im.getAttribute('alt') || '').trim(), p = picPath(im.getAttribute('src')); if (a && p && !m[p]) m[p] = a; }); } catch (_) { /* labels fall back to the piece number */ }
     return m;
   }
   async function runDiff(st, diff, tail) {                              // tail: crystals to take off once the rest is done (the ones a restore frees again)
@@ -1405,10 +1436,10 @@ const Presets = (() => {
   async function engineMob(t) {
     if (!t || t.kind !== 'dungeon' || t.instanceId == null) return t ? bossOf(t) : null;
     const key = t.monsterId + ':' + t.instanceId, hit = dgMobs.get(key);
-    if (hit && Date.now() - hit.at < (hit.mob ? 20 * 60000 : 45000)) return hit.mob ? Object.assign(bossOf(t), hit.mob) : null;
+    if (hit && Date.now() - hit.at < (hit.mob ? 20 * 60000 : 45000)) return hit.mob ? Object.assign({ name: t.name, kind: t.kind }, hit.mob) : null;
     let mob = null;
     try {
-      const html = await Core.net.fetchText(`/battle.php?dgmid=${encodeURIComponent(t.monsterId)}&instance_id=${encodeURIComponent(t.instanceId)}`, { ttl: 60000 });
+      const html = await netText(`/battle.php?dgmid=${encodeURIComponent(t.monsterId)}&instance_id=${encodeURIComponent(t.instanceId)}`, { ttl: 60000 });
       if (Guard.pageState(html) === 'ok') {
         const m = {}, num = (x) => parseInt(String(x).replace(/[^0-9]/g, ''), 10) || 0, doc = parseHtml(html);
         doc.querySelectorAll('.stat-block').forEach((sb) => {          // the same blocks the engine reads on a wave boss's page
@@ -1435,8 +1466,10 @@ const Presets = (() => {
         if (m.atk && m.def) mob = Object.assign({ petDef: 0, eqDef: 0, element: 'None' }, m);
       }
     } catch (_) { mob = null; }
+    if (dgMobs.size > 300) dgMobs.clear();
     dgMobs.set(key, { at: Date.now(), mob });
-    return mob ? Object.assign(bossOf(t), mob) : null;
+    // stats are complete here, so the engine never needs the id: leaving it out lets every mob of the same kind share ONE cached search
+    return mob ? Object.assign({ name: t.name, kind: t.kind }, mob) : null;
   }
   const noBest = (t) => !t;                                           // the engine can search for any boss: wave bosses, Generals, dungeon bosses and mobs alike
   const memoOf = (kind, want, t) => (kind === BEST ? 'best@' + (t && t.monsterId != null ? t.monsterId : '') : String(want));   // best is judged per boss
@@ -1549,7 +1582,7 @@ const Presets = (() => {
         if (kind === BEST && r && r.timing) log(`⏱ ${esc(bossName(low))}: ${timingText(r.timing)}`, 'info');
         if (kind === BEST && sig && !(r && r.ok !== false && r.changed)) Prog.drop(SIG);          // no new pets, so no sigils to move: not a step that is waited for
         if (r && r.ok !== false) {
-          applied[kind] = memo; log(`✅ ${kind === BEST ? 'best gear + pets' : kind + ' preset'} ${r.changed === false ? 'already on' : 'applied'}`, 'ok'); try { await Core.me.sync(); } catch (_) { /* */ } Me.statsAt = 0;
+          applied[kind] = memo; log(`✅ ${kind === BEST ? 'best gear + pets' : kind + ' preset'} ${r.changed === false ? 'already on' : 'applied'}`, 'ok'); try { await syncMe(); } catch (_) { /* */ } Me.statsAt = 0;
           if (kind === 'gear' || (kind === BEST && r.changed)) buildEpoch++;
           if (r.changed !== false) changedAny = true;
           if (kind === 'crystal') await Origin.markCrystals();
@@ -1631,7 +1664,7 @@ const Presets = (() => {
         try { await Origin.markLeft(o.probe); await Origin.markCrystals(); } catch (_) { /* */ }   // what is on now is what WE left (part of the way back): the retry compares against that, not against the old state
         log(`⚠️ not everything went back: ${esc(notes.join(' · '))} — it is still remembered, try again`, 'warn'); return { ok: false, message: notes.join('; ') };
       }
-      Origin.clear(); try { await Core.me.sync(); } catch (_) { /* */ } Me.statsAt = 0;
+      Origin.clear(); try { await syncMe(); } catch (_) { /* */ } Me.statsAt = 0;
       return { ok: true, message: 'your build is back' };
     } catch (e) { log('⚠️ restore: ' + esc((e && e.message) || String(e)), 'warn'); return { ok: false, message: (e && e.message) || String(e) }; }
     finally { ensuring = false; ownUntil = Date.now() + 2500; Prog.end(); }
@@ -1769,7 +1802,7 @@ const Planner = (() => {
   const reset = () => { cache.clear(); lastLog = ''; onNow = null; };
   const crystalNow = () => { const c = Presets.applied().crystal; return c ? String(c).split('@')[0] : null; };
   // -> { sig, cur }   cur = the live selection (from the same search), for the starting point
-  const ckey = (t) => t.low + ':' + (t.monsterId != null ? t.monsterId : '');            // a dungeon swarm is many mobs with one name: one search per kind of mob
+  const ckey = (t) => (t.swarm ? t.low + ':swarm' : t.low + ':' + (t.monsterId != null ? t.monsterId : ''));            // a dungeon swarm is many mobs with one name: one search per kind of mob
   async function sigFor(t) {
     const w = Presets.wanted(t.low, t), crystal = w.crystal != null && w.crystal !== '__best' ? w.crystal : null;   // auto crystals follow the gear: the gear distance already counts them
     if (w.best) {
@@ -1778,7 +1811,7 @@ const Planner = (() => {
         let r = null; const mob = await Presets.engineMob(t);
         try { r = mob ? await withTimeout(Promise.resolve(Core.call('build.best', mob, { mode: OPT_MODE })), SEARCH_MS, null) : null; } catch (_) { r = null; }
         if (r && r.timing && !r.timing.cached) log(`⏱ searched ${esc(t.name)}: ${Presets.timingText(r.timing)}`, 'info');
-        if (r && r.ok !== false && r.best && r.best.sel) { hit = { at: Date.now(), sel: r.best.sel }; cache.set(ckey(t), hit); cur = r.current && r.current.sel; }
+        if (r && r.ok !== false && r.best && r.best.sel) { hit = { at: Date.now(), sel: r.best.sel }; if (cache.size > 200) cache.clear(); cache.set(ckey(t), hit); cur = r.current && r.current.sel; }
         else hit = null;
       }
       if (hit) return { sig: Plan.sigFromSel(hit.sel, crystal), cur };
@@ -1855,7 +1888,7 @@ const SideMob = (() => {
 
   async function waveMob(t) {
     const loc = bossLoc(t.low); if (!loc) return null;
-    let html; try { html = await Lane.run(() => Core.net.fetchText(`/active_wave.php?gate=${loc.gate}&wave=${loc.wave}`, { ttl: 15000, key: `ma:wave:${loc.gate}:${loc.wave}`, via: (run) => Core.cookies.withMode('alive', run) })); } catch (_) { return null; }
+    let html; try { html = await Lane.run(() => netText(`/active_wave.php?gate=${loc.gate}&wave=${loc.wave}`, { ttl: 15000, key: `ma:wave:${loc.gate}:${loc.wave}` }, 'alive')); } catch (_) { return null; }
     const doc = parseHtml(html); if (Guard.pageState(doc) !== 'ok') return null;
     for (const card of doc.querySelectorAll('.monster-container .monster-card, .monster-card')) {
       if (!Scan.cardAlive(card)) continue;
@@ -1903,6 +1936,7 @@ const Engine = (() => {
   let token = 0, loopRunning = false, forceScan = true, current = null, curLow = '', idleSince = 0, wake = false, idleRestoreAt = 0;
   let skillOffUntil = 0, stallLogAt = 0, lastFightAt = 0;
   const skip = new Map(), fails = new Map(), capLogged = new Set();
+  const joinedMon = new Set();                                      // monsters joined this run: the join is sent once, before the first swing, then only again after a "removed due to inactivity" reply
   const live = (tk) => tk === token && Run.active();
   async function sleepLive(tk, ms) {
     const end = Date.now() + ms;
@@ -1956,7 +1990,7 @@ const Engine = (() => {
     if (!e || !def || def.kind !== 'wave' || Roster.members(def).indexOf(def) < 1) return 0;
     if (Board.baseKnown(t.low)) return Board.base(t.low);
     try {
-      const html = await Core.net.fetchText(t.kind === 'dungeon' ? `/battle.php?dgmid=${encodeURIComponent(t.monsterId)}&instance_id=${encodeURIComponent(t.instanceId)}` : `/battle.php?id=${encodeURIComponent(t.monsterId)}`, { force: true, ttl: 0 });
+      const html = await netText(t.kind === 'dungeon' ? `/battle.php?dgmid=${encodeURIComponent(t.monsterId)}&instance_id=${encodeURIComponent(t.instanceId)}` : `/battle.php?id=${encodeURIComponent(t.monsterId)}`, { force: true, ttl: 0 });
       if (Guard.pageState(html) !== 'ok') return 0;
       const doc = parseHtml(html), el = doc.getElementById('yourDamageValue'), chip = Array.from(doc.querySelectorAll('.chip')).find((c) => /^phase dmg/i.test((c.textContent || '').trim()));
       const mine = el ? parseNum(el.textContent, null) : null, ph = chip ? parseNum(chip.textContent.replace(/^[^:]*:/, ''), null) : null;
@@ -1968,21 +2002,35 @@ const Engine = (() => {
     } catch (_) { return 0; }
   }
 
+  // JOIN: once per monster. A reply that never arrived is not remembered (the next swing joins again); a death reply ends the target.
+  async function ensureJoined(t, tk, again) {
+    const jk = targetKey(t), userId = uid();
+    if (!again && joinedMon.has(jk)) return { ok: true };
+    for (let i = 0; i < 2; i++) {
+      const jr = await act(t, () => postForm(t.kind === 'dungeon' ? '/dungeon_join_battle.php' : '/user_join_battle.php',
+        t.kind === 'dungeon' ? { dgmid: t.monsterId, instance_id: t.instanceId, location_id: t.locationId } : { monster_id: t.monsterId, user_id: userId }), cfg.minActionGapMs);
+      if (!live(tk)) return { ok: false, reason: 'halt' };
+      if (jr.text && /invalid monster|already dead/i.test(jr.text)) return { ok: false, reason: 'dead' };
+      if (jr.text && AF_MSG.test(jr.text)) { if (await AF.pauseIfNeeded()) continue; return { ok: false, reason: 'autofarm' }; }
+      if (jr.status === 0) { warnOnce('⚠️ join request failed: ' + esc(jr.text)); return { ok: true }; }
+      if (joinedMon.size > 300) joinedMon.clear();
+      joinedMon.add(jk); return { ok: true };
+    }
+    return { ok: false, reason: 'autofarm' };
+  }
+
   async function swing(t, tk) {
     const raw = bossCap(t.low), cap = raw + await phaseBase(t); let cur = Board.dealt(t);
     if (!(raw > 0) || cur >= cap) return { ok: false, reason: 'capped' };
     const userId = uid();
     if (!userId) return { ok: false, reason: 'auth' };
 
-    // 1) JOIN (every swing, like 3.0.0)
-    const jr = await act(t, () => postForm(t.kind === 'dungeon' ? '/dungeon_join_battle.php' : '/user_join_battle.php',
-      t.kind === 'dungeon' ? { dgmid: t.monsterId, instance_id: t.instanceId, location_id: t.locationId } : { monster_id: t.monsterId, user_id: userId }), cfg.minActionGapMs);
-    if (!live(tk)) return { ok: false, reason: 'halt' };
-    if (jr.text && /invalid monster|already dead/i.test(jr.text)) return { ok: false, reason: 'dead' };
-    if (jr.status === 0) warnOnce('⚠️ join request failed: ' + esc(jr.text));
+    // 1) JOIN (once per monster; see ensureJoined)
+    const jn = await ensureJoined(t, tk, false);
+    if (!jn.ok) return jn;
 
     // 2) CLASS SKILL (optional bonus hit; mana is refilled first when it is low)
-    if (!Me.stamKnown()) { try { await Core.me.sync(); } catch (_) { /* */ } }
+    if (!Me.stamKnown()) { try { await syncMe(); } catch (_) { /* */ } }
     const cls = cfg.useClassSkill ? effectiveClass() : null, cs = cls ? CLASS_SKILLS[cls] : null;
     const wb = pickTier(t.low, Math.max(0, cap - cur), cfg.maxTier, Me.stam()) === 'WORLD_BREAKER';   // the class skill is only cast before World Breaker
     let skillUsed = false;
@@ -2005,6 +2053,8 @@ const Engine = (() => {
             if (!side && c.total > cur) { cur = c.total; Board.confirm(t, c.total); }
             log(`🔮 ${cs.label} → ${side ? 'side mob ' + esc(side.name) : esc(t.name)}`, 'skill'); skillUsed = true; break;
           }
+          if (c.cr.reason === 'autofarm') { if (await AF.pauseIfNeeded()) continue; return { ok: false, reason: 'autofarm' }; }
+          if (!side && SideMob.isRejoin(c.msg)) { const j = await ensureJoined(t, tk, true); if (!j.ok) return j; continue; }
           if (SideMob.isShieldMsg(c.msg)) {
             if (!side) {
               SideMob.mark(t);
@@ -2026,8 +2076,8 @@ const Engine = (() => {
     const attackGap = skillUsed ? cfg.skillToAttackGapMs : (cs && wb ? 600 : 120);
 
     // 3) ATTACK (tier downgrade until the estimated hit fits what is left under the cap and the stamina on hand)
-    if (!Me.stamKnown()) { try { await Core.me.sync(); } catch (_) { /* */ } }
-    let tier = pickTier(t.low, Math.max(0, cap - cur), cfg.maxTier, Me.stam());
+    if (!Me.stamKnown()) { try { await syncMe(); } catch (_) { /* */ } }
+    let tier = pickTier(t.low, Math.max(0, cap - cur), cfg.maxTier, Me.stam()), afTry = 0, rejoinTry = 0;
     for (let attempt = 1; attempt <= 3 && live(tk); attempt++) {
       if (Me.stam() < SKILLS[tier].cost) {
         if (!(await Potions.refillStamina())) return { ok: false, reason: 'stam' };
@@ -2051,6 +2101,8 @@ const Engine = (() => {
       }
       const msg = String(j.message || j.error || (r.status === 0 ? r.text : '') || JSON.stringify(j));
       const cr = classifyReject(msg);
+      if (cr.reason === 'autofarm') { if (afTry++ < 2 && (await AF.pauseIfNeeded())) { attempt--; continue; } return { ok: false, reason: 'autofarm' }; }   // server auto-farm was on: pause it, swing again straight away
+      if (SideMob.isRejoin(msg) && rejoinTry++ < 2) { const j = await ensureJoined(t, tk, true); if (!j.ok) return j; attempt--; continue; }   // kicked for inactivity: join again, swing again
       if (SideMob.isShieldMsg(msg)) {
         SideMob.mark(t);
         if (cs && SideMob.eligible(t)) {
@@ -2066,7 +2118,7 @@ const Engine = (() => {
         return { ok: false, reason: 'shielded', backoffMs: 3000 };
       }
       if (cr.reason === 'stam') {                                   // our stamina number was stale: ask the server, then re-pick
-        try { await Core.me.sync(); } catch (_) { /* */ }
+        try { await syncMe(); } catch (_) { /* */ }
         const t2 = pickTier(t.low, Math.max(0, cap - cur), cfg.maxTier, Me.stam());
         if (t2 === tier && Me.stam() < SKILLS[tier].cost) { if (!(await Potions.refillStamina())) return { ok: false, reason: 'stam' }; }
         tier = pickTier(t.low, Math.max(0, cap - cur), cfg.maxTier, Me.stam()); continue;
@@ -2103,7 +2155,7 @@ const Engine = (() => {
       }
       case 'stam': {
         try { await Loot.onStamStall(); } catch (e) { log('⚠️ stamina-stall loot: ' + e.message, 'warn'); }
-        try { await Core.me.sync(); } catch (_) { /* */ }
+        try { await syncMe(); } catch (_) { /* */ }
         if (Me.stam() >= SKILLS.SLASH.cost) return;                  // a level-up from loot refilled it: never really stalled
         // stamina only comes back on the hour (Core.me.secondsToTick): wait for that, not for a request every 2.5 s
         const secs = (() => { try { return Core.me.secondsToTick(); } catch (_) { return 60; } })();
@@ -2127,6 +2179,9 @@ const Engine = (() => {
         return;
       }
       case 'shielded': await sleepLive(tk, res.backoffMs || 3000); return;
+      case 'autofarm':
+        warnOnce(cfg.autoFarmControl ? '⛔ the site says Auto-Farm is on and pausing it failed' : '⛔ the site says Auto-Farm is on — turn it off, or enable "Pause server auto-farm" in Settings');
+        Diag.skip('auto-farm-on', 'the site refuses attacks while its Auto-Farm is on'); await sleepLive(tk, 3000); return;
       default: {                                                      // unknown / net / mp / cooldown that ran out: log ONCE, then wait
         const k = targetKey(t), n = (fails.get(k) || 0) + 1; fails.set(k, n);
         warnOnce(`⚠️ ${esc(t.name)}: ${res.reason}${res.detail ? ' — ' + esc(String(res.detail).slice(0, 140)) : ''} (try ${n})`);
@@ -2139,7 +2194,7 @@ const Engine = (() => {
 
   async function loop(tk) {
     Status.set('RUNNING'); Work.set('scan', 'Loading your stats…');
-    await Promise.all([withTimeout(Core.me.sync().catch(() => {}), 10000), withTimeout(Me.refresh(0).catch(() => {}), 10000)]);   // bounded: a slow reply can no longer park the start
+    await Promise.all([withTimeout(syncMe().catch(() => {}), 10000), withTimeout(Me.refresh(0).catch(() => {}), 10000)]);   // bounded: a slow reply can no longer park the start
     Work.clear('scan');
     if (!cfg.detectedClass) detectClass().catch(() => {});
     while (live(tk)) {
@@ -2173,7 +2228,6 @@ const Engine = (() => {
           if (!live(tk)) break;
         } else current = t;
         Status.set('FIGHTING');
-        await AF.pauseIfNeeded();
         await Me.refresh(15000);
         if (Potions.hpTrip()) await Potions.heal(`HP ${Me.hp}/${Me.maxHp}`);
         stats.cycles++; lastFightAt = Date.now();
@@ -2194,10 +2248,10 @@ const Engine = (() => {
   function start(force) {
     if (force) forceScan = true;
     if (loopRunning || !Run.active() || isDuelPage()) { poke(); return; }
-    loopRunning = true; token++; idleSince = 0;
+    loopRunning = true; token++; idleSince = 0; joinedMon.clear();
     loop(token).catch((e) => { log('❌ engine stopped: ' + e.message, 'err'); loopRunning = false; });
   }
-  function halt() { token++; loopRunning = false; current = null; curLow = ''; wake = true; }
+  function halt() { token++; loopRunning = false; current = null; curLow = ''; wake = true; joinedMon.clear(); }
   function poke(force) { if (force) forceScan = true; wake = true; }
   return { start, halt, poke, current: () => current, isLooping: () => loopRunning, scanNow: () => poke(true), clearSkips: () => { skip.clear(); fails.clear(); } };
 })();
@@ -2275,7 +2329,7 @@ Object.assign(Dungeons, (() => {
   // fetch + validate. null = fetch failed; { doc: null, state } = login / maintenance page (Guard already stopped the run)
   async function getDoc(url, ttl, key) {
     let html;
-    try { html = await Core.net.fetchText(url, { ttl, key: key || 'ma:' + url }); } catch (e) { Diag.skip('dungeon-fetch-failed', url + ' ' + e.message); return null; }
+    try { html = await netText(url, { ttl, key: key || 'ma:' + url }); } catch (e) { Diag.skip('dungeon-fetch-failed', url + ' ' + e.message); return null; }
     const st = Guard.pageState(html); if (st !== 'ok') { Guard.fault(st, url); return { html, doc: null, state: st }; }
     return { html, doc: parseHtml(html), state: 'ok' };
   }
@@ -2312,7 +2366,7 @@ Object.assign(Dungeons, (() => {
   }
   async function dmgOn(id, dgmid) {                                       // the server's own damage total for us on that monster
     try {
-      const html = await Core.net.fetchText(`/battle.php?dgmid=${encodeURIComponent(dgmid)}&instance_id=${encodeURIComponent(id)}`, { force: true, ttl: 0 });
+      const html = await netText(`/battle.php?dgmid=${encodeURIComponent(dgmid)}&instance_id=${encodeURIComponent(id)}`, { force: true, ttl: 0 });
       if (Guard.pageState(html) !== 'ok') return null;
       const el = parseHtml(html).getElementById('yourDamageValue'); return el ? parseNum(el.textContent, null) : null;
     } catch (_) { return null; }
@@ -2476,7 +2530,7 @@ Object.assign(Duels, (() => {
   async function resolveQs(t) {
     const url = t.kind === 'dungeon' ? `/battle.php?dgmid=${enc(t.monsterId)}&instance_id=${enc(t.instanceId)}` : `/battle.php?id=${enc(t.monsterId)}`;
     try {
-      const html = await Core.net.fetchText(url, { force: true, ttl: 0 });
+      const html = await netText(url, { force: true, ttl: 0 });
       if (Guard.pageState(html) !== 'ok') return null;
       const m = html.match(/href="(pvp_style_battle\.php\?[^"]+)"/i); if (!m) return null;
       return new URL(m[1].replace(/&amp;/g, '&'), BASE).search.replace(/^\?/, '');
@@ -2569,7 +2623,6 @@ Kernel.register({
 Object.assign(Loot, (() => {
   const st = { rows: [], scanning: false, looting: false, estimating: false, lastScanAt: 0, lastStuckAt: 0, claiming: new Set() };
   const rate = new Map(), capInfo = new Map(), upTo = new Map(), dmgCache = new Map();
-  const syncMe = async () => { try { await Core.me.sync(); } catch (_) { /* */ } };
   const expNeeded = () => { const m = Core.me.get(), e = m && m.exp; return e && e.max > 0 ? Math.max(0, e.max - e.cur) : null; };
 
   /* ---- wave corpses: the wave page with the monster cookies set to show dead ones ---- */
@@ -2579,7 +2632,7 @@ Object.assign(Loot, (() => {
     for (const [i, l] of locs.entries()) {
       Work.set('scan', `Graveyard · Gate ${l.gate} · Wave ${l.wave}`, i, locs.length);
       let html;
-      try { html = await Core.net.fetchText(`/active_wave.php?gate=${l.gate}&wave=${l.wave}`, { ttl: 20000, key: `ma:gy:${l.gate}:${l.wave}`, via: (run) => Core.cookies.withMode('all', run) }); }
+      try { html = await netText(`/active_wave.php?gate=${l.gate}&wave=${l.wave}`, { ttl: 20000, key: `ma:gy:${l.gate}:${l.wave}` }, 'all'); }
       catch (e) { log(`⚠️ graveyard fetch failed (${l.gate}/${l.wave}): ${e.message}`, 'warn'); continue; }
       const doc = parseHtml(html), s = Guard.pageState(doc);
       if (s !== 'ok') { Guard.fault(s, `graveyard ${l.gate}/${l.wave}`); return out; }
@@ -2648,7 +2701,7 @@ Object.assign(Loot, (() => {
     if (needDmg && dmgCache.has(r.key)) r.userDamage = dmgCache.get(r.key);
     if (!needName && r.userDamage != null) return;
     let doc = null;
-    try { const html = await Core.net.fetchText(battleUrl(r), { force: true, ttl: 0 }); if (Guard.pageState(html) === 'ok') doc = parseHtml(html); } catch (_) { /* */ }
+    try { const html = await netText(battleUrl(r), { force: true, ttl: 0 }); if (Guard.pageState(html) === 'ok') doc = parseHtml(html); } catch (_) { /* */ }
     if (!doc) return;
     if (r.userDamage == null) { const el = doc.getElementById('yourDamageValue'); r.userDamage = el ? parseNum(el.textContent, null) : null; dmgCache.set(r.key, r.userDamage); }
     if (!rate.has(r.nameLow)) { const b = block(doc, 'EXP / DMG'), v = b ? parseFloat(((b.querySelector('strong') || {}).textContent || '').trim()) : NaN; rate.set(r.nameLow, Number.isFinite(v) ? v : null); }
@@ -2783,7 +2836,7 @@ Object.assign(LootScan, (() => {
     if (Guard.isFaulted()) throw new Halt('the site is signed out or unavailable right now');
     let html;
     try {
-      html = await Act.run(() => Core.net.fetchText(url, Object.assign({ force: true, ttl: 0, key: 'ma:scan:' + (mode || '') + url }, mode ? { via: (run) => Core.cookies.withMode(mode, run) } : {})), gapMs());
+      html = await Act.run(() => netText(url, { force: true, ttl: 0, key: 'ma:scan:' + (mode || '') + url }, mode), gapMs());
     } catch (e) { throw new Error(`${where}: ${e.message}`); }
     const doc = parseHtml(html), s = Guard.pageState(doc);
     if (s !== 'ok') { Guard.fault(s, 'boss loot read'); throw new Halt(s === 'signedout' ? 'you are signed out' : 'the site is unavailable'); }
@@ -3035,7 +3088,7 @@ Object.assign(LootScan, (() => {
         auto.tried.set(low, Date.now());
         try {
           const url = info.kind === 'dungeon' ? `/battle.php?dgmid=${encodeURIComponent(info.id)}&instance_id=${encodeURIComponent(info.instanceId)}` : `/battle.php?id=${encodeURIComponent(info.id)}`;
-          const html = await Act.run(() => Core.net.fetchText(url, { force: true, ttl: 0, key: 'ma:learn:' + url }), gapMs());
+          const html = await Act.run(() => netText(url, { force: true, ttl: 0, key: 'ma:learn:' + url }), gapMs());
           const doc = parseHtml(html), ps = Guard.pageState(doc);
           if (ps !== 'ok') { Guard.fault(ps, 'loot pickup'); break; }
           if (!Guard.chromeOk(doc)) continue;
@@ -3439,7 +3492,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     if (e.alive) { if (e.needsDuel) return ['needs duel', 'warn']; return Board.baseKnown(low) && (e.userDmg || 0) >= cap + Board.base(low) ? ['capped', 'cap'] : ['alive', 'ok']; }
     if (e.locked) return ['locked', 'warn'];
     if (e.noInstance) return ['no dungeon', ''];
-    if (e.nextTs && e.nextTs * 1000 > Date.now()) return ['in ' + fmtDur(e.nextTs * 1000 - Date.now()), 'blue'];
+    if (e.nextTs && spawnAtMs(e) > Date.now()) return ['in ' + fmtDur(spawnAtMs(e) - Date.now()), 'blue'];
     return ['not up', ''];
   }
   function entryState(def) {   // the phase that is actually up, else the first
