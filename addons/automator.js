@@ -32,7 +32,7 @@ Core.module({
   } : {},
   init(Core) {
 'use strict';
-const ID = 'automator', VERSION = '1.10.2';
+const ID = 'automator', VERSION = '1.10.3';
 if (window.__automatorLoaded) { console.warn('[automator] already loaded', window.__automatorLoaded); return null; }
 window.__automatorLoaded = VERSION;
 
@@ -74,6 +74,7 @@ function parseCap(str) {
 const parseHtml = (html) => new DOMParser().parseFromString(html, 'text/html');
 
 /* ---- config (one Core.store, per player, shared across tabs) ---------------------------------------------------- */
+const OPT_MODE = 'dps';                                               // what the Build Engine maximises:  'noncrit' = the best plain (non-crit) hit  |  'dps' = the best average hit (non-crit and crit, weighted by crit rate)
 const DEFAULT_CFG = {
   v: 2,                                // 2 = the old-default migrations in mergeCfg() have run (they must not rerun: they used to overwrite a value you typed)
   targets: [],                         // nameLow list = enabled bosses, in priority order (first alive + uncapped wins)
@@ -1327,6 +1328,7 @@ const Presets = (() => {
   const nameOf = (kind, id) => { const p = list(kind).find((x) => x.id === String(id)); return p ? p.name : String(id); };
   // The Build Engine offers the pseudo-kind 'best' (preset.best.*): it needs the boss (any boss: wave, General, dungeon boss or mob).
   const BEST = 'best';
+  const BEST_MIN_GAIN = 0.1;                                          // %: the engine equips its best unless that is within this of what is on (its own default, 2%, would leave up to 2% damage on the table)
   const bossOf = (t) => ({ monsterId: t.monsterId, name: t.name, kind: t.kind });
   // What the Build Engine is asked to search for. A wave boss (Generals included) is just its id: the engine reads its battle page itself.
   // A dungeon boss / mob has no such page (battle.php?dgmid=..&instance_id=..), so its stats are read here from its own battle page and handed
@@ -1361,6 +1363,7 @@ const Presets = (() => {
           else if (lab === 'final damage resistance') m.finalDmgRes = parseFloat(txt) || 0;
           else if (lab === 'passive damage resistance') m.passiveDmgRes = parseFloat(txt) || 0;
         });
+        doc.querySelectorAll('.chip').forEach((c) => { const x = (c.textContent || '').trim(); if (x.includes('Effect:')) m.effect = x.replace(/^\u{1F9E0}\s*/u, '').trim(); });   // "🧠 Effect: …", as the engine reads it on a wave boss
         { const dm = /Damage\s*Multiplier:\s*([0-9.]+)\s*%/i.exec((doc.body && doc.body.textContent) || ''); if (dm) m.divineMult = parseFloat(dm[1]) / 100; }   // Divine Shield, as the engine reads it on a wave boss
         if (m.atk && m.def) mob = Object.assign({ petDef: 0, eqDef: 0, element: 'None' }, m);
       }
@@ -1466,7 +1469,7 @@ const Presets = (() => {
         log(`🎒 applying ${label} for ${esc(bossName(low))}…`, 'info');
         const boss = t ? await engineMob(t) : { name: bossName(low) };
         if (!boss) { failedAt[key] = Date.now(); log(`⚠️ ${label}: could not read ${esc(bossName(low))}'s stats, so what is equipped stays`, 'warn'); continue; }
-        const opts = kind === BEST ? { silent: true, boss, target: boss } : { silent: true, boss };
+        const opts = kind === BEST ? { silent: true, boss, target: boss, threshold: BEST_MIN_GAIN, mode: OPT_MODE } : { silent: true, boss };
         let teamBefore = null;
         if (kind === BEST && sig) { try { teamBefore = await withTimeout(BuildKit.sigils.team(), 30000, null); } catch (_) { teamBefore = null; } }
         let r;
@@ -1687,7 +1690,7 @@ const Planner = (() => {
       let hit = cache.get(ckey(t)), cur = null;
       if (!hit || Date.now() - hit.at > TTL) {
         let r = null; const mob = await Presets.engineMob(t);
-        try { r = mob ? await withTimeout(Promise.resolve(Core.call('build.best', mob)), SEARCH_MS, null) : null; } catch (_) { r = null; }
+        try { r = mob ? await withTimeout(Promise.resolve(Core.call('build.best', mob, { mode: OPT_MODE })), SEARCH_MS, null) : null; } catch (_) { r = null; }
         if (r && r.ok !== false && r.best && r.best.sel) { hit = { at: Date.now(), sel: r.best.sel }; cache.set(ckey(t), hit); cur = r.current && r.current.sel; }
         else hit = null;
       }
