@@ -3475,7 +3475,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
       h('button', { type: 'button', class: 'ma-x', title: 'Remove', onclick: (e) => { stop(e); ovr(low).schedule.splice(i, 1); if (!ovr(low).schedule.length) delete ovr(low).schedule; saveCfg(); draw(); } }, '✕')));
     return h('div', { class: 'ma-sched' },
       h('div', { class: 'ma-sub-h' }, 'Server clock', h('span', { class: 'sp' }), h('small', { style: { whiteSpace: 'nowrap' } }, now != null ? fmtClock(now) + ' IST' : 'not read yet')),
-      rows.length ? rows : h('div', { class: 'ma-note', style: { margin: '2px 0 6px' } }, 'Add a change to switch cap at a set time (server clock, IST, repeats daily). A new dungeon resets to the list.'),
+      rows.length ? rows : h('div', { class: 'ma-note', style: { margin: '2px 0 6px' } }, 'Change the cap at set times of the day (server clock, IST, daily). Each new dungeon starts from the cap for the current time.'),
       rows.length ? h('div', { class: 'ma-note', style: { margin: '4px 2px 6px' } }, now == null ? 'Waiting for the server clock (open any game page).' : nxt ? `${act < 0 ? `Now at the default, ${fmtNum(base)}. ` : ''}Next change at ${fmtClock(nxt.t)} → ${fmtNum(nxt.cap)}, in ${inTxt(nxt.t - now)}.` : 'No more changes today. A dungeon still running at midnight keeps this cap until a new one starts.') : null,
       h('button', { type: 'button', class: 'ma-add', onclick: (e) => { stop(e); const t = now != null ? hhmm((Math.floor(now / 60) + 1) * 60) : '12:00'; (ovr(low).schedule = ovr(low).schedule || []).push({ at: t, cap: bossCap(low) }); sortSave(); } }, '+ Add a cap change'));
   }
