@@ -19,7 +19,7 @@
  */
 (() => {
   'use strict';
-  const ID = 'build-engine', VERSION = '1.0.2';
+  const ID = 'build-engine', VERSION = '1.0.4';
   if (!(Core.apiLevel >= 6 && Core.model && Core.tx)) {
     console.warn('[build-engine] needs Core api level 6 (Core.model + Core.tx); not loaded');
     return;
@@ -637,6 +637,41 @@
     "Ring 2": 9,
     "Class Weapon": 10,
   };
+  /* A build is the same build wherever its pets stand: the damage maths takes the three mains as a SET and every link as (pet x its level's share), so
+   * which slot a main is in and which main a link hangs on change nothing. What it does cost: every pet that moves is a request and a 1.2 s wait.
+   * So the search's answer is laid over what is on now: a main already on the team keeps its slot (its links stay with it), and a link stays where it
+   * is when the build wants that pet at that level anywhere. Only when the shares of that level differ between the mains (then where a link hangs
+   * does count) is it left as the search put it.
+   *   sel = { mains, link1, link2 (names, link1[i] / link2[i] belong to mains[i]), ... }   curMains = names by slot now
+   *   linkName(main, level) = the link now on that main ('' if none)   sameShare(level, mains) = every main has the same share at that level */
+  function alignPets(sel, curMains, linkName, sameShare) {
+    const sm = [0, 1, 2].map((i) => (sel.mains || [])[i] || ''), from = [-1, -1, -1], taken = new Set();
+    for (let j = 0; j < 3; j++) {
+      const n = (curMains || [])[j] || '', i = n ? sm.findIndex((x, k) => x === n && !taken.has(k)) : -1;
+      if (i >= 0) { from[j] = i; taken.add(i); }
+    }
+    for (let i = 0; i < 3; i++) {
+      if (taken.has(i)) continue;
+      const j = from.indexOf(-1); if (j < 0) break;
+      from[j] = i; taken.add(i);
+    }
+    const out = Object.assign({}, sel, { mains: ['', '', ''], link1: ['', '', ''], link2: ['', '', ''] });
+    from.forEach((i, j) => { if (i < 0) return; out.mains[j] = sm[i]; out.link1[j] = (sel.link1 || [])[i] || ''; out.link2[j] = (sel.link2 || [])[i] || ''; });
+    [1, 2].forEach((lv) => {
+      const key = 'link' + lv, wantAt = out[key], left = wantAt.filter((n, j) => n && out.mains[j]);
+      if (!left.length || !sameShare(lv, out.mains.filter(Boolean))) return;
+      const res = ['', '', ''];
+      out.mains.forEach((m, j) => { if (!m) return; const c = linkName(m, lv), k = c ? left.indexOf(c) : -1; if (k >= 0) { res[j] = c; left.splice(k, 1); } });
+      left.forEach((n) => {
+        let j = wantAt.findIndex((x, k) => x === n && out.mains[k] && !res[k]);                      // where the search wanted it
+        if (j < 0) j = out.mains.findIndex((m, k) => m && !res[k] && !linkName(m, lv));              // else a main with nothing there now
+        if (j < 0) j = out.mains.findIndex((m, k) => m && !res[k]);
+        if (j >= 0) res[j] = n;
+      });
+      out[key] = res;
+    });
+    return out;
+  }
   function lbPetTarget(sel, state) {
     const errors = [],
       notes = [],
@@ -659,6 +694,19 @@
     });
     const idsOf = (n) => Object.keys(names).filter((id) => names[id] === n);
     const atkOf = (id) => (byId[id] && byId[id].atk) || 0;
+    {                                                              // where the pets already stand decides where they go (see alignPets)
+      const nowIds = (state.mains || []).map((x) => (x == null ? '' : String(x)));
+      const idFor = (n) => { const ids = idsOf(n); return ids.find((id) => nowIds.indexOf(id) >= 0) || ids.find((id) => state.links && state.links[id]) || ids[0] || null; };
+      const linkName = (n, lv) => { const id = idFor(n), l = id && state.links ? state.links[id] : null, x = l ? l[lv - 1] : null; return x == null ? '' : names[String(x)] || ''; };
+      const shareOf = (n, lv) => {
+        const id = idFor(n), cap = lv === 1 ? 0.5 : 0.25, a = id && state.ajax ? state.ajax[id] : null;
+        if (!a) return null;                                       // not read: unknown
+        const l = (a.links || []).find((x) => x.link_level === lv);
+        return l ? Math.min(parseFloat(String(l.share_pct_label || '0').replace('%', '')) / 100, cap) : cap;
+      };
+      const sameShare = (lv, ms) => { const f = ms.map((n) => shareOf(n, lv)); return f.every((x) => x != null && Math.abs(x - f[0]) < 1e-9); };
+      sel = alignPets(sel, nowIds.map((id) => (id ? names[id] || '' : '')), linkName, sameShare);
+    }
     const used = {},
       mains = [null, null, null];
     const sm = (sel.mains || []).map((x) => x || ""),
@@ -2501,18 +2549,18 @@
           factors.push(linked ? linked.factor : li === 1 ? 0.5 : 0.25);
         }
       const used = new Set(mains.map((m) => m.name));
-      const slots = factors.map((f) => ({ f, pet: null }));
+      const slots = factors.map((f, k) => ({ f, pet: null, lv: k < 3 ? 1 : 2 }));
       const cur = () =>
         slots
           .filter((sl) => sl.pet)
-          .map((sl) => ({ pet: sl.pet, factor: sl.f }));
+          .map((sl) => ({ pet: sl.pet, factor: sl.f, lv: sl.lv }));
       const withAt = (i, lp) =>
         slots
           .map((sl, k) =>
             k === i
-              ? { pet: lp, factor: sl.f }
+              ? { pet: lp, factor: sl.f, lv: sl.lv }
               : sl.pet
-                ? { pet: sl.pet, factor: sl.f }
+                ? { pet: sl.pet, factor: sl.f, lv: sl.lv }
                 : null,
           )
           .filter(Boolean);
@@ -2585,8 +2633,8 @@
           for (let j = i + 1; j < links.length; j++) {
             const currentDps = metricOf(ev(mains, pieces, links));
             const swapped = links.map((l, idx) => {
-              if (idx === i) return { pet: links[j].pet, factor: l.factor };
-              if (idx === j) return { pet: links[i].pet, factor: l.factor };
+              if (idx === i) return { pet: links[j].pet, factor: l.factor, lv: l.lv };
+              if (idx === j) return { pet: links[i].pet, factor: l.factor, lv: l.lv };
               return l;
             });
             const swapDps = metricOf(ev(mains, pieces, swapped));
@@ -2741,7 +2789,12 @@
     return data;
   }
   const dropLinks = () => linkCache.clear();
-  Core.net.watch(/pet_link_action\.php|inventory_ajax\.php/, dropLinks);
+  Core.net.watch(/pet_link_action\.php|inventory_ajax\.php/, (r) => {
+    // one request per pet is what makes a search slow, and a GEAR change (equip_item / unequip_item) cannot change what any pet has linked:
+    // those keep the cache. Anything else (a link, a pet moved) drops it, as before.
+    if (/inventory_ajax\.php/.test((r && r.url) || '') && /(^|&)action=(equip|unequip)_item(&|$)/.test(String((r && r.body) || ''))) return;
+    dropLinks();
+  });
 
   /* ---- resources ---- */
   M.defined('stats') || M.define('stats', {
@@ -2844,8 +2897,9 @@
   const ids = ['stats', 'gear', 'team', 'relics', 'class'];
   async function gather(opts, t) {
     const get = (id) => (t ? t.get(id, opts && opts.force ? { force: true } : {}) : M.get(id, opts && opts.force ? { force: true } : {}));
-    const r = await Promise.all(ids.map(get));
-    const o = {}; ids.forEach((id, i) => { o[id] = r[i]; });
+    const ms = {}, timed = (id) => { const t0 = Date.now(); return Promise.resolve(get(id)).then((v) => { ms[id] = Date.now() - t0; return v; }); };
+    const r = await Promise.all(ids.map(timed));
+    const o = { ms }; ids.forEach((id, i) => { o[id] = r[i]; });
     if (!(o.stats.value && o.stats.value.atk && o.stats.value.def && o.stats.value.stamina)) throw new Error('your stats could not be read (stats.php)');
     return o;
   }
@@ -2898,17 +2952,23 @@
       const pet = sel[key] && sel[key][i] ? linkPets.find((p) => p.name === sel[key][i]) : null;
       if (!pet) return null;
       const main = mains[i], linked = main && main.linkedPets ? main.linkedPets.find((l) => l.linkLevel === lv) : null;
-      return { pet, factor: linked && linked.name === pet.name ? linked.factor : dflt };
+      return { pet, factor: linked && linked.name === pet.name ? linked.factor : dflt, lv };
     }).filter(Boolean);
     const pieces = {};
     EQUIP_SLOTS.forEach((sl) => { const name = (sel.gear && sel.gear[sl]) || ''; pieces[sl] = P.inventory.find((i) => i.name === name && i.slot === sl) || null; });
     return { mains, links: [...linkOf('link1', 1, 0.5), ...linkOf('link2', 2, 0.25)], pieces };
   }
   function selFromBest(P, b) {
-    const l1 = b.links.filter((l) => l.factor > 0.375).map((l) => l.pet.name), l2 = b.links.filter((l) => l.factor <= 0.375).map((l) => l.pet.name);
+    const isL1 = (l) => (l.lv ? l.lv === 1 : l.factor > 0.375);
+    const l1 = b.links.filter(isL1).map((l) => l.pet.name), l2 = b.links.filter((l) => !isL1(l)).map((l) => l.pet.name);
     const cur = currentSel(P).gear, gear = {};
     EQUIP_SLOTS.forEach((sl) => { gear[sl] = b.pieces[sl] ? b.pieces[sl].name : cur[sl] || ''; });   // no better piece found: keep what is on
-    return { mains: [0, 1, 2].map((i) => (b.mains[i] ? b.mains[i].name : '')), link1: [0, 1, 2].map((i) => l1[i] || ''), link2: [0, 1, 2].map((i) => l2[i] || ''), gear };
+    const raw = { mains: [0, 1, 2].map((i) => (b.mains[i] ? b.mains[i].name : '')), link1: [0, 1, 2].map((i) => l1[i] || ''), link2: [0, 1, 2].map((i) => l2[i] || ''), gear };
+    const all = P.pets.mains.concat(P.pets.links), petOf = (n) => { const ps = all.filter((p) => p.name === n); return ps.find((p) => p.equippedMain) || ps.find((p) => (p.linkedPets || []).length) || ps[0] || null; };
+    const linkOn = (n, lv) => { const p = petOf(n); return p && p.linkedPets ? p.linkedPets.find((x) => x.linkLevel === lv) || null : null; };
+    const share = (n, lv) => { const l = linkOn(n, lv); return l ? l.factor : (lv === 1 ? 0.5 : 0.25); };
+    return alignPets(raw, currentSel(P).mains, (n, lv) => { const l = linkOn(n, lv); return l ? l.name : ''; },
+      (lv, ms) => { const f = ms.map((n) => share(n, lv)); return f.every((x) => Math.abs(x - f[0]) < 1e-9); });
   }
   function petRules(opts) {                                       // the optimizer's saved "must use / exclude" pets, unless the caller passes rules
     if (opts && opts.rules) return { exclude: opts.rules.exclude || {}, must: opts.rules.must || {} };
@@ -2935,23 +2995,24 @@
   const bestCache = new Map();
   async function best(mobArg, opts) {
     opts = opts || {};
-    const P = prepare(await gather(opts)), mob = await resolveMob(mobArg), rules = petRules(opts);
+    const T0 = Date.now(), G = await gather(opts), P = prepare(G), T1 = Date.now(), mob = await resolveMob(mobArg), T2 = Date.now(), rules = petRules(opts);
     const key = [P.key, JSON.stringify(mob), opts.mode || 'noncrit', JSON.stringify(rules), opts.critMult, opts.critRate].join('|');
     let hit = bestCache.get(key);
-    if (hit && !opts.force) return Object.assign({ cached: true }, hit);
+    if (hit && !opts.force) return Object.assign({ cached: true }, hit, { timing: { total: Date.now() - T0, cached: true } });
     const cs = currentSel(P), cur = buildFromSel(P, cs);
     const out = compute(P, opts, () => {
       const curRes = buildDamage(P.player, mob, cur);
       const b = optimizeBuild(P.player, mob, P.inventory, P.pets, rules, cur);
       return { curRes, b };
     });
-    const sel = selFromBest(P, out.b), r = out.b.result, c = out.curRes;
+    const T3 = Date.now(), sel = selFromBest(P, out.b), r = out.b.result, c = out.curRes;
     hit = {
       ok: true, mode: opts.mode || 'noncrit', mob: shortMob(mob),
       current: { sel: cs, result: c }, best: { sel, result: r, notes: out.b.notes || [] },
       gainPct: (() => { const k = opts.mode === 'dps' ? 'dps' : 'noncrit'; return c && c[k] ? 100 * (r[k] / c[k] - 1) : 0; })(),   // the metric the search maximised, or the equip decision could skip a better build
       gainNoncritPct: c && c.noncrit ? 100 * (r.noncrit / c.noncrit - 1) : 0,
       changes: diffSel(cs, sel),
+      timing: { total: T3 - T0, pages: T1 - T0, boss: T2 - T1, search: T3 - T2, slowPage: Object.keys(G.ms || {}).sort((a, b) => G.ms[b] - G.ms[a]).slice(0, 2).map((k) => k + ' ' + G.ms[k] + ' ms').join(', ') },   // pages = reading your stats / gear / pets / relics / class; search = the maths
     };
     bestCache.size > 30 && bestCache.delete(bestCache.keys().next().value);
     bestCache.set(key, hit);
@@ -3037,15 +3098,17 @@
   }
   const benchHolders = (P) => P.pets.mains.concat(P.pets.links).filter((p) => p.petInvId && (p.linkedPets || []).length && !p.equippedMain).map((p) => p.petInvId);
 
+  // gear changes your stats, so they are re-read afterwards: but they are not in the tx's stale list, or a stat allocation / potion mid-apply would abort it
+  const statsStale = () => { try { typeof M.stale === 'function' && M.stale(['stats'], 'build-engine'); } catch (_) { /* */ } };
   async function apply(arg, opts) {
     opts = opts || {};
     const sel = arg && arg.best ? arg.best.sel : arg && arg.sel ? arg.sel : arg;
     if (!sel || !Array.isArray(sel.mains) || !sel.gear) throw new Error('build.apply needs a result of build.best or a selection { mains, link1, link2, gear }');
     const P = prepare(await gather(opts)), bench = benchHolders(P);
     const hook = typeof opts.onStep === 'function' ? (e) => { try { opts.onStep(e); } catch (_) { /* a progress callback must never break the apply */ } } : null;
-    let before = null, expected = null;
+    let before = null, expected = null, petActs = 0;
     const res = await Core.tx.run('loadout', {
-      owner: ID, kind: 'apply', label: opts.label || 'Best build', ifBusy: opts.silent ? 'fail' : 'wait', stale: ['gear', 'team', 'stats'],
+      owner: ID, kind: 'apply', label: opts.label || 'Best build', ifBusy: opts.silent ? 'fail' : 'wait', stale: ['gear', 'team'],
       snapshot: async (t) => (before = await takeSnapshot(t, bench)),
       async apply(t) {
         const env = makeEnv(t), st = await env.readState();
@@ -3056,13 +3119,15 @@
         const errs = pt.errors.concat(gp.errors);
         if (errs.length) throw new Error(errs.join('; '));
         expected = { pets: pt.target, gear: sel.gear };
-        const n = (await lbApplyPets(env, pt.target, pt.names, bench, hook)) + (await lbApplyGear(env, sel.gear, P.inventory, hook));
+        petActs = await lbApplyPets(env, pt.target, pt.names, bench, hook);
+        const n = petActs + (await lbApplyGear(env, sel.gear, P.inventory, hook));
         return { ok: true, changed: n > 0, count: n };
       },
       verify: async ({ phase, t }) => (phase === 'apply' ? verifyAgainst(t, expected && expected.pets, expected && expected.gear) : before ? verifyAgainst(t, { mains: before.mains, links: before.links }, before.gear) : { ok: true, why: [] }),
       restore: (b, t) => restoreFrom(b, t),
     });
-    dropLinks();
+    statsStale();
+    (petActs || !res.ok) && dropLinks();                          // gear only and fine: every pet's links are still what they were
     if (res.ok && res.changed && before) store.update((s) => { s.restore = before; });
     return { ok: !!res.ok, changed: !!res.changed, message: res.ok ? (res.changed ? 'build applied' : 'already on') : (res.restored ? 'failed and put back: ' : 'failed: ') + (res.error || '?'), tx: res.tx, restored: res.restored, error: res.error };
   }
@@ -3070,11 +3135,11 @@
     const saved = store.get().restore;
     if (!saved) return { ok: false, message: 'nothing to revert' };
     const res = await Core.tx.run('loadout', {
-      owner: ID, kind: 'restore', label: 'Revert build', ifBusy: 'wait', stale: ['gear', 'team', 'stats'],
+      owner: ID, kind: 'restore', label: 'Revert build', ifBusy: 'wait', stale: ['gear', 'team'],
       apply: (t) => restoreFrom(saved, t),
       verify: ({ t }) => verifyAgainst(t, { mains: saved.mains, links: saved.links }, saved.gear),
     });
-    dropLinks();
+    statsStale(); dropLinks();
     res.ok && store.update((s) => { s.restore = null; });
     return { ok: !!res.ok, message: res.ok ? 'previous build put back' : 'revert failed: ' + (res.error || '?') + ' (it is kept, try again)', error: res.error };
   }
@@ -3097,18 +3162,18 @@
           if (!o.target) return { ok: false, message: 'preset.best.apply needs { target: <boss> }' };
           const b = await best(o.target, { mode: o.mode });
           const min = o.threshold != null ? Number(o.threshold) : store.get().threshold;
-          if (!b.changes.length || b.gainPct < min) return { ok: true, changed: false, message: 'current build is within ' + min + '% of the best (' + b.gainPct.toFixed(2) + '%)', gainPct: b.gainPct };
-          const r = await apply(b, { silent: o.silent !== false, label: 'Best build: ' + (b.mob.name || ''), onStep: o.onStep });
-          return Object.assign(r, { gainPct: b.gainPct });
+          if (!b.changes.length || b.gainPct < min) return { ok: true, changed: false, message: 'current build is within ' + min + '% of the best (' + b.gainPct.toFixed(2) + '%)', gainPct: b.gainPct, timing: b.timing };
+          const tApply = Date.now(), r = await apply(b, { silent: o.silent !== false, label: 'Best build: ' + (b.mob.name || ''), onStep: o.onStep });
+          return Object.assign(r, { gainPct: b.gainPct, timing: Object.assign({}, b.timing, { apply: Date.now() - tApply }) });
         }),
       },
     },
     init() {
       Core.tx.recovery('loadout', async (journal, t) => {         // an interrupted apply of ours: put `before` back
         if (!journal || journal.owner !== ID || !journal.before) return { ok: false, message: 'not a build-engine journal' };
-        await restoreFrom(journal.before, t);
+        await restoreFrom(journal.before, t); statsStale();
         return { ok: true, changed: true };
-      }, { stale: ['gear', 'team', 'stats'] });
+      }, { stale: ['gear', 'team'] });
       return api;
     },
   });
