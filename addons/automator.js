@@ -672,11 +672,13 @@ const LootData = (() => {
   const norm = (v) => (v && typeof v === 'object' && v.bosses && typeof v.bosses === 'object' ? v : { v: 1, at: 0, bosses: {} });
   let d = norm(lootStore.get());
   const get = (low) => d.bosses[String(low || '').toLowerCase()] || null;
+  // a dungeon boss's later phases drop the same loot as its first phase: they read the first phase's record
+  const src = (low) => { const f = Roster.get(low); return f && f.kind !== 'wave' && Roster.canon(f) !== f ? get(Roster.canon(f).low) || get(low) : get(low); };
   // the game's phase number of a boss form: wave bosses have a PvP duel that counts as a phase (our phase 2 = game phase 3). Dungeon bosses have no phase-only loot: old behaviour
   const ownPhase = (low) => { const d = Roster.get(low), i = d ? Roster.members(d).indexOf(d) : 0; return i < 1 || !d || d.kind !== 'wave' ? 1 : i + 2; };
   // [{ req, items:[names], ph:[phase-only names], gp }], lowest requirement first. locked=true: loot of a LATER phase (shown on this form, but only that phase's own damage unlocks it)
   function tiers(low, locked) {
-    const e = get(low), m = new Map(), own = ownPhase(low), wave = (Roster.get(low) || {}).kind === 'wave';
+    const e = src(low), m = new Map(), own = ownPhase(low), wave = (Roster.get(low) || {}).kind === 'wave';
     ((e && e.loot) || []).forEach((it) => {
       if (!(Number.isFinite(it.dmgReq) && it.dmgReq > 0) || !it.name || (wave && it.gp > own) !== !!locked) return;
       const t = m.get(it.dmgReq) || { req: it.dmgReq, items: [], ph: [], gp: it.gp }; if (!t.items.includes(it.name)) t.items.push(it.name); if (wave && it.gp && !t.ph.includes(it.name)) t.ph.push(it.name); m.set(it.dmgReq, t);
@@ -723,7 +725,7 @@ const LootData = (() => {
     saveCfg();
   }
   lootStore.watch((v) => { d = norm(v); const n = apply(); if (n) log(`🆕 loot scan added ${n} boss${n === 1 ? '' : 'es'} to the Bosses tab`, 'info'); UI.dirty(); });
-  return { get, tiers, top, ownPhase, icon, apply, purge, dismiss, isBossRecord, all: () => d.bosses, at: () => d.at || 0 };
+  return { get, src, tiers, top, ownPhase, icon, apply, purge, dismiss, isBossRecord, all: () => d.bosses, at: () => d.at || 0 };
 })();
 
 /* ---- board: what we KNOW about each boss right now. Only a validated page / confirmed reply may change it. -------- */
@@ -3503,7 +3505,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     return src ? imgTag(src, '', fb) : fb();
   }
   function damageBlock(low) {
-    const base = baseCap(low), info = LootData.get(low);
+    const base = baseCap(low), info = LootData.src(low);
     const exp = info && info.expCapDmg > 0 ? info.expCapDmg : 0;
     const rungs = LootData.tiers(low).map((t) => ({ req: t.req, items: t.items, ph: t.ph, exp: t.req === exp })), later = LootData.tiers(low, true), own = LootData.ownPhase(low);
     if (exp && !rungs.some((r) => r.exp)) { rungs.push({ req: exp, items: [], exp: true }); rungs.sort((a, b) => a.req - b.req); }
