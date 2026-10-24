@@ -672,14 +672,14 @@ const LootData = (() => {
   const norm = (v) => (v && typeof v === 'object' && v.bosses && typeof v.bosses === 'object' ? v : { v: 1, at: 0, bosses: {} });
   let d = norm(lootStore.get());
   const get = (low) => d.bosses[String(low || '').toLowerCase()] || null;
-  // the game's phase number of a boss form: phase 1 = 1, our "phase 2" = game phase 3 (the duel counts as a phase)
-  const ownPhase = (low) => { const d = Roster.get(low), i = d ? Roster.members(d).indexOf(d) : 0; return i < 1 ? 1 : i + 2; };
+  // the game's phase number of a boss form: wave bosses have a PvP duel that counts as a phase (our phase 2 = game phase 3). Dungeon bosses have no phase-only loot: old behaviour
+  const ownPhase = (low) => { const d = Roster.get(low), i = d ? Roster.members(d).indexOf(d) : 0; return i < 1 || !d || d.kind !== 'wave' ? 1 : i + 2; };
   // [{ req, items:[names], ph:[phase-only names], gp }], lowest requirement first. locked=true: loot of a LATER phase (shown on this form, but only that phase's own damage unlocks it)
   function tiers(low, locked) {
-    const e = get(low), m = new Map(), own = ownPhase(low);
+    const e = get(low), m = new Map(), own = ownPhase(low), wave = (Roster.get(low) || {}).kind === 'wave';
     ((e && e.loot) || []).forEach((it) => {
-      if (!(Number.isFinite(it.dmgReq) && it.dmgReq > 0) || !it.name || (!!(it.gp > own)) !== !!locked) return;
-      const t = m.get(it.dmgReq) || { req: it.dmgReq, items: [], ph: [], gp: it.gp }; if (!t.items.includes(it.name)) t.items.push(it.name); if (it.gp && !t.ph.includes(it.name)) t.ph.push(it.name); m.set(it.dmgReq, t);
+      if (!(Number.isFinite(it.dmgReq) && it.dmgReq > 0) || !it.name || (wave && it.gp > own) !== !!locked) return;
+      const t = m.get(it.dmgReq) || { req: it.dmgReq, items: [], ph: [], gp: it.gp }; if (!t.items.includes(it.name)) t.items.push(it.name); if (wave && it.gp && !t.ph.includes(it.name)) t.ph.push(it.name); m.set(it.dmgReq, t);
     });
     return [...m.values()].sort((x, y) => x.req - y.req);
   }
@@ -746,7 +746,7 @@ const Board = (() => {
   }
   // a later phase's loot counts only damage dealt IN that phase: base = damage dealt before it (read once per monster life, see phaseBase)
   const base = (low) => { const e = b[low]; return e && e.phBaseFor != null && e.phBaseFor === String(e.monsterId) ? e.phBase || 0 : 0; };
-  const baseKnown = (low) => { const d = Roster.get(low), e = b[low]; return !d || Roster.members(d).indexOf(d) < 1 || !!(e && e.phBaseFor != null && e.phBaseFor === String(e.monsterId)); };
+  const baseKnown = (low) => { const d = Roster.get(low), e = b[low]; return !d || d.kind !== 'wave' || Roster.members(d).indexOf(d) < 1 || !!(e && e.phBaseFor != null && e.phBaseFor === String(e.monsterId)); };
   load();
   window.addEventListener('beforeunload', () => { dirty = true; save(); });
   boardStore.watch((v) => { if (v && !Tab.isMain()) { b = v; UI.dirty('status'); } });
@@ -1872,7 +1872,7 @@ const Engine = (() => {
   // "Your damage" minus "Phase DMG" on the boss's own page = what was dealt before this phase (0 for phase 1, or when the page has no Phase DMG chip)
   async function phaseBase(t) {
     const def = Roster.get(t.low), e = Board.get(t.low);
-    if (!e || !def || t.swarm || Roster.members(def).indexOf(def) < 1) return 0;
+    if (!e || !def || def.kind !== 'wave' || Roster.members(def).indexOf(def) < 1) return 0;
     if (Board.baseKnown(t.low)) return Board.base(t.low);
     try {
       const html = await Core.net.fetchText(t.kind === 'dungeon' ? `/battle.php?dgmid=${encodeURIComponent(t.monsterId)}&instance_id=${encodeURIComponent(t.instanceId)}` : `/battle.php?id=${encodeURIComponent(t.monsterId)}`, { force: true, ttl: 0 });
@@ -3535,7 +3535,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
         tiles.length ? h('div', { class: 'ma-rg-i' }, tiles) : h('span', { class: 'ma-none' }, 'EXP cap'));
     });
     // loot of a later phase is on this form too, but locked: only damage dealt in THAT phase unlocks it (like the lock on the battle page)
-    const lockRows = later.length ? [h('div', { class: 'ma-lockh' }, `🔒 Phase ${later[0].gp > 2 ? later[0].gp - 1 : later[0].gp} loot (game: Phase ${later[0].gp}) · only damage dealt in that phase counts`),
+    const lockRows = later.length ? [h('div', { class: 'ma-lockh' }, `🔒 Phase ${later[0].gp > 2 ? later[0].gp - 1 : later[0].gp} loot · only damage dealt in that phase counts`),
       h('div', { class: 'ma-rgs' }, later.map((r) => h('div', { class: 'ma-rg lock', title: `Needs ${fmtNum(r.req)} damage dealt in that phase: ${r.items.join(', ')}` },
         h('span', { class: 'ma-rg-n' }), h('div', { class: 'ma-rg-b' }, h('span', { class: 'ma-rg-v' }, h('b', {}, short(r.req)), h('span', {}, '🔒'))),
         h('div', { class: 'ma-rg-i' }, r.items.slice(0, 12).map((nm) => h('span', { class: 'ma-it', title: nm }, h('span', { class: 'ma-ti' }, lootIcon(nm)), h('em', {}, nm))))))) ] : [];
@@ -3565,7 +3565,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     return h('div', { class: 'ma-ed' },
       h('div', { class: 'ma-ed-h' }, h('div', { class: 'ma-ed-t' }, h('b', { title: m.name }, m.name), place ? h('small', {}, place) : null), pill(txt, kind),
         h('button', { type: 'button', class: 'ma-x', title: 'Close', onclick: (e) => { stop(e); ui.sel = ''; saveUi(); draw(); } }, '✕')),
-      ms.length > 1 ? h('div', { style: { margin: '0 0 6px' } }, seg(ms.map((x, i) => [i, 'Phase ' + (i + 1) + (i ? ' · game ' + (i + 2) : ''), x.name]), idx, (v) => { phaseSel[def.low] = v; }, { full: true })) : null,
+      ms.length > 1 ? h('div', { style: { margin: '0 0 6px' } }, seg(ms.map((x, i) => [i, 'Phase ' + (i + 1), x.name]), idx, (v) => { phaseSel[def.low] = v; }, { full: true })) : null,
       Presets.pickKinds().length ? bossLoadout(low) : null,
       caption('🎯 Damage cap'), ...damageBlock(low),
       timedBtn, m.kind !== 'wave' && tOpen ? scheduleEditor(low) : null,
