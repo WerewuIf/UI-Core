@@ -32,7 +32,7 @@ Core.module({
   } : {},
   init(Core) {
 'use strict';
-const ID = 'automator', VERSION = '1.10.14';
+const ID = 'automator', VERSION = '1.10.17';
 if (window.__automatorLoaded) { console.warn('[automator] already loaded', window.__automatorLoaded); return null; }
 window.__automatorLoaded = VERSION;
 
@@ -3439,7 +3439,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     if (e.alive) { if (e.needsDuel) return ['needs duel', 'warn']; return Board.baseKnown(low) && (e.userDmg || 0) >= cap + Board.base(low) ? ['capped', 'cap'] : ['alive', 'ok']; }
     if (e.locked) return ['locked', 'warn'];
     if (e.noInstance) return ['no dungeon', ''];
-    if (e.nextTs && e.nextTs * 1000 > Date.now()) return ['respawn ' + fmtDur(e.nextTs * 1000 - Date.now()), 'blue'];
+    if (e.nextTs && e.nextTs * 1000 > Date.now()) return ['in ' + fmtDur(e.nextTs * 1000 - Date.now()), 'blue'];
     return ['not up', ''];
   }
   function entryState(def) {   // the phase that is actually up, else the first
@@ -3539,7 +3539,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
 
     // numbers
     const up = Date.now() - (stats.started || Date.now()), ap = Presets.summary();
-    out.push(fold('ov:session', false, '📊 This session', () => [h('div', { class: 'ma-stats', style: { marginTop: '8px' } }, [['⚔️ Hits', stats.hits], ['💥 Damage', fmtNum(stats.dmg)], ['🧪 Stamina', stats.stamA + stats.stamB], ['💊 HP', stats.hpUses], ['💧 Mana', stats.mpRefills], ['⏱ Up', fmtDur(up)]].map(([k, v]) => h('div', { class: 'ma-stat' }, k, h('b', {}, v)))),
+    out.push(fold('ov:session', false, '📊 This session', () => [h('div', { class: 'ma-stats', style: { marginTop: '8px' } }, [['⚔️ Hits', stats.hits, 'Attacks landed this session'], ['💥 DMG', fmtNum(stats.dmg), 'Total damage dealt this session'], ['🧪 STAM', stats.stamA + stats.stamB, 'Stamina potions used this session'], ['💊 HP', stats.hpUses, 'HP potions used this session'], ['💧 MP', stats.mpRefills, 'Mana potions used this session'], ['⏱ Up', fmtDur(up), 'Time since the automator started this session']].map(([k, v, tip]) => h('div', { class: 'ma-stat', title: tip }, k, h('b', {}, v)))),
       ap && ap !== '—' ? note('🎒 Equipped by Automator: ' + ap) : null]));
     out.push(h('div', { class: 'ma-actions', style: { marginTop: '12px' } }, btn('🔄 Refresh bosses', 'soft', () => Engine.scanNow()), btn('Clear skips', 'soft', () => { Engine.clearSkips(); Diag.clear(); draw(); })));
     return out;
