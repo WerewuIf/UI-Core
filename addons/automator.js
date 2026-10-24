@@ -32,7 +32,7 @@ Core.module({
   } : {},
   init(Core) {
 'use strict';
-const ID = 'automator', VERSION = '1.10.10';
+const ID = 'automator', VERSION = '1.10.11';
 if (window.__automatorLoaded) { console.warn('[automator] already loaded', window.__automatorLoaded); return null; }
 window.__automatorLoaded = VERSION;
 
@@ -695,10 +695,23 @@ const LootData = (() => {
   // which already carries phase 1's loot (the same in every phase) and the later-phase items its page listed
   const src = (low) => {
     const f = Roster.get(low), first = f && Roster.canon(f) !== f ? get(Roster.canon(f).low) : null, mine = get(low);
-    if (!first) return mine;
+    if (!first) {                                                  // the first phase never read (the boss was already in phase 2): a later phase's page carries the same loot list
+      const sib = f && f.kind === 'wave' && !(mine && mine.loot && mine.loot.length) ? Roster.members(f).map((m) => get(m.low)).find((r) => r && r.loot && r.loot.length) : null;
+      return wave2(f, sib ? Object.assign({}, mine || {}, { name: (mine && mine.name) || sib.name, loot: sib.loot }) : mine);
+    }
     if (f.kind !== 'wave') return first || mine;
-    return mine && Array.isArray(mine.loot) && mine.loot.length ? mine : mine ? Object.assign({}, mine, { loot: first.loot || [] }) : first;
+    return wave2(f, mine && Array.isArray(mine.loot) && mine.loot.length ? mine : mine ? Object.assign({}, mine, { loot: first.loot || [] }) : first);
   };
+  // both ways: loot of a LATER phase that another phase's record knows (phase 1 saw it locked, or phase 2 was read live) shows locked here too
+  function wave2(f, rec) {
+    if (!rec || !f || f.kind !== 'wave') return rec;
+    const own = ownPhase(f.low), have = new Set((rec.loot || []).map((it) => it && it.name)), extra = [];
+    for (const m of Roster.members(f)) {
+      const o = m.low === f.low ? null : get(m.low); if (!o || o === rec) continue;
+      for (const it of o.loot || []) if (it && it.name && it.gp > own && !have.has(it.name)) { have.add(it.name); extra.push(it); }
+    }
+    return extra.length ? Object.assign({}, rec, { loot: (rec.loot || []).concat(extra) }) : rec;
+  }
   // the game's phase number of a boss form: wave bosses have a PvP duel that counts as a phase (our phase 2 = game phase 3). Dungeon bosses have no phase-only loot: old behaviour
   const ownPhase = (low) => { const d = Roster.get(low), i = d ? Roster.members(d).indexOf(d) : 0; return i < 1 || !d || d.kind !== 'wave' ? 1 : i + 2; };
   // [{ req, items:[names], ph:[phase-only names], gp }], lowest requirement first. locked=true: loot of a LATER phase (shown on this form, but only that phase's own damage unlocks it)
