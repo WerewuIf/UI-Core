@@ -32,7 +32,7 @@ Core.module({
   } : {},
   init(Core) {
 'use strict';
-const ID = 'automator', VERSION = '1.10.1';
+const ID = 'automator', VERSION = '1.10.2';
 if (window.__automatorLoaded) { console.warn('[automator] already loaded', window.__automatorLoaded); return null; }
 window.__automatorLoaded = VERSION;
 
@@ -589,18 +589,27 @@ function baseCapOf(low) {
   const top = LootData.top(low); if (top != null) return top;
   return def && def.defaultCap != null ? def.defaultCap : cfg.defaultBossCap;
 }
-function bossCap(low) {
+// Which timed-cap row is in force for this boss right now, read the way a person would read the list: the latest change whose time has already come today
+// (server time); before the day's first change it is the default. One exception, for a dungeon that carries on past midnight: with no change yet today, the
+// cap it was last on (Board.capHeld) stays until a NEW dungeon (a different dungeon id) clears it (see refreshBoss). Nothing here remembers when anything opened.
+function capNow(low) {
   const def = Roster.get(low), o = cfg.bosses[low] || {}, base = baseCapOf(low);
-  if (def && def.kind !== 'wave' && Array.isArray(o.schedule) && o.schedule.length) {   // dungeon bosses only: "from this SERVER time on, use this cap" (latest row that has started; resets at midnight)
+  if (def && def.kind !== 'wave' && Array.isArray(o.schedule) && o.schedule.length) {   // dungeon bosses only
     const mins = serverMinutes();
     if (mins != null) {
-      let best = null;
-      for (const b of o.schedule) { const [hr, mi] = String(b.at).split(':').map(Number), t = hr * 60 + (mi || 0); if (mins >= t && (!best || t >= best.t) && Number.isFinite(b.cap)) best = { t, cap: b.cap }; }
-      if (best) return best.cap;
+      const e = Board.get(low); let best = null;
+      for (const b of o.schedule) { const [hr, mi] = String(b.at).split(':').map(Number), t = hr * 60 + (mi || 0); if (mins >= t && (!best || t >= best.t) && Number.isFinite(b.cap)) best = { t, cap: b.cap, row: b }; }
+      if (best) {
+        if (e && (!e.capHeld || e.capHeld.at !== best.row.at)) Board.patch(low, { capHeld: { at: best.row.at } });   // remember which row we are on (only changes a few times a day)
+        return { cap: best.cap, row: best.row };
+      }
+      const held = e && e.capHeld && o.schedule.find((b) => b.at === e.capHeld.at && Number.isFinite(b.cap));
+      if (held) return { cap: held.cap, row: held };
     }
   }
-  return base;
+  return { cap: base, row: null };
 }
+function bossCap(low) { return capNow(low).cap; }
 function bossLoc(low) {
   const def = Roster.get(low), o = cfg.bosses[low] || {};
   const gate = o.gate != null ? o.gate : def && def.gate, wave = o.wave != null ? o.wave : def && def.wave;
@@ -2242,13 +2251,14 @@ Object.assign(Dungeons, (() => {
     const now = Date.now(), liveLow = f && f.live ? f.live.low : def.low;
     for (const s of Roster.members(def)) { if (s.low === liveLow) continue; const pe = Board.get(s.low); if (pe && pe.alive !== false) Board.patch(s.low, { alive: false, locked: false, noInstance: false, seenAt: now }); }
     const prev = Board.get(liveLow) || {}, sameInst = f && prev.instanceId && String(prev.instanceId) === String(f.inst);
+    const capHeld = !f || sameInst ? prev.capHeld : null;   // a different dungeon id = a new dungeon: nothing is held over (see capNow). Same id = same dungeon and the same mobs, so it stays
     if (!f) { Board.patch(liveLow, base(liveLow, { alive: false, locked: false, noInstance: true, seenAt: now })); return; }
-    if (f.dead) { Board.patch(liveLow, base(liveLow, sameInst ? { alive: false, locked: false, noInstance: false, instanceId: f.inst, seenAt: now } : { alive: false, locked: false, noInstance: false, instanceId: f.inst, monsterId: undefined, userDmg: 0, seenAt: now })); return; }
-    if (f.locked) { Board.patch(liveLow, base(liveLow, { alive: false, locked: true, noInstance: false, instanceId: f.inst, seenAt: now })); return; }
+    if (f.dead) { Board.patch(liveLow, base(liveLow, sameInst ? { alive: false, locked: false, noInstance: false, instanceId: f.inst, capHeld, seenAt: now } : { alive: false, locked: false, noInstance: false, instanceId: f.inst, capHeld, monsterId: undefined, userDmg: 0, seenAt: now })); return; }
+    if (f.locked) { Board.patch(liveLow, base(liveLow, { alive: false, locked: true, noInstance: false, instanceId: f.inst, capHeld, seenAt: now })); return; }
     LootScan.learn({ name: f.name || def.name, kind: 'dungeon', dtype: def.dtype, locationId: f.loc || Roster.canon(def).locationId, boss: true, id: f.id, instanceId: f.inst, bossish: true });
     const same = sameInst && String(prev.monsterId) === String(f.id);
     Board.patch(liveLow, base(liveLow, {
-      alive: true, locked: false, noInstance: false, monsterId: f.id, instanceId: f.inst, locationId: f.loc || Roster.canon(def).locationId, name: f.name, icon: f.icon,
+      alive: true, locked: false, noInstance: false, monsterId: f.id, instanceId: f.inst, capHeld, locationId: f.loc || Roster.canon(def).locationId, name: f.name, icon: f.icon,
       userDmg: Math.max(same ? prev.userDmg || 0 : 0, f.userDmg || 0), firstAliveAt: same && prev.firstAliveAt ? prev.firstAliveAt : now, needsDuel: same ? prev.needsDuel : false, seenAt: now,
     }));
   }
@@ -2277,7 +2287,8 @@ Object.assign(Dungeons, (() => {
       if (cap > 0 && dealt >= cap) return;
       found.push({ monsterId: j.dgmid, instanceId: j.id, locationId: j.loc, userDmg: dealt, chk });
     }, 4);
-    Board.put(def.low, { low: def.low, name: def.name, kind: 'dungeon-swarm', icon, alive: found.length > 0, swarm: found, totalAlive: jobs.length, seenAt: Date.now() });
+    const ids = (ins.v[def.dtype] || []).map(String), sig = ids.slice().sort().join(','), isNew = sig !== '' && sig !== (prev.instSig || '');   // the dungeon ids it lives in, as one string: a different set than last time = a new dungeon (an empty list changes nothing)
+    Board.put(def.low, { low: def.low, name: def.name, kind: 'dungeon-swarm', icon, alive: found.length > 0, swarm: found, totalAlive: jobs.length, seenAt: Date.now(), instSig: sig || prev.instSig || '', capHeld: isNew ? null : prev.capHeld });
   }
 
   /* ---- the Scan hooks ---- */
@@ -3036,8 +3047,9 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
 .ma-opt-l small{margin-left:6px;color:#6e7a9c;font-size:10px;font-weight:400;letter-spacing:0;text-transform:none}
 .ma-opt.wide{grid-column:1/-1}
 /* timing: the labels may wrap, the fields stay level */
-.ma-sr-o.tm{margin:0 0 2px}.ma-sr-o.tm .ma-opt-l{white-space:normal;line-height:1.25}
-@media (max-width:420px){.ma-sr-o{grid-template-columns:minmax(0,1fr);margin-left:0}}
+.ma-sr-o.tm{margin:0 0 2px}.ma-sr-o.tm .ma-opt-l{white-space:normal;line-height:1.25}.ma-sr-o.tm .ma-opt-l small{display:block;margin:1px 0 0}
+.ma-sr-o.tm>.ma-opt:last-child:nth-child(odd){grid-column:1/-1}
+@media (max-width:420px){.ma-sr-o:not(.tm){grid-template-columns:minmax(0,1fr);margin-left:0}}
 .ma-card.off .ma-ico{opacity:.55}.ma-card.off .ma-card-t b{color:#aeb9dc}
 .ma-card-b .ma-set{padding:6px 0}.ma-card-b .ma-fld{margin:2px 0 4px}
 .ma-fold-t small{margin-left:2px}
@@ -3421,17 +3433,17 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   function scheduleEditor(low) {
     const o = cfg.bosses[low] || {}, list = Array.isArray(o.schedule) ? o.schedule : [], now = serverMinutes(), base = baseCapOf(low);
     const sortSave = () => { ovr(low).schedule.sort((a, b) => toMin(a.at) - toMin(b.at)); saveCfg(); draw(); };
-    let act = -1; if (now != null) list.forEach((b, i) => { if (toMin(b.at) <= now && (act < 0 || toMin(b.at) >= toMin(list[act].at))) act = i; });   // the row bossCap() is on right now (-1 = the default)
+    const act = now != null ? list.indexOf(capNow(low).row) : -1;   // the row bossCap() is on right now (-1 = the default)
     const nxt = nextChange(low), inTxt = (m) => (m >= 60 ? Math.floor(m / 60) + ' h ' + (m % 60) + ' min' : m + ' min');
     const rows = list.map((b, i) => h('div', { class: 'ma-srow' + (i === act ? ' now' : '') },
       timePicker(b.at, (at) => { ovr(low).schedule[i].at = at; sortSave(); }), h('span', { class: 'arrow' }, '→'),
       num(() => b.cap, (n) => { ovr(low).schedule[i].cap = n; saveCfg(); }, { fmt: fmtNum }),
       h('button', { type: 'button', class: 'ma-x', title: 'Remove', onclick: (e) => { stop(e); ovr(low).schedule.splice(i, 1); if (!ovr(low).schedule.length) delete ovr(low).schedule; saveCfg(); draw(); } }, '✕')));
-    const first = h('div', { class: 'ma-srow' + (act < 0 && now != null ? ' now' : '') }, h('div', { class: 'ma-time ro', title: 'Every day starts here' }, h('span', { class: 't' }, '12'), h('span', {}, ':'), h('span', { class: 't' }, '00'), h('span', { class: 'ma-ampm' }, 'AM')), h('span', { class: 'arrow' }, '→'), h('span', { class: 'ma-num u' }, h('input', { class: 'ma-in', disabled: true, value: fmtNum(base), title: 'The default cap: every day starts here' }), h('i', {}, 'default')), h('span', {}));
+    const first = h('div', { class: 'ma-srow' + (act < 0 && now != null ? ' now' : '') }, h('div', { class: 'ma-time ro', title: 'Before the day’s first change' }, h('span', { class: 't' }, '12'), h('span', {}, ':'), h('span', { class: 't' }, '00'), h('span', { class: 'ma-ampm' }, 'AM')), h('span', { class: 'arrow' }, '→'), h('span', { class: 'ma-num u' }, h('input', { class: 'ma-in', disabled: true, value: fmtNum(base), title: 'The default cap: every day starts here' }), h('i', {}, 'default')), h('span', {}));
     return h('div', { class: 'ma-sched' },
       h('div', { class: 'ma-sub-h' }, 'Server clock', h('span', { class: 'sp' }), h('small', { style: { whiteSpace: 'nowrap' } }, now != null ? fmtClock(now) + ' IST' : 'not read yet')),
       rows.length ? [first, ...rows] : h('div', { class: 'ma-note', style: { margin: '2px 0 6px' } }, 'The cap stays the same all day. Add a change to raise or lower it from a set time. Times follow the game’s server clock (IST) and repeat every day.'),
-      rows.length ? h('div', { class: 'ma-note', style: { margin: '4px 2px 6px' } }, now == null ? 'Waiting for the server clock (open any game page).' : nxt ? `Next change at ${fmtClock(nxt.t)} → ${fmtNum(nxt.cap)}, in ${inTxt(nxt.t - now)}.` : 'No more changes today. At 12:00 AM server time the day starts again at the default.') : null,
+      rows.length ? h('div', { class: 'ma-note', style: { margin: '4px 2px 6px' } }, now == null ? 'Waiting for the server clock (open any game page).' : nxt ? `Next change at ${fmtClock(nxt.t)} → ${fmtNum(nxt.cap)}, in ${inTxt(nxt.t - now)}.` : 'No more changes today. A dungeon still running at midnight keeps this cap until a new one starts.') : null,
       h('button', { type: 'button', class: 'ma-add', onclick: (e) => { stop(e); const t = now != null ? hhmm((Math.floor(now / 60) + 1) * 60) : '12:00'; (ovr(low).schedule = ovr(low).schedule || []).push({ at: t, cap: bossCap(low) }); sortSave(); } }, '+ Add a cap change'));
   }
   /* ---- the picker under a boss row: ONE flat card, no tabs, nothing to scroll through.
@@ -3802,7 +3814,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
         srow('⏸️', 'Pause server auto-farm', 'So the two never fight over stamina', sw(() => cfg.autoFarmControl, (v) => { cfg.autoFarmControl = v; }, { redraw: false }))),
       caption('Advanced'),
       fold('adv', false, ['⏱ Timing', h('small', {}, 'pauses between requests')], () => [h('div', { class: 'ma-sr-o tm' },
-        opt(['Scan every', h('small', {}, 'Waves, dungeons, and loot')], num(() => cfg.fightScanMs / 60000, (n) => { cfg.fightScanMs = Math.round(n * 60000); }, { unit: 'min', min: 0.1, parse: parseFloat }), null, 'wide'),
+        opt(['Scan every', h('small', {}, 'Waves, dungeons, and loot')], num(() => cfg.fightScanMs / 60000, (n) => { cfg.fightScanMs = Math.round(n * 60000); }, { unit: 'min', min: 0.1, parse: parseFloat })),
         opt('Wave attack cooldown', num(() => cfg.attackDelayMs, (n) => { cfg.attackDelayMs = n; }, { unit: 'ms', min: 0 })),
         opt('Dungeon attack cooldown', num(() => cfg.dungeonAttackDelayMs, (n) => { cfg.dungeonAttackDelayMs = n; }, { unit: 'ms', min: 0 })),
         skillOn ? opt('Skill → attack gap', num(() => cfg.skillToAttackGapMs, (n) => { cfg.skillToAttackGapMs = n; }, { unit: 'ms', min: 0 })) : null,
