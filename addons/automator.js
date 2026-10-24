@@ -32,7 +32,7 @@ Core.module({
   } : {},
   init(Core) {
 'use strict';
-const ID = 'automator', VERSION = '1.10.6';
+const ID = 'automator', VERSION = '1.10.7';
 if (window.__automatorLoaded) { console.warn('[automator] already loaded', window.__automatorLoaded); return null; }
 window.__automatorLoaded = VERSION;
 
@@ -691,7 +691,14 @@ const LootData = (() => {
   let d = norm(lootStore.get());
   const get = (low) => d.bosses[String(low || '').toLowerCase()] || null;
   // a dungeon boss's later phases drop the same loot as its first phase: they read the first phase's record
-  const src = (low) => { const f = Roster.get(low); return f && f.kind !== 'wave' && Roster.canon(f) !== f ? get(Roster.canon(f).low) || get(low) : get(low); };
+  // a wave boss's later phase has loot of its own only once its own battle page was read (only while it is live): until then it shows the first phase's list,
+  // which already carries phase 1's loot (the same in every phase) and the later-phase items its page listed
+  const src = (low) => {
+    const f = Roster.get(low), first = f && Roster.canon(f) !== f ? get(Roster.canon(f).low) : null, mine = get(low);
+    if (!first) return mine;
+    if (f.kind !== 'wave') return first || mine;
+    return mine && Array.isArray(mine.loot) && mine.loot.length ? mine : mine ? Object.assign({}, mine, { loot: first.loot || [] }) : first;
+  };
   // the game's phase number of a boss form: wave bosses have a PvP duel that counts as a phase (our phase 2 = game phase 3). Dungeon bosses have no phase-only loot: old behaviour
   const ownPhase = (low) => { const d = Roster.get(low), i = d ? Roster.members(d).indexOf(d) : 0; return i < 1 || !d || d.kind !== 'wave' ? 1 : i + 2; };
   // [{ req, items:[names], ph:[phase-only names], gp }], lowest requirement first. locked=true: loot of a LATER phase (shown on this form, but only that phase's own damage unlocks it)
