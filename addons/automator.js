@@ -32,7 +32,7 @@ Core.module({
   } : {},
   init(Core) {
 'use strict';
-const ID = 'automator', VERSION = '1.10.7';
+const ID = 'automator', VERSION = '1.10.10';
 if (window.__automatorLoaded) { console.warn('[automator] already loaded', window.__automatorLoaded); return null; }
 window.__automatorLoaded = VERSION;
 
@@ -643,7 +643,7 @@ const WaveMap = (() => {
     generals: { id: 'generals', title: 'Generals', sub: 'Gate 3', ico: '⚔️', order: 1 },
     ocean:    { id: 'ocean',    title: 'Ocean',    sub: 'Gate 5', ico: '🌊', order: 2 },
     olympus:  { id: 'olympus',  title: 'Olympus',  sub: 'Gate 5', ico: '🏛️', order: 3 },
-    other:    { id: 'other',    title: 'More waves', sub: 'found by the loot scan', ico: '🗺️', order: 4 },
+    other:    { id: 'other',    title: 'More waves', sub: 'found by the boss scan', ico: '🗺️', order: 4 },
   };
   const WAVES = {
     '3/8': ['generals', 'Generals'], '5/9': ['ocean', 'Oceanus'],
@@ -711,6 +711,8 @@ const LootData = (() => {
     return [...m.values()].sort((x, y) => x.req - y.req);
   }
   const top = (low) => { const t = tiers(low); return t.length ? t[t.length - 1].req : null; };
+  // forget every saved loot record (a boss is read again when it is next scanned / next spawns); your caps, targets and the ignore list stay
+  function clear() { d = { v: 1, at: 0, bosses: {} }; lootStore.set(d); iconFor = null; UI.dirty(); }
   let iconMap = null, iconFor = null;                                // item name -> picture, from whichever boss's scan had one (the same item looks the same everywhere)
   const icon = (name) => {
     if (iconFor !== d) { iconFor = d; iconMap = new Map(); Object.values(d.bosses).forEach((b) => ((b && b.loot) || []).forEach((it) => { if (it && it.icon && it.name && !iconMap.has(it.name)) iconMap.set(it.name, it.icon); })); }
@@ -749,8 +751,8 @@ const LootData = (() => {
     if (d.bosses[low]) { const b = Object.assign({}, d.bosses); delete b[low]; d = Object.assign({}, d, { bosses: b }); lootStore.set(d); }
     saveCfg();
   }
-  lootStore.watch((v) => { d = norm(v); const n = apply(); if (n) log(`🆕 loot scan added ${n} boss${n === 1 ? '' : 'es'} to the Bosses tab`, 'info'); UI.dirty(); });
-  return { get, src, tiers, top, ownPhase, icon, apply, purge, dismiss, isBossRecord, all: () => d.bosses, at: () => d.at || 0 };
+  lootStore.watch((v) => { d = norm(v); const n = apply(); if (n) log(`🆕 boss loot read added ${n} boss${n === 1 ? '' : 'es'} to the Bosses tab`, 'info'); UI.dirty(); });
+  return { get, src, tiers, top, clear, ownPhase, icon, apply, purge, dismiss, isBossRecord, all: () => d.bosses, at: () => d.at || 0 };
 })();
 
 /* ---- board: what we KNOW about each boss right now. Only a validated page / confirmed reply may change it. -------- */
@@ -2768,7 +2770,7 @@ Object.assign(LootScan, (() => {
       html = await Act.run(() => Core.net.fetchText(url, Object.assign({ force: true, ttl: 0, key: 'ma:scan:' + (mode || '') + url }, mode ? { via: (run) => Core.cookies.withMode(mode, run) } : {})), gapMs());
     } catch (e) { throw new Error(`${where}: ${e.message}`); }
     const doc = parseHtml(html), s = Guard.pageState(doc);
-    if (s !== 'ok') { Guard.fault(s, 'loot scan'); throw new Halt(s === 'signedout' ? 'you are signed out' : 'the site is unavailable'); }
+    if (s !== 'ok') { Guard.fault(s, 'boss loot read'); throw new Halt(s === 'signedout' ? 'you are signed out' : 'the site is unavailable'); }
     if (!Guard.chromeOk(doc)) throw new Error(`${where}: not a normal game page`);
     return doc;
   }
@@ -2916,7 +2918,7 @@ Object.assign(LootScan, (() => {
   async function run() {
     if (st.running) return;
     Object.assign(st, { running: true, stop: false, label: 'Starting…', done: 0, total: 0, read: 0, added: 0, notes: [], error: '', skipped: 0, startedAt: Date.now(), endedAt: 0 });
-    found = {}; skipped.clear(); UI.dirty('scan'); log('🔎 loot scan started (read-only)', 'info');
+    found = {}; skipped.clear(); UI.dirty('scan'); log('🔎 boss loot read started (read-only)', 'info');
     try {
       const waves = await discoverWaves();
       st.total = waves.length + 1; UI.dirty('scan');
@@ -2933,7 +2935,7 @@ Object.assign(LootScan, (() => {
       let n = 0; try { n = save(); } catch (e) { st.error = 'could not save: ' + e.message; }
       st.running = false; st.endedAt = Date.now(); st.label = '';
       if (!n) { if (!st.error) st.error = 'nothing was read. Are you signed in?'; }
-      log(`${st.error ? '⚠️' : '✅'} loot scan ${st.stop ? 'stopped' : 'finished'}: ${n} monster${n === 1 ? '' : 's'} read${st.added ? ', ' + st.added + ' new' : ''}${st.skipped ? ', ' + st.skipped + ' regular mob' + (st.skipped === 1 ? '' : 's') + ' left out' : ''}${st.notes.length ? ', ' + st.notes.length + ' note' + (st.notes.length === 1 ? '' : 's') : ''}${st.error ? ' — ' + st.error : ''}`, st.error ? 'warn' : 'ok');
+      log(`${st.error ? '⚠️' : '✅'} boss loot read ${st.stop ? 'stopped' : 'finished'}: ${n} monster${n === 1 ? '' : 's'} read${st.added ? ', ' + st.added + ' new' : ''}${st.skipped ? ', ' + st.skipped + ' ordinary mob' + (st.skipped === 1 ? '' : 's') + ' ignored' : ''}${st.notes.length ? ', ' + st.notes.length + ' note' + (st.notes.length === 1 ? '' : 's') : ''}${st.error ? ' — ' + st.error : ''}`, st.error ? 'warn' : 'ok');
       UI.dirty('scan'); UI.dirty('loot');
     }
   }
@@ -2954,8 +2956,8 @@ Object.assign(LootScan, (() => {
     const rows = Object.values(LootData.all()).filter((e) => e && e.name).map((e) => ({ e, w: whereOf(e) }))
       .sort((a, b) => a.w.sort - b.w.sort || (ri(a.e) - ri(b.e)) || a.e.name.localeCompare(b.e.name));
     const L = [], rule = '='.repeat(78), thin = '-'.repeat(78);
-    L.push('AUTOMATOR · LOOT SCAN FINDINGS', rule, `Exported        ${when(Date.now())}   (Automator v${VERSION})`, `Data saved      ${when(LootData.at())}`, `Monsters        ${rows.length}`, '');
-    if (!rows.length) { L.push('Nothing has been scanned yet. Press Scan in the Bosses tab.'); return L.join('\r\n'); }
+    L.push('AUTOMATOR · BOSS LOOT FINDINGS', rule, `Exported        ${when(Date.now())}   (Automator v${VERSION})`, `Data saved      ${when(LootData.at())}`, `Monsters        ${rows.length}`, '');
+    if (!rows.length) { L.push('Nothing has been scanned yet. Press Scan bosses in the Bosses tab.'); return L.join('\r\n'); }
 
     L.push('CAP CHOICES (the loot DMG requirements; the highest one is the default cap)', thin);
     const nw = Math.min(46, Math.max(...rows.map((r) => r.e.name.length)));
@@ -2983,7 +2985,7 @@ Object.assign(LootScan, (() => {
   }
   function download() {
     const body = text(), n = Object.keys(LootData.all()).length, d = new Date(), p = (x) => String(x).padStart(2, '0');
-    const name = `automator-loot-scan-${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}.txt`;
+    const name = `automator-boss-loot-${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}.txt`;
     try {
       const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([body], { type: 'text/plain;charset=utf-8' })); a.download = name;
       document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1500);
@@ -3584,7 +3586,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
         h('small', {}, '0 = skip')));
     if (!rungs.length) {
       return [head, chips([[1e8, '100M'], [5e8, '500M'], [1e9, '1B'], [2e9, '2B'], [3e9, '3B'], [5e9, '5B']], base, (v) => { ovr(low).cap = v; }),
-        h('div', { class: 'ma-what' }, base <= 0 ? 'Cap 0: this boss is skipped.' : !info ? (LootScan.available ? 'No loot data yet. Press Scan at the top to read it.' : 'No loot data for this boss yet.') : '')];
+        h('div', { class: 'ma-what' }, base <= 0 ? 'Cap 0: this boss is skipped.' : !info ? (LootScan.available ? 'No loot data yet. Press Scan bosses at the top to read it.' : 'No loot data for this boss yet.') : '')];
     }
     const topReq = rungs[rungs.length - 1].req;
     const at = new Map();                                              // item -> every level that drops it (for the hover text)
@@ -3625,7 +3627,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     const timedBtn = m.kind !== 'wave' ? h('button', { type: 'button', class: 'ma-timed-bar' + (tOpen ? ' open' : ''), onclick: () => { ui.open.time = !tOpen; saveUi(); draw(); } }, h('span', {}, '⏰ Timed cap' + (sched ? ' · ' + o.schedule.length + ' set' + (serverMinutes() != null ? ' · now ' + short(bossCap(low)) : '') : '')), h('i', {}, tOpen ? '▾' : '▸')) : null;
     const resetBtn = Object.keys(o).length ? h('button', { type: 'button', class: 'ma-link', onclick: () => { delete cfg.bosses[low]; saveCfg(); draw(); } }, '↺ Reset') : null;
     const copyBtn = kinds.length ? h('button', { type: 'button', class: 'ma-link', title: 'Give other bosses this boss’s gear / crystal / pet picks', onclick: (e) => { stop(e); startBulk(def, low); } }, '⧉ Copy loadout to…') : null;
-    const removeBtn = def.fromScan ? h('button', { type: 'button', class: 'ma-link warn', title: 'The loot scan added this boss. Remove it from the list (a rescan will not bring it back).', onclick: (e) => { stop(e); removeAdded([def]); } }, '🗑 Remove') : null;
+    const removeBtn = def.fromScan ? h('button', { type: 'button', class: 'ma-link warn', title: 'The boss scan added this boss. Remove it from the list (a rescan will not bring it back).', onclick: (e) => { stop(e); removeAdded([def]); } }, '🗑 Remove') : null;
     return h('div', { class: 'ma-ed' },
       h('div', { class: 'ma-ed-h' }, h('div', { class: 'ma-ed-t' }, h('b', { title: m.name }, m.name), place ? h('small', {}, place) : null), pill(txt, kind),
         h('button', { type: 'button', class: 'ma-x', title: 'Close', onclick: (e) => { stop(e); ui.sel = ''; saveUi(); draw(); } }, '✕')),
@@ -3820,13 +3822,13 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     if (s.running) {
       const pct = s.total ? Math.min(100, Math.round(s.done / s.total * 100)) : 0;
       out.push(h('div', { class: 'ma-scan' }, h('span', { class: 'ma-ico' }, '⏳'),
-        h('div', { class: 'ma-scan-t' }, h('b', {}, `Scanning loot… ${pct}%`), h('small', {}, (s.label || '') + (s.read ? ` · ${s.read} read` : '')), h('div', { class: 'ma-bar' }, h('i', { style: { width: pct + '%' } }))),
+        h('div', { class: 'ma-scan-t' }, h('b', {}, `Reading boss loot… ${pct}%`), h('small', {}, (s.label || '') + (s.read ? ` · ${s.read} read` : '')), h('div', { class: 'ma-bar' }, h('i', { style: { width: pct + '%' } }))),
         h('div', { class: 'ma-scan-b' }, btn('■ Stop', 'danger', () => LootScan.stop()))));
       return out;
     }
-    const sub = s.error ? '⚠ ' + s.error : n ? `${n} monsters · scanned ${ago(LootData.at())}` + (s.endedAt ? ` · last run read ${s.read}${s.added ? ', ' + s.added + ' new' : ''}${s.skipped ? ' · ' + s.skipped + ' regular mob' + (s.skipped === 1 ? '' : 's') + ' left out' : ''}` : '') : 'Reads every boss’s loot, level requirement and EXP cap.';
-    out.push(h('div', { class: 'ma-scan' }, h('span', { class: 'ma-ico' }, '🔎'), h('div', { class: 'ma-scan-t' }, h('b', {}, 'Loot scan'), h('small', { title: sub }, sub)),
-      h('div', { class: 'ma-scan-b' }, btn(n ? '↻ Rescan' : '🔎 Scan', 'soft', () => LootScan.run()), n ? btn('⬇ Export .txt', 'soft', () => LootScan.download()) : null)));
+    const sub = s.error ? '⚠ ' + s.error : n ? `${n} boss${n === 1 ? '' : 'es'} saved · updated ${ago(LootData.at())}` + (s.endedAt ? ` · last run read ${s.read}${s.added ? ', ' + s.added + ' new' : ''}${s.skipped ? ' · ignored ' + s.skipped + ' ordinary mob' + (s.skipped === 1 ? '' : 's') : ''}` : '') : 'Reads every boss’s loot, level requirement and EXP cap.';
+    out.push(h('div', { class: 'ma-scan' }, h('span', { class: 'ma-ico' }, '🔎'), h('div', { class: 'ma-scan-t' }, h('b', {}, 'Boss loot'), h('small', { title: sub }, sub)),
+      h('div', { class: 'ma-scan-b' }, btn(n ? '↻ Rescan bosses' : '🔎 Scan bosses', 'soft', () => LootScan.run()), n ? btn('⬇ Export .txt', 'soft', () => LootScan.download()) : null, n ? btn('🗑 Clear', 'danger', () => { if (confirm(`Delete the saved loot data of ${n} boss${n === 1 ? '' : 'es'}? Your caps and targets stay. A boss is read again on the next Scan or when it spawns.`)) { LootData.clear(); draw(); } }) : null)));
     if (s.notes.length) {
       out.push(h('div', { style: { margin: '-3px 4px 6px' } }, h('button', { type: 'button', class: 'ma-link', onclick: () => { scanOpen = !scanOpen; paintScan(); } }, `⚠ ${s.notes.length} thing${s.notes.length === 1 ? '' : 's'} could not be read ${scanOpen ? '▾' : '▸'}`)));
       if (scanOpen) out.push(h('div', { class: 'ma-scan-n' }, s.notes.map((t) => h('div', {}, t))));
@@ -3995,7 +3997,7 @@ Kernel.register({ id: 'bosses', name: 'Wave bosses', icon: '🌊' });
   const set = new Set(gone); let t = 0;
   cfg.targets = cfg.targets.filter((x) => { if (set.has(x)) { t++; return false; } return true; });
   gone.forEach((l) => { delete cfg.bosses[l]; });
-  saveCfg(); log(`🧹 removed ${gone.length} regular mob${gone.length === 1 ? '' : 's'} that an earlier loot scan had saved${t ? ' (and ' + t + ' target tick' + (t === 1 ? '' : 's') + ')' : ''}`, 'info');
+  saveCfg(); log(`🧹 removed ${gone.length} regular mob${gone.length === 1 ? '' : 's'} that an earlier boss scan had saved${t ? ' (and ' + t + ' target tick' + (t === 1 ? '' : 's') + ')' : ''}`, 'info');
 })();
 LootData.apply();
 Panel.register();
