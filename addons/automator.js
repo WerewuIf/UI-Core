@@ -32,7 +32,7 @@ Core.module({
   } : {},
   init(Core) {
 'use strict';
-const ID = 'automator', VERSION = '1.10.4';
+const ID = 'automator', VERSION = '1.10.6';
 if (window.__automatorLoaded) { console.warn('[automator] already loaded', window.__automatorLoaded); return null; }
 window.__automatorLoaded = VERSION;
 
@@ -1367,6 +1367,9 @@ const Presets = (() => {
   const nameOf = (kind, id) => { const p = list(kind).find((x) => x.id === String(id)); return p ? p.name : String(id); };
   // The Build Engine offers the pseudo-kind 'best' (preset.best.*): it needs the boss (any boss: wave, General, dungeon boss or mob).
   const BEST = 'best';
+  // where a search spends its time (the engine reports it): pages = reading your stats / gear / pets, boss = the boss page, maths = the search itself
+  const secs = (ms) => (ms / 1000).toFixed(ms < 10000 ? 1 : 0) + ' s';
+  const timingText = (tm) => (!tm ? '' : tm.cached ? 'search: already known' : `search ${secs(tm.total)} (pages ${secs(tm.pages)}${tm.slowPage ? ' – ' + esc(tm.slowPage) : ''} · boss ${secs(tm.boss)} · maths ${secs(tm.search)})` + (tm.apply != null ? ` · switch ${secs(tm.apply)}` : ''));
   const BEST_MIN_GAIN = 0.1;                                          // %: the engine equips its best unless that is within this of what is on (its own default, 2%, would leave up to 2% damage on the table)
   const bossOf = (t) => ({ monsterId: t.monsterId, name: t.name, kind: t.kind });
   // What the Build Engine is asked to search for. A wave boss (Generals included) is just its id: the engine reads its battle page itself.
@@ -1518,6 +1521,7 @@ const Presets = (() => {
         try { r = await withTimeout(Core.call('preset.' + kind + '.apply', String(want), opts), 120000, { ok: false, message: 'timed out' }); }
         catch (e) { r = { ok: false, message: (e && e.code === 'NO_CAP') ? 'the addon that offered it is gone' : ((e && e.message) || String(e)) }; }
         if (kind === BEST && !ex.ran) Prog.note(lab, 'Gear + pets · ' + (r && r.ok !== false ? 'already the best' : 'failed'));
+        if (kind === BEST && r && r.timing) log(`⏱ ${esc(bossName(low))}: ${timingText(r.timing)}`, 'info');
         if (kind === BEST && sig && !(r && r.ok !== false && r.changed)) Prog.drop(SIG);          // no new pets, so no sigils to move: not a step that is waited for
         if (r && r.ok !== false) {
           applied[kind] = memo; log(`✅ ${kind === BEST ? 'best gear + pets' : kind + ' preset'} ${r.changed === false ? 'already on' : 'applied'}`, 'ok'); try { await Core.me.sync(); } catch (_) { /* */ } Me.statsAt = 0;
@@ -1598,7 +1602,10 @@ const Presets = (() => {
         if (r && r.ok !== false) log(`✅ sigils back on their pets (${r.moved})`, 'ok'); else notes.push('sigils: ' + ((r && r.message) || 'failed'));
       }
       Object.keys(applied).forEach((k) => delete applied[k]); buildEpoch++;
-      if (notes.length) { log(`⚠️ not everything went back: ${esc(notes.join(' · '))} — it is still remembered, try again`, 'warn'); return { ok: false, message: notes.join('; ') }; }
+      if (notes.length) {
+        try { await Origin.markLeft(o.probe); await Origin.markCrystals(); } catch (_) { /* */ }   // what is on now is what WE left (part of the way back): the retry compares against that, not against the old state
+        log(`⚠️ not everything went back: ${esc(notes.join(' · '))} — it is still remembered, try again`, 'warn'); return { ok: false, message: notes.join('; ') };
+      }
       Origin.clear(); try { await Core.me.sync(); } catch (_) { /* */ } Me.statsAt = 0;
       return { ok: true, message: 'your build is back' };
     } catch (e) { log('⚠️ restore: ' + esc((e && e.message) || String(e)), 'warn'); return { ok: false, message: (e && e.message) || String(e) }; }
@@ -1617,7 +1624,7 @@ const Presets = (() => {
   // "gear: Boss gear · pet: Boss pets" for the Status tab, or an em dash when nothing was applied this session
   const summary = () => { const a = kinds().filter((k) => applied[k]).map((k) => k + ': ' + (String(applied[k]).startsWith('__best') ? 'best' : nameOf(k, String(applied[k]).split('@')[0]))); if (applied.crystal && !kinds().includes('crystal')) a.push('crystal: best'); return a.length ? a.join(' · ') : '—'; };
   const note = () => !haveCaps() ? 'needs Core 3.16.0+' : (kinds().length ? kinds().map((k) => `${k} (${list(k).length})`).join(' · ') : 'none offered');
-  return { kinds, pickKinds, available, list, ensure, wanted, autoFor, buildOf, defaultPick, crystalAuto, engineMob, summary, note, restore, origin: Origin, applied: () => Object.assign({}, applied), forget: () => { Object.keys(applied).forEach((k) => delete applied[k]); buildEpoch++; } };
+  return { timingText, kinds, pickKinds, available, list, ensure, wanted, autoFor, buildOf, defaultPick, crystalAuto, engineMob, summary, note, restore, origin: Origin, applied: () => Object.assign({}, applied), forget: () => { Object.keys(applied).forEach((k) => delete applied[k]); buildEpoch++; } };
 })();
 
 /* ---- build planner: which boss next, so the build changes as little as possible ------------------------------------------
@@ -1640,19 +1647,23 @@ const Plan = (() => {
   }
   const tagSig = (tag, crystal) => ({ any: false, tag: String(tag), gear: {}, mains: [], links: {}, crystal: cryst(crystal) });
   const anySig = (crystal) => ({ any: true, tag: '', gear: {}, mains: [], links: {}, crystal: cryst(crystal) });
+  const linkSet = (s, i) => new Set(s.mains.map((m) => nz(((s.links || {})[m] || [])[i])).filter(Boolean));   // the pets linked at one level (0 = Link 1, 1 = Link 2)
   function distance(a, b) {
     let d = a.crystal != null && b.crystal != null && a.crystal !== b.crystal ? 1 : 0;
     if (a.any || b.any) return d;
     if (a.tag !== b.tag) return d + UNRELATED;
     if (a.tag) return d;
     new Set([...Object.keys(a.gear), ...Object.keys(b.gear)]).forEach((slot) => { if (nz(a.gear[slot]) !== nz(b.gear[slot])) d++; });
+    // Where a pet stands changes nothing (the Build Engine keeps pets where they are): the mains count as a SET, and the links as a set PER LEVEL
+    // (a link moved to another main at the same level costs nothing; the same pet at the other level is a change).
     const am = new Set(a.mains), bm = new Set(b.mains);
     am.forEach((m) => { if (!bm.has(m)) d++; });
-    bm.forEach((m) => {
-      if (!am.has(m)) { d += 1 + (b.links[m] || []).filter(Boolean).length; return; }
-      const la = a.links[m] || ['', ''], lb = b.links[m] || ['', ''];
-      for (let i = 0; i < 2; i++) if (nz(la[i]) !== nz(lb[i])) d++;
-    });
+    bm.forEach((m) => { if (!am.has(m)) d++; });
+    for (let i = 0; i < 2; i++) {
+      const la = linkSet(a, i), lb = linkSet(b, i); let add = 0, gone = 0;
+      lb.forEach((n) => { if (!la.has(n)) add++; }); la.forEach((n) => { if (!lb.has(n)) gone++; });
+      d += Math.max(add, gone);                                      // a pet put in the place of another is one change
+    }
     return d;
   }
   const dist0 = (start, sig) => (start ? distance(start, sig) : 0);
@@ -1715,8 +1726,9 @@ const Plan = (() => {
   function describe(a, b) {
     const slots = [...new Set([...Object.keys(a.gear), ...Object.keys(b.gear)])].filter((k) => nz(a.gear[k]) !== nz(b.gear[k]));
     let pets = 0; const am = new Set(a.mains);
-    b.mains.forEach((m) => { if (!am.has(m)) { pets += 1 + (b.links[m] || []).filter(Boolean).length; return; } const la = a.links[m] || ['', ''], lb = b.links[m] || ['', '']; for (let i = 0; i < 2; i++) if (nz(la[i]) !== nz(lb[i])) pets++; });
+    b.mains.forEach((m) => { if (!am.has(m)) pets++; });
     am.forEach((m) => { if (!b.mains.includes(m)) pets++; });
+    for (let i = 0; i < 2; i++) { const la = linkSet(a, i), lb = linkSet(b, i); let add = 0, gone = 0; lb.forEach((n) => { if (!la.has(n)) add++; }); la.forEach((n) => { if (!lb.has(n)) gone++; }); pets += Math.max(add, gone); }
     const parts = [...slots.slice(0, 4), ...(slots.length > 4 ? ['+' + (slots.length - 4) + ' more'] : []), ...(pets ? [pets + ' pet' + (pets === 1 ? '' : 's')] : [])];
     return parts.join(', ');
   }
@@ -1740,6 +1752,7 @@ const Planner = (() => {
       if (!hit || Date.now() - hit.at > TTL) {
         let r = null; const mob = await Presets.engineMob(t);
         try { r = mob ? await withTimeout(Promise.resolve(Core.call('build.best', mob, { mode: OPT_MODE })), SEARCH_MS, null) : null; } catch (_) { r = null; }
+        if (r && r.timing && !r.timing.cached) log(`⏱ searched ${esc(t.name)}: ${Presets.timingText(r.timing)}`, 'info');
         if (r && r.ok !== false && r.best && r.best.sel) { hit = { at: Date.now(), sel: r.best.sel }; cache.set(ckey(t), hit); cur = r.current && r.current.sel; }
         else hit = null;
       }
@@ -1781,7 +1794,11 @@ const Planner = (() => {
       const seq = wild.slice().sort(byName).concat(...stops.map((g) => g.ts));
       // "Gribbles ×15 → Oceanus": the same boss in a row is one entry
       const parts = []; seq.forEach((t) => { const n = label(t), l = parts[parts.length - 1]; if (l && l.n === n) l.c++; else parts.push({ n, c: 1 }); });
-      const line = parts.map((x) => (x.c > 1 ? `${x.n} ×${x.c}` : x.n)).join(' → ') + ` (${res.cost} change${res.cost === 1 ? '' : 's'}${res.mode === 'heuristic' ? ', nearest-first' : ''})`;
+      // res.cost is a score, not a step count: one per gear slot / pet / link that differs (each is an unequip + equip, so more real steps), crystals and sigils are not in it,
+      // and a saved-preset build or a boss with no search result counts a flat 20 against any other build. So the number is only quoted when every build was searched.
+      const sized = gl.every((g) => !g.sig.tag) && !(start && start.tag);
+      const sizeTxt = sized ? `about ${res.cost} gear / pet change${res.cost === 1 ? '' : 's'}, each several steps; crystals and sigils not counted` : 'size of each switch not known: saved presets or no search result';
+      const line = parts.map((x) => (x.c > 1 ? `${x.n} ×${x.c}` : x.n)).join(' → ') + ` (${sizeTxt}${res.mode === 'heuristic' ? ', nearest-first' : ''})`;
       if (line !== lastLog) { lastLog = line; log('🧭 build order: ' + esc(line), 'ok'); }
       const first = seq[0] || list[0], fg = stops.find((g) => g.ts.includes(first));
       if (fg) onNow = fg.sig;                                                              // the engine is about to put this build on
@@ -2363,7 +2380,9 @@ Object.assign(Dungeons, (() => {
 
   /* ---- the Scan hooks ---- */
   function nextCheck(def) {
-    const now = Date.now(), e = Board.get(def.low); if (!e || !e.seenAt) return now;
+    const now = Date.now(); let e = null;                              // a phase boss is scanned as a group and the live phase gets the fresh stamp: use the newest entry of the group, not just the selected one
+    for (const m of Roster.members(def)) { const x = Board.get(m.low); if (x && x.seenAt && (!e || x.seenAt > e.seenAt)) e = x; }
+    if (!e) return now;
     return e.seenAt + cfg.fightScanMs * (e.locked ? 2 : 1);
   }
   async function refresh(lows, step) {
