@@ -672,10 +672,16 @@ const LootData = (() => {
   const norm = (v) => (v && typeof v === 'object' && v.bosses && typeof v.bosses === 'object' ? v : { v: 1, at: 0, bosses: {} });
   let d = norm(lootStore.get());
   const get = (low) => d.bosses[String(low || '').toLowerCase()] || null;
-  function tiers(low) {                                              // [{ req, items:[names] }], lowest requirement first
-    const e = get(low), m = new Map();
-    ((e && e.loot) || []).forEach((it) => { if (Number.isFinite(it.dmgReq) && it.dmgReq > 0) { const a = m.get(it.dmgReq) || []; if (it.name && !a.includes(it.name)) a.push(it.name); m.set(it.dmgReq, a); } });
-    return [...m.entries()].sort((x, y) => x[0] - y[0]).map(([req, items]) => ({ req, items }));
+  // the game's phase number of a boss form: phase 1 = 1, our "phase 2" = game phase 3 (the duel counts as a phase)
+  const ownPhase = (low) => { const d = Roster.get(low), i = d ? Roster.members(d).indexOf(d) : 0; return i < 1 ? 1 : i + 2; };
+  // [{ req, items:[names], ph:[phase-only names], gp }], lowest requirement first. locked=true: loot of a LATER phase (shown on this form, but only that phase's own damage unlocks it)
+  function tiers(low, locked) {
+    const e = get(low), m = new Map(), own = ownPhase(low);
+    ((e && e.loot) || []).forEach((it) => {
+      if (!(Number.isFinite(it.dmgReq) && it.dmgReq > 0) || !it.name || (!!(it.gp > own)) !== !!locked) return;
+      const t = m.get(it.dmgReq) || { req: it.dmgReq, items: [], ph: [], gp: it.gp }; if (!t.items.includes(it.name)) t.items.push(it.name); if (it.gp && !t.ph.includes(it.name)) t.ph.push(it.name); m.set(it.dmgReq, t);
+    });
+    return [...m.values()].sort((x, y) => x.req - y.req);
   }
   const top = (low) => { const t = tiers(low); return t.length ? t[t.length - 1].req : null; };
   let iconMap = null, iconFor = null;                                // item name -> picture, from whichever boss's scan had one (the same item looks the same everywhere)
@@ -717,7 +723,7 @@ const LootData = (() => {
     saveCfg();
   }
   lootStore.watch((v) => { d = norm(v); const n = apply(); if (n) log(`🆕 loot scan added ${n} boss${n === 1 ? '' : 'es'} to the Bosses tab`, 'info'); UI.dirty(); });
-  return { get, tiers, top, icon, apply, purge, dismiss, isBossRecord, all: () => d.bosses, at: () => d.at || 0 };
+  return { get, tiers, top, ownPhase, icon, apply, purge, dismiss, isBossRecord, all: () => d.bosses, at: () => d.at || 0 };
 })();
 
 /* ---- board: what we KNOW about each boss right now. Only a validated page / confirmed reply may change it. -------- */
@@ -738,12 +744,15 @@ const Board = (() => {
     if (e.swarm) { const s = e.swarm.find((x) => String(x.monsterId) === String(t.monsterId) && String(x.instanceId) === String(t.instanceId)); if (s && total > (s.userDmg || 0)) { s.userDmg = total; touch(); } return; }
     if (String(e.monsterId) === String(t.monsterId) && total > (e.userDmg || 0)) { e.userDmg = total; touch(); }
   }
+  // a later phase's loot counts only damage dealt IN that phase: base = damage dealt before it (read once per monster life, see phaseBase)
+  const base = (low) => { const e = b[low]; return e && e.phBaseFor != null && e.phBaseFor === String(e.monsterId) ? e.phBase || 0 : 0; };
+  const baseKnown = (low) => { const d = Roster.get(low), e = b[low]; return !d || Roster.members(d).indexOf(d) < 1 || !!(e && e.phBaseFor != null && e.phBaseFor === String(e.monsterId)); };
   load();
   window.addEventListener('beforeunload', () => { dirty = true; save(); });
   boardStore.watch((v) => { if (v && !Tab.isMain()) { b = v; UI.dirty('status'); } });
   // a gribble (swarm mob) died or was capped by the server: forget just that one
   function dropSwarm(t) { const e = b[t.low]; if (!e || !e.swarm) return; e.swarm = e.swarm.filter((x) => !(String(x.monsterId) === String(t.monsterId) && String(x.instanceId) === String(t.instanceId))); if (!e.swarm.length) e.alive = false; touch(); }
-  return { get, load, put, patch, dealt, confirm, dropSwarm, all: () => b, save };
+  return { get, load, put, patch, dealt, base, baseKnown, confirm, dropSwarm, all: () => b, save };
 })();
 
 /* ---- targets: everything the engine may attack right now, in priority order (first tick = first priority) --------- */
@@ -754,15 +763,16 @@ function candidates() {
     if (def.kind !== 'wave' && !Kernel.isOn('dungeons')) continue;      // the Dungeons part is switched off: wave bosses only
     if (def.kind === 'wave' && !Kernel.isOn('bosses')) continue;         // the Wave bosses part is switched off
     const cap = bossCap(low); if (cap <= 0) continue;
+    const capT = cap + Board.base(low);
     if (e.pausedUntil && e.pausedUntil > now) continue;
     if (def.kind === 'dungeon-swarm') {
       for (const s of e.swarm || []) { if ((s.userDmg || 0) < cap) out.push({ low, name: def.name, kind: 'dungeon', monsterId: s.monsterId, instanceId: s.instanceId, locationId: s.locationId, userDmg: s.userDmg || 0, cap, swarm: true }); }
       continue;
     }
     if (!e.monsterId) continue;
-    if ((e.userDmg || 0) >= cap) continue;
+    if (Board.baseKnown(low) && (e.userDmg || 0) >= capT) continue;
     if (e.needsDuel && e.duelRetryAt && e.duelRetryAt > now) continue;
-    out.push({ low, name: e.name || def.name, kind: def.kind === 'wave' ? 'wave' : 'dungeon', monsterId: e.monsterId, instanceId: e.instanceId, locationId: e.locationId, userDmg: e.userDmg || 0, cap });
+    out.push({ low, name: e.name || def.name, kind: def.kind === 'wave' ? 'wave' : 'dungeon', monsterId: e.monsterId, instanceId: e.instanceId, locationId: e.locationId, userDmg: e.userDmg || 0, cap: capT });
   }
   return out;
 }
@@ -1859,9 +1869,27 @@ const Engine = (() => {
     return { used: false, msg, cr: classifyReject(msg || JSON.stringify(j)), r };
   }
 
+  // "Your damage" minus "Phase DMG" on the boss's own page = what was dealt before this phase (0 for phase 1, or when the page has no Phase DMG chip)
+  async function phaseBase(t) {
+    const def = Roster.get(t.low), e = Board.get(t.low);
+    if (!e || !def || t.swarm || Roster.members(def).indexOf(def) < 1) return 0;
+    if (Board.baseKnown(t.low)) return Board.base(t.low);
+    try {
+      const html = await Core.net.fetchText(t.kind === 'dungeon' ? `/battle.php?dgmid=${encodeURIComponent(t.monsterId)}&instance_id=${encodeURIComponent(t.instanceId)}` : `/battle.php?id=${encodeURIComponent(t.monsterId)}`, { force: true, ttl: 0 });
+      if (Guard.pageState(html) !== 'ok') return 0;
+      const doc = parseHtml(html), el = doc.getElementById('yourDamageValue'), chip = Array.from(doc.querySelectorAll('.chip')).find((c) => /^phase dmg/i.test((c.textContent || '').trim()));
+      const mine = el ? parseNum(el.textContent, null) : null, ph = chip ? parseNum(chip.textContent.replace(/^[^:]*:/, ''), null) : null;
+      if (mine == null || (chip && (ph == null || ph > mine))) return 0;               // unreadable: try again next swing
+      const base = chip ? mine - ph : 0;
+      Board.patch(t.low, { phBase: base, phBaseFor: String(t.monsterId) });
+      if (base > 0) log(`📐 ${esc(t.name)}: ${fmtNum(base)} was dealt before this phase, so its cap counts only damage from here`, 'info');
+      return base;
+    } catch (_) { return 0; }
+  }
+
   async function swing(t, tk) {
-    const cap = bossCap(t.low); let cur = Board.dealt(t);
-    if (!(cap > 0) || cur >= cap) return { ok: false, reason: 'capped' };
+    const raw = bossCap(t.low), cap = raw + await phaseBase(t); let cur = Board.dealt(t);
+    if (!(raw > 0) || cur >= cap) return { ok: false, reason: 'capped' };
     const userId = uid();
     if (!userId) return { ok: false, reason: 'auth' };
 
@@ -1976,7 +2004,7 @@ const Engine = (() => {
       case 'halt': return;
       case 'capped': {
         const k = targetKey(t);
-        if (!capLogged.has(k)) { capLogged.add(k); if (capLogged.size > 400) capLogged.clear(); log(`✅ ${esc(t.name)} capped (${fmtNum(Board.dealt(t))}/${fmtNum(bossCap(low))})`, 'ok'); }
+        if (!capLogged.has(k)) { capLogged.add(k); if (capLogged.size > 400) capLogged.clear(); log(`✅ ${esc(t.name)} capped (${fmtNum(Math.max(0, Board.dealt(t) - Board.base(low)))}/${fmtNum(bossCap(low))})`, 'ok'); }
         if (t.swarm) Board.dropSwarm(t);
         return;
       }
@@ -2693,7 +2721,7 @@ Object.assign(LootScan, (() => {
         (child.querySelectorAll ? child.querySelectorAll('.loot-card') : []).forEach((card) => {
           const chips = Array.from(card.querySelectorAll('.chip')).map((c) => clean(c.textContent));
           const im = card.querySelector('img'), icon = im ? (im.getAttribute('src') || im.getAttribute('data-src') || '') : '';
-          loot.push({ tier, name: clean((card.querySelector('.loot-name') || {}).textContent), icon: icon || undefined, dropPct: numIn(chips.find((t) => /drop:/i.test(t))), dmgReq: numIn(chips.find((t) => /dmg req:/i.test(t))) });
+          loot.push({ tier, name: clean((card.querySelector('.loot-name') || {}).textContent), icon: icon || undefined, gp: (card.classList.contains('phase-loot-card') || chips.some((t) => /^phase\s*\d/i.test(t))) ? numIn(chips.find((t) => /^phase\s*\d/i.test(t))) || 3 : undefined, dropPct: numIn(chips.find((t) => /drop:/i.test(t))), dmgReq: numIn(chips.find((t) => /dmg req:/i.test(t))) });
         });
       });
     }
@@ -3145,6 +3173,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
 .ma-rg-i{display:flex;flex-wrap:wrap;gap:5px 6px;justify-content:flex-start;align-items:center;min-width:0}
 .ma-it{display:inline-flex;align-items:center;gap:5px;min-width:0;border-radius:8px;padding-right:7px;background:rgba(110,168,255,.12)}
 .ma-rg:not(.got) .ma-it{opacity:.4;filter:grayscale(.8);background:none}
+.ma-it.ph{background:rgba(217,196,255,.16);box-shadow:inset 0 0 0 1px rgba(217,196,255,.35)}.ma-rg.lock{cursor:default;opacity:.55}.ma-rg.lock .ma-it{filter:grayscale(.8);background:none}.ma-rg.lock:hover{background:none}.ma-lockh{margin:8px 2px 2px;font:700 11px Arial,sans-serif;color:#9aa6c9}
 .ma-it .ma-ti{width:26px;height:26px;aspect-ratio:auto;flex:0 0 26px;border-radius:7px}.ma-rg.got .ma-ti{border-color:rgba(110,168,255,.7)}
 .ma-it em{font:700 10.5px Arial,sans-serif;font-style:normal;color:#cfe0ff;max-width:110px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .ma-rg .ma-none{justify-self:start;color:#d9c4ff;background:rgba(160,122,216,.14);border:1px solid rgba(160,122,216,.35);border-radius:999px;font:700 10px Arial,sans-serif;padding:3px 8px;letter-spacing:.03em}
@@ -3323,7 +3352,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     if (cap <= 0) return ['skipped', ''];
     if (!e || !e.seenAt) return ['not scanned', 'warn'];
     if (def.kind === 'dungeon-swarm') return [`${(e.swarm || []).length} open`, (e.swarm || []).length ? 'ok' : ''];
-    if (e.alive) { if (e.needsDuel) return ['needs duel', 'warn']; return (e.userDmg || 0) >= cap ? ['capped', 'cap'] : ['alive', 'ok']; }
+    if (e.alive) { if (e.needsDuel) return ['needs duel', 'warn']; return Board.baseKnown(low) && (e.userDmg || 0) >= cap + Board.base(low) ? ['capped', 'cap'] : ['alive', 'ok']; }
     if (e.locked) return ['locked', 'warn'];
     if (e.noInstance) return ['no dungeon', ''];
     if (e.nextTs && e.nextTs * 1000 > Date.now()) return ['respawn ' + fmtDur(e.nextTs * 1000 - Date.now()), 'blue'];
@@ -3377,7 +3406,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     // hero: what it is doing right now
     let nextIn = null; try { const n = Scan.nextDueIn(); if (Number.isFinite(n)) nextIn = n; } catch (_) { /* */ }
     if (cur) {
-      const ev = Board.get(cur.low) || {}, cap = bossCap(cur.low), dmg = Math.max(ev.userDmg || 0, Board.dealt(cur)), bw = Work.get('build'), pct = bw && bw.total ? pctOf({ done: bw.done + 0.5, total: bw.total }) : cap > 0 ? Math.min(100, dmg / cap * 100) : 0;
+      const ev = Board.get(cur.low) || {}, cap = bossCap(cur.low), dmg = Math.max(0, Math.max(ev.userDmg || 0, Board.dealt(cur)) - Board.base(cur.low)), bw = Work.get('build'), pct = bw && bw.total ? pctOf({ done: bw.done + 0.5, total: bw.total }) : cap > 0 ? Math.min(100, dmg / cap * 100) : 0;
       out.push(h('div', { class: 'ma-hero' }, h('div', { class: 'ma-hero-top' }, avatar(cur.name, ev.icon, { size: 'lg', boss: true }),
         h('div', { class: 'ma-hero-t' }, h('div', { class: 'ma-state' }, h('i', { class: 'ma-dot ' + dotOf(st) }), STATE_TXT[st] || st), h('div', { class: 'ma-hero-name' }, cur.name), h('div', { class: 'ma-hero-sub' }, bw ? `🎒 ${bw.step || bw.label}${bw.total > 1 ? ` · step ${Math.min(bw.done + 1, bw.total)} of ${bw.total}` : ''}` : `${fmtNum(dmg)} of ${fmtNum(cap)} damage · ${pct.toFixed(0)}%`))),
         h('div', { class: 'ma-bar' + (!bw && pct >= 100 ? ' done' : '') }, h('i', { style: { width: pct.toFixed(1) + '%' } }))));
@@ -3403,7 +3432,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     const isUp = (r) => r.kind === 'ok' || r.txt === 'needs duel';                                   // up and under its cap, or waiting on a duel
     const upNow = rows.filter(isUp), rest = rows.filter((r) => !isUp(r));
     const bigRow = (r) => {
-      const def = r.def, ev = Board.get(r.live) || {}, cap = bossCap(r.live), dmg = ev.userDmg || 0, swarm = def.kind === 'dungeon-swarm';
+      const def = r.def, ev = Board.get(r.live) || {}, cap = bossCap(r.live), dmg = Math.max(0, (ev.userDmg || 0) - Board.base(r.live)), swarm = def.kind === 'dungeon-swarm';
       return h('div', { class: 'ma-q', onclick: go2(def) }, avatar(def.name, ev.icon || iconOfBoss(def.low), { boss: true }),
         h('div', { class: 'ma-q-n' }, h('b', {}, def.name), swarm ? null : h('div', { class: 'ma-bar' + (cap > 0 && dmg >= cap ? ' done' : '') }, h('i', { style: { width: (cap > 0 ? Math.min(100, dmg / cap * 100) : 0).toFixed(1) + '%' } })), swarm ? null : h('small', {}, `${fmtNum(dmg)} / ${fmtNum(cap)}`)), pill(r.txt, r.kind));
     };
@@ -3476,7 +3505,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   function damageBlock(low) {
     const base = baseCap(low), info = LootData.get(low);
     const exp = info && info.expCapDmg > 0 ? info.expCapDmg : 0;
-    const rungs = LootData.tiers(low).map((t) => ({ req: t.req, items: t.items, exp: t.req === exp }));
+    const rungs = LootData.tiers(low).map((t) => ({ req: t.req, items: t.items, ph: t.ph, exp: t.req === exp })), later = LootData.tiers(low, true), own = LootData.ownPhase(low);
     if (exp && !rungs.some((r) => r.exp)) { rungs.push({ req: exp, items: [], exp: true }); rungs.sort((a, b) => a.req - b.req); }
     const pctTxt = info && info.expCapPct != null ? ` (${info.expCapPct}%)` : '';
     const setCap = (v) => (e) => { stop(e); ovr(low).cap = v; saveCfg(); draw(); };
@@ -3498,14 +3527,19 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     rungs.forEach((r) => r.items.forEach((nm) => { const e = at.get(nm) || []; e.push(r.req); at.set(nm, e); }));
     // a loot ladder: one row per level; levels the cap reaches are bright, the rest are greyed out
     const rows = rungs.map((r) => {
-      const MAXT = 12, tiles = r.items.slice(0, MAXT).map((nm) => h('span', { class: 'ma-it', title: `${nm}\nDrops at ${at.get(nm).map(short).join(' · ')} damage` }, h('span', { class: 'ma-ti' }, lootIcon(nm)), h('em', {}, nm)));
+      const MAXT = 12, tiles = r.items.slice(0, MAXT).map((nm) => h('span', { class: 'ma-it' + (r.ph.includes(nm) ? ' ph' : ''), title: `${nm}${r.ph.includes(nm) ? ' (phase loot: only damage dealt in this phase counts)' : ''}\nDrops at ${at.get(nm).map(short).join(' · ')} damage` }, h('span', { class: 'ma-ti' }, lootIcon(nm)), h('em', {}, nm)));
       if (r.items.length > MAXT) tiles.push(h('span', { class: 'ma-it', title: r.items.slice(MAXT).join(', ') }, h('span', { class: 'ma-ti more' }, '+' + (r.items.length - MAXT))));
       return h('div', { class: 'ma-rg' + (r.req <= base ? ' got' : '') + (r.req === base ? ' on' : '') + (r.exp ? ' exp' : ''), title: `Cap at ${fmtNum(r.req)}` + (r.items.length ? ': ' + r.items.join(', ') : ''), onclick: setCap(r.req) },
         h('span', { class: 'ma-rg-n' }),
         h('div', { class: 'ma-rg-b' }, h('span', { class: 'ma-rg-v' }, h('b', {}, short(r.req)), r.exp ? h('span', { class: 'ma-lvx', title: `Reaches the EXP cap${pctTxt}` }, '★') : null)),
         tiles.length ? h('div', { class: 'ma-rg-i' }, tiles) : h('span', { class: 'ma-none' }, 'EXP cap'));
     });
-    return [head, h('div', { class: 'ma-rgs' }, rows),
+    // loot of a later phase is on this form too, but locked: only damage dealt in THAT phase unlocks it (like the lock on the battle page)
+    const lockRows = later.length ? [h('div', { class: 'ma-lockh' }, `🔒 Phase ${later[0].gp > 2 ? later[0].gp - 1 : later[0].gp} loot (game: Phase ${later[0].gp}) · only damage dealt in that phase counts`),
+      h('div', { class: 'ma-rgs' }, later.map((r) => h('div', { class: 'ma-rg lock', title: `Needs ${fmtNum(r.req)} damage dealt in that phase: ${r.items.join(', ')}` },
+        h('span', { class: 'ma-rg-n' }), h('div', { class: 'ma-rg-b' }, h('span', { class: 'ma-rg-v' }, h('b', {}, short(r.req)), h('span', {}, '🔒'))),
+        h('div', { class: 'ma-rg-i' }, r.items.slice(0, 12).map((nm) => h('span', { class: 'ma-it', title: nm }, h('span', { class: 'ma-ti' }, lootIcon(nm)), h('em', {}, nm))))))) ] : [];
+    return [head, h('div', { class: 'ma-rgs' }, rows), ...lockRows, own > 1 ? h('div', { class: 'ma-what' }, 'This phase\'s cap counts only damage dealt in this phase (earlier phases are not counted).') : null,
       base <= 0 ? h('div', { class: 'ma-what' }, 'Cap 0: this boss is skipped.') : base > topReq ? h('div', { class: 'ma-what' }, `Above the top level (${short(topReq)}): the extra damage adds nothing.`) : null];
   }
   function placeOf(m) {
@@ -3531,7 +3565,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     return h('div', { class: 'ma-ed' },
       h('div', { class: 'ma-ed-h' }, h('div', { class: 'ma-ed-t' }, h('b', { title: m.name }, m.name), place ? h('small', {}, place) : null), pill(txt, kind),
         h('button', { type: 'button', class: 'ma-x', title: 'Close', onclick: (e) => { stop(e); ui.sel = ''; saveUi(); draw(); } }, '✕')),
-      ms.length > 1 ? h('div', { style: { margin: '0 0 6px' } }, seg(ms.map((x, i) => [i, 'Phase ' + (i + 1), x.name]), idx, (v) => { phaseSel[def.low] = v; }, { full: true })) : null,
+      ms.length > 1 ? h('div', { style: { margin: '0 0 6px' } }, seg(ms.map((x, i) => [i, 'Phase ' + (i + 1) + (i ? ' · game ' + (i + 2) : ''), x.name]), idx, (v) => { phaseSel[def.low] = v; }, { full: true })) : null,
       Presets.pickKinds().length ? bossLoadout(low) : null,
       caption('🎯 Damage cap'), ...damageBlock(low),
       timedBtn, m.kind !== 'wave' && tOpen ? scheduleEditor(low) : null,
@@ -3644,7 +3678,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     saveCfg(); Engine.poke(true);
     const parts = [...did]; if (capDefs) parts.push('cap' + (capDefs < defs.length ? ` (${capDefs} of ${defs.length})` : '')); const cnt = defs.length;
     BK.msg = parts.length ? `✅ ${parts.join(' + ')} applied to ${cnt} boss${cnt === 1 ? '' : 'es'}` + (noExp ? ` · ${noExp} ${noExp === 1 ? 'has' : 'have'} no EXP cap data, so ${noExp === 1 ? 'its' : 'their'} cap was left alone` : '') : '⚠ nothing changed' + (noExp ? ': none of them has EXP cap data (scan the loot first)' : '');
-    BK.pick = {}; BK.cap = ''; BK.ph = null;
+    BK.sel = new Set();                                                // ready for the next bosses: the copied loadout / cap / phases stay until Cancel, so Apply goes green again as soon as one is ticked
     draw();
   }
   function bulkBar(sec) {
