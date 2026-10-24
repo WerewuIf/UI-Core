@@ -1146,9 +1146,16 @@ const BuildKit = (() => {
   }
   // takes the unequips first, then the equips (a crystal cannot go on while it is still linked); one retry for a crystal that is still linked
   // to gear that is not on. Never throws.
+  const picPath = (src) => String(src || '').replace(/#\d+$/, '').split('?')[0].replace(/^https?:\/\/[^/]+/, '').replace(/^\//, '');
+  async function gearNames() {                                       // picture -> gear name, from the inventory page (the crystals page has the picture only)
+    const m = {};
+    try { parseHtml(await Core.net.fetchText('/inventory.php', { ttl: 60000, key: 'ma:inv-gearnames' })).querySelectorAll('.slot-box img[alt]').forEach((im) => { const a = (im.getAttribute('alt') || '').trim(), p = picPath(im.getAttribute('src')); if (a && p && !m[p]) m[p] = a; }); } catch (_) { /* labels fall back to the piece number */ }
+    return m;
+  }
   async function runDiff(st, diff) {
     let moves = 0; const notes = [];
-    const label = (key) => { const i = st.cards.findIndex((x) => x.key === key), c = st.cards[i]; return (c && c.label) || 'gear piece ' + (i + 1); };   // never the picture's path
+    const gn = await gearNames();
+    const label = (key) => { const i = st.cards.findIndex((x) => x.key === key), c = st.cards[i], n = (c && c.label) || gn[picPath(key)], d = /#(\d+)$/.exec(key); return n ? n + (d ? ' #' + d[1] : '') : 'gear piece ' + (i + 1); };   // never the picture's path
     const nm = (id) => { const c = st.catalog[String(id)]; return c ? (c.name || (typeof c.type === 'string' && c.type ? c.type.charAt(0).toUpperCase() + c.type.slice(1) + ' crystal' : 'crystal')) + (c.level ? ' Lv' + c.level : '') : 'crystal #' + id; };
     const plan = [...diff.unequip.map((id) => 'Take off ' + nm(id)), ...diff.equip.map((m) => 'Put ' + nm(m.id) + ' on ' + label(m.key))];
     const base = Prog.sub('Crystals', plan); let k = 0; const tick = () => { if (base >= 0) Prog.go(base + k); k++; };   // every move is a step of the status bar
@@ -1481,7 +1488,13 @@ const Presets = (() => {
         log(`🎒 applying ${label} for ${esc(bossName(low))}…`, 'info');
         const boss = t ? await engineMob(t) : { name: bossName(low) };
         if (!boss) { failedAt[key] = Date.now(); log(`⚠️ ${label}: could not read ${esc(bossName(low))}'s stats, so what is equipped stays`, 'warn'); continue; }
-        const opts = kind === BEST ? { silent: true, boss, target: boss, threshold: BEST_MIN_GAIN, mode: OPT_MODE } : { silent: true, boss };
+        // the engine reports its exact pet / gear actions: each becomes a step of the status bar (an older engine without onStep keeps the one "Gear + pets" step)
+        let sb = -1;
+        const onStep = (e) => {
+          if (e.plan) { const list = e.plan.map((x) => (e.stage === 'pets' ? 'Pets · ' : 'Gear · ') + x.charAt(0).toUpperCase() + x.slice(1)); sb = e.stage === 'pets' ? Prog.sub('Gear + pets', [...list, 'Gear swaps']) : Prog.sub('Gear swaps', list); }
+          else if (sb >= 0) Prog.go(sb + e.i);
+        };
+        const opts = kind === BEST ? { silent: true, boss, target: boss, threshold: BEST_MIN_GAIN, mode: OPT_MODE, onStep } : { silent: true, boss };
         let teamBefore = null;
         if (kind === BEST && sig) { try { teamBefore = await withTimeout(BuildKit.sigils.team(), 30000, null); } catch (_) { teamBefore = null; } }
         let r;
