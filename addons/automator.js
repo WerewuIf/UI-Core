@@ -32,7 +32,7 @@ Core.module({
   } : {},
   init(Core) {
 'use strict';
-const ID = 'automator', VERSION = '1.10.3';
+const ID = 'automator', VERSION = '1.10.4';
 if (window.__automatorLoaded) { console.warn('[automator] already loaded', window.__automatorLoaded); return null; }
 window.__automatorLoaded = VERSION;
 
@@ -410,14 +410,30 @@ const Status = (() => {
  * show "Switching build for X · Crystals · step 3 of 3" with a bar. start() with no steps shows nothing (everything was already on). */
 const Prog = (() => {
   let steps = [], title = '', prev = '', mine = 'SWITCHING';
+  const WAIT = 'Gear · working out the swaps';                      // between the engine's pet steps and its gear steps: the gear plan is not known yet
   const show = (i) => Work.set('build', title, i, steps.length, steps[i] || '');
+  // a step is found by its exact text, else by its text up to " · " ("Crystals" finds "Crystals · picking the best")
+  const find = (label) => { const i = steps.indexOf(label); return i >= 0 ? i : steps.findIndex((x) => x.startsWith(label + ' · ')); };
   return {
     start(t, list, status) { if (!list || !list.length) { steps = []; return; } steps = list.slice(); title = t; mine = status || 'SWITCHING'; prev = Status.get(); Status.set(mine); show(0); },
-    at(label) { if (!steps.length) return; const i = steps.indexOf(label); if (i >= 0) show(i); },
+    at(label) { if (!steps.length) return; const i = find(label); if (i >= 0) show(i); },
     // swaps one step for the finer steps it is made of (each crystal / sigil move); go(i) shows one of them. sub() returns the index of the first, or -1
-    sub(label, list) { if (!steps.length || !list || !list.length) return -1; const i = steps.indexOf(label); if (i < 0) return -1; steps.splice(i, 1, ...list); show(i); return i; },
+    sub(label, list) { if (!steps.length || !list || !list.length) return -1; const i = find(label); if (i < 0) return -1; steps.splice(i, 1, ...list); show(i); return i; },
     go(i) { if (steps.length && i >= 0 && i < steps.length) show(i); },
-    note(label, text) { const i = steps.indexOf(label); if (i < 0) return; steps[i] = text; show(i); },        // a step keeps its place but says more about what it is doing
+    text(i, t) { if (steps.length && t && i >= 0 && i < steps.length) { steps[i] = t; show(i); } },   // the step at i says more about what it is doing now
+    note(label, text) { const i = find(label); if (i < 0) return; steps[i] = text; show(i); },        // a step keeps its place but says more about what it is doing
+    drop(label) { const i = find(label); if (i < 0 || steps.length < 2) return; steps.splice(i, 1); show(Math.min(i, steps.length - 1)); },
+    // the callback for the engine's onStep: the step called `label` becomes the engine's exact pet actions, then its exact gear actions
+    exact(label) {
+      let sb = -1; const f = (e) => {
+        f.ran = true;
+        if (e.plan) {
+          const list = e.plan.map((x) => (e.stage === 'pets' ? 'Pets · ' : 'Gear · ') + x.charAt(0).toUpperCase() + x.slice(1));
+          if (e.stage === 'pets') sb = Prog.sub(label, [...list, WAIT]); else { sb = Prog.sub(WAIT, list); if (!list.length) Prog.drop(WAIT); }
+        } else if (sb >= 0) Prog.go(sb + e.i);
+      };
+      return f;
+    },
     end() { if (!steps.length) return; steps = []; Work.clear('build'); if (Status.get() === mine) Status.set(prev && prev !== mine ? prev : (Run.wanted() ? 'RUNNING' : 'STOPPED')); },
   };
 })();
@@ -487,6 +503,8 @@ const Kernel = (() => {
   function becameMain() {
     Board.load();                      // shared state is reloaded whenever leadership changes (3.0.0 never did)
     startBeat(); AF.recover();
+    // a restore that was cut short (page reload / crash) leaves the saved build behind with the run stopped: finish it once the engine's own recovery has settled
+    setTimeout(() => { try { if (Tab.isMain() && !Run.wanted() && typeof Presets !== 'undefined' && Presets.origin.get()) Presets.restore('recovered after reload').catch(() => {}); } catch (_) { /* */ } }, 12000);
     for (const p of parts.values()) { try { p.onMain && p.onMain(); } catch (_) { /* */ } }
     if (Run.wanted()) engineStart(true);
     Status.set(Run.wanted() ? 'RUNNING' : 'STOPPED');
@@ -1152,12 +1170,12 @@ const BuildKit = (() => {
     try { parseHtml(await Core.net.fetchText('/inventory.php', { ttl: 60000, key: 'ma:inv-gearnames' })).querySelectorAll('.slot-box img[alt]').forEach((im) => { const a = (im.getAttribute('alt') || '').trim(), p = picPath(im.getAttribute('src')); if (a && p && !m[p]) m[p] = a; }); } catch (_) { /* labels fall back to the piece number */ }
     return m;
   }
-  async function runDiff(st, diff) {
+  async function runDiff(st, diff, tail) {                              // tail: crystals to take off once the rest is done (the ones a restore frees again)
     let moves = 0; const notes = [];
     const gn = await gearNames();
     const label = (key) => { const i = st.cards.findIndex((x) => x.key === key), c = st.cards[i], n = (c && c.label) || gn[picPath(key)], d = /#(\d+)$/.exec(key); return n ? n + (d ? ' #' + d[1] : '') : 'gear piece ' + (i + 1); };   // never the picture's path
     const nm = (id) => { const c = st.catalog[String(id)]; return c ? (c.name || (typeof c.type === 'string' && c.type ? c.type.charAt(0).toUpperCase() + c.type.slice(1) + ' crystal' : 'crystal')) + (c.level ? ' Lv' + c.level : '') : 'crystal #' + id; };
-    const plan = [...diff.unequip.map((id) => 'Take off ' + nm(id)), ...diff.equip.map((m) => 'Put ' + nm(m.id) + ' on ' + label(m.key))];
+    const plan = [...diff.unequip.map((id) => 'Take off ' + nm(id)), ...diff.equip.map((m) => 'Put ' + nm(m.id) + ' on ' + label(m.key)), ...(tail || []).map((id) => 'Take off ' + nm(id))];
     const base = Prog.sub('Crystals', plan); let k = 0; const tick = () => { if (base >= 0) Prog.go(base + k); k++; };   // every move is a step of the status bar
     for (const id of diff.unequip) {
       tick();
@@ -1176,6 +1194,11 @@ const BuildKit = (() => {
       }
       if (!r.ok) { notes.push(`crystal #${m.id}: ${r.error}`); continue; }
       st = r.st; moves++; await sleep(GAP);
+    }
+    for (const id of (tail || [])) {
+      tick();
+      const u = await crystalAct(st, { action: 'unequip_crystal', crystal_id: String(id) });
+      if (u.ok) { st = u.st; moves++; await sleep(GAP); } else { try { st = await loadCrystals(); } catch (_) { /* keep the old state */ } }   // a refusal is ignored
     }
     return { ok: !notes.length, moves, message: notes.length ? notes.join('; ') : '', notes, st };
   }
@@ -1205,13 +1228,9 @@ const BuildKit = (() => {
         let st = await loadCrystals(); const { wanted, skipped } = Kit.restoreWanted(snap.layout, st.cards);
         const diff = Kit.layoutDiff(Kit.layoutOf(st.cards), wanted), gone = skipped.map((k) => (snap.labels && snap.labels[k]) || k);
         let r = { ok: true, moves: 0, message: '' };
-        if (diff.unequip.length || diff.equip.length) { r = await runDiff(st, diff); st = r.st || st; }
         const free = new Set((snap.free || []).map(String)), keep = new Set([].concat(...Object.values(wanted)).map(String));
-        for (const id of ((extra && extra.placed) || []).map(String)) {
-          if (!free.has(id) || keep.has(id)) continue;
-          const u = await crystalAct(st, { action: 'unequip_crystal', crystal_id: id });
-          if (u.ok) { st = u.st; r.moves++; await sleep(GAP); } else { try { st = await loadCrystals(); } catch (_) { /* */ } }
-        }
+        const tail = ((extra && extra.placed) || []).map(String).filter((id) => free.has(id) && !keep.has(id));   // were free before, so are freed again (a refusal is ignored)
+        if (diff.unequip.length || diff.equip.length || tail.length) { r = await runDiff(st, diff, tail); st = r.st || st; }
         if (gone.length) r.message = (r.message ? r.message + '; ' : '') + `${gone.join(', ')} not equipped: its crystals were left`;
         r.skipped = gone; delete r.st; return r;
       } catch (e) { return { ok: false, moves: 0, message: (e && e.message) || String(e) }; }
@@ -1243,15 +1262,15 @@ const BuildKit = (() => {
   async function readTeam() {
     const doc = parseHtml(await getText(teamUrl('attack'))); if (Guard.pageState(doc) !== 'ok') throw new Error('pets page: ' + Guard.pageState(doc));
     const sec = Array.from(doc.querySelectorAll('.section')).find((s) => ((s.querySelector('.section-title') || {}).textContent || '').trim() === 'PvE Attack Team');
-    const team = { m: {}, l: {} };
+    const team = { m: {}, l: {}, n: {} };                             // n: pet name by inventory id (for the step names)
     if (sec) sec.querySelectorAll('.pet-card[data-pet-inv-id]').forEach((card) => {
       const b = Array.from(card.querySelectorAll('button')).find((x) => /unequipPet\s*\(\s*\d+\s*\)/.test(x.getAttribute('onclick') || '')), m = b && /unequipPet\s*\(\s*(\d+)\s*\)/.exec(b.getAttribute('onclick') || '');
-      if (m) team.m[m[1]] = card.getAttribute('data-pet-inv-id');
+      if (m) { const inv = card.getAttribute('data-pet-inv-id'), im = card.querySelector('.pet-img-wrap img'); team.m[m[1]] = inv; if (im && im.getAttribute('alt')) team.n[inv] = im.getAttribute('alt').trim(); }
     });
     for (const s of Object.keys(team.m)) {
       try {
         const j = await getJson('/pet_links_ajax.php?pet_inv_id=' + encodeURIComponent(team.m[s])); team.l[s] = {};
-        if (j.status === 'success') (j.links || []).forEach((x) => { const id = x.inv_id != null ? x.inv_id : (x.link_pet_id != null ? x.link_pet_id : x.pet_inv_id); if (id != null && (x.link_level === 1 || x.link_level === 2)) team.l[s][x.link_level] = String(id); });
+        if (j.status === 'success') (j.links || []).forEach((x) => { const id = x.inv_id != null ? x.inv_id : (x.link_pet_id != null ? x.link_pet_id : x.pet_inv_id); if (id != null && (x.link_level === 1 || x.link_level === 2)) { team.l[s][x.link_level] = String(id); const nx = x.name || x.pet_name || x.pet_title; if (nx) team.n[String(id)] = String(nx).trim(); } });
       } catch (_) { /* this main's links stay unknown: no carry for them */ }
     }
     return team;
@@ -1263,14 +1282,15 @@ const BuildKit = (() => {
     async carry(before) {
       const undo = [], notes = [];
       try {
-        const changes = Kit.positionChanges(before, await readTeam());
-        const base = Prog.sub('Sigils', changes.map((c) => 'Move sigils · ' + c.pos)); let k = 0;
+        const after = await readTeam(), changes = Kit.positionChanges(before, after), pn = (inv) => (after.n && after.n[String(inv)]) || '';
+        const base = Prog.sub('Sigils', changes.map((c) => 'Move sigils · ' + (pn(c.to) ? 'to ' + pn(c.to) + ' (' + c.pos + ')' : c.pos))); let k = 0;
         for (const c of changes) {
           if (base >= 0) Prog.go(base + k); k++;
           for (const slot of Kit.SLOTS) {
             let old; try { old = await sigilInfo(c.from, slot); } catch (e) { notes.push(`${c.pos} ${slot}: ${e.message}`); continue; }
             if (!old.current) continue;
             const want = old.current;
+            if (base >= 0) Prog.text(base + k - 1, 'Move ' + want.name + ' (' + slot + ') · ' + (pn(c.to) ? 'to ' + pn(c.to) : c.pos));
             try {
               let now = await sigilInfo(c.to, slot);
               if (now.current && now.current.itemId === want.itemId) continue;
@@ -1284,7 +1304,7 @@ const BuildKit = (() => {
               const prev = now.current ? now.current.itemId : null;
               if (prev) await sigilAct(c.to, slot, null);
               await sigilAct(c.to, slot, want.itemId);
-              undo.push({ pet: c.to, slot, restore: prev, took: want.itemId, giveBack: removedFrom ? { pet: removedFrom, item: want.itemId } : null });
+              undo.push({ pet: c.to, slot, restore: prev, took: want.itemId, name: want.name, petName: pn(c.to), giveBack: removedFrom ? { pet: removedFrom, item: want.itemId } : null });
             } catch (e) { notes.push(`${c.pos} ${slot}: ${e.message}`); }
           }
         }
@@ -1294,7 +1314,7 @@ const BuildKit = (() => {
     // moves = the undo entries of every carry so far, undone newest first
     async undo(moves) {
       const notes = []; let n = 0;
-      const list = (moves || []).slice().reverse(), base = Prog.sub('Sigils', list.map((u) => 'Put back ' + u.slot + ' sigil')); let k = 0;
+      const list = (moves || []).slice().reverse(), base = Prog.sub('Sigils', list.map((u) => (u.name ? 'Move ' + u.name + ' back' + (u.petName ? ' off ' + u.petName : '') + ' (' + u.slot + ')' : 'Put back ' + u.slot + ' sigil'))); let k = 0;
       for (const u of list) {
         if (base >= 0) Prog.go(base + k); k++;
         try {
@@ -1392,8 +1412,8 @@ const Presets = (() => {
   }
   const noBest = (t) => !t;                                           // the engine can search for any boss: wave bosses, Generals, dungeon bosses and mobs alike
   const memoOf = (kind, want, t) => (kind === BEST ? 'best@' + (t && t.monsterId != null ? t.monsterId : '') : String(want));   // best is judged per boss
-  // Called between swings, when the engine moves to a boss. Applies what the boss gets, in the order that makes sense: gear and pets first
-  // (the Build Engine's 'best' is one of them), THEN crystals (they sit on the gear that is on now) and sigils (they sit on the pets that
+  // Called between swings, when the engine moves to a boss. Applies what the boss gets, one thing after the other, never at the same time: pets, then gear
+  // (the Build Engine's 'best' is both, in that order), THEN crystals (they sit on the gear that is on now) and sigils (they sit on the pets that
   // are on now). Every preset apply gets { silent: true, boss }; kind 'best' also gets target = the boss, which is what the engine searches for.
   //
   // What a boss gets: the Loadout card decides, a pick in the boss's own picker (gear / crystal / pet) wins for that kind.
@@ -1468,14 +1488,15 @@ const Presets = (() => {
     ensuring = true;
     let changedAny = false;
     try {
-      const all = kinds(), first = ['gear', 'pet', BEST].filter((k) => all.includes(k));
+      const all = kinds(), first = ['pet', 'gear', BEST].filter((k) => all.includes(k));   // pets, then gear (the engine does the same inside 'best'), then crystals on top of that gear
       const seq = [...first, ...all.filter((k) => !first.includes(k) && k !== 'crystal'), ...(all.includes('crystal') ? ['crystal'] : [])];
-      const stepOf = (k) => (k === BEST ? 'Gear + pets' : k === 'gear' ? 'Gear' : k === 'pet' ? 'Pets' : k === 'crystal' ? 'Crystals' : k.charAt(0).toUpperCase() + k.slice(1));
-      const todo = []; if (Object.keys(W).length && !Origin.get()) todo.push('Remembering your build');
-      for (const kind of seq) { const want = W[kind]; if (!want || (kind === 'crystal' && want === '__best') || applied[kind] === memoOf(kind, want, t)) continue; todo.push(stepOf(kind)); if (kind === BEST && sig) todo.push('Sigils'); }
-      if (W.crystal === '__best' && (todo.length || applied.crystal !== '__best@' + buildEpoch)) todo.push('Crystals');
+      const REM = 'Remembering your gear, pets and crystals', SIG = 'Sigils · moving them to the new pets', CRY = 'Crystals · picking the best';
+      const stepOf = (k, want) => (k === BEST ? 'Gear + pets' : k.charAt(0).toUpperCase() + k.slice(1) + ' preset · ' + nameOf(k, want));   // the preset addons report no steps of their own: the preset's name is the exact thing
+      const todo = []; if (Object.keys(W).length && !Origin.get()) todo.push(REM);
+      for (const kind of seq) { const want = W[kind]; if (!want || (kind === 'crystal' && want === '__best') || applied[kind] === memoOf(kind, want, t)) continue; todo.push(stepOf(kind, want)); if (kind === BEST && sig) todo.push(SIG); }
+      if (W.crystal === '__best' && (todo.length || applied.crystal !== '__best@' + buildEpoch)) todo.push(CRY);
       Prog.start('Switching build for ' + bossName(low), todo);
-      if (Object.keys(W).length) { Prog.at('Remembering your build'); await Origin.ensure(t); }   // before anything moves: what is on now is what gets put back
+      if (Object.keys(W).length) { Prog.at(REM); await Origin.ensure(t); }   // before anything moves: what is on now is what gets put back
       for (const kind of seq) {
         const want = W[kind];
         if (!want || (kind === 'crystal' && want === '__best')) continue;
@@ -1484,22 +1505,20 @@ const Presets = (() => {
         const key = kind + ':' + memo;
         if (Date.now() - (failedAt[key] || 0) < 300000) continue;           // a failed apply is not retried for 5 min (best: per boss)
         const label = kind === BEST ? 'best gear + pets' : `${kind} preset "${esc(nameOf(kind, want))}"`;
-        Prog.at(stepOf(kind));
+        Prog.at(stepOf(kind, want));
+        const lab = 'Gear + pets · searching the best build', ex = Prog.exact(lab);   // the engine's exact pet / gear actions become the steps (an older engine without onStep keeps this one step)
+        if (kind === BEST) Prog.note('Gear + pets', lab);          // reading the boss and searching take a while: say so, instead of a bare "step 1"
         log(`🎒 applying ${label} for ${esc(bossName(low))}…`, 'info');
         const boss = t ? await engineMob(t) : { name: bossName(low) };
         if (!boss) { failedAt[key] = Date.now(); log(`⚠️ ${label}: could not read ${esc(bossName(low))}'s stats, so what is equipped stays`, 'warn'); continue; }
-        // the engine reports its exact pet / gear actions: each becomes a step of the status bar (an older engine without onStep keeps the one "Gear + pets" step)
-        let sb = -1;
-        const onStep = (e) => {
-          if (e.plan) { const list = e.plan.map((x) => (e.stage === 'pets' ? 'Pets · ' : 'Gear · ') + x.charAt(0).toUpperCase() + x.slice(1)); sb = e.stage === 'pets' ? Prog.sub('Gear + pets', [...list, 'Gear swaps']) : Prog.sub('Gear swaps', list); }
-          else if (sb >= 0) Prog.go(sb + e.i);
-        };
-        const opts = kind === BEST ? { silent: true, boss, target: boss, threshold: BEST_MIN_GAIN, mode: OPT_MODE, onStep } : { silent: true, boss };
+        const opts = kind === BEST ? { silent: true, boss, target: boss, threshold: BEST_MIN_GAIN, mode: OPT_MODE, onStep: ex } : { silent: true, boss };
         let teamBefore = null;
         if (kind === BEST && sig) { try { teamBefore = await withTimeout(BuildKit.sigils.team(), 30000, null); } catch (_) { teamBefore = null; } }
         let r;
         try { r = await withTimeout(Core.call('preset.' + kind + '.apply', String(want), opts), 120000, { ok: false, message: 'timed out' }); }
         catch (e) { r = { ok: false, message: (e && e.code === 'NO_CAP') ? 'the addon that offered it is gone' : ((e && e.message) || String(e)) }; }
+        if (kind === BEST && !ex.ran) Prog.note(lab, 'Gear + pets · ' + (r && r.ok !== false ? 'already the best' : 'failed'));
+        if (kind === BEST && sig && !(r && r.ok !== false && r.changed)) Prog.drop(SIG);          // no new pets, so no sigils to move: not a step that is waited for
         if (r && r.ok !== false) {
           applied[kind] = memo; log(`✅ ${kind === BEST ? 'best gear + pets' : kind + ' preset'} ${r.changed === false ? 'already on' : 'applied'}`, 'ok'); try { await Core.me.sync(); } catch (_) { /* */ } Me.statsAt = 0;
           if (kind === 'gear' || (kind === BEST && r.changed)) buildEpoch++;
@@ -1508,7 +1527,7 @@ const Presets = (() => {
           if (kind === BEST && r.changed) {
             delete applied.gear; delete applied.pet;                  // the engine moved gear / pets: those memos no longer describe what is on
             if (sig && teamBefore) {                                  // sigils sit on pets: move them to the pets that took their place
-              Prog.at('Sigils');
+              Prog.at(SIG);
               const c = await BuildKit.sigils.carry(teamBefore);
               Origin.addMoves(c.undo);
               if (c.moved) log(`✨ ${c.moved} sigil${c.moved === 1 ? '' : 's'} moved to the new pets`, 'ok');
@@ -1521,11 +1540,12 @@ const Presets = (() => {
       if (W.crystal === '__best') {                                   // crystals sit on the gear that is on now, so after gear
         const memo = '__best@' + buildEpoch, key = 'crystal:' + memo;
         if (applied.crystal !== memo && Date.now() - (failedAt[key] || 0) >= 300000) {
-          Prog.at('Crystals');
+          Prog.at(CRY);
           log(`💎 best crystals on the gear for ${esc(bossName(low))}…`, 'info');
           const r = await withTimeout(BuildKit.crystals.best(), 180000, { ok: false, message: 'timed out' });
           Origin.addPlaced(r && r.placed);
           if (r && r.ok !== false) { await Origin.markCrystals(r.layout); }
+          if (r && r.ok !== false && !r.changed) Prog.note(CRY, 'Crystals · already the best');
           if (r && r.ok !== false) { applied.crystal = memo; log(r.changed ? `✅ crystals placed (${r.moves} step${r.moves === 1 ? '' : 's'})` : '✅ crystals already the best', 'ok'); }
           else { failedAt[key] = Date.now(); log(`⚠️ best crystals: ${esc((r && r.message) || 'unknown')}`, 'warn'); }
         }
@@ -1556,20 +1576,24 @@ const Presets = (() => {
         }
       }
       let backWhat = ''; try { if (o.sel && o.probe) { const live = liveSel || await Origin.read(o.probe); if (live) backWhat = Plan.describe(Plan.sigFromSel(live, null), Plan.sigFromSel(o.sel, null)); } } catch (_) { /* no detail */ }   // what will change, for the status text
-      Prog.start('Putting your build back', [...(o.sel ? ['Gear + pets'] : []), ...(o.crystals ? ['Crystals'] : []), ...((o.moves || []).length ? ['Sigils'] : [])]);
+      const CRYR = 'Crystals · back on their gear', SIGR = 'Sigils · back on their pets';
+      Prog.start('Putting your build back', [...(o.sel ? ['Gear + pets'] : []), ...(o.crystals ? [CRYR] : []), ...((o.moves || []).length ? [SIGR] : [])]);
       log(`↩ putting your build back${why ? ' (' + esc(why) + ')' : ''}…`, 'info');
       if (o.sel && Core.has && Core.has('build.apply')) {
-        Prog.at('Gear + pets'); if (backWhat) Prog.note('Gear + pets', 'Gear + pets · ' + backWhat);
-        const r = await withTimeout(Promise.resolve(Core.call('build.apply', { sel: o.sel }, { label: 'Your build' })), 240000, { ok: false, message: 'timed out' });
+        Prog.at('Gear + pets'); const lab = 'Gear + pets' + (backWhat ? ' · ' + backWhat : ''), ex = Prog.exact(lab); if (backWhat) Prog.note('Gear + pets', lab);
+        const r = await withTimeout(Promise.resolve(Core.call('build.apply', { sel: o.sel }, { label: 'Your build', onStep: ex })), 240000, { ok: false, message: 'timed out' });
+        if (!ex.ran) Prog.note(lab, 'Gear + pets · ' + (r && r.ok !== false ? 'already as before' : 'failed'));
         if (r && r.ok !== false) log(`✅ gear + pets ${r.changed === false ? 'were already as before' : 'put back'}`, 'ok'); else notes.push('gear + pets: ' + ((r && r.message) || 'failed'));
       } else if (!o.sel) notes.push('gear + pets were not read, so they stay as they are');
+      else Prog.drop('Gear + pets');                                 // the engine is gone: nothing to wait for
       if (o.crystals) {
-        Prog.at('Crystals');
+        Prog.at(CRYR);
         const r = await withTimeout(BuildKit.crystals.restore(o.crystals, { placed: o.placed }), 240000, { ok: false, message: 'timed out' });
+        if (r && r.ok !== false && !r.moves) Prog.note(CRYR, 'Crystals · already as before');
         if (r && r.ok !== false) log(`✅ crystals ${r.moves ? 'put back on their gear' : 'were already as before'}${r.message ? ' (' + esc(r.message) + ')' : ''}`, 'ok'); else notes.push('crystals: ' + ((r && r.message) || 'failed'));
       }
       if ((o.moves || []).length) {
-        Prog.at('Sigils');
+        Prog.at(SIGR);
         const r = await withTimeout(BuildKit.sigils.undo(o.moves), 240000, { ok: false, message: 'timed out' });
         if (r && r.ok !== false) log(`✅ sigils back on their pets (${r.moved})`, 'ok'); else notes.push('sigils: ' + ((r && r.message) || 'failed'));
       }
