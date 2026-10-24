@@ -19,7 +19,7 @@
  */
 (() => {
   'use strict';
-  const ID = 'build-engine', VERSION = '1.0.4';
+  const ID = 'build-engine', VERSION = '1.0.5';
   if (!(Core.apiLevel >= 6 && Core.model && Core.tx)) {
     console.warn('[build-engine] needs Core api level 6 (Core.model + Core.tx); not loaded');
     return;
@@ -1002,7 +1002,12 @@
     return { ok: true, problems: [] };
   }
 
+  let _calMemo = null;                       // set for the length of one search: localStorage + JSON.parse per evaluation was a large part of the cost
   function getCalibration() {
+    if (_calMemo) return _calMemo;
+    return readCalibration();
+  }
+  function readCalibration() {
     try {
       const o = JSON.parse(localStorage.getItem("veyra_calibration") || "{}");
       return {
@@ -1881,7 +1886,7 @@
     if (cond === "defGtMob") return player.def > mob.def;
     return true;
   }
-  function buildDamage(player, mob, build) {
+  function buildDamage(player, mob, build, lite) {
     const { mains = [], links = [], pieces = {} } = build;
     const _rawAD = (player.atk || 0) + (player.def || 0);
     const _pvpRatio =
@@ -2140,7 +2145,7 @@
       const p = pieces[sl];
       if (p && p.element && p.element !== "NONE" && p.element !== "None") {
         pElemBy[p.element] = (pElemBy[p.element] || 0) + (p.elemPct || 0);
-        _elemSources.push({
+        lite || _elemSources.push({
           src: "gear",
           slot: sl,
           name: p.name || null,
@@ -2152,7 +2157,7 @@
     mains.forEach((m) => {
       if (m.element && m.elemRate > 0) {
         pElemBy[m.element] = (pElemBy[m.element] || 0) + m.elemRate;
-        _elemSources.push({
+        lite || _elemSources.push({
           src: "main",
           name: m.name || null,
           elem: m.element,
@@ -2165,7 +2170,7 @@
         r = (l.pet && l.pet.elemRate) || 0;
       if (el && el !== "NONE" && r > 0 && l.factor > 0) {
         pElemBy[el] = (pElemBy[el] || 0) + r * l.factor;
-        _elemSources.push({
+        lite || _elemSources.push({
           src: "link-card",
           name: l.pet.name || null,
           factor: l.factor,
@@ -2182,7 +2187,7 @@
         const base = pElemBy[el] || 0;
         const mult = 1 + (l.pet.contrib.val / 100) * l.factor;
         const after = base * mult;
-        _elemSources.push({
+        lite || _elemSources.push({
           src: "link",
           name: l.pet.name || null,
           factor: l.factor,
@@ -2283,6 +2288,7 @@
               L.critRate,
           );
     const dps = noncrit * (1 - cr) + crit * cr;
+    if (lite) return { noncrit, crit, dps };     // the search only compares these; the chosen build is recomputed in full at the end
     (noncrit && !isNaN(noncrit) && base) ||
       console.warn(
         "[VBO11.81] DAMAGE ANOMALY &#x2014; noncrit:",
@@ -2395,7 +2401,19 @@
   let OPT_MODE = "noncrit";
   let CRIT_MULT_OVR = null,
     CRIT_RATE_OVR = null;
-  function optimizeBuild(player, mob, inventory, pets, rules, current) {
+  // tick (optional): async function the search awaits between its heavy steps, so the page gets a turn every few tens of ms instead of
+  // freezing for the whole search. It is called very often and must be cheap when it has nothing to do; the result is identical either way.
+  async function optimizeBuild(player, mob, inventory, pets, rules, current, tick) {
+    const _cal = readCalibration();
+    _calMemo = _cal;
+    const _tick = async () => { if (tick) { await tick(); _calMemo = _cal; } };
+    try {
+      return await optimizeBuild0(player, mob, inventory, pets, rules, current, _tick);
+    } finally {
+      _calMemo = null;
+    }
+  }
+  async function optimizeBuild0(player, mob, inventory, pets, rules, current, tick) {
     const metricOf = (r) => (OPT_MODE === "dps" ? r.dps : r.noncrit);
     const _ex = (rules && rules.exclude) || {},
       _must = (rules && rules.must) || {},
@@ -2448,9 +2466,12 @@
     EQUIP_SLOTS.forEach((sl) => {
       bySlot[sl] = inventory.filter((i) => i.slot === sl);
     });
+    // light evaluation: numbers only (see buildDamage's lite flag); the winner is recomputed in full at the end
     function ev(mains, pieces, links) {
-      return buildDamage(player, mob, { mains, pieces, links });
+      return buildDamage(player, mob, { mains, pieces, links }, true);
     }
+    // what buildDamage reads of a gear piece / link pet: two with the same numbers can never beat each other (the search needs a strict gain)
+    const _gearSig = (o) => o.atk + "|" + o.critDmg + "|" + o.monsterDmg + "|" + o.critRate + "|" + o.dragonDmg + "|" + o.element + "|" + o.elemPct;
     const equippedPieces = {};
     EQUIP_SLOTS.forEach((sl) => {
       const eq = inventory.find((i) => i.slot === sl && i.equipped);
@@ -2492,38 +2513,45 @@
           (mainCombos.filter((ms) => ms.length).length - _legalCombos.length) +
           " illegal main combo(s): a combined ATK+DEF gap pet cannot share a team with a gap engine (its own passive says so).",
       );
-    _legalCombos.forEach((ms) => {
+    for (let ci = 0; ci < _legalCombos.length; ci++) {
+      const ms = _legalCombos[ci];
       const r = ev(ms, equippedPieces, []);
       _ranked.push({ ms, d: metricOf(r), i: _ranked.length });
       if (metricOf(r) > bestMainDps) {
         bestMainDps = metricOf(r);
         bestMains = ms;
       }
-    });
-    function refineEquip(mains, pieces, links) {
+      await tick();
+    }
+    let _converged = false;
+    async function refineEquip(mains, pieces, links) {
       let improved = true,
         guard = 0;
       while (improved && guard < 30) {
         improved = false;
         guard++;
-        EQUIP_SLOTS.forEach((sl) => {
+        for (const sl of EQUIP_SLOTS) {
           const opts = bySlot[sl];
-          if (!opts.length) return;
+          if (!opts.length) continue;
           let bestP = pieces[sl],
             bestD = metricOf(ev(mains, pieces, links));
-          opts.forEach((opt) => {
+          const seen = new Set();
+          for (const opt of opts) {
             if (
               sl === "Ring" &&
               pieces["Ring 2"] &&
               opt.name === pieces["Ring 2"].name
             )
-              return;
+              continue;
             if (
               sl === "Ring 2" &&
               pieces["Ring"] &&
               opt.name === pieces["Ring"].name
             )
-              return;
+              continue;
+            const sg = _gearSig(opt);
+            if (seen.has(sg)) continue;
+            seen.add(sg);
             const t = Object.assign({}, pieces, { [sl]: opt });
             const d = metricOf(ev(mains, t, links));
             if (d > bestD + 1e-4) {
@@ -2531,13 +2559,15 @@
               bestP = opt;
               improved = true;
             }
-          });
+          }
           pieces[sl] = bestP;
-        });
+          await tick();
+        }
       }
+      _converged = !improved;
       return pieces;
     }
-    function fillLinks(mains, pieces) {
+    async function fillLinks(mains, pieces) {
       const factors = [];
       for (let li = 1; li <= 2; li++)
         for (let mi = 0; mi < 3; mi++) {
@@ -2592,9 +2622,10 @@
                   '" does not fit',
               );
         });
-      slots.forEach((slot, si) => {
-        if (slot.pet) return;
-        slot.f;
+      for (let si = 0; si < slots.length; si++) {
+        const slot = slots[si];
+        if (slot.pet) continue;
+        await tick();
         const links = cur();
         let bestPet = null,
           bestDps = metricOf(ev(mains, pieces, links));
@@ -2622,7 +2653,7 @@
           used.add(bestPet.name);
           slot.pet = bestPet;
         }
-      });
+      }
       const links = cur();
       let swapImproved = true,
         swapGuard = 0;
@@ -2647,15 +2678,26 @@
       }
       return links;
     }
-    function solveTrio(mains) {
+    // Same steps as before, minus the repeats: fillLinks and refineEquip are deterministic, so (1) the links for the equipped gear are the
+    // starting links, (2) fillLinks only has to run again when refineEquip changed a piece, and (3) a second refineEquip with the same links
+    // on a finished (fixpoint) gear set cannot change anything.
+    const _samePieces = (a, b) => EQUIP_SLOTS.every((sl) => a[sl] === b[sl]);
+    const _sameLinks = (a, b) => a.length === b.length && a.every((l, i) => l.pet === b[i].pet && l.factor === b[i].factor);
+    async function solveTrio(mains) {
       let pieces = Object.assign({}, equippedPieces);
-      let links = fillLinks(mains, pieces);
+      const currentLinks = await fillLinks(mains, pieces);
+      let links = currentLinks,
+        refinedWith = null,
+        settled = false;
       for (let pass = 0; pass < 2; pass++) {
-        pieces = refineEquip(mains, pieces, links);
-        links = fillLinks(mains, pieces);
+        if (settled && refinedWith && _sameLinks(refinedWith, links)) continue;
+        const before = Object.assign({}, pieces);
+        pieces = await refineEquip(mains, pieces, links);
+        refinedWith = links;
+        settled = _converged;
+        if (!_samePieces(before, pieces)) links = await fillLinks(mains, pieces);
       }
       const optResult = ev(mains, pieces, links);
-      const currentLinks = fillLinks(mains, equippedPieces);
       const currentResult = ev(mains, equippedPieces, currentLinks);
       if (metricOf(currentResult) >= metricOf(optResult))
         return {
@@ -2710,11 +2752,11 @@
         _cands.push(pool);
     }
     let best = null;
-    _cands.forEach((ms) => {
-      const b = solveTrio(ms);
+    for (const ms of _cands) {
+      const b = await solveTrio(ms);
       (!best || metricOf(b.result) > metricOf(best.result) + 1e-4) &&
         (best = b);
-    });
+    }
     if (_curOk) {
       const cr = buildDamage(player, mob, {
         mains: _curMains,
@@ -2729,6 +2771,8 @@
           result: cr,
         });
     }
+    // the search compared light results (numbers only); the caller gets the full one, from the same formula, for the build that won
+    best = Object.assign({}, best, { result: buildDamage(player, mob, { mains: best.mains, pieces: best.pieces, links: best.links }) });
     best.notes = _notes;
     best.trios = _cands.length;
     return best;
@@ -2917,13 +2961,33 @@
     prepKey = key;
     return (prepVal = { key, player, pets, inventory, relics, sigil: (pets.sigil && pets.sigil.atk) || 0, live: clone(g.gear.value.live) });
   }
-  function compute(P, opts, fn) {                                 // the engine keeps its settings in module variables: set them, run (sync), done
-    RELICS = P.relics; PET_SIGIL_ATK = P.sigil;
-    OPT_MODE = opts && opts.mode === 'dps' ? 'dps' : 'noncrit';
-    CRIT_MULT_OVR = opts && opts.critMult != null ? Number(opts.critMult) : null;
-    CRIT_RATE_OVR = opts && opts.critRate != null ? Number(opts.critRate) : null;
-    return fn();
+  // the engine keeps its settings in module variables. settingsFor() returns the function that sets them; a search that yields to the page
+  // calls it again after every yield, because a predict() or another search may have run in between and changed them.
+  function settingsFor(P, opts) {
+    return () => {
+      RELICS = P.relics; PET_SIGIL_ATK = P.sigil;
+      OPT_MODE = opts && opts.mode === 'dps' ? 'dps' : 'noncrit';
+      CRIT_MULT_OVR = opts && opts.critMult != null ? Number(opts.critMult) : null;
+      CRIT_RATE_OVR = opts && opts.critRate != null ? Number(opts.critRate) : null;
+    };
   }
+  function compute(P, opts, fn) { settingsFor(P, opts)(); return fn(); }
+  // hands the page a turn. MessageChannel, not setTimeout: a hidden tab clamps timers to 1 s (then 1 min), which would stretch a search enormously.
+  let _mc = null, _mcWait = null;
+  function yieldToPage() {
+    return new Promise((res) => {
+      try {
+        if (!_mc) { _mc = new MessageChannel(); _mc.port1.onmessage = () => { const f = _mcWait; _mcWait = null; f && f(); }; }
+        _mcWait = res; _mc.port2.postMessage(0);
+      } catch (e) { setTimeout(res, 0); }
+    });
+  }
+  const mobKeyOf = (mob) => {     // the parts of a boss the damage maths reads (not its id, hp or page): identical bosses share one search
+    const obs = mob.monsterId != null ? MOB_OBS[String(mob.monsterId)] : null, pen = MOB_PEN[String(mob.name || '')];
+    return JSON.stringify([mob.atk, mob.def, obs && obs.petDef > 0 ? obs.petDef : mob.petDef, mob.eqDef, mob.element || 'None', mob.elemRate, mob.divineMult,
+      mob.finalDmgRes, mob.passiveDmgRes, mob.effect || '', mob.race === 'Dragon', /^grakthar$/i.test(String(mob.gate || '')), pen && pen.pen != null ? pen.pen : null,
+      /goblin/i.test(String(mob.name || ''))]);
+  };
   const mobDefaults = { hp: 0, petDef: 0, eqDef: 0, element: 'None', elemRate: 0, effect: '' };
   async function resolveMob(x, t) {
     const isObj = x && typeof x === 'object';
@@ -2992,19 +3056,31 @@
     const build = buildFromSel(P, sel || currentSel(P));
     return { ok: true, mob: shortMob(mob), sel: sel || currentSel(P), result: compute(P, opts, () => buildDamage(P.player, mob, build)) };
   }
-  const bestCache = new Map();
+  const bestCache = new Map(), inflight = new Map();
+  let lastYield = 0, dataGen = 0;                              // dataGen: bumped when gear / pets / stats change, so a search that was running across the change is not cached
   async function best(mobArg, opts) {
     opts = opts || {};
     const T0 = Date.now(), G = await gather(opts), P = prepare(G), T1 = Date.now(), mob = await resolveMob(mobArg), T2 = Date.now(), rules = petRules(opts);
-    const key = [P.key, JSON.stringify(mob), opts.mode || 'noncrit', JSON.stringify(rules), opts.critMult, opts.critRate].join('|');
+    const key = [P.key, mobKeyOf(mob), opts.mode || 'noncrit', JSON.stringify(rules), opts.critMult, opts.critRate].join('|');
     let hit = bestCache.get(key);
-    if (hit && !opts.force) return Object.assign({ cached: true }, hit, { timing: { total: Date.now() - T0, cached: true } });
+    if (hit && !opts.force) return Object.assign({ cached: true }, hit, { mob: shortMob(mob), timing: { total: Date.now() - T0, cached: true } });
+    const flying = inflight.get(key);                          // the same search is already running (another tab or addon asked): wait for it
+    if (flying && !opts.force) { await flying.catch(() => {}); const h2 = bestCache.get(key); if (h2) return Object.assign({ cached: true }, h2, { mob: shortMob(mob), timing: { total: Date.now() - T0, cached: true } }); }
+    const gen0 = dataGen;
+    let done; inflight.set(key, new Promise((r) => { done = r; }));
     const cs = currentSel(P), cur = buildFromSel(P, cs);
-    const out = compute(P, opts, () => {
-      const curRes = buildDamage(P.player, mob, cur);
-      const b = optimizeBuild(P.player, mob, P.inventory, P.pets, rules, cur);
-      return { curRes, b };
-    });
+    let out;
+    try {
+      const apply = settingsFor(P, opts);
+      out = await compute(P, opts, async () => {
+        const curRes = buildDamage(P.player, mob, cur);
+        const b = await optimizeBuild(P.player, mob, P.inventory, P.pets, rules, cur, async () => {
+          if (Date.now() - lastYield < 40) return;             // only hand the page a turn once ~40 ms of maths has run
+          await yieldToPage(); apply(); lastYield = Date.now();
+        });
+        return { curRes, b };
+      });
+    } finally { inflight.delete(key); done(); }
     const T3 = Date.now(), sel = selFromBest(P, out.b), r = out.b.result, c = out.curRes;
     hit = {
       ok: true, mode: opts.mode || 'noncrit', mob: shortMob(mob),
@@ -3014,11 +3090,13 @@
       changes: diffSel(cs, sel),
       timing: { total: T3 - T0, pages: T1 - T0, boss: T2 - T1, search: T3 - T2, slowPage: Object.keys(G.ms || {}).sort((a, b) => G.ms[b] - G.ms[a]).slice(0, 2).map((k) => k + ' ' + G.ms[k] + ' ms').join(', ') },   // pages = reading your stats / gear / pets / relics / class; search = the maths
     };
-    bestCache.size > 30 && bestCache.delete(bestCache.keys().next().value);
-    bestCache.set(key, hit);
+    if (gen0 === dataGen) {
+      bestCache.size > 30 && bestCache.delete(bestCache.keys().next().value);
+      bestCache.set(key, hit);
+    }
     return hit;
   }
-  M.watch('*', (e) => { /gear|team|stats|relics|class/.test(e.id) && bestCache.clear(); });
+  M.watch('*', (e) => { /gear|team|stats|relics|class/.test(e.id) && (bestCache.clear(), dataGen++); });
 
   /* ---- apply / revert, through Core.tx ('loadout') ---- */
   function makeEnv(t) {
@@ -3146,7 +3224,7 @@
 
   /* ---- offered to the other addons ---- */
   const safe = (fn) => async (...a) => { try { return await fn(...a); } catch (e) { return { ok: false, message: String((e && e.message) || e) }; } };
-  const api = { predict: safe(predict), best: safe(best), apply: safe(apply), revert: safe(revert), version: VERSION, _engine: { buildDamage, optimizeBuild, EQUIP_SLOTS } };
+  const api = { predict: safe(predict), best: safe(best), apply: safe(apply), revert: safe(revert), version: VERSION, _engine: { buildDamage, optimizeBuild, EQUIP_SLOTS, compute, settingsFor, mobKeyOf } };
   Core.module({
     id: ID, name: 'Build Engine', version: VERSION,
     provides: {
