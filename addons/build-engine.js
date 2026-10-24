@@ -19,7 +19,7 @@
  */
 (() => {
   'use strict';
-  const ID = 'build-engine', VERSION = '1.0.0';
+  const ID = 'build-engine', VERSION = '1.0.2';
   if (!(Core.apiLevel >= 6 && Core.model && Core.tx)) {
     console.warn('[build-engine] needs Core api level 6 (Core.model + Core.tx); not loaded');
     return;
@@ -869,14 +869,16 @@
     }
     return st;
   }
-  async function lbApplyPets(env, target, names, bench) {
+  async function lbApplyPets(env, target, names, bench, hook) {
     const keys = (target.mains || []).concat(
       Object.keys(target.links || {}),
       bench || [],
     );
     let cur = await lbBench(env, await env.readState(), keys);
     const acts = swDiff(cur, target);
-    for (const a of acts) {
+    hook && hook({ stage: "pets", plan: acts.map((a) => lbDescribe(a, names)) });
+    for (const [i, a] of acts.entries()) {
+      hook && hook({ stage: "pets", i });
       env.log("  > " + lbDescribe(a, names));
       await env.doPet(a);
       await env.sleep();
@@ -894,11 +896,13 @@
       );
     return acts.length;
   }
-  async function lbApplyGear(env, want, items) {
+  async function lbApplyGear(env, want, items, hook) {
     const g = await env.gearRead(),
       plan = lbGearPlan(want, g, items);
     if (plan.errors.length) throw new Error(plan.errors.join("; "));
-    for (const a of plan.acts) {
+    hook && hook({ stage: "gear", plan: plan.acts.map((a) => lbDescribe(a)) });
+    for (const [i, a] of plan.acts.entries()) {
+      hook && hook({ stage: "gear", i });
       env.log("  > " + lbDescribe(a));
       await env.gearDo(a);
       await env.sleep();
@@ -2945,7 +2949,7 @@
     hit = {
       ok: true, mode: opts.mode || 'noncrit', mob: shortMob(mob),
       current: { sel: cs, result: c }, best: { sel, result: r, notes: out.b.notes || [] },
-      gainPct: c && c.dps ? 100 * (r.dps / c.dps - 1) : 0,
+      gainPct: (() => { const k = opts.mode === 'dps' ? 'dps' : 'noncrit'; return c && c[k] ? 100 * (r[k] / c[k] - 1) : 0; })(),   // the metric the search maximised, or the equip decision could skip a better build
       gainNoncritPct: c && c.noncrit ? 100 * (r.noncrit / c.noncrit - 1) : 0,
       changes: diffSel(cs, sel),
     };
@@ -3038,6 +3042,7 @@
     const sel = arg && arg.best ? arg.best.sel : arg && arg.sel ? arg.sel : arg;
     if (!sel || !Array.isArray(sel.mains) || !sel.gear) throw new Error('build.apply needs a result of build.best or a selection { mains, link1, link2, gear }');
     const P = prepare(await gather(opts)), bench = benchHolders(P);
+    const hook = typeof opts.onStep === 'function' ? (e) => { try { opts.onStep(e); } catch (_) { /* a progress callback must never break the apply */ } } : null;
     let before = null, expected = null;
     const res = await Core.tx.run('loadout', {
       owner: ID, kind: 'apply', label: opts.label || 'Best build', ifBusy: opts.silent ? 'fail' : 'wait', stale: ['gear', 'team', 'stats'],
@@ -3051,7 +3056,7 @@
         const errs = pt.errors.concat(gp.errors);
         if (errs.length) throw new Error(errs.join('; '));
         expected = { pets: pt.target, gear: sel.gear };
-        const n = (await lbApplyPets(env, pt.target, pt.names, bench)) + (await lbApplyGear(env, sel.gear, P.inventory));
+        const n = (await lbApplyPets(env, pt.target, pt.names, bench, hook)) + (await lbApplyGear(env, sel.gear, P.inventory, hook));
         return { ok: true, changed: n > 0, count: n };
       },
       verify: async ({ phase, t }) => (phase === 'apply' ? verifyAgainst(t, expected && expected.pets, expected && expected.gear) : before ? verifyAgainst(t, { mains: before.mains, links: before.links }, before.gear) : { ok: true, why: [] }),
@@ -3086,14 +3091,14 @@
       'build.revert': { fn: api.revert, doc: 'put back what the last build.apply replaced', returns: 'Promise<{ ok, message }>' },
       'preset.best.list': { fn: () => [{ id: 'best', name: 'Best build for the boss' }], doc: 'the engine as a preset', returns: '[{ id, name }]' },
       'preset.best.apply': {
-        doc: 'search for the target boss and equip the best build if it gains enough', args: '(id, { target, threshold? = 2 (%), mode?, silent? })', returns: 'Promise<{ ok, message, changed }>',
+        doc: 'search for the target boss and equip the best build if it gains enough', args: '(id, { target, threshold? = 2 (%), mode?, silent?, onStep?(ev) })', returns: 'Promise<{ ok, message, changed }>',
         fn: safe(async (_id, o) => {
           o = o || {};
           if (!o.target) return { ok: false, message: 'preset.best.apply needs { target: <boss> }' };
           const b = await best(o.target, { mode: o.mode });
           const min = o.threshold != null ? Number(o.threshold) : store.get().threshold;
           if (!b.changes.length || b.gainPct < min) return { ok: true, changed: false, message: 'current build is within ' + min + '% of the best (' + b.gainPct.toFixed(2) + '%)', gainPct: b.gainPct };
-          const r = await apply(b, { silent: o.silent !== false, label: 'Best build: ' + (b.mob.name || '') });
+          const r = await apply(b, { silent: o.silent !== false, label: 'Best build: ' + (b.mob.name || ''), onStep: o.onStep });
           return Object.assign(r, { gainPct: b.gainPct });
         }),
       },
