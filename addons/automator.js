@@ -918,7 +918,7 @@ const Scan = (() => {
     if (!Guard.chromeOk(doc)) { Diag.skip('wave-page-no-chrome', `${gate}/${wave}`); return false; }
     Guard.ok(); Me.readRes(doc);                          // the sidebar on this page has our HP / mana
     const now = Date.now(), seen = new Set(), tracked = new Set();
-    for (const d of Roster.list) { const loc = bossLoc(d.low); if (loc && loc.gate === gate && loc.wave === wave) tracked.add(d.low); }
+    for (const d of Roster.list) { const loc = bossLoc(d.low); if (loc && String(loc.gate) === String(gate) && String(loc.wave) === String(wave)) tracked.add(d.low); }   // (compared as text so 5 and "5" match: a boss missed here gets no timestamp and would stay due)
     doc.querySelectorAll('.monster-container .monster-card, .monster-card').forEach((card) => {
       if (!cardAlive(card)) return;
       const id = cardId(card); const raw = (card.dataset.name || (card.querySelector('.monster-name,.name,h2,h3') || {}).textContent || '').trim();
@@ -947,19 +947,46 @@ const Scan = (() => {
     }
     return true;
   }
-  function nextCheck(low) {
-    const def = Roster.get(low), now = Date.now(); if (!def || bossCap(low) <= 0) return Infinity;
+  // a wave page that could not be read waits RETRY_MS before it counts as due again: one unreadable page must not start a full pass on every loop tick
+  const retryAt = new Map(), RETRY_MS = 15000, pageKey = (loc) => `${loc.gate}/${loc.wave}`;
+  const isWaveLow = (l) => { const d = Roster.get(l); return !!d && d.kind === 'wave'; };
+  const inBackoff = (l) => { const loc = bossLoc(l); return !!loc && (retryAt.get(pageKey(loc)) || 0) > Date.now(); };
+  const failing = (l) => { const loc = bossLoc(l); return !!loc && retryAt.has(pageKey(loc)); };       // its page failed the last time it was read (cleared by a good read)
+  // A boss falls due for two different reasons:
+  //   interval  the configured "Scan every" has run out since its page was read. This starts the ONE full pass (scanNow reads every selected
+  //             place, in order, like the Refresh button), so all pages get the same timestamp and fall due together again.
+  //   respawn   a dead boss with a known respawn time is looked at just before it spawns. Only that boss's own page is read for it.
+  function intervalAt(low) {                                           // Infinity = nothing to scan: a skipped boss, or a wave with no gate/wave known (it can never be read)
+    const def = Roster.get(low); if (!def || bossCap(low) <= 0) return Infinity;
     if (def.kind !== 'wave') return Dungeons.nextCheck(def);
-    const e = Board.get(low); if (!e || !e.seenAt) return now;
-    if (e.alive) return e.seenAt + cfg.fightScanMs;
-    if (e.nextTs && spawnAtMs(e) + 120000 > now) return Math.max(e.seenAt + 5000, Math.min(spawnAtMs(e) - cfg.spawnLeadMs, e.seenAt + cfg.fightScanMs));
+    if (!bossLoc(low)) return Infinity;
+    const e = Board.get(low); if (!e || !e.seenAt) return Date.now();
     return e.seenAt + cfg.fightScanMs;
+  }
+  function baseCheck(low) {
+    const iv = intervalAt(low), def = Roster.get(low);
+    if (!Number.isFinite(iv) || !def || def.kind !== 'wave') return iv;
+    const e = Board.get(low), now = Date.now();
+    if (e && e.seenAt && !e.alive && e.nextTs && spawnAtMs(e) + 120000 > now) return Math.max(e.seenAt + 5000, Math.min(spawnAtMs(e) - cfg.spawnLeadMs, iv));
+    return iv;
+  }
+  function nextCheck(low) {
+    const t = baseCheck(low);
+    if (!Number.isFinite(t) || !isWaveLow(low)) return t;
+    const loc = bossLoc(low), r = loc ? retryAt.get(pageKey(loc)) : 0;
+    return r ? Math.max(t, r) : t;
   }
   const dueLows = (force) => cfg.targets.filter((l) => force || nextCheck(l) <= Date.now());
   const anyDue = () => dueLows(false).length > 0;
   const nextDueIn = () => { let m = Infinity; for (const l of cfg.targets) m = Math.min(m, nextCheck(l)); return Math.max(0, m - Date.now()); };
   async function scanNow(force) {
-    const due = dueLows(force), pages = new Map(), dd = [], t0 = Date.now();
+    let due = dueLows(force); const pages = new Map(), dd = [], t0 = Date.now();
+    // When the "Scan every" interval runs out for a wave, read EVERYTHING selected in one ordered pass, exactly like the Refresh button. Each page
+    // used to keep its own timer from the moment IT was read (the pages are read ~0.5 s apart), so five minutes later they fell due one or two at
+    // a time and the loop (it wakes every <= 5 s) scanned whichever few had just come due: a never-ending trickle of 1-page scans instead of one
+    // full pass per interval. A respawn-lead check (a boss about to spawn) still reads only that boss's page. A page that just failed is retried
+    // on its own after RETRY_MS: it must not start a full pass every time its retry comes round.
+    if (!force && due.some((l) => isWaveLow(l) && intervalAt(l) <= t0 && !inBackoff(l) && !failing(l))) due = cfg.targets.filter((l) => Number.isFinite(intervalAt(l)) && !inBackoff(l));
     for (const low of due) {
       const def = Roster.get(low); if (!def) continue;
       if (def.kind !== 'wave') { dd.push(low); continue; }
@@ -973,7 +1000,7 @@ const Scan = (() => {
     try {
       for (const loc of pages.values()) {
         if (!Run.active()) return; Work.set('scan', `Scanning Gate ${loc.gate} · Wave ${loc.wave}`, n++, total);
-        try { let ok = await page(loc.gate, loc.wave); if (ok === null) ok = await page(loc.gate, loc.wave); if (!ok) failed++; } catch (e) { failed++; Diag.skip('wave-scan-error', `${loc.gate}/${loc.wave} ${e.message}`); log(`⚠️ Gate ${loc.gate} · Wave ${loc.wave} could not be read: ${esc(e.message)}`, 'warn'); }
+        try { let ok = await page(loc.gate, loc.wave); if (ok === null) ok = await page(loc.gate, loc.wave); if (ok) retryAt.delete(pageKey(loc)); else { failed++; retryAt.set(pageKey(loc), Date.now() + RETRY_MS); } } catch (e) { failed++; retryAt.set(pageKey(loc), Date.now() + RETRY_MS); Diag.skip('wave-scan-error', `${loc.gate}/${loc.wave} ${e.message}`); log(`⚠️ Gate ${loc.gate} · Wave ${loc.wave} could not be read: ${esc(e.message)}`, 'warn'); }
         await sleep(150);
       }
       if (dd.length) { try { await Dungeons.refresh(dd, (label) => Work.set('scan', label, n++, total)); } catch (e) { failed++; Diag.skip('dungeon-scan-error', e.message); log(`⚠️ dungeon scan failed: ${esc(e.message)}`, 'warn'); } }
