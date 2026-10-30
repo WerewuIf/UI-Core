@@ -1,5 +1,5 @@
 /* =============================================================================
- * Cube Suite  (Core addon, version 3.4.0)  -  port of the Tampermonkey script "Cube Suite" 2.7.8
+ * Cube Suite  (Core addon, version 3.4.2)  -  port of the Tampermonkey script "Cube Suite" 2.7.8
  *
  * Runs inside Core (addons/core.js): `Core` is in scope, so this file is NOT a userscript.
  * List it in addons.json (see the entry in the notes) or add its raw URL in the Addons panel.
@@ -20,6 +20,8 @@
  * one potion per need). The old local code stays as the fallback when the running Core is older.
  * v3.4.0: stamina / exp in the top bar go through Core.me (apply / addExp / ingest), the same code Battle Page uses, and a location page
  * that was just fetched is handed to Core.me.ingest, so a fresh fetch beats a stale bar. The old local code is the fallback for an older Core.
+ * v3.4.2: Fast Run now parses PvP match cards while a node is on cooldown, so a fully cleared dungeon is detected and the mode
+ * switches back to Normal automatically (before, a cooled-down node never got allCleared and the reset never fired).
  * ========================================================================== */
 (async function () {
   'use strict';
@@ -1725,9 +1727,24 @@
         if (!doc) continue;
         if (pvpHasCooldown(doc)) {
           pvpSetCooldown(nodeId, pvpExtractCooldownTimer(doc));
-          pvpNodeStats[nodeId] = { ...(pvpNodeStats[nodeId] || {}), locked: false, onCooldown: true, hasOpen: false };
+          // FIX: still parse the cards during the lockout (as pvpScanAndJoin / pvpReadOnlyScan do). Skipping the parse left
+          // allCleared unset on a cooled-down node, so dsIsDungeonFullyCleared() never became true and the automatic
+          // Fast Run -> Normal reset never fired. Only the JOIN is skipped while on cooldown.
+          const cdCards = pvpParseMatchCards(doc, currentPlayerKey, instanceId, nodeId);
+          pvpLastNodeMatches[nodeId] = cdCards;
+          const cdAllCleared = cdCards.length > 0 && cdCards.every(m => m.clearedBadge);
+          pvpNodeStats[nodeId] = {
+            ...(pvpNodeStats[nodeId] || {}),
+            locked    : false,
+            onCooldown: true,
+            hasSelf   : cdCards.some(m => m.hasSelf && !m.clearedBadge),
+            hasOpen   : false,
+            allCleared: cdAllCleared,
+            matchCount: cdCards.length,
+          };
+          if (cdAllCleared) pvpWipeCooldown(nodeId);
           refreshUI();
-          pvpInfo(`Node ${nodeId}: committed to a match — skipping this cycle`);
+          if (!cdAllCleared) pvpInfo(`Node ${nodeId}: committed to a match — skipping this cycle`);
           continue;
         }
         pvpClearCooldown(nodeId);
