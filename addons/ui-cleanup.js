@@ -6219,3 +6219,787 @@
 
   run();
 })();
+
+
+/* ==========================================================================
+ * Merchant Shop  (UI Cleanup module, merchant.php only)
+ *
+ *  - Replaces the two stacked shop panels with a Gold / Gems tab view
+ *  - Click a tile to open a buy dialog (quantity, Max, total, confirm)
+ *  - Every item gets the same quantity + Max controls (limited, unlimited,
+ *    and the ones the native page shows no quantity box for)
+ *  - "Buy weekly restock" for gold: only the weekly-reset items, never the
+ *    one-time ones (eggs, guild card, the 1-gold promos)
+ *  - Damon's Shop offers merged into the Gold tab
+ *
+ * Self-contained. Append to the end of addons/ui-cleanup.js, or load as its
+ * own addon with  "match": "^/merchant\\.php".
+ * ========================================================================== */
+(function merchantShop() {
+  'use strict';
+
+  if (!/\/merchant\.php/i.test(location.pathname)) return;
+  if (window.__uicMerchantShop) return;
+  window.__uicMerchantShop = true;
+
+  /* ---------------------------------------------------------------- config */
+  const CFG = {
+    // Gold items that have a limit but do NOT restock weekly (bought-out promos).
+    // Anything with a limit of 1 is also treated as one-time automatically.
+    oneTimeGoldIds: new Set(['26', '40', '41']),
+    damonEnabled: true,
+    buyDelayMs: 150,
+    prefsKey: 'uic_merchant_prefs',
+  };
+
+  const CUR = {
+    gold: { label: 'Gold', icon: '🪙', balId: 'goldBalance' },
+    gems: { label: 'Gems', icon: '💎', balId: 'gemsBalance' },
+  };
+
+  /* --------------------------------------------------------------- helpers */
+  const NF = new Intl.NumberFormat();
+  const fmt = (n) => NF.format(Math.max(0, Math.floor(Number(n) || 0)));
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
+
+  function fixText(s) {
+    return String(s || '')
+      .replace(/â€™/g, '’').replace(/â€˜/g, '‘')
+      .replace(/â€œ/g, '“').replace(/â€\u009d/g, '”')
+      .replace(/â€“/g, '–').replace(/â€”/g, '—')
+      .replace(/â€¦/g, '…').replace(/Â/g, '');
+  }
+
+  function h(tag, props, ...kids) {
+    const e = document.createElement(tag);
+    for (const [k, v] of Object.entries(props || {})) {
+      if (v == null || v === false) continue;
+      if (k === 'class') e.className = v;
+      else if (k === 'text') e.textContent = v;
+      else if (k.startsWith('on') && typeof v === 'function') e.addEventListener(k.slice(2), v);
+      else e.setAttribute(k, v === true ? '' : v);
+    }
+    for (const kid of kids.flat()) {
+      if (kid == null || kid === false) continue;
+      e.append(kid.nodeType ? kid : document.createTextNode(String(kid)));
+    }
+    return e;
+  }
+
+  const prefs = (() => {
+    const d = { tab: 'gold', hideSold: false, sort: 'default' };
+    try { return Object.assign(d, JSON.parse(localStorage.getItem(CFG.prefsKey) || '{}')); }
+    catch (_) { return d; }
+  })();
+  const savePrefs = () => { try { localStorage.setItem(CFG.prefsKey, JSON.stringify(prefs)); } catch (_) {} };
+
+  /* ----------------------------------------------------------------- state */
+  const S = {
+    items: [],
+    bal: { gold: 0, gems: 0 },
+    query: '',
+    busy: false,
+  };
+
+  const readBal = (cur) =>
+    parseInt((document.getElementById(CUR[cur].balId)?.textContent || '0').replace(/[^\d]/g, ''), 10) || 0;
+
+  function setBalance(cur, value) {
+    const v = Math.max(0, Math.floor(value));
+    S.bal[cur] = v;
+
+    const chip = document.getElementById(CUR[cur].balId);
+    if (chip) chip.textContent = fmt(v);
+
+    const want = CUR[cur].label.toLowerCase();
+    document.querySelectorAll('.gtb-stat').forEach((stat) => {
+      const label = stat.querySelector('.gtb-label');
+      if (label && label.textContent.trim().toLowerCase() === want) {
+        const val = stat.querySelector('.gtb-value');
+        if (val) val.textContent = fmt(v);
+      }
+    });
+
+    const sym = CUR[cur].icon;
+    document.querySelectorAll('.side-chip').forEach((c) => {
+      if (c.textContent.includes(sym)) {
+        const s = c.querySelector('span:last-child');
+        if (s) s.textContent = fmt(v);
+      }
+    });
+  }
+
+  /* ------------------------------------------------------------ item model */
+  function scrapeNative() {
+    const out = [];
+    document.querySelectorAll('.card[data-merch-id]').forEach((card) => {
+      const d = card.dataset;
+      out.push({
+        uid: 'm' + d.merchId,
+        source: 'merch',
+        id: String(d.merchId),
+        currency: (d.currency || 'gold').toLowerCase() === 'gems' ? 'gems' : 'gold',
+        name: (card.querySelector('.name')?.textContent || 'Item').trim(),
+        desc: fixText(d.desc || ''),
+        img: card.querySelector('.thumb img')?.src || '',
+        price: parseInt(d.price, 10) || 0,
+        limit: parseInt(d.maxq, 10) || 0,
+        bought: parseInt(d.bought, 10) || 0,
+      });
+    });
+    return out;
+  }
+
+  const remaining = (it) => (it.limit > 0 ? Math.max(0, it.limit - it.bought) : Infinity);
+
+  // weekly | once | limited | open
+  function kind(it) {
+    if (it.limit <= 0) return 'open';
+    if (it.source === 'damon') return 'weekly';
+    if (it.currency === 'gold') {
+      return it.limit > 1 && !CFG.oneTimeGoldIds.has(it.id) ? 'weekly' : 'once';
+    }
+    return 'limited';
+  }
+
+  function maxBuy(it) {
+    const afford = it.price > 0 ? Math.floor(S.bal[it.currency] / it.price) : Infinity;
+    const m = Math.min(remaining(it), afford, 99999);
+    return Number.isFinite(m) ? Math.max(0, m) : 1;
+  }
+
+  const weeklyCandidates = () =>
+    S.items.filter((i) => i.currency === 'gold' && kind(i) === 'weekly' && remaining(i) > 0);
+
+  /* --------------------------------------------------------------- network */
+  async function post(url, body, headers) {
+    const res = await fetch(url, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: Object.assign({ 'Content-Type': 'application/x-www-form-urlencoded' }, headers || {}),
+      body: new URLSearchParams(body).toString(),
+    });
+    const data = await res.json().catch(() => ({}));
+    const rem = data.remaining;
+    return {
+      ok: String(data.status || '').trim() === 'success',
+      message: String(data.message || '').trim(),
+      remaining: rem !== undefined && rem !== null && rem !== '' && Number.isFinite(Number(rem)) ? Number(rem) : null,
+    };
+  }
+
+  async function purchase(it, qty) {
+    try {
+      if (it.source === 'damon') {
+        return await post('olympus_damon_buy.php', { offer: it.id, qty: String(qty) }, { Accept: 'application/json' });
+      }
+      return await post('merchant_buy.php', { merch_id: it.id, qty: String(qty) });
+    } catch (_) {
+      return { ok: false, message: 'Network error. Try again.', remaining: null };
+    }
+  }
+
+  function applyPurchase(it, qty, r) {
+    if (it.limit > 0) {
+      it.bought = r.remaining !== null ? it.limit - r.remaining : it.bought + qty;
+    }
+    setBalance(it.currency, S.bal[it.currency] - it.price * qty);
+  }
+
+  async function loadDamon() {
+    if (!CFG.damonEnabled) return;
+    try {
+      const res = await fetch('olympus_damon_buy.php?action=state', {
+        headers: { Accept: 'application/json' },
+        credentials: 'same-origin',
+      });
+      const data = await res.json();
+      if (!data || data.status !== 'success' || !Array.isArray(data.offers)) return;
+
+      const offers = data.offers.map((o) => {
+        const limit = Number(o.weekly_limit) || 0;
+        const bought = limit > 0 && o.remaining !== undefined ? limit - Number(o.remaining || 0) : Number(o.bought) || 0;
+        const path = String(o.image_url || '');
+        return {
+          uid: 'd' + o.key,
+          source: 'damon',
+          id: String(o.key || ''),
+          currency: 'gold',
+          name: String(o.name || 'Item'),
+          desc: 'A special item imported from Damon’s Apothecary.',
+          img: path ? new URL(path.startsWith('/') ? path : '/' + path, location.origin).href : '',
+          price: Number(o.price) || 0,
+          limit,
+          bought: Math.max(0, bought),
+        };
+      });
+      S.items = [...offers, ...S.items.filter((i) => i.source !== 'damon')];
+      refresh();
+    } catch (err) {
+      console.warn('[Merchant Shop] Damon load failed:', err);
+    }
+  }
+
+  /* ----------------------------------------------------------------- toasts */
+  let toasts;
+  function toast(msg, type) {
+    if (!toasts) {
+      toasts = h('div', { class: 'uic-toasts', role: 'status', 'aria-live': 'polite' });
+      document.body.append(toasts);
+    }
+    const t = h('div', { class: 'uic-toast uic-toast-' + (type || 'ok'), text: msg });
+    toasts.append(t);
+    setTimeout(() => t.remove(), type === 'err' ? 5000 : 3200);
+  }
+
+  /* ------------------------------------------------------------ layer/modal */
+  let layer = null;
+  let lastFocus = null;
+
+  function openLayer(node) {
+    closeLayer();
+    lastFocus = document.activeElement;
+    layer = h('div', { class: 'uic-backdrop', onclick: (e) => { if (e.target === layer && !S.busy) closeLayer(); } }, node);
+    document.body.append(layer);
+    document.body.classList.add('uic-lock');
+  }
+
+  function closeLayer() {
+    if (!layer) return;
+    layer.remove();
+    layer = null;
+    document.body.classList.remove('uic-lock');
+    if (lastFocus && lastFocus.focus) try { lastFocus.focus(); } catch (_) {}
+  }
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && layer && !S.busy) closeLayer();
+  });
+
+  /* ------------------------------------------------------------- buy dialog */
+  function pillFor(it) {
+    const k = kind(it);
+    if (k === 'weekly') return h('span', { class: 'uic-pill uic-pill-weekly', text: 'Weekly' });
+    if (k === 'once') return h('span', { class: 'uic-pill uic-pill-once', text: 'One-time' });
+    return null;
+  }
+
+  function openBuy(it) {
+    const m = CUR[it.currency];
+    let qty = 1;
+
+    const input = h('input', { type: 'number', class: 'uic-qty-input', min: '1', step: '1', inputmode: 'numeric', 'aria-label': 'Quantity' });
+    const minus = h('button', { type: 'button', class: 'uic-step', 'aria-label': 'Decrease', text: '−' });
+    const plus = h('button', { type: 'button', class: 'uic-step', 'aria-label': 'Increase', text: '+' });
+    const chips = h('div', { class: 'uic-chips' });
+    const totalEl = h('b', { class: 'uic-total-num' });
+    const afterEl = h('span', { class: 'uic-after' });
+    const stockEl = h('dd');
+    const balEl = h('dd');
+    const buyBtn = h('button', { type: 'button', class: 'uic-btn uic-btn-primary' });
+    const cancelBtn = h('button', { type: 'button', class: 'uic-btn', text: 'Cancel', onclick: () => { if (!S.busy) closeLayer(); } });
+
+    function update() {
+      const max = maxBuy(it);
+      const can = max >= 1;
+      qty = can ? clamp(qty, 1, max) : 1;
+
+      input.value = String(qty);
+      input.max = String(Math.max(1, max));
+      input.disabled = !can || S.busy;
+      minus.disabled = !can || S.busy || qty <= 1;
+      plus.disabled = !can || S.busy || qty >= max;
+
+      chips.replaceChildren();
+      if (can) {
+        [1, 5, 10, 25, 50, 100].filter((v) => v < max).forEach((v) => {
+          chips.append(h('button', { type: 'button', class: 'uic-chip' + (qty === v ? ' on' : ''), text: String(v), disabled: S.busy, onclick: () => { qty = v; update(); } }));
+        });
+        chips.append(h('button', { type: 'button', class: 'uic-chip uic-chip-max' + (qty === max ? ' on' : ''), text: 'Max ' + fmt(max), disabled: S.busy, onclick: () => { qty = max; update(); } }));
+      }
+
+      const total = it.price * qty;
+      totalEl.textContent = fmt(total) + ' ' + m.icon;
+      afterEl.textContent = can ? 'Left after: ' + fmt(S.bal[it.currency] - total) : '';
+
+      const rem = remaining(it);
+      stockEl.textContent = Number.isFinite(rem) ? fmt(rem) + ' of ' + fmt(it.limit) + ' left' : 'No limit';
+      balEl.textContent = fmt(S.bal[it.currency]) + ' ' + m.icon;
+
+      buyBtn.disabled = !can || S.busy;
+      buyBtn.textContent = S.busy ? 'Buying…' : can ? 'Buy ' + fmt(qty) + ' for ' + fmt(total) + ' ' + m.label.toLowerCase() : rem === 0 ? 'Sold out' : 'Not enough ' + m.label.toLowerCase();
+    }
+
+    async function doBuy() {
+      if (S.busy || buyBtn.disabled) return;
+      S.busy = true;
+      update();
+      const cost = it.price * qty;
+      const r = await purchase(it, qty);
+      S.busy = false;
+      if (r.ok) {
+        applyPurchase(it, qty, r);
+        toast('Bought ' + fmt(qty) + ' × ' + it.name + ' for ' + fmt(cost) + ' ' + m.label.toLowerCase(), 'ok');
+        closeLayer();
+        refresh();
+      } else {
+        const low = r.message.toLowerCase();
+        toast(r.message || 'Purchase failed.', low.includes('not enough') ? 'warn' : 'err');
+        update();
+      }
+    }
+
+    minus.addEventListener('click', () => { qty -= 1; update(); });
+    plus.addEventListener('click', () => { qty += 1; update(); });
+    input.addEventListener('input', () => {
+      const n = parseInt(input.value, 10);
+      if (Number.isFinite(n)) { qty = n; }
+    });
+    input.addEventListener('change', update);
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); qty = parseInt(input.value, 10) || 1; update(); doBuy(); }
+    });
+    input.addEventListener('focus', () => input.select());
+    buyBtn.addEventListener('click', doBuy);
+
+    const dlg = h('div', { class: 'uic-dlg', role: 'dialog', 'aria-modal': 'true', 'aria-label': it.name, 'data-cur': it.currency },
+      h('button', { type: 'button', class: 'uic-x', 'aria-label': 'Close', text: '×', onclick: () => { if (!S.busy) closeLayer(); } }),
+      h('div', { class: 'uic-dlg-head' },
+        h('div', { class: 'uic-dlg-art' }, it.img ? h('img', { src: it.img, alt: '' }) : null),
+        h('div', { class: 'uic-dlg-title' },
+          h('h3', { text: it.name }),
+          h('div', { class: 'uic-dlg-tags' }, pillFor(it), it.source === 'damon' ? h('span', { class: 'uic-pill uic-pill-damon', text: 'Damon' }) : null),
+          h('p', { class: 'uic-desc', text: it.desc || 'No description.' }))),
+      h('dl', { class: 'uic-facts' },
+        h('div', null, h('dt', { text: 'Price each' }), h('dd', { text: fmt(it.price) + ' ' + m.icon })),
+        h('div', null, h('dt', { text: 'In stock' }), stockEl),
+        h('div', null, h('dt', { text: 'Your ' + m.label.toLowerCase() }), balEl)),
+      h('div', { class: 'uic-qty-row' }, h('div', { class: 'uic-qty' }, minus, input, plus), chips),
+      h('div', { class: 'uic-total' }, h('span', { text: 'Total' }), totalEl, afterEl),
+      h('div', { class: 'uic-dlg-actions' }, cancelBtn, buyBtn));
+
+    openLayer(dlg);
+    update();
+    (input.disabled ? buyBtn : input).focus({ preventScroll: true });
+  }
+
+  /* ----------------------------------------------------- buy weekly restock */
+  function openBuyAll() {
+    const cands = weeklyCandidates().sort((a, b) => remaining(a) * a.price - remaining(b) * b.price);
+    if (!cands.length) { toast('Everything weekly is already bought.', 'info'); return; }
+
+    const picked = new Map(cands.map((i) => [i.uid, true]));
+    const rows = new Map();
+    const totalEl = h('b', { class: 'uic-total-num' });
+    const noteEl = h('span', { class: 'uic-after' });
+    const runBtn = h('button', { type: 'button', class: 'uic-btn uic-btn-primary' });
+    const cancelBtn = h('button', { type: 'button', class: 'uic-btn', text: 'Cancel', onclick: () => { if (!S.busy) closeLayer(); } });
+    let finished = false;
+
+    const cost = (i) => remaining(i) * i.price;
+
+    function update() {
+      const chosen = cands.filter((i) => picked.get(i.uid));
+      const sum = chosen.reduce((s, i) => s + cost(i), 0);
+      totalEl.textContent = fmt(sum) + ' 🪙';
+      noteEl.textContent = sum > S.bal.gold ? 'Not enough gold for everything, the rest is skipped.' : 'Left after: ' + fmt(S.bal.gold - sum);
+      runBtn.disabled = S.busy || (!finished && !chosen.length);
+      runBtn.textContent = finished ? 'Done' : S.busy ? 'Buying…' : 'Buy ' + chosen.length + (chosen.length === 1 ? ' item' : ' items');
+      cancelBtn.disabled = S.busy;
+      cancelBtn.style.display = finished ? 'none' : '';
+    }
+
+    const list = h('div', { class: 'uic-ba-list' }, cands.map((i) => {
+      const box = h('input', { type: 'checkbox', checked: true, 'aria-label': 'Include ' + i.name });
+      box.addEventListener('change', () => { picked.set(i.uid, box.checked); update(); });
+      const state = h('span', { class: 'uic-ba-state' });
+      const row = h('label', { class: 'uic-ba-row' },
+        box,
+        h('span', { class: 'uic-ba-art' }, i.img ? h('img', { src: i.img, alt: '' }) : null),
+        h('span', { class: 'uic-ba-name' },
+          h('b', { text: i.name }),
+          h('small', { text: fmt(remaining(i)) + ' × ' + fmt(i.price) + (i.source === 'damon' ? ' (Damon)' : '') })),
+        h('span', { class: 'uic-ba-cost', text: fmt(cost(i)) + ' 🪙' }),
+        state);
+      rows.set(i.uid, { box, state, row });
+      return row;
+    }));
+
+    async function run() {
+      if (finished) { closeLayer(); return; }
+      const chosen = cands.filter((i) => picked.get(i.uid));
+      if (!chosen.length || S.busy) return;
+      S.busy = true;
+      rows.forEach((r) => { r.box.disabled = true; });
+      update();
+
+      let okCount = 0;
+      let spent = 0;
+      for (const it of chosen) {
+        const r = rows.get(it.uid);
+        const want = remaining(it);
+        const qty = Math.min(want, Math.floor(S.bal.gold / it.price));
+        if (qty < 1) { r.state.textContent = 'Not enough gold'; r.row.classList.add('bad'); continue; }
+
+        r.state.textContent = 'Buying…';
+        const res = await purchase(it, qty);
+        if (res.ok) {
+          applyPurchase(it, qty, res);
+          okCount += 1;
+          spent += qty * it.price;
+          r.state.textContent = qty < want ? 'Bought ' + fmt(qty) + ' of ' + fmt(want) : 'Bought';
+          r.row.classList.add('ok');
+        } else {
+          r.state.textContent = res.message || 'Failed';
+          r.row.classList.add('bad');
+        }
+        await sleep(CFG.buyDelayMs);
+      }
+
+      S.busy = false;
+      finished = true;
+      update();
+      refresh();
+      toast('Weekly restock: ' + okCount + ' of ' + chosen.length + ' bought for ' + fmt(spent) + ' gold', okCount === chosen.length ? 'ok' : 'warn');
+    }
+
+    runBtn.addEventListener('click', run);
+
+    const dlg = h('div', { class: 'uic-dlg uic-dlg-wide', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Buy weekly restock', 'data-cur': 'gold' },
+      h('button', { type: 'button', class: 'uic-x', 'aria-label': 'Close', text: '×', onclick: () => { if (!S.busy) closeLayer(); } }),
+      h('h3', { class: 'uic-ba-title', text: 'Buy weekly restock' }),
+      h('p', { class: 'uic-desc', text: 'Weekly gold items with stock left, bought up to their limit. One-time items are never included. Untick anything you want to skip.' }),
+      list,
+      h('div', { class: 'uic-total' }, h('span', { text: 'Total' }), totalEl, noteEl),
+      h('div', { class: 'uic-dlg-actions' }, cancelBtn, runBtn));
+
+    openLayer(dlg);
+    update();
+    runBtn.focus({ preventScroll: true });
+  }
+
+  /* -------------------------------------------------------------- shop view */
+  let root, tabBtns = {}, grid, buyAllBtn, searchEl, sortEl, hideEl;
+
+  function tile(it) {
+    const m = CUR[it.currency];
+    const rem = remaining(it);
+    const sold = rem === 0;
+    const poor = !sold && S.bal[it.currency] < it.price;
+    const pct = it.limit > 0 ? Math.min(100, Math.round((it.bought / it.limit) * 100)) : 0;
+    const cls = 'uic-tile' + (sold ? ' is-sold' : '') + (poor ? ' is-poor' : '');
+
+    return h('button', {
+      type: 'button',
+      class: cls,
+      'aria-label': it.name + ', ' + fmt(it.price) + ' ' + m.label + (sold ? ', sold out' : ''),
+      onclick: () => openBuy(it),
+    },
+      h('span', { class: 'uic-art' },
+        it.img ? h('img', { src: it.img, alt: '', loading: 'lazy', decoding: 'async' }) : null,
+        pillFor(it),
+        it.source === 'damon' ? h('span', { class: 'uic-pill uic-pill-damon', text: 'Damon' }) : null,
+        sold ? h('span', { class: 'uic-sold', text: 'Sold out' }) : null),
+      h('span', { class: 'uic-name', text: it.name }),
+      h('span', { class: 'uic-price' }, h('span', { text: m.icon }), h('b', { text: fmt(it.price) })),
+      h('span', { class: 'uic-stock' },
+        it.limit > 0 ? h('span', { class: 'uic-bar' }, h('i', { style: 'width:' + pct + '%' })) : null,
+        h('span', { class: 'uic-stock-txt', text: it.limit > 0 ? fmt(it.bought) + ' / ' + fmt(it.limit) + ' bought' : 'No limit' })));
+  }
+
+  function refresh() {
+    if (!root) return;
+    const cur = prefs.tab;
+    root.dataset.cur = cur;
+
+    ['gold', 'gems'].forEach((c) => {
+      const b = tabBtns[c];
+      const avail = S.items.filter((i) => i.currency === c && remaining(i) > 0).length;
+      b.setAttribute('aria-selected', c === cur ? 'true' : 'false');
+      b.querySelector('.uic-tab-bal').textContent = fmt(S.bal[c]);
+      b.querySelector('.uic-tab-sub').textContent = avail + (avail === 1 ? ' item available' : ' items available');
+    });
+
+    // weekly restock button
+    const cands = weeklyCandidates();
+    const sum = cands.reduce((s, i) => s + remaining(i) * i.price, 0);
+    buyAllBtn.style.display = cur === 'gold' ? '' : 'none';
+    buyAllBtn.disabled = !cands.length;
+    buyAllBtn.replaceChildren(
+      h('b', { text: cands.length ? 'Buy weekly restock' : 'Weekly stock bought' }),
+      cands.length ? h('small', { text: cands.length + (cands.length === 1 ? ' item for ' : ' items for ') + fmt(sum) + ' gold' }) : null);
+
+    // grid
+    const q = S.query.trim().toLowerCase();
+    let list = S.items.filter((i) => i.currency === cur);
+    if (q) list = list.filter((i) => i.name.toLowerCase().includes(q));
+    if (prefs.hideSold) list = list.filter((i) => remaining(i) > 0);
+
+    const cmp = {
+      default: () => 0,
+      'price-asc': (a, b) => a.price - b.price,
+      'price-desc': (a, b) => b.price - a.price,
+      name: (a, b) => a.name.localeCompare(b.name),
+    }[prefs.sort] || (() => 0);
+    const soldRank = (i) => (remaining(i) > 0 ? 0 : 1);
+    list.sort((a, b) => soldRank(a) - soldRank(b) || cmp(a, b));
+
+    grid.replaceChildren(...(list.length
+      ? list.map(tile)
+      : [h('div', { class: 'uic-empty', text: q ? 'Nothing matches “' + S.query.trim() + '”.' : 'Nothing to show here.' })]));
+  }
+
+  function setTab(cur) {
+    prefs.tab = cur;
+    savePrefs();
+    refresh();
+  }
+
+  function buildShell() {
+    const tabs = h('div', { class: 'uic-tabs', role: 'tablist', 'aria-label': 'Shop currency' },
+      ['gold', 'gems'].map((c) => {
+        const b = h('button', { type: 'button', class: 'uic-tab', role: 'tab', 'data-cur': c, onclick: () => setTab(c) },
+          h('span', { class: 'uic-tab-ico', text: CUR[c].icon }),
+          h('span', { class: 'uic-tab-main' }, h('b', { text: CUR[c].label + ' Shop' }), h('small', { class: 'uic-tab-sub' })),
+          h('span', { class: 'uic-tab-bal' }));
+        tabBtns[c] = b;
+        return b;
+      }));
+
+    searchEl = h('input', { type: 'search', class: 'uic-search', placeholder: 'Search items', 'aria-label': 'Search items' });
+    searchEl.addEventListener('input', () => { S.query = searchEl.value; refresh(); });
+
+    sortEl = h('select', { class: 'uic-select', 'aria-label': 'Sort items' },
+      [['default', 'Default order'], ['price-asc', 'Price, low to high'], ['price-desc', 'Price, high to low'], ['name', 'Name']]
+        .map(([v, t]) => h('option', { value: v, text: t })));
+    sortEl.value = prefs.sort;
+    sortEl.addEventListener('change', () => { prefs.sort = sortEl.value; savePrefs(); refresh(); });
+
+    hideEl = h('input', { type: 'checkbox' });
+    hideEl.checked = !!prefs.hideSold;
+    hideEl.addEventListener('change', () => { prefs.hideSold = hideEl.checked; savePrefs(); refresh(); });
+
+    buyAllBtn = h('button', { type: 'button', class: 'uic-btn uic-btn-primary uic-buyall', onclick: openBuyAll });
+
+    grid = h('div', { class: 'uic-grid', role: 'tabpanel' });
+
+    root = h('section', { class: 'uic-shop', 'data-cur': prefs.tab },
+      tabs,
+      h('div', { class: 'uic-panel' },
+        h('div', { class: 'uic-toolbar' },
+          searchEl, sortEl,
+          h('label', { class: 'uic-check' }, hideEl, h('span', { text: 'Hide sold out' })),
+          h('span', { class: 'uic-grow' }),
+          buyAllBtn),
+        grid,
+        h('p', { class: 'uic-hint', text: 'Click an item to choose a quantity and buy.' })));
+    return root;
+  }
+
+  /* ------------------------------------------------------------------ CSS */
+  const CSS = `
+.uic-shop,.uic-dlg{--acc:#FFD369;--ink:#241a00}
+.uic-shop[data-cur="gems"],.uic-dlg[data-cur="gems"]{--acc:#5fd0f5;--ink:#04202b}
+.uic-shop{margin:16px 0;color:#E0E0E0}
+.uic-shop *,.uic-dlg *,.uic-switchbar *{box-sizing:border-box}
+.uic-native-hidden{display:none!important}
+body.uic-classic .uic-native-hidden{display:block!important}
+body.uic-classic .uic-shop{display:none}
+body.uic-lock{overflow:hidden}
+
+.uic-switchbar{display:flex;justify-content:flex-end;margin:-4px 0 -8px}
+.uic-link{background:none;border:0;color:#9aa0b8;font:inherit;font-size:12px;cursor:pointer;padding:4px 2px;text-decoration:underline}
+.uic-link:hover{color:#EDEFF6}
+
+.uic-tabs{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.uic-tab{--t:#FFD369;appearance:none;font:inherit;color:#B9BBD1;cursor:pointer;text-align:left;
+  display:flex;align-items:center;gap:12px;padding:12px 16px;background:#171923;border:1px solid #232437;border-radius:12px;
+  transition:border-color .15s,background .15s,color .15s}
+.uic-tab[data-cur="gems"]{--t:#5fd0f5}
+.uic-tab:hover{background:#1c1e2b;color:#EDEFF6}
+.uic-tab[aria-selected="true"]{color:#F1F2FA;border-color:var(--t);background:linear-gradient(180deg,color-mix(in srgb,var(--t) 13%,#1A1B25),#1A1B25)}
+.uic-tab-ico{font-size:24px;line-height:1}
+.uic-tab-main{display:flex;flex-direction:column;min-width:0;flex:1}
+.uic-tab-main b{font-size:15px}
+.uic-tab-main small{font-size:12px;color:#9aa0b8}
+.uic-tab-bal{font-weight:700;font-size:15px;color:var(--t);font-variant-numeric:tabular-nums}
+
+.uic-panel{background:#1A1B25;border:1px solid #232437;border-radius:12px;padding:14px;margin-top:10px;box-shadow:0 6px 18px rgba(0,0,0,.35)}
+.uic-toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin-bottom:14px}
+.uic-grow{flex:1}
+.uic-search,.uic-select{font:inherit;font-size:13px;color:#EDEFF6;background:#12131A;border:1px solid #2B2D44;border-radius:8px;padding:8px 10px;min-width:0}
+.uic-search{width:200px}
+.uic-search:focus,.uic-select:focus,.uic-qty-input:focus{outline:2px solid var(--acc);outline-offset:1px}
+.uic-check{display:inline-flex;align-items:center;gap:6px;font-size:13px;color:#B9BBD1;cursor:pointer;user-select:none}
+.uic-check input{accent-color:var(--acc)}
+
+.uic-btn{appearance:none;font:inherit;font-size:13px;font-weight:600;color:#EDEFF6;background:#2A2B3A;border:1px solid #2B2D44;border-radius:8px;padding:9px 14px;cursor:pointer;transition:background .15s,transform .08s}
+.uic-btn:hover:not(:disabled){background:#34364A}
+.uic-btn:active:not(:disabled){transform:translateY(1px)}
+.uic-btn:disabled{opacity:.5;cursor:not-allowed}
+.uic-btn-primary{background:var(--acc);border-color:var(--acc);color:var(--ink)}
+.uic-btn-primary:hover:not(:disabled){background:var(--acc);filter:brightness(1.08)}
+.uic-buyall{display:flex;flex-direction:column;align-items:flex-start;gap:1px;line-height:1.2;padding:7px 14px}
+.uic-buyall small{font-weight:500;font-size:11px;opacity:.8}
+
+.uic-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(168px,1fr));gap:12px}
+.uic-empty{grid-column:1/-1;padding:28px 0;text-align:center;color:#9aa0b8}
+.uic-hint{margin:14px 0 0;font-size:12px;color:#7f869f}
+
+.uic-tile{appearance:none;font:inherit;color:inherit;text-align:left;cursor:pointer;display:flex;flex-direction:column;gap:7px;
+  padding:9px;background:#171923;border:1px solid #2B2D44;border-radius:12px;min-width:0;
+  transition:border-color .15s,transform .12s,background .15s}
+.uic-tile:hover{border-color:var(--acc);background:#1b1d29;transform:translateY(-2px)}
+.uic-tile:active{transform:translateY(0)}
+.uic-tile:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+.uic-art{position:relative;display:block;aspect-ratio:1;border-radius:9px;overflow:hidden;background:#20212E}
+.uic-art img{width:100%;height:100%;object-fit:cover;display:block}
+.uic-pill{position:absolute;top:6px;left:6px;font-size:10.5px;font-weight:700;line-height:1;padding:4px 7px;border-radius:999px;
+  background:rgba(18,19,26,.82);border:1px solid #3a3d5a;color:#cfd4ff;backdrop-filter:blur(3px)}
+.uic-pill-weekly{border-color:#3b8a5a;color:#b8f0cf}
+.uic-pill-once{border-color:#6a5a2a;color:#f0dca0}
+.uic-pill-damon{left:auto;right:6px;background:#7c3aed;border-color:#7c3aed;color:#fff}
+.uic-dlg-tags .uic-pill{position:static}
+.uic-sold{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(12,13,19,.62);
+  font-weight:700;font-size:13px;color:#d6d9ee}
+.uic-tile.is-sold .uic-art img{filter:grayscale(.85);opacity:.55}
+.uic-tile.is-sold .uic-name,.uic-tile.is-sold .uic-price{color:#7f869f}
+.uic-tile.is-sold{border-style:dashed}
+.uic-name{font-weight:600;font-size:13.5px;color:#F1F2FA;line-height:1.25;min-height:2.5em;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.uic-price{display:flex;align-items:center;gap:6px;font-size:14px}
+.uic-price b{color:var(--acc);font-variant-numeric:tabular-nums}
+.uic-tile.is-poor .uic-price b{color:#f08a8a}
+.uic-stock{display:flex;flex-direction:column;gap:4px;margin-top:auto}
+.uic-bar{display:block;height:5px;border-radius:999px;background:#2a2b3a;overflow:hidden}
+.uic-bar i{display:block;height:100%;background:var(--acc);border-radius:999px}
+.uic-stock-txt{font-size:11.5px;color:#9aa0b8}
+
+/* dialog */
+.uic-backdrop{position:fixed;inset:0;z-index:10100;display:flex;align-items:center;justify-content:center;padding:16px;background:rgba(0,0,0,.68)}
+.uic-dlg{position:relative;width:min(440px,100%);max-height:calc(100dvh - 32px);overflow:auto;background:#1A1B25;color:#E0E0E0;
+  border:1px solid #2B2D44;border-radius:14px;padding:18px;box-shadow:0 16px 40px rgba(0,0,0,.55);font-family:'Segoe UI',Arial,sans-serif}
+.uic-dlg-wide{width:min(560px,100%)}
+.uic-x{position:absolute;top:8px;right:10px;background:none;border:0;color:#9aa0b8;font-size:24px;line-height:1;cursor:pointer;padding:4px 8px}
+.uic-x:hover{color:#fff}
+.uic-dlg-head{display:flex;gap:14px;margin-right:18px}
+.uic-dlg-art{width:92px;height:92px;flex-shrink:0;border-radius:10px;overflow:hidden;background:#20212E}
+.uic-dlg-art img{width:100%;height:100%;object-fit:cover;display:block}
+.uic-dlg-title{min-width:0}
+.uic-dlg-title h3,.uic-ba-title{margin:0 0 6px;font-size:18px;color:#F1F2FA}
+.uic-dlg-tags{display:flex;gap:6px;margin-bottom:6px}
+.uic-dlg-tags:empty{display:none}
+.uic-desc{margin:0;font-size:13px;line-height:1.45;color:#B9BBD1;max-height:7.5em;overflow:auto}
+.uic-facts{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:16px 0 14px}
+.uic-facts div{background:#171923;border:1px solid #2B2D44;border-radius:9px;padding:8px 10px;min-width:0}
+.uic-facts dt{font-size:11.5px;color:#9aa0b8;margin-bottom:2px}
+.uic-facts dd{margin:0;font-size:13px;font-weight:600;color:#F1F2FA;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+.uic-qty-row{display:flex;flex-direction:column;gap:10px}
+.uic-qty{display:inline-flex;align-self:flex-start;align-items:center;background:#12131A;border:1px solid #2B2D44;border-radius:10px;padding:3px}
+.uic-step{width:36px;height:36px;border-radius:8px;border:0;background:#232433;color:#EDEFF6;font-size:18px;font-weight:700;cursor:pointer}
+.uic-step:hover:not(:disabled){background:#2e3047}
+.uic-step:disabled{opacity:.4;cursor:not-allowed}
+.uic-qty-input{width:92px;text-align:center;font:inherit;font-weight:700;font-size:16px;color:#EDEFF6;background:transparent;border:0;border-radius:6px;padding:6px 4px;-moz-appearance:textfield}
+.uic-qty-input::-webkit-outer-spin-button,.uic-qty-input::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
+.uic-chips{display:flex;flex-wrap:wrap;gap:6px}
+.uic-chip{font:inherit;font-size:12px;font-weight:600;color:#cfd4ff;background:#212439;border:1px solid #2B2D44;border-radius:999px;padding:5px 11px;cursor:pointer}
+.uic-chip:hover:not(:disabled){border-color:var(--acc)}
+.uic-chip.on{background:var(--acc);border-color:var(--acc);color:var(--ink)}
+.uic-total{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 10px;margin:16px 0 14px;padding-top:12px;border-top:1px solid #2B2D44}
+.uic-total span:first-child{color:#9aa0b8;font-size:13px}
+.uic-total-num{font-size:20px;color:var(--acc);font-variant-numeric:tabular-nums}
+.uic-after{font-size:12px;color:#9aa0b8;margin-left:auto}
+.uic-dlg-actions{display:flex;justify-content:flex-end;gap:10px}
+.uic-dlg-actions .uic-btn-primary{min-width:170px;padding:11px 16px}
+
+/* weekly restock list */
+.uic-ba-list{display:flex;flex-direction:column;gap:6px;margin:14px 0 4px;max-height:46vh;overflow:auto}
+.uic-ba-row{display:grid;grid-template-columns:auto 38px 1fr auto;align-items:center;gap:10px;background:#171923;border:1px solid #2B2D44;border-radius:9px;padding:7px 10px;cursor:pointer}
+.uic-ba-row input{accent-color:var(--acc)}
+.uic-ba-row.ok{border-color:#2e7d32}
+.uic-ba-row.bad{border-color:#a33}
+.uic-ba-art{width:38px;height:38px;border-radius:7px;overflow:hidden;background:#20212E}
+.uic-ba-art img{width:100%;height:100%;object-fit:cover;display:block}
+.uic-ba-name{display:flex;flex-direction:column;min-width:0}
+.uic-ba-name b{font-size:13px;color:#F1F2FA;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.uic-ba-name small{font-size:11.5px;color:#9aa0b8}
+.uic-ba-cost{font-size:13px;font-weight:600;color:var(--acc);font-variant-numeric:tabular-nums;white-space:nowrap}
+.uic-ba-state{grid-column:2/-1;font-size:11.5px;color:#9aa0b8}
+.uic-ba-state:empty{display:none}
+.uic-ba-row.ok .uic-ba-state{color:#8fd19e}
+.uic-ba-row.bad .uic-ba-state{color:#f08a8a}
+
+/* toasts */
+.uic-toasts{position:fixed;left:50%;bottom:78px;transform:translateX(-50%);z-index:10110;display:flex;flex-direction:column;align-items:center;gap:8px;width:min(92vw,460px);pointer-events:none}
+.uic-toast{pointer-events:auto;width:100%;padding:11px 14px;border-radius:10px;font:600 13px/1.35 'Segoe UI',Arial,sans-serif;color:#fff;
+  background:#1e1e2e;border:1px solid #2e7d32;box-shadow:0 8px 24px rgba(0,0,0,.5)}
+.uic-toast-warn{border-color:#ef6c00}
+.uic-toast-err{border-color:#c62828}
+.uic-toast-info{border-color:#3a3d5a}
+
+@media (max-width:720px){
+  .uic-tabs{gap:8px}
+  .uic-tab{padding:10px 12px;gap:8px}
+  .uic-tab-ico{font-size:20px}
+  .uic-tab-bal{display:none}
+  .uic-toolbar .uic-grow{display:none}
+  .uic-search{flex:1 1 100%;width:auto}
+  .uic-buyall{width:100%}
+}
+@media (max-width:480px){
+  .uic-grid{grid-template-columns:repeat(2,1fr);gap:10px}
+  .uic-backdrop{align-items:flex-end;padding:0}
+  .uic-dlg{width:100%;border-radius:16px 16px 0 0;max-height:92dvh;padding-bottom:calc(18px + env(safe-area-inset-bottom,0px))}
+  .uic-facts{grid-template-columns:1fr 1fr}
+  .uic-dlg-actions .uic-btn{flex:1}
+}
+@media (prefers-reduced-motion:reduce){
+  .uic-tile,.uic-tab,.uic-btn{transition:none}
+  .uic-tile:hover{transform:none}
+}`;
+
+  /* ------------------------------------------------------------------ init */
+  function start() {
+    const native = scrapeNative();
+    if (!native.length) return false;
+
+    const panels = [...document.querySelectorAll('.panel')].filter((p) => p.querySelector('.card[data-merch-id]'));
+    if (!panels.length) return false;
+
+    S.items = native;
+    S.bal.gold = readBal('gold');
+    S.bal.gems = readBal('gems');
+
+    document.head.append(h('style', { id: 'uic-merchant-css', text: CSS }));
+
+    const shell = buildShell();
+    const switchBar = h('div', { class: 'uic-switchbar' },
+      h('button', {
+        type: 'button', class: 'uic-link', text: 'Show classic view',
+        onclick: (e) => {
+          const on = document.body.classList.toggle('uic-classic');
+          e.currentTarget.textContent = on ? 'Show new view' : 'Show classic view';
+        },
+      }));
+
+    panels[0].before(switchBar, shell);
+    panels.forEach((p) => p.classList.add('uic-native-hidden'));
+
+    refresh();
+    loadDamon();
+    return true;
+  }
+
+  function boot() {
+    let tries = 0;
+    const t = setInterval(() => {
+      tries += 1;
+      let done = false;
+      try { done = start(); } catch (err) { console.error('[Merchant Shop] failed to start:', err); done = true; }
+      if (done || tries > 50) clearInterval(t);
+    }, 200);
+  }
+
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot, { once: true });
+  else boot();
+})();
