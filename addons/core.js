@@ -3485,7 +3485,7 @@
 
   /* ------------------------------------------------------------ export --- */
   const Core = {
-    __isCore: true, apiLevel: API, version: '3.20.0', debug: false, tabId: TAB,
+    __isCore: true, apiLevel: API, version: '3.20.1', debug: false, tabId: TAB,
     esc, sleep, debounce, fmt, int, compact, parseNum, parseJson,
     on, off, once, emit,
     state, store, player,
