@@ -1,4 +1,5 @@
 /* UI Cleanup — Core addon (migrated from the standalone userscript).
+ * v2.6.0: Options: one switch per part (home button, pin, guild, dungeon map, battle back, main page, waves, merchant). See OPTIONS below.
  * Loaded by core.user.js; `Core` is in scope. No @require / header needed.
  * Cookie helper + 3 toast copies removed (Core.cookies / Core.ui.toast); quest/battle-pass/PvP polls share Core.net cache.
  * Page scoping: v2.3 loads this addon on EVERY page (addons.json has no "match" for it any more) so MODULE 0 / 0b can put the Home
@@ -51,6 +52,25 @@
    window.__gsCookies is still defined by the core for any old script that checks it. */
 
 /* =====================================================================
+   OPTIONS (Core 3.19+): one switch per part, under  Addons panel > UI Cleanup > Options.
+   A part that is off does not run at all; the addon is skipped on a page where none of its parts is on. Each part keeps its own
+   on-page settings (Direct links, Compact Cards, the tracker's ⚙ ...): those are unchanged.
+   On an older Core there are no switches and every part runs, as before.
+   ===================================================================== */
+const __ucMods = [
+  { id: 'home',        label: 'Home button',          icon: '🏠', pages: '*',                          help: 'A Home button in the top bar that goes straight to your dashboard.' },
+  { id: 'pin',         label: 'Keep-alive pin',       icon: '📌', pages: '*',                          help: 'The pin in the top bar that keeps your session alive.' },
+  { id: 'guild',       label: 'Guild dashboard',      icon: '🏰', pages: ['/guild_dash.php'],          help: 'A tidier guild page.' },
+  { id: 'dungeon-map', label: 'Dungeon map and list', icon: '🗺️', pages: ['/guild_dungeon.php', '/guild_dungeon_instance.php', '/guild_dungeon_location.php'], help: 'Cleaner dungeon list and map, direct links to single-boss fights, Fight buttons on the stats row.' },
+  { id: 'battle-back', label: 'Battle: skip location', icon: '↩️', pages: ['/battle.php'],             help: 'Back from a single-boss dungeon fight goes straight to the instance map.' },
+  { id: 'dashboard',   label: 'Main page tiles',      icon: '🏠', pages: ['/game_dash.php'],           help: 'Live counts on the dashboard tiles (gates, quests, PvP, guild dungeons) and their ⚙ settings.' },
+  { id: 'waves',       label: 'Wave pages',           icon: '🌊', pages: ['/active_wave.php'],         help: 'Loot preview overlays, the toolbar and Compact Cards.' },
+  { id: 'merchant',    label: 'Merchant',             icon: '🛒', pages: ['/merchant.php'],            help: 'Gold / Gems tabs and a buy dialog with quantity and Max.' },
+];
+try { if (Core && Core.settings && Core.settings.define) Core.settings.define('ui-cleanup', { title: 'UI Cleanup', icon: '🧹', modules: __ucMods, fields: [] }); } catch (e) { console.warn('[ui-cleanup] options not registered', e); }
+const __ucOn = (id) => { try { return !(Core && Core.settings && Core.settings.module) || Core.settings.module('ui-cleanup', id) !== false; } catch (_) { return true; } };
+
+/* =====================================================================
    MODULE 0: Top bar "Home" button — every page
    Adds a 🏠 Home button to the game's top bar (.game-topbar > .gtb-inner > .gtb-right, in front of the level chip)
    that goes straight to the User Dashboard. Unlike modules 1–5 this one is NOT scoped to a page: addons.json no
@@ -63,6 +83,7 @@
    ===================================================================== */
 (function () {
   'use strict';
+  if (!__ucOn('home')) return;   // switched off in Options
   const HOME_URL = '/game_dash.php';
   if (/\/game_dash\.php$/.test(location.pathname)) return;
 
@@ -107,6 +128,7 @@
    ===================================================================== */
 (function () {
   'use strict';
+  if (!__ucOn('pin')) return;   // switched off in Options
   if (!Core.keepAlive) return;
 
   Core.ui.css('ui-cleanup-pin', `
@@ -170,6 +192,7 @@
    ===================================================================== */
 (function () {
   'use strict';
+  if (!__ucOn('guild')) return;   // switched off in Options
   if (!/\/guild_dash\.php/.test(location.pathname)) return;
 
   let dashInitialScrollDone = false;
@@ -643,6 +666,7 @@
    ===================================================================== */
 (function () {
   'use strict';
+  if (!__ucOn('dungeon-map')) return;   // switched off in Options
 
   const PIN_SIZE_PERCENT = 15;
 
@@ -1713,6 +1737,7 @@
    ===================================================================== */
 (function () {
   'use strict';
+  if (!__ucOn('battle-back')) return;   // switched off in Options
   if (!/\/battle\.php/.test(location.pathname)) return;
   if (!(window.BATTLE_CFG && window.BATTLE_CFG.isDungeon)) return;
 
@@ -1778,6 +1803,7 @@
    ===================================================================== */
 (function () {
   'use strict';
+  if (!__ucOn('dashboard')) return;   // switched off in Options
 
   // Feature-detect rather than trust the @match list alone. This guard
   // means the script simply no-ops anywhere those two markers aren't both
@@ -4361,6 +4387,7 @@
    ===================================================================== */
 (function () {
   'use strict';
+  if (!__ucOn('waves')) return;   // switched off in Options
   if (!/\/active_wave\.php/.test(location.pathname)) return;
 
   const clean = (s) => (s ?? '').replace(/\s+/g, ' ').trim();
@@ -6237,6 +6264,7 @@
  * ========================================================================== */
 (function merchantShop() {
   'use strict';
+  if (!__ucOn('merchant')) return;   // switched off in Options
 
   if (!/\/merchant\.php/i.test(location.pathname)) return;
   if (window.__uicMerchantShop) return;
