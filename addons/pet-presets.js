@@ -1,4 +1,5 @@
 /* Pet Team Presets + Sigil Helper — Core addon (migrated from the standalone userscript).
+ * v2.11.0: Options: switches for the preset panel, sigils without reload, and link orbs/badges.
  * Loaded by core.user.js; `Core` is in scope. No @require / header needed.
  * Floating 🐾 button + panel; fallback toast via Core.ui.toast (site notifier still preferred); pets.php?team= reads via Core.net.
  */
@@ -112,6 +113,16 @@
 
 (function () {
   'use strict';
+
+  /* Options (Core 3.19+): one switch per part, Addons panel > Pet Presets > Options. Older Core: everything runs, as before.
+     The saved teams and the Core.call('preset.pet.*') API are always available to other addons, whatever is switched off here. */
+  const PP_MODS = [
+    { id: 'panel',  label: 'Preset panel',        icon: '🐾', pages: '*',            help: 'The 🐾 button and panel: save, apply and edit pet teams.' },
+    { id: 'sigils', label: 'Sigils without reload', icon: '✨', pages: ['/pets.php'], help: 'Equipping or removing a sigil updates the page in place.' },
+    { id: 'cards',  label: 'Link orbs and badges', icon: '🔗', pages: ['/pets.php'], help: 'Linked pets and Equipped badges on the pet cards.' },
+  ];
+  try { if (Core.settings && Core.settings.define) Core.settings.define('pet-presets', { title: 'Pet Presets', icon: '🐾', modules: PP_MODS, fields: [] }); } catch (e) { console.warn('[pet-presets] options not registered', e); }
+  const __ppOn = (id) => { try { return !(Core.settings && Core.settings.module) || Core.settings.module('pet-presets', id) !== false; } catch (_) { return true; } };
 
   /* =======================================================================
    * Config
@@ -1250,7 +1261,7 @@
     }
   }
 
-  const scheduleAugment = debounce(() => { augmentNativeCards(); }, 350);
+  const scheduleAugment = debounce(() => { if (__ppOn('cards')) augmentNativeCards(); }, 350);
 
   function watchInventoryVisibility() {
     const pool = findSectionByTitle(document, '🐾 Pet Inventory');
@@ -3592,16 +3603,16 @@ function openLinkChooser(mainInvId, level, info) {
 
   buildUI();
 
-  // Register the floating 🐾 button + panel with Core.
-  Core.float.add({
+  // Register the floating 🐾 button + panel with Core (the panel's own switch in Options).
+  if (__ppOn('panel')) Core.float.add({
     id: 'pet-presets', title: 'Pet Presets', icon: '🐾', order: 30,
     render(el) { el.replaceChildren(ppPanel); },
     onShow() { renderPresetList(true); },
     onHide() { if (ppHome && ppPanel) ppHome.appendChild(ppPanel); },
   });
 
-  if (isPetsPage()) {
-    installSigilOverride();
+  if (isPetsPage() && __ppOn('sigils')) installSigilOverride();
+  if (isPetsPage() && __ppOn('cards')) {
     injectNativeStyles();
     watchInventoryVisibility();
     scheduleAugment();
