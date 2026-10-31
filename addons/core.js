@@ -452,6 +452,19 @@
       .core-row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
       .core-input{box-sizing:border-box;padding:8px 10px;border-radius:10px;border:1px solid #2b3859;background:#0d1322;color:#eef3ff;font:13px Arial,sans-serif}
       .core-dim{color:#9caad0;font-size:12px;overflow-wrap:anywhere}
+      /* Building blocks for an addon's OWN panel on a game page (3.20): same look as Core's windows. */
+      .core-card{box-sizing:border-box;background:linear-gradient(180deg,rgba(24,34,56,.98),rgba(14,20,34,.98));border:1px solid rgba(255,255,255,.08);border-radius:16px;padding:12px 14px;color:#eef3ff;font:13px Arial,sans-serif;box-shadow:0 10px 26px rgba(0,0,0,.28)}
+      .core-card-h{display:flex;align-items:center;gap:8px;font-weight:800;font-size:14px}
+      .core-seg{display:inline-flex;flex-wrap:wrap;gap:3px;padding:3px;background:#0d1322;border:1px solid #2b3859;border-radius:12px}
+      .core-seg button{border:none;background:none;color:#9caad0;font:700 12px Arial,sans-serif;padding:6px 10px;border-radius:9px;cursor:pointer;margin:0}
+      .core-seg button:hover{color:#fff}
+      .core-seg button[aria-pressed="true"]{background:linear-gradient(135deg,#3657a7,#4b6dd0);color:#fff}
+      .core-check{display:inline-flex;align-items:center;gap:6px;font:13px Arial,sans-serif;color:#eef3ff;cursor:pointer;margin:0}
+      .core-check input{width:16px;height:16px;margin:0;accent-color:#5b7cff;cursor:pointer}
+      .core-field{display:flex;flex-direction:column;gap:3px;min-width:0}
+      .core-field>label{font-size:11px;font-weight:700;letter-spacing:.03em;text-transform:uppercase;color:#9caad0}
+      .core-link{background:none;border:none;color:#8fa6ff;cursor:pointer;font:700 12px Arial,sans-serif;padding:2px 4px}
+      .core-link:hover{text-decoration:underline}
       .core-err{color:#ff8a97;font-size:12px;margin-top:3px}
       .core-pill{font:800 10px Arial,sans-serif;letter-spacing:.03em;text-transform:uppercase;border-radius:999px;padding:2px 8px;border:1px solid rgba(255,255,255,.15);color:#9caad0}
       .core-pill-ok{color:#8ee6a8;border-color:rgba(46,204,113,.4);background:rgba(46,204,113,.1)}
@@ -1269,9 +1282,11 @@
   // Drag a row by its grip (two bars, right side). A ghost copy follows the pointer while the real row stays behind as
   // a dashed placeholder that slides to where it would land; letting go drops it there. Works with mouse, pen and
   // touch (pointer events). Esc cancels. The grip also takes the Up / Down arrow keys.
-  function startRowDrag(ev, row, pane) {
-    const rows = () => [...pane.querySelectorAll('.core-addon')];
-    const startIds = rows().map((r) => r.getAttribute('data-id'));
+  function startRowDrag(ev, row, pane, opt) {
+    opt = opt || {};   // { sel, idAttr, onCommit } : which rows, which attribute holds the id, what to do with the new order
+    const SEL = opt.sel || '.core-addon', ID_ATTR = opt.idAttr || 'data-id', COMMIT = opt.onCommit || saveOrder;
+    const rows = () => [...pane.querySelectorAll(SEL)];
+    const startIds = rows().map((r) => r.getAttribute(ID_ATTR));
     const rect = row.getBoundingClientRect(), grab = ev.clientY - rect.top;
     const scroller = row.closest('.core-modal-card');
     const ghost = row.cloneNode(true);
@@ -1298,8 +1313,8 @@
       for (let guard = 0; guard < 50; guard++) {          // can cross several rows in one move
         const next = row.nextElementSibling, prev = row.previousElementSibling;
         const mid = (r) => { const b = r.getBoundingClientRect(); return b.top + b.height / 2; };
-        if (next && next.classList.contains('core-addon') && centre > mid(next)) flip(() => next.after(row));
-        else if (prev && prev.classList.contains('core-addon') && centre < mid(prev)) flip(() => prev.before(row));
+        if (next && next.matches(SEL) && centre > mid(next)) flip(() => next.after(row));
+        else if (prev && prev.matches(SEL) && centre < mid(prev)) flip(() => prev.before(row));
         else break;
       }
     }
@@ -1325,12 +1340,12 @@
         ghost.remove(); row.classList.remove('core-placeholder');
         rows().forEach((r) => { r.style.transition = ''; r.style.transform = ''; });
         if (!row.isConnected) return;                      // the panel was redrawn meanwhile
-        const ids = rows().map((r) => r.getAttribute('data-id'));
-        if (commit && ids.join('|') !== startIds.join('|')) saveOrder(ids);
+        const ids = rows().map((r) => r.getAttribute(ID_ATTR));
+        if (commit && ids.join('|') !== startIds.join('|')) COMMIT(ids);
       };
       if (!row.isConnected) { done(); return; }
       if (!commit) {                                       // put it back where it was
-        const at = startIds.indexOf(row.getAttribute('data-id')), others = rows().filter((r) => r !== row);
+        const at = startIds.indexOf(row.getAttribute(ID_ATTR)), others = rows().filter((r) => r !== row);
         if (others[at]) others[at].before(row); else if (others.length) others[others.length - 1].after(row);
       }
       const to = row.getBoundingClientRect();              // the ghost settles into the slot, then the real row takes over
@@ -3106,8 +3121,12 @@
   //           text    { placeholder }               default ''
   //           select  { options: [ value | [value, label] ] }
   //           orderlist { items: [ { id, label, icon, hidden?, ...yours } ] }   show / hide and re-order a list (e.g. the sidebar)
+  //           json    { default }                   any JSON value (object / array); no control is drawn for it, set it from your own UI
   //           button  { label, onClick }            runs in the addon's own page (not stored)
   //           heading                               a title line (not stored)
+  //   Any field can say hidden: true: it is stored, has a default and fires onChange like the others, but the options window does not
+  //   draw it. Use it when the addon shows that control itself, in its own panel on the page, so the setting lives in ONE place.
+  //   An orderlist is re-ordered by dragging a row's grip (mouse, pen or touch; the grip also takes the Up / Down keys).
   //   get(id) -> { key: value, ... } with defaults filled in      get(id, key) -> one value
   //   set(id, key, value)      reset(id[, key])
   //   list(id, key) -> an orderlist in the user's order: [ { id, label, icon, hidden, ...yours } ]. Items you add later appear at the end.
@@ -3167,6 +3186,7 @@
       case 'bool': return false;
       case 'number': return typeof f.min === 'number' ? f.min : 0;
       case 'select': return f.options && f.options.length ? optVal(f.options[0]) : '';
+      case 'json': return {};
       case 'orderlist': { const it = f.items || []; return { order: it.map((i) => i.id), hidden: it.filter((i) => i.hidden).map((i) => i.id) }; }
       default: return '';
     }
@@ -3290,7 +3310,17 @@
     .core-opt-pg{display:flex;align-items:center;gap:8px;padding:7px 9px;background:#11192d;border:1px solid rgba(255,255,255,.06);border-radius:10px;cursor:pointer;font-size:13px}
     .core-opt-pg input{width:16px;height:16px;accent-color:#5b7cff;cursor:pointer}
     .core-opt-pg.off{opacity:.55}
-    .core-mod{background:#0f1730;border:1px solid rgba(255,255,255,.07);border-radius:14px;padding:8px 10px;margin-bottom:10px}
+    .core-opt-det{margin-top:8px;background:#11192d;border:1px solid rgba(255,255,255,.06);border-radius:14px;padding:6px 12px}
+    .core-opt-det>summary{cursor:pointer;font-weight:700;font-size:13px;padding:6px 0;color:#cfd8f6}
+    .core-pgrp{margin:6px 0 12px}
+    .core-pgrp-h{display:flex;align-items:center;gap:8px;font-size:11px;color:#9caad0;font-weight:800;text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px}
+    .core-chips{display:flex;flex-wrap:wrap;gap:6px}
+    .core-chip{border:1px solid #2b3859;background:#0d1322;color:#8f9bc2;border-radius:999px;padding:5px 11px;font:700 12px Arial,sans-serif;cursor:pointer;margin:0}
+    .core-chip:hover{color:#fff;border-color:#3d4f80}
+    .core-chip.on{background:linear-gradient(135deg,#3657a7,#4b6dd0);border-color:transparent;color:#fff}
+    .core-opt-row.core-placeholder{opacity:.35;border:1px dashed rgba(110,168,255,.6)}
+    .core-ghost.core-opt-row{padding:6px 8px;background:#17213a}
+    .core-mod{background:#11192d;border:1px solid rgba(255,255,255,.06);border-radius:14px;padding:8px 12px;margin-bottom:10px}
     .core-mod.off{opacity:.6}
     .core-mod-head{display:flex;align-items:center;gap:10px;cursor:pointer;padding:4px 2px}
     .core-mod-head input{width:18px;height:18px;flex:0 0 auto;cursor:pointer;accent-color:#5b7cff}
@@ -3343,10 +3373,22 @@
         box.replaceChildren(...items.map((it, i) => {
           const cb = h('input', { type: 'checkbox', title: 'Show' }); cb.checked = !it.hidden;
           cb.addEventListener('change', () => { items[i].hidden = !cb.checked; commit(items); });
-          const move = (d) => { const j = i + d; if (j < 0 || j >= items.length) return; items.splice(j, 0, items.splice(i, 1)[0]); commit(items); };
-          const up = h('button', { type: 'button', title: 'Move up', onclick: () => move(-1) }, '▲'), dn = h('button', { type: 'button', title: 'Move down', onclick: () => move(1) }, '▼');
-          if (i === 0) up.disabled = true; if (i === items.length - 1) dn.disabled = true;
-          return h('div', { class: 'core-opt-row' + (it.hidden ? ' off' : ''), 'data-item': it.id }, cb, h('div', { class: 'core-opt-ico' }, it.icon || ''), h('div', { class: 'core-opt-main core-opt-lab' }, it.label || it.id), h('div', { class: 'core-opt-mv' }, up, dn));
+          const grip = h('div', { class: 'core-grip', tabindex: '0', role: 'button', title: 'Drag to rearrange', 'aria-label': 'Rearrange ' + (it.label || it.id) + ': drag, or press Up / Down' }, h('i'), h('i'));
+          const row = h('div', { class: 'core-opt-row' + (it.hidden ? ' off' : ''), 'data-item': it.id }, cb, h('div', { class: 'core-opt-ico' }, it.icon || ''), h('div', { class: 'core-opt-main core-opt-lab' }, it.label || it.id), grip);
+          grip.addEventListener('pointerdown', (ev) => {
+            if (ev.pointerType === 'mouse' && ev.button !== 0) return;
+            ev.preventDefault();
+            startRowDrag(ev, row, box, { sel: '.core-opt-row', idAttr: 'data-item', onCommit: (ids) => { const by = new Map(items.map((x) => [x.id, x])); commit(ids.map((x) => by.get(x)).filter(Boolean)); } });
+          });
+          grip.addEventListener('keydown', (ev) => {
+            const d = ev.key === 'ArrowUp' ? -1 : ev.key === 'ArrowDown' ? 1 : 0;
+            if (!d) return;
+            ev.preventDefault();
+            const j = i + d; if (j < 0 || j >= items.length) return;
+            items.splice(j, 0, items.splice(i, 1)[0]); commit(items);
+            const again = box.querySelector('[data-item="' + it.id + '"] .core-grip'); if (again) again.focus();
+          });
+          return row;
         }));
       };
       draw();
@@ -3358,12 +3400,49 @@
     inp.addEventListener('change', () => settingsSet(id, key, inp.value));
     return h('div', { class: 'core-opt-row' }, text(), inp);
   }
+  // Which pages an addon without modules runs on: one line saying so, and the pages (grouped, as chips) behind "Choose pages".
+  const PAGE_GROUPS = [
+    ['Home & waves', ['/game_dash.php', '/battle.php', '/active_wave.php', '/gates.php', '/stats.php', '/weekly.php', '/event_page.php', '/game_mail.php']],
+    ['Character', ['/inventory.php', '/pets.php', '/power_crystals.php', '/collections.php', '/achievements.php', '/classes.php', '/secondary_classes.php', '/advanced_classes.php', '/shadow_army.php', '/shadow_army_live_battle.php', '/player.php']],
+    ['Guild & dungeons', ['/guild_dash.php', '/guild_join_create.php', '/guild_dungeon.php', '/guild_dungeon_enter.php', '/guild_dungeon_location.php', '/guild_dungeon_instance.php', '/guild_dungeon_cube.php', '/world_map.php']],
+    ['PvP & rewards', ['/pvp.php', '/colosseum.php', '/battle_pass.php', '/adventurers_guild.php']],
+    ['Shops & crafting', ['/merchant.php', '/black_merchant.php', '/olympus.php', '/blacksmith.php', '/legendary_forge.php', '/legendary_decraft.php']],
+  ];
+  function pagePicker(id) {
+    if (!pageList(id).length) return null;
+    const summary = h('div', { class: 'core-dim', style: { marginBottom: '2px' } });
+    const det = h('details', { class: 'core-opt-det' }), body = h('div');
+    const sec = h('div', { class: 'core-opt-sec' }, h('div', { class: 'core-opt-h' }, 'Where it runs'), summary, det);
+    det.append(h('summary', {}, 'Choose pages'), body);
+    const draw = () => {
+      const list = pageList(id), off = list.filter((p) => !p.on), by = new Map(list.map((p) => [normPath(p.path), p]));
+      summary.textContent = off.length
+        ? 'Off on ' + off.length + ' of ' + list.length + ' pages: ' + off.slice(0, 4).map((p) => p.label).join(', ') + (off.length > 4 ? ' and more' : '') + '. Applies from the next page load.'
+        : (list.length >= PAGE_DIR.length ? 'Every page.' : 'All ' + list.length + ' pages it supports.') + ' Switch pages off below if you do not want it on some.';
+      const groups = PAGE_GROUPS.map(([title, paths]) => [title, paths.map((x) => by.get(normPath(x))).filter(Boolean)]);
+      const seen = new Set(groups.flatMap(([, ps]) => ps.map((p) => normPath(p.path))));
+      const rest = list.filter((p) => !seen.has(normPath(p.path)));
+      if (rest.length) groups.push(['Other', rest]);
+      body.replaceChildren(...groups.filter(([, ps]) => ps.length).map(([title, ps]) => {
+        const setAll = (on) => { ps.forEach((p) => pageSet(id, p.path, on)); draw(); };
+        return h('div', { class: 'core-pgrp' },
+          h('div', { class: 'core-pgrp-h' }, title, h('div', { class: 'core-spacer' }),
+            h('button', { class: 'core-opt-link', type: 'button', onclick: () => setAll(true) }, 'All'),
+            h('button', { class: 'core-opt-link', type: 'button', onclick: () => setAll(false) }, 'None')),
+          h('div', { class: 'core-chips' }, ps.map((p) => h('button', { class: 'core-chip' + (p.on ? ' on' : ''), type: 'button', 'aria-pressed': String(p.on), title: p.path, onclick: () => { pageSet(id, p.path, !p.on); draw(); } }, p.label))));
+      }));
+    };
+    draw();
+    if (pageList(id).some((p) => !p.on)) det.open = true;
+    return sec;
+  }
   function renderOptions(id, el) {
     const sc = schemaOf(id), fields = (sc && sc.fields) || [], mods = (sc && sc.modules) || [];
     const kids = [];
-    const loose = fields.filter((f) => !f.module || !mods.some((m) => m.id === f.module));
+    const shown = (f) => !f.hidden && f.type !== 'json';
+    const loose = fields.filter((f) => shown(f) && (!f.module || !mods.some((m) => m.id === f.module)));
     if (loose.length) kids.push(h('div', { class: 'core-opt-sec' }, loose.map((f) => optionField(id, f))));
-    else if (!fields.length && !mods.length) kids.push(h('div', { class: 'core-dim', style: { marginBottom: '16px' } }, 'This addon has no options of its own' + (defs.has(id) ? '.' : ' (or it has not run in this browser yet).')));
+    else if (!fields.some(shown) && !mods.length) kids.push(h('div', { class: 'core-dim', style: { marginBottom: '16px' } }, 'This addon has no options of its own' + (defs.has(id) ? '.' : ' (or it has not run in this browser yet).')));
     if (mods.length) {
       const labelOf = (m) => [].concat(m.pages == null || m.pages === '*' ? ['*'] : m.pages).map((x) => (x === '*' ? 'every page' : (PAGE_LABEL.get(x) || x))).join(', ');
       kids.push(h('div', { class: 'core-opt-sec' },
@@ -3373,29 +3452,15 @@
           const cb = h('input', { type: 'checkbox' }); cb.checked = moduleOn(id, m.id);
           const card = h('div', { class: 'core-mod' + (cb.checked ? '' : ' off') });
           cb.addEventListener('change', () => { settingsSet(id, 'module:' + m.id, cb.checked); card.classList.toggle('off', !cb.checked); });
-          const own = fields.filter((f) => f.module === m.id);
+          const own = fields.filter((f) => shown(f) && f.module === m.id);
           card.append(h('label', { class: 'core-mod-head' }, cb, h('div', { class: 'core-opt-ico' }, m.icon || ''),
             h('div', { class: 'core-opt-main' }, h('div', { class: 'core-mod-title' }, m.label || m.id), m.help ? h('div', { class: 'core-dim' }, m.help) : null, h('div', { class: 'core-mod-pages' }, 'Runs on: ' + labelOf(m)))));
           if (own.length) card.append(h('div', { class: 'core-mod-body' }, own.map((f) => optionField(id, f))));
           return card;
         })));
     } else {
-      const pages = pageList(id);
-      if (pages.length) {
-        const grid = h('div', { class: 'core-opt-pages' });
-        const draw = () => grid.replaceChildren(...pageList(id).map((p) => {
-          const cb = h('input', { type: 'checkbox' }); cb.checked = p.on;
-          cb.addEventListener('change', () => { pageSet(id, p.path, cb.checked); draw(); });
-          return h('label', { class: 'core-opt-pg' + (p.on ? '' : ' off'), title: p.path }, cb, p.label);
-        }));
-        draw();
-        const all = (on) => { pageList(id).forEach((p) => pageSet(id, p.path, on)); draw(); };
-        kids.push(h('div', { class: 'core-opt-sec' },
-          h('div', { class: 'core-opt-h' }, 'Runs on these pages', h('div', { class: 'core-spacer' }),
-            h('button', { class: 'core-opt-link', type: 'button', onclick: () => all(true) }, 'All'),
-            h('button', { class: 'core-opt-link', type: 'button', onclick: () => all(false) }, 'None')),
-          h('div', { class: 'core-dim', style: { marginBottom: '8px' } }, 'Untick a page and this addon will not load there. Applies from the next page load.'), grid));
-      }
+      const sec = pagePicker(id);
+      if (sec) kids.push(sec);
     }
     el.replaceChildren(...kids);
   }
@@ -3420,7 +3485,7 @@
 
   /* ------------------------------------------------------------ export --- */
   const Core = {
-    __isCore: true, apiLevel: API, version: '3.19.0', debug: false, tabId: TAB,
+    __isCore: true, apiLevel: API, version: '3.20.0', debug: false, tabId: TAB,
     esc, sleep, debounce, fmt, int, compact, parseNum, parseJson,
     on, off, once, emit,
     state, store, player,
