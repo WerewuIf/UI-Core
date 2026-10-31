@@ -73,8 +73,18 @@
  * including server-decided slots and ring slots.
  * --------------------------------------------------------------------- */
 
+/* Options (Core 3.19+): one switch per part, Addons panel > Gear Presets > Options. Older Core: everything runs, as before.
+   The saved sets and the Core.call('preset.gear.*') API stay available to other addons whatever is switched off here. */
+const __gpMods = [
+  { id: 'panel',  label: 'Preset panel',          icon: '⚔️', pages: '*',                help: 'The ⚔️ button and panel: save, apply and edit equipment sets.' },
+  { id: 'helper', label: 'Equip without reload',  icon: '🔄', pages: ['/inventory.php'], help: 'Equip and Unequip on the Inventory page update the cards in place.' },
+];
+try { if (Core.settings && Core.settings.define) Core.settings.define('gear-presets', { title: 'Gear Presets', icon: '⚔️', modules: __gpMods, fields: [] }); } catch (e) { console.warn('[gear-presets] options not registered', e); }
+const __gpOn = (id) => { try { return !(Core.settings && Core.settings.module) || Core.settings.module('gear-presets', id) !== false; } catch (_) { return true; } };
+
 (function () {
   'use strict';
+  if (!__gpOn('helper')) return;   // switched off in Options
 
   const BADGE_CLASS = 'tm-equipped-pill';
   const CARD_SEL = '.slot-box, .crystal-card';
@@ -1147,7 +1157,7 @@
   hideNativeQuickSetButton();
 
   // Register the floating ⚔️ button + panel with Core.
-  Core.float.add({
+  if (__gpOn('panel')) Core.float.add({
     id: 'gear-presets', title: 'Gear Presets', icon: '⚔️', order: 20,
     render(el) { el.replaceChildren(gpPanel); },
     onShow() { renderPresetList(); },
