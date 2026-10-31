@@ -3113,6 +3113,11 @@
   //   list(id, key) -> an orderlist in the user's order: [ { id, label, icon, hidden, ...yours } ]. Items you add later appear at the end.
   //   onChange(id, (key, value, all) => ...) -> unsubscribe. Also fires when another tab changes a value.
   //   open(id) shows the options window.
+  //   MODULES (3.19+): define(id, { modules: [ { id, label, icon?, help?, pages: ['/pets.php', ...] | '*', default?: true } ], fields: [ { ..., module: 'pets' } ] })
+  //     An addon made of several parts (UI Cleanup style) lists its parts as modules. The options window then shows ONE switch per module
+  //     (with that module's own options under it) INSTEAD of the long "Runs on these pages" grid. A module is on only on its own pages.
+  //     module(id, modId[, path]) -> true when the module is switched on AND the page matches (default: the page you are on). Check it first thing.
+  //     modules(id) -> [ { id, label, icon, help, pages, on } ]. The whole addon is skipped on a page where no module is on.
   // Core.pageRules  which pages an addon may run on. The pages an addon DECLARES are the ones its manifest "match" allows (or "pages": [...]
   //                 in its manifest entry, or define({ pages })). The user can switch any of them off; the addon then does not load there.
   //   allowed(id[, path]) -> boolean      declared(id) -> [ { path, label } ]      list(id) -> [ { path, label, on } ]
@@ -3140,6 +3145,8 @@
   const schemaStore = store('settings-schema', { def: {}, key: 'core:settings-schema' }); // what each addon asked for, so the window works on any page
 
   function pageAllowed(id, path) {
+    const mods = ((schemaOf(id) || {}).modules) || [];
+    if (mods.length) { const pp = path || root.location.pathname; return mods.some((m) => moduleOn(id, m.id) && moduleMatches(m, pp)); }   // modules replace the per-page list
     const r = (ruleStore.get() || {})[id];
     if (!r || !Array.isArray(r.off) || !r.off.length) return true;
     const p = normPath(path || root.location.pathname);
@@ -3150,7 +3157,7 @@
   const NO_VALUE = new Set(['button', 'heading']);
   const schemaOf = (id) => {
     const d = defs.get(id);
-    return d ? { title: d.title, icon: d.icon, pages: d.pages, fields: d.fields } : (schemaStore.get() || {})[id];
+    return d ? { title: d.title, icon: d.icon, pages: d.pages, modules: d.modules, fields: d.fields } : (schemaStore.get() || {})[id];
   };
   const fieldOf = (id, key) => ((schemaOf(id) || {}).fields || []).find((f) => f.key === key);
   const optVal = (o) => (Array.isArray(o) ? o[0] : o);
@@ -3167,7 +3174,7 @@
   function settingsDefine(id, spec) {
     if (!id || !spec || !Array.isArray(spec.fields)) { warn('Core.settings.define needs (id, { fields: [...] })'); return null; }
     defs.set(id, spec);
-    const plain = { title: spec.title || id, icon: spec.icon || '', pages: spec.pages, fields: spec.fields.map((f) => { const c = Object.assign({}, f); delete c.onClick; return c; }) };
+    const plain = { title: spec.title || id, icon: spec.icon || '', pages: spec.pages, modules: Array.isArray(spec.modules) ? cloneJ(spec.modules) : undefined, fields: spec.fields.map((f) => { const c = Object.assign({}, f); delete c.onClick; return c; }) };
     const all = schemaStore.get() || {};
     if (!sameJ(all[id], plain)) { all[id] = cloneJ(plain); schemaStore.set(all); }
     return settingsApi;
@@ -3175,6 +3182,7 @@
   function values(id) {
     const saved = (valStore.get() || {})[id] || {}, out = {};
     ((schemaOf(id) || {}).fields || []).forEach((f) => { if (f.key && !NO_VALUE.has(f.type)) out[f.key] = f.key in saved ? cloneJ(saved[f.key]) : fieldDefault(f); });
+    (((schemaOf(id) || {}).modules) || []).forEach((m) => { const k = 'module:' + m.id; out[k] = k in saved ? !!saved[k] : m.default !== false; });
     Object.keys(saved).forEach((k) => { if (!(k in out)) out[k] = cloneJ(saved[k]); });
     return out;
   }
@@ -3186,7 +3194,7 @@
       if (typeof f.min === 'number') n = Math.max(f.min, n);
       if (typeof f.max === 'number') n = Math.min(f.max, n);
       value = n;
-    } else if (f && f.type === 'bool') value = !!value;
+    } else if ((f && f.type === 'bool') || /^module:/.test(key)) value = !!value;
     const all = valStore.get() || {}, cur = all[id] || (all[id] = {});
     if (key in cur ? sameJ(cur[key], value) : sameJ(settingsGet(id, key), value)) return;   // nothing would change
     cur[key] = cloneJ(value); valStore.set(all);
@@ -3247,6 +3255,16 @@
     if (!r.off.length) delete all[id];
     ruleStore.set(all);
   }
+  const modulesOf = (id) => ((schemaOf(id) || {}).modules) || [];
+  const moduleOn = (id, modId) => settingsGet(id, 'module:' + modId) !== false;
+  function moduleMatches(m, path) {
+    const pg = m.pages;
+    if (pg == null || pg === '*' || (Array.isArray(pg) && pg.includes('*'))) return true;
+    const p = normPath(path || root.location.pathname);
+    return [].concat(pg).some((x) => normPath(x) === p);
+  }
+  function moduleAllowed(id, modId, path) { const m = modulesOf(id).find((x) => x.id === modId); return !!m && moduleOn(id, modId) && moduleMatches(m, path); }
+  const moduleList = (id) => modulesOf(id).map((m) => Object.assign({}, m, { on: moduleOn(id, m.id) }));
   function pageReset(id) { const all = ruleStore.get() || {}; if (all[id]) { delete all[id]; ruleStore.set(all); } }
 
   // ---- the options window
@@ -3272,6 +3290,14 @@
     .core-opt-pg{display:flex;align-items:center;gap:8px;padding:7px 9px;background:#11192d;border:1px solid rgba(255,255,255,.06);border-radius:10px;cursor:pointer;font-size:13px}
     .core-opt-pg input{width:16px;height:16px;accent-color:#5b7cff;cursor:pointer}
     .core-opt-pg.off{opacity:.55}
+    .core-mod{background:#0f1730;border:1px solid rgba(255,255,255,.07);border-radius:14px;padding:8px 10px;margin-bottom:10px}
+    .core-mod.off{opacity:.6}
+    .core-mod-head{display:flex;align-items:center;gap:10px;cursor:pointer;padding:4px 2px}
+    .core-mod-head input{width:18px;height:18px;flex:0 0 auto;cursor:pointer;accent-color:#5b7cff}
+    .core-mod-title{font-weight:800}
+    .core-mod-pages{font-size:12px;color:#8fa2d8;margin-top:2px}
+    .core-mod-body{margin-top:8px;padding-left:28px}
+    .core-mod.off .core-mod-body{display:none}
   `);
 
   function optionField(id, f, redraw) {
@@ -3333,25 +3359,43 @@
     return h('div', { class: 'core-opt-row' }, text(), inp);
   }
   function renderOptions(id, el) {
-    const sc = schemaOf(id), fields = (sc && sc.fields) || [];
+    const sc = schemaOf(id), fields = (sc && sc.fields) || [], mods = (sc && sc.modules) || [];
     const kids = [];
-    if (fields.length) kids.push(h('div', { class: 'core-opt-sec' }, fields.map((f) => optionField(id, f))));
-    else kids.push(h('div', { class: 'core-dim', style: { marginBottom: '16px' } }, 'This addon has no options of its own' + (defs.has(id) ? '.' : ' (or it has not run in this browser yet).')));
-    const pages = pageList(id);
-    if (pages.length) {
-      const grid = h('div', { class: 'core-opt-pages' });
-      const draw = () => grid.replaceChildren(...pageList(id).map((p) => {
-        const cb = h('input', { type: 'checkbox' }); cb.checked = p.on;
-        cb.addEventListener('change', () => { pageSet(id, p.path, cb.checked); draw(); });
-        return h('label', { class: 'core-opt-pg' + (p.on ? '' : ' off'), title: p.path }, cb, p.label);
-      }));
-      draw();
-      const all = (on) => { pageList(id).forEach((p) => pageSet(id, p.path, on)); draw(); };
+    const loose = fields.filter((f) => !f.module || !mods.some((m) => m.id === f.module));
+    if (loose.length) kids.push(h('div', { class: 'core-opt-sec' }, loose.map((f) => optionField(id, f))));
+    else if (!fields.length && !mods.length) kids.push(h('div', { class: 'core-dim', style: { marginBottom: '16px' } }, 'This addon has no options of its own' + (defs.has(id) ? '.' : ' (or it has not run in this browser yet).')));
+    if (mods.length) {
+      const labelOf = (m) => [].concat(m.pages == null || m.pages === '*' ? ['*'] : m.pages).map((x) => (x === '*' ? 'every page' : (PAGE_LABEL.get(x) || x))).join(', ');
       kids.push(h('div', { class: 'core-opt-sec' },
-        h('div', { class: 'core-opt-h' }, 'Runs on these pages', h('div', { class: 'core-spacer' }),
-          h('button', { class: 'core-opt-link', type: 'button', onclick: () => all(true) }, 'All'),
-          h('button', { class: 'core-opt-link', type: 'button', onclick: () => all(false) }, 'None')),
-        h('div', { class: 'core-dim', style: { marginBottom: '8px' } }, 'Untick a page and this addon will not load there. Applies from the next page load.'), grid));
+        h('div', { class: 'core-opt-h' }, 'Modules'),
+        h('div', { class: 'core-dim', style: { marginBottom: '8px' } }, 'Switch a part of this addon off and it does not load. Applies from the next page load.'),
+        mods.map((m) => {
+          const cb = h('input', { type: 'checkbox' }); cb.checked = moduleOn(id, m.id);
+          const card = h('div', { class: 'core-mod' + (cb.checked ? '' : ' off') });
+          cb.addEventListener('change', () => { settingsSet(id, 'module:' + m.id, cb.checked); card.classList.toggle('off', !cb.checked); });
+          const own = fields.filter((f) => f.module === m.id);
+          card.append(h('label', { class: 'core-mod-head' }, cb, h('div', { class: 'core-opt-ico' }, m.icon || ''),
+            h('div', { class: 'core-opt-main' }, h('div', { class: 'core-mod-title' }, m.label || m.id), m.help ? h('div', { class: 'core-dim' }, m.help) : null, h('div', { class: 'core-mod-pages' }, 'Runs on: ' + labelOf(m)))));
+          if (own.length) card.append(h('div', { class: 'core-mod-body' }, own.map((f) => optionField(id, f))));
+          return card;
+        })));
+    } else {
+      const pages = pageList(id);
+      if (pages.length) {
+        const grid = h('div', { class: 'core-opt-pages' });
+        const draw = () => grid.replaceChildren(...pageList(id).map((p) => {
+          const cb = h('input', { type: 'checkbox' }); cb.checked = p.on;
+          cb.addEventListener('change', () => { pageSet(id, p.path, cb.checked); draw(); });
+          return h('label', { class: 'core-opt-pg' + (p.on ? '' : ' off'), title: p.path }, cb, p.label);
+        }));
+        draw();
+        const all = (on) => { pageList(id).forEach((p) => pageSet(id, p.path, on)); draw(); };
+        kids.push(h('div', { class: 'core-opt-sec' },
+          h('div', { class: 'core-opt-h' }, 'Runs on these pages', h('div', { class: 'core-spacer' }),
+            h('button', { class: 'core-opt-link', type: 'button', onclick: () => all(true) }, 'All'),
+            h('button', { class: 'core-opt-link', type: 'button', onclick: () => all(false) }, 'None')),
+          h('div', { class: 'core-dim', style: { marginBottom: '8px' } }, 'Untick a page and this addon will not load there. Applies from the next page load.'), grid));
+      }
     }
     el.replaceChildren(...kids);
   }
@@ -3371,12 +3415,12 @@
     optModal.open();
   }
 
-  const settingsApi = { define: settingsDefine, get: settingsGet, set: settingsSet, reset: settingsReset, list: settingsList, onChange: settingsOnChange, open: openOptions };
+  const settingsApi = { module: moduleAllowed, modules: moduleList, define: settingsDefine, get: settingsGet, set: settingsSet, reset: settingsReset, list: settingsList, onChange: settingsOnChange, open: openOptions };
   const pageRulesApi = { allowed: pageAllowed, declared: declaredPages, list: pageList, set: pageSet, reset: pageReset, directory: () => PAGE_DIR.map((x) => ({ path: x[0], label: x[1] })) };
 
   /* ------------------------------------------------------------ export --- */
   const Core = {
-    __isCore: true, apiLevel: API, version: '3.18.0', debug: false, tabId: TAB,
+    __isCore: true, apiLevel: API, version: '3.19.0', debug: false, tabId: TAB,
     esc, sleep, debounce, fmt, int, compact, parseNum, parseJson,
     on, off, once, emit,
     state, store, player,
