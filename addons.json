@@ -11,6 +11,6 @@
     {"id": "cube-suite", "name": "Cube Suite", "version": "3.4.1", "url": "addons/cube-suite.js", "button": false, "match": "^/guild_dungeon_cube\\.php\\?.*instance_id="},
     {"id": "automator", "name": "Automator", "version": "1.9.0", "url": "addons/automator.js", "button": true},
     {"id": "sidebar", "name": "Sidebar", "version": "1.0.0", "url": "addons/sidebar.js", "button": false},
-    {"id": "visuals-addition", "name": "Visuals", "version": "1.0.0", "url": "addons/visuals-addition.js", "button": false},
+    {"id": "visuals-addition", "name": "Visuals", "version": "1.0.0", "url": "addons/visuals-addition.js", "button": false}
   ]
 }
