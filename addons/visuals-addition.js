@@ -14,7 +14,7 @@
  * Quick attack has NO entry in Options besides its switch: all of its settings live in the panel on the map, in one place.
  * On an older Core everything still runs; the options are just not grouped (and lists reorder with the keys only).
  *
- * addons.json:  { "id": "visuals-addition", "name": "Visuals", "version": "2.1.1", "url": "addons/visuals-addition.js", "button": false }
+ * addons.json:  { "id": "visuals-addition", "name": "Visuals", "version": "2.1.2", "url": "addons/visuals-addition.js", "button": false }
  *   (no "match": the sidebar module needs every page; the other modules check their own page.)
  *
  * Your saved Sidebar / Pets / Dungeon Attack options from the old separate ids are copied across once, only where you
@@ -429,12 +429,14 @@ const VS = (() => {
     s.textContent = [
       '.uic-side-gear{margin-left:auto;margin-right:6px;background:#1e1f2c;border:1px solid #2b2d44;color:#cfd3ea;border-radius:8px;padding:3px 8px;font-size:13px;line-height:1.2;cursor:pointer}',
       '.uic-side-gear:hover{background:#2a2c44;color:#fff}',
-      /* group = the game's own row + a small toggle; children reuse .side-nav-item so they follow the game's look */
+      /* The disclosure control is the trailing segment of the menu row, not a second floating button. */
       '.uic-side-grp{margin-bottom:8px}',
-      '.uic-side-head{display:flex;gap:6px;align-items:stretch}',
-      '.uic-side-head>.side-nav-item{flex:1;min-width:0;margin-bottom:0}',
-      '.uic-side-chev{flex:0 0 34px;background:#1a1b25;border:1px solid #2b2d44;color:#cfd3ea;border-radius:10px;cursor:pointer;font-size:13px;line-height:1;box-shadow:0 4px 12px rgba(0,0,0,.4);transition:transform .12s ease,background .12s ease}',
-      '.uic-side-chev:hover{background:#2a2c44;color:#fff}',
+      '.uic-side-head{display:flex;align-items:stretch;gap:0;min-width:0;overflow:hidden;background:#1a1b25;border:1px solid #2b2d44;border-radius:10px;box-shadow:0 4px 12px rgba(0,0,0,.35)}',
+      '.uic-side-head>.side-nav-item{flex:1 1 auto;min-width:0;margin:0!important;border:0!important;border-radius:0!important;box-shadow:none!important;background:transparent!important}',
+      '.uic-side-head>.side-nav-item:hover{background:rgba(255,255,255,.045)!important}',
+      '.uic-side-head>.side-nav-item.active{background:rgba(127,137,255,.12)!important}',
+      '.uic-side-chev{flex:0 0 34px;align-self:stretch;display:flex;align-items:center;justify-content:center;padding:0;margin:0;border:0;border-left:1px solid rgba(207,211,234,.16);border-radius:0;background:transparent;color:#cfd3ea;cursor:pointer;font-size:13px;line-height:1;box-shadow:none;transition:transform .12s ease,background .12s ease}',
+      '.uic-side-chev:hover{background:rgba(255,255,255,.07);color:#fff}',
       '.uic-side-chev:focus-visible,.uic-sq:focus-visible,.uic-sq-refresh:focus-visible{outline:2px solid #7f89ff;outline-offset:2px}',
       '.uic-side-grp.is-open>.uic-side-head>.uic-side-chev{transform:rotate(90deg)}',
       '.uic-side-sub{display:none;margin:6px 0 0 14px}',
@@ -874,7 +876,10 @@ const VS = (() => {
     const low = msg.toLowerCase();
     if (data.status === 'success') {
       const m = /You have dealt\s*<strong>([\d,]+)<\/strong>/i.exec(msg);
-      return { kind: 'ok', data, damage: m ? Number(m[1].replace(/,/g, '')) : null, dead: !!(data.hp && Number(data.hp.value) <= 0) };
+      const reported = data.totaldmgdealt == null ? NaN : Number(data.totaldmgdealt);
+      return { kind: 'ok', data, damage: m ? Number(m[1].replace(/,/g, '')) : null,
+        totalDamage: Number.isFinite(reported) && reported >= 0 ? reported : null,
+        dead: !!(data.hp && Number(data.hp.value) <= 0) };
     }
     if (low.includes('not enough stamina')) return { kind: 'stamina', message: msg };
     if (low.includes('you are dead') || low.includes('you are defeated')) return { kind: 'dead_player', message: msg };
@@ -905,29 +910,38 @@ const VS = (() => {
       const m = /dmg req:\s*([\d,]+)/i.exec(norm(chip.textContent));
       if (m) lootCap = Math.max(lootCap, Number(m[1].replace(/,/g, '')) || 0);
     });
-    return { damage: dmg ? Number(String(dmg).replace(/[^\d]/g, '')) || 0 : 0, expCap, lootCap: lootCap > 0 ? lootCap : null };
+    // Same HP bootstrap as Cube Suite: data-maxhp first, visible current/max text as fallback.
+    let monsterMaxHp = Number(doc.querySelector('#yourStats')?.getAttribute('data-maxhp')) || 0;
+    if (!monsterMaxHp) {
+      const hpM = /([\d,]+)\s*\/\s*([\d,]+)/.exec((doc.querySelector('#hpText') || {}).textContent || '');
+      if (hpM) monsterMaxHp = Number(hpM[2].replace(/,/g, '')) || 0;
+    }
+    return { damage: dmg ? Number(String(dmg).replace(/[^\d]/g, '')) || 0 : 0, expCap, lootCap: lootCap > 0 ? lootCap : null, monsterMaxHp: monsterMaxHp > 0 ? monsterMaxHp : null };
   }
 
-  /* What a hit with each skill does, learned from this page's own replies. Used to avoid wasting a big hit when the cap is near. */
-  const learned = new Map();                                     // stamina cost -> { sum, n }
-  function learn(cost, dmg) { if (!(dmg > 0)) return; const l = learned.get(cost) || { sum: 0, n: 0 }; l.sum += dmg; l.n++; learned.set(cost, l); }
-  function estimate(cost) {
-    const l = learned.get(cost); if (l && l.n) return l.sum / l.n;
-    let td = 0, ts = 0; learned.forEach((v, c) => { td += v.sum; ts += c * v.n; });
-    return ts ? (td / ts) * cost : null;                         // not used yet: scale from what is known
+  /* Conservative per-monster history. Use the maximum observed hit for each stamina tier (not an average),
+     matching Cube Suite's damage ceiling when choosing a smaller attack near a cap/HP limit. */
+  const learned = new Map();                                      // normalized monster -> stamina cost -> hit damage samples
+  function learn(name, cost, dmg) {
+    if (!(dmg > 0)) return;
+    const key = norm(name), byCost = learned.get(key) || new Map(), hist = byCost.get(cost) || [];
+    hist.push(dmg); if (hist.length > 20) hist.shift();
+    byCost.set(cost, hist); learned.set(key, byCost);
   }
-  // Which skill for the next hit when `left` damage remains before the cap: the chosen one while far away, a smaller one close to it, null = even Slash would overshoot.
-  function chooseCost(want, left) {
-    if (!S.get('overshoot')) return want;
-    const SAFE = 1.15, e = estimate(want);
-    if (e == null || e * SAFE <= left) return want;
-    for (let i = SKILLS.length - 1; i >= 0; i--) {
-      const c = SKILLS[i][0]; if (c >= want) continue;
-      const ec = estimate(c);
-      if (ec != null && ec * SAFE <= left) return c;
-    }
-    const e1 = estimate(1);
-    return e1 != null && e1 * SAFE > left ? null : 1;
+  function estimate(name, cost) {
+    const hist = learned.get(norm(name))?.get(cost);
+    return hist && hist.length ? Math.max(...hist) : null;
+  }
+  function chooseCost(name, want, left) {
+    if (!S.get('overshoot') || typeof left !== 'number' || left <= 0) return want;
+    const rows = SKILLS.filter((skill) => skill[0] <= want).map((skill) => ({ cost: skill[0], damage: estimate(name, skill[0]) }));
+    const rates = rows.filter((r) => r.damage != null && r.damage > 0).map((r) => r.damage / r.cost);
+    const worstRate = rates.length ? Math.max(...rates) : null;
+    rows.forEach((r) => { if (r.damage == null && worstRate != null) r.damage = worstRate * r.cost; });
+    const fits = rows.filter((r) => r.damage != null && r.damage <= left).sort((a, b) => b.cost - a.cost);
+    if (fits.length) return fits[0].cost;
+    const known = rows.filter((r) => r.damage != null).sort((a, b) => a.cost - b.cost);
+    return known.length ? known[0].cost : want;
   }
 
   /* ------------------------------------------------------------------- run */
@@ -950,7 +964,7 @@ const VS = (() => {
       const name = nameOf(c);
 
       // 1. What is the stopping point for this monster?
-      let cap = null, dealt = 0;
+      let cap = null, dealt = 0, monsterMaxHp = null;
       if (mode !== 'hits') {
         if (mode === 'monster') {
           cap = num(mobCaps()[norm(name)]);
@@ -960,10 +974,12 @@ const VS = (() => {
         const info = await lookup(mid);
         if (run.stop) { why = 'stopped'; break; }
         if (!info) { run.skipped.push(name + ': battle page unreadable'); run.done++; continue; }
-        dealt = info.damage;                                     // the damage you already have on it counts
+        dealt = info.damage;                                     // existing damage on the mob counts toward the stop condition
+        monsterMaxHp = info.monsterMaxHp;
         if (mode === 'exp') cap = info.expCap;
         else if (mode === 'loot') cap = info.lootCap;
-        if (cap == null) run.notes.push(name + ' has no ' + (mode === 'exp' ? 'EXP cap' : 'loot requirement') + ': ' + hits + ' hit' + (hits === 1 ? '' : 's') + ' used');
+        if (monsterMaxHp && dealt >= monsterMaxHp) { if (c) markDead(c); run.kills++; run.done++; run.notes.push(name + ' was already at its HP limit'); continue; }
+        if (cap == null) run.notes.push(name + ' has no ' + (mode === 'exp' ? 'EXP cap' : 'loot requirement') + ': continuing until it is dead');
         else if (dealt >= cap) { run.capped++; run.done++; run.notes.push(name + ' was already at its ' + capName[mode]); continue; }
       }
 
@@ -976,26 +992,35 @@ const VS = (() => {
         setPill(c, 'joined');
       }
       let n = 0, cool = 0, retriedJoin = false, drinks = 0, flat = 0;
-      while (cap != null || n < hits) {
+      // Hits mode is count-limited; all cap modes continue until their cap or the mob death is confirmed.
+      while (mode !== 'hits' || n < hits) {
         if (run.stop) { why = 'stopped'; break outer; }
         c = byMid(mid);
         let cost = want;
-        if (cap != null) {
-          cost = chooseCost(want, cap - dealt);
-          if (cost == null) cost = 1;                            // even Slash may pass the cap: still hit, being short of it would lose the EXP or the drop
-        }
-        run.cur = { name, dealt, cap, n: n + 1, of: cap != null ? 0 : hits, label: capName[mode] };
+        const capRemaining = cap != null ? cap - dealt : null;
+        const hpRemaining = monsterMaxHp != null ? Math.max(0, monsterMaxHp - dealt) : null;
+        const left = [capRemaining, hpRemaining].filter((x) => typeof x === 'number').sort((a, b) => a - b)[0];
+        if (mode !== 'hits' && left != null) cost = chooseCost(name, want, left);
+        run.cur = { name, dealt, cap, monsterMaxHp, n: n + 1, of: mode === 'hits' ? hits : 0, label: capName[mode] };
         run.note = ''; paintStatus();
         const r = await hit(mid, cost);
         if (r.kind === 'ok') {
           n++; run.hits++;
-          if (r.damage != null) { run.damage += r.damage; dealt += r.damage; learn(cost, r.damage); flat = r.damage > 0 ? 0 : flat + 1; }
-          else if (cap != null) { const again = await lookup(mid); if (again) dealt = again.damage; else flat++; }   // the reply gave no number: ask the battle page
+          const before = dealt;
+          if (r.totalDamage != null) dealt = r.totalDamage;
+          else if (r.damage != null) dealt += r.damage;
+          const delta = Math.max(0, dealt - before);
+          run.damage += r.damage != null ? r.damage : delta;
+          if (delta > 0) learn(name, cost, delta);
+          flat = delta > 0 ? 0 : flat + 1;
+          // Older replies may omit the cumulative total; refresh the battle page to reconcile state.
+          if (r.totalDamage == null && (cap != null || monsterMaxHp != null)) { const again = await lookup(mid); if (again) { dealt = again.damage; monsterMaxHp = again.monsterMaxHp || monsterMaxHp; } }
           if (Core && Core.me && Core.me.fromAttack) { try { Core.me.fromAttack(r.data); } catch (_) { /* top bar only */ } }
           if (c) paintHp(c, r.data.hp);
           if (r.dead) { if (c) markDead(c); run.kills++; break; }
           if (cap != null && dealt >= cap) { run.capped++; break; }
-          if (flat >= 5) { run.notes.push(name + ': five hits did no damage, left alone'); break; }
+          if (monsterMaxHp != null && dealt >= monsterMaxHp) { if (c) markDead(c); run.kills++; break; }
+          if (flat >= 5) { run.notes.push(name + ': damage stopped increasing after five hits; left alone'); break; }
         } else if (r.kind === 'monster_dead') { if (c) markDead(c); break; }
         else if (r.kind === 'cooldown') { if (++cool > 6) { why = 'The game keeps saying "slow down": raise the pause between hits'; break outer; } await sleep(700); continue; }
         else if (r.kind === 'notjoined') {
@@ -1038,7 +1063,7 @@ const VS = (() => {
     statusEl.className = 'uic-da-status' + (tone ? ' ' + tone : '');
     if (!run.on) { statusEl.textContent = run.note; return; }
     const cur = run.cur;
-    const where = cur ? cur.name + ' · ' + (cur.cap != null ? compact(cur.dealt) + ' / ' + compact(cur.cap) + ' ' + cur.label : 'hit ' + cur.n + '/' + cur.of) : run.note;
+    const where = cur ? cur.name + ' · ' + (cur.cap != null ? compact(cur.dealt) + ' / ' + compact(cur.cap) + ' ' + cur.label : cur.monsterMaxHp != null ? compact(cur.dealt) + ' / ' + compact(cur.monsterMaxHp) + ' mob HP' : 'no cap · hit ' + cur.n) : run.note;
     statusEl.textContent = '⏳ ' + where + ' · monster ' + Math.min(run.done + 1, run.queue) + '/' + run.queue + ' · ' + fmt(run.hits) + ' hits' + (run.damage ? ' · ' + compact(run.damage) : '') + (run.cur && run.note ? ' · ' + run.note : '');
   }
   function refreshBar() {
@@ -1153,30 +1178,29 @@ const VS = (() => {
     const s = el('style', { id: 'uic-da-css' });
     /* Layout is custom; colour, heading and button foundations are the game's own .panel, .h and .btn. */
     s.textContent = `
-      .uic-da{display:flex;flex-direction:column;gap:12px;margin:0 0 14px;min-width:0}
-      .uic-da-head{margin:0 0 2px;font-size:18px;font-weight:700;color:#f9e2af}
-      .uic-da-row{display:flex;flex-wrap:wrap;align-items:flex-end;gap:10px 14px;min-width:0}
-      .uic-da-main{align-items:flex-start}
-      .uic-da-actions{align-items:center;gap:8px}
-      .uic-da-opts{align-items:center;padding-top:2px;border-top:1px solid rgba(255,255,255,.07)}
-      .uic-da-field{display:flex;flex-direction:column;gap:5px;min-width:0;font-size:13px}
-      .uic-da-field>label{font-size:12px;font-weight:700;color:#cfd3ea}
-      .uic-da-control{min-height:36px;max-width:100%;padding:7px 10px;border:1px solid #2b2d44;border-radius:8px;background:#12131a;color:#edeff6;font:inherit;font-size:13px}
+      .uic-da{display:flex;flex-direction:column;gap:8px;margin:0 0 12px;padding:10px;min-width:0;max-width:100%;width:100%;box-sizing:border-box;overflow:hidden}
+      .uic-da-head{margin:0;font-size:16px;font-weight:700;color:#f9e2af;line-height:1.25}
+      .uic-da-row{display:flex;flex-wrap:wrap;align-items:flex-end;gap:8px 10px;min-width:0;max-width:100%}
+      .uic-da-main{display:grid;grid-template-columns:minmax(125px,185px) minmax(0,1fr);align-items:start;gap:8px 12px}
+      .uic-da-actions{align-items:center;gap:6px;padding-top:7px;border-top:1px solid rgba(255,255,255,.07)}
+      .uic-da-opts{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));align-items:center;gap:4px 10px;padding-top:7px;border-top:1px solid rgba(255,255,255,.07)}
+      .uic-da-field{display:flex;flex-direction:column;gap:4px;min-width:0;max-width:100%;font-size:12px}
+      .uic-da-field>label{font-size:11px;font-weight:700;color:#cfd3ea}
+      .uic-da-control{min-height:32px;width:100%;max-width:100%;min-width:0;box-sizing:border-box;padding:6px 8px;border:1px solid #2b2d44;border-radius:8px;background:#12131a;color:#edeff6;font:inherit;font-size:12px}
       .uic-da-control:focus{outline:2px solid #e1b65b;outline-offset:1px}
-      .uic-da select.uic-da-control{min-width:200px}
       .uic-da-num{width:96px}.uic-da-cap{width:170px}
-      .uic-da-mode{display:flex;flex-wrap:wrap;gap:5px}
-      .uic-da-mode-btn{font-size:12px;padding:7px 10px;border:1px solid #3a3b4d}
+      .uic-da-mode{display:grid;grid-template-columns:repeat(auto-fit,minmax(72px,1fr));gap:4px;min-width:0;width:100%}
+      .uic-da-mode-btn{min-width:0;width:100%;font-size:11px;padding:6px 7px;border:1px solid #3a3b4d;white-space:normal;line-height:1.2}
       .uic-da-mode-btn[aria-pressed="true"]{background:#6d5528;border-color:#caa65d;color:#fff0c4}
-      .uic-da-note,.uic-da-muted{font-size:11px;color:#9aa0b8}
-      .uic-da-note{max-width:560px;line-height:1.4}
-      .uic-da-body{display:flex;flex-direction:column;gap:8px}
-      .uic-da-moblist{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:7px 14px}
-      .uic-da-mob{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:0;font-size:13px}
+      .uic-da-note,.uic-da-muted{font-size:10.5px;color:#9aa0b8}
+      .uic-da-note{max-width:100%;line-height:1.35}
+      .uic-da-body{display:flex;flex-direction:column;gap:7px;min-width:0}
+      .uic-da-moblist{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,190px),1fr));gap:6px 10px;min-width:0}
+      .uic-da-mob{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:0;font-size:12px;min-width:0}
       .uic-da-mobname{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-      .uic-da-mobcap{width:130px;flex:0 0 auto}
-      .uic-da-check{display:inline-flex;align-items:center;gap:6px;min-height:30px;font-size:12px;color:#cfd3ea;cursor:pointer}
-      .uic-da-check input{width:16px;height:16px;margin:0;accent-color:#d4aa55}
+      .uic-da-mobcap{width:112px;max-width:42%;flex:0 1 112px;min-width:0}
+      .uic-da-check{display:inline-flex;align-items:center;gap:6px;min-height:27px;font-size:11px;color:#cfd3ea;cursor:pointer;min-width:0}
+      .uic-da-check input{width:15px;height:15px;margin:0;flex:0 0 auto;accent-color:#d4aa55}
       .uic-da-primary{border-color:#8a692f;background:#59431f;color:#fff0c4;font-weight:700}
       .uic-da-primary:hover{background:#705528}
       .uic-da-stop{border-color:#6a383c;color:#ffd5d8}
@@ -1185,11 +1209,11 @@ const VS = (() => {
       .uic-da-status{min-height:18px;font-size:12px;color:#cfd8f6;line-height:1.45;overflow-wrap:anywhere}
       .uic-da-status.ok{color:#8ee6a8}.uic-da-status.bad{color:#ff8a97}
       .uic-da button:disabled{opacity:.45;cursor:not-allowed}
-      .uic-da-pick{display:flex;align-items:flex-start;padding:2px 8px 0 0}
-      .uic-da-pick input{width:18px;height:18px;cursor:pointer;accent-color:#d4aa55}
+      .uic-da-pick{display:flex;align-items:flex-start;padding:2px 7px 0 0}
+      .uic-da-pick input{width:17px;height:17px;cursor:pointer;accent-color:#d4aa55}
       .btn.uic-da-hit{padding:5px 10px;margin-left:8px;font-size:12px;vertical-align:middle}
       .mon.uic-da-dead{opacity:.55}
-      @media(max-width:600px){.uic-da{padding:12px}.uic-da-main,.uic-da-opts{align-items:stretch}.uic-da-main>.uic-da-field{flex:1 1 100%}.uic-da select.uic-da-control{width:100%;min-width:0}.uic-da-mode{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}.uic-da-mode-btn{width:100%}.uic-da-moblist{grid-template-columns:1fr}.uic-da-actions .uic-da-primary{flex:1 1 100%}}
+      @media(max-width:600px){.uic-da{padding:9px}.uic-da-main{grid-template-columns:minmax(0,1fr)}.uic-da-opts{grid-template-columns:repeat(2,minmax(0,1fr))}.uic-da-mode{grid-template-columns:repeat(2,minmax(0,1fr))}.uic-da-moblist{grid-template-columns:1fr}.uic-da-actions .uic-da-primary{flex:1 1 100%}}
     `;
     (document.head || document.documentElement).appendChild(s);
   }
