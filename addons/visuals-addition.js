@@ -14,7 +14,7 @@
  * Quick attack has NO entry in Options besides its switch: all of its settings live in the panel on the map, in one place.
  * On an older Core everything still runs; the options are just not grouped (and lists reorder with the keys only).
  *
- * addons.json:  { "id": "visuals-addition", "name": "Visuals", "version": "2.1.0", "url": "addons/visuals-addition.js", "button": false }
+ * addons.json:  { "id": "visuals-addition", "name": "Visuals", "version": "2.1.1", "url": "addons/visuals-addition.js", "button": false }
  *   (no "match": the sidebar module needs every page; the other modules check their own page.)
  *
  * Your saved Sidebar / Pets / Dungeon Attack options from the old separate ids are copied across once, only where you
@@ -472,6 +472,8 @@ const VS = (() => {
   /* ------------------------------------------------------------------ start */
   function start() {
     css(); addGear(); render(); weekly();
+    window.addEventListener('popstate', render);
+    window.addEventListener('uic:routechange', render);
     if (hasSettings) VS.onChange(ID, (k) => { render(); if (k === 'weekly') weekly(); });
     // If the game redraws its menu (or our list is wiped), draw ours again. The observer ignores our own changes.
     const nav = document.querySelector('#sideDrawer .side-nav, .side-drawer .side-nav');
@@ -1054,14 +1056,14 @@ const VS = (() => {
     const mode = modeOf();
     segEl.querySelectorAll('button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.mode === mode)));
     const tip = MODES.find((m) => m[0] === mode)[2];
-    const note = el('div', { class: 'core-dim' }, tip);
-    const field = (label, input, hint) => el('div', { class: 'core-field' }, el('label', null, label), input, hint ? el('div', { class: 'core-dim' }, hint) : null);
+    const note = el('div', { class: 'uic-da-note' }, tip);
+    const field = (label, input, hint) => el('div', { class: 'uic-da-field' }, el('label', null, label), input, hint ? el('div', { class: 'uic-da-note' }, hint) : null);
     if (mode === 'hits') {
-      const inp = el('input', { class: 'core-input uic-da-num', type: 'number', min: '1', max: '100000', value: String(S.get('hits')), title: 'Hits per monster' });
+      const inp = el('input', { class: 'uic-da-control uic-da-num', type: 'number', min: '1', max: '100000', value: String(S.get('hits')), title: 'Hits per monster' });
       inp.addEventListener('change', () => { const v = Math.max(1, Math.floor(Number(inp.value) || 1)); inp.value = String(v); S.set('hits', v); });
       bodyEl.replaceChildren(el('div', { class: 'uic-da-row' }, field('Hits per monster', inp), note));
     } else if (mode === 'fixed') {
-      const inp = el('input', { class: 'core-input uic-da-cap', type: 'text', inputmode: 'numeric', placeholder: 'e.g. 5,000,000 or 5m', value: num(S.get('cap')) ? fmt(S.get('cap')) : '', title: 'Damage cap for every monster' });
+      const inp = el('input', { class: 'uic-da-control uic-da-cap', type: 'text', inputmode: 'numeric', placeholder: 'e.g. 5,000,000 or 5m', value: num(S.get('cap')) ? fmt(S.get('cap')) : '', title: 'Damage cap for every monster' });
       inp.addEventListener('change', () => { const v = num(inp.value); inp.value = v ? fmt(v) : ''; S.set('cap', v); });
       bodyEl.replaceChildren(el('div', { class: 'uic-da-row' }, field('Damage cap', inp, 'Counts the damage you already have on a monster.'), note));
     } else if (mode === 'monster') {
@@ -1069,15 +1071,15 @@ const VS = (() => {
       cards().forEach((c) => { const nm = nameOf(c), k = norm(nm); const g = groups.get(k) || { name: nm, n: 0 }; if (!isDead(c)) g.n++; groups.set(k, g); });
       const saved = mobCaps(), list = el('div', { class: 'uic-da-moblist' });
       groups.forEach((g, k) => {
-        const inp = el('input', { class: 'core-input uic-da-mobcap', type: 'text', inputmode: 'numeric', placeholder: 'skip', value: num(saved[k]) ? fmt(saved[k]) : '', 'data-mob': k, title: 'Damage cap for ' + g.name });
+        const inp = el('input', { class: 'uic-da-control uic-da-mobcap', type: 'text', inputmode: 'numeric', placeholder: 'skip', value: num(saved[k]) ? fmt(saved[k]) : '', 'data-mob': k, title: 'Damage cap for ' + g.name });
         inp.addEventListener('change', () => {
           const v = num(inp.value); inp.value = v ? fmt(v) : '';
           const all = Object.assign({}, mobCaps()); if (v) all[k] = v; else delete all[k];
           S.set('mobCaps', all);
         });
-        list.append(el('label', { class: 'uic-da-mob' }, el('span', { class: 'uic-da-mobname' }, g.name, el('span', { class: 'core-dim' }, ' ×' + g.n)), inp));
+        list.append(el('label', { class: 'uic-da-mob' }, el('span', { class: 'uic-da-mobname' }, g.name, el('span', { class: 'uic-da-muted' }, ' ×' + g.n)), inp));
       });
-      bodyEl.replaceChildren(note, groups.size ? list : el('div', { class: 'core-dim' }, 'No monsters on this map.'));
+      bodyEl.replaceChildren(note, groups.size ? list : el('div', { class: 'uic-da-note' }, 'No monsters on this map.'));
     } else bodyEl.replaceChildren(note);
     if (checks.overshoot) checks.overshoot.label.style.display = mode === 'hits' ? 'none' : '';
   }
@@ -1097,7 +1099,7 @@ const VS = (() => {
     cb.addEventListener('change', refreshBar);
     c.insertBefore(el('label', { class: 'uic-da-pick' }, cb), c.firstChild);
     const fight = c.querySelector('a[href*="dgmid="]');
-    const btn = el('button', { class: 'core-btn core-btn-soft uic-da-hit', type: 'button', title: 'Attack this monster with the panel\'s skill and mode', onclick: (e) => { e.preventDefault(); attackMonsters([mid]); } }, '⚡ Hit');
+    const btn = el('button', { class: 'btn uic-da-hit', type: 'button', title: 'Attack this monster with the panel\'s skill and mode', onclick: (e) => { e.preventDefault(); attackMonsters([mid]); } }, '⚡ Hit');
     if (dead) { btn.disabled = true; c.classList.add('uic-da-dead'); }
     if (fight && fight.parentNode) fight.after(btn); else c.append(btn);
   }
@@ -1107,38 +1109,39 @@ const VS = (() => {
     const list = cards();
     if (!list.length) return false;
     const first = list[0].closest('.panel') || list[0].parentNode;
-    if (Core && Core.ui && Core.ui.base) Core.ui.base();         // Core's shared styles (.core-card, .core-seg, ...)
-    const field = (label, ctl) => el('div', { class: 'core-field' }, el('label', null, label), ctl);
+    // Match the game's native .panel / .h / .btn vocabulary; this panel deliberately
+    // does not call Core.ui.base() or depend on Core's component stylesheet.
+    const field = (label, ctl) => el('div', { class: 'uic-da-field' }, el('label', null, label), ctl);
     const check = (key, text, title) => {
       const input = el('input', { type: 'checkbox' });
       input.addEventListener('change', () => S.set(key, input.checked));
-      const label = el('label', { class: 'core-check', title: title || null }, input, text);
+      const label = el('label', { class: 'uic-da-check', title: title || null }, input, el('span', null, text));
       checks[key] = { input, label };
       return label;
     };
-    skillSel = el('select', { class: 'core-input', title: 'Skill' }, SKILLS.map((s) => el('option', { value: String(s[0]) }, s[2] + ' · ' + s[0] + ' stamina')));
+    skillSel = el('select', { class: 'uic-da-control', title: 'Skill' }, SKILLS.map((s) => el('option', { value: String(s[0]) }, s[2] + ' · ' + s[0] + ' stamina')));
     skillSel.addEventListener('change', () => S.set('skill', Number(skillSel.value)));
-    segEl = el('div', { class: 'core-seg uic-da-mode', role: 'group', 'aria-label': 'Stop when' }, MODES.map(([id, label, tip]) =>
-      el('button', { type: 'button', 'data-mode': id, 'aria-pressed': 'false', title: tip, onclick: () => { S.set('mode', id); drawBody(); } }, label)));
+    segEl = el('div', { class: 'uic-da-mode', role: 'group', 'aria-label': 'Stop when' }, MODES.map(([id, label, tip]) =>
+      el('button', { class: 'btn uic-da-mode-btn', type: 'button', 'data-mode': id, 'aria-pressed': 'false', title: tip, onclick: () => { S.set('mode', id); drawBody(); } }, label)));
     bodyEl = el('div', { class: 'uic-da-body' });
-    delayInp = el('input', { class: 'core-input uic-da-num', type: 'number', min: '0', max: '10000', step: '50', title: 'Pause between hits (ms). The game may refuse hits that come too fast.' });
+    delayInp = el('input', { class: 'uic-da-control uic-da-num', type: 'number', min: '0', max: '10000', step: '50', title: 'Pause between hits (ms). The game may refuse hits that come too fast.' });
     delayInp.addEventListener('change', () => { const v = Math.max(0, Math.min(10000, Math.floor(Number(delayInp.value) || 0))); delayInp.value = String(v); S.set('delay', v); });
     optsEl = el('div', { class: 'uic-da-row uic-da-opts' },
       check('autoJoin', 'Join "not joined" monsters first'),
       check('staminaPotion', 'Stamina potion when out', 'Uses items from your inventory.'),
       check('hpPotion', 'Full HP potion when dead', 'Uses items from your inventory.'),
-      check('overshoot', 'Don\'t waste big hits near the cap', 'Close to the cap it switches to a smaller skill, so less stamina is spent passing it. It never stops short of the cap.'),
+      check('overshoot', "Don't waste big hits near the cap", 'Close to the cap it switches to a smaller skill, so less stamina is spent passing it. It never stops short of the cap.'),
       field('Pause (ms)', delayInp));
     selCount = el('b', null, '0');
-    attackBtn = el('button', { class: 'core-btn core-btn-success', type: 'button', onclick: () => attackMonsters(picked().map(midOf)) }, '⚡ Attack selected (', selCount, ')');
-    stopBtn = el('button', { class: 'core-btn core-btn-danger', type: 'button', onclick: () => { run.stop = true; run.note = 'Stopping after this hit…'; paintStatus(); } }, '■ Stop');
-    statusEl = el('div', { class: 'uic-da-status' });
-    const link = (t, fn) => el('button', { class: 'core-link', type: 'button', onclick: fn }, t);
-    bar = el('div', { class: 'core-card uic-da' },
-      el('div', { class: 'core-card-h' }, '⚡ Quick attack'),
-      el('div', { class: 'uic-da-row' }, field('Skill', skillSel), field('Stop when', segEl)),
+    attackBtn = el('button', { class: 'btn uic-da-primary', type: 'button', onclick: () => attackMonsters(picked().map(midOf)) }, '⚡ Attack selected (', selCount, ')');
+    stopBtn = el('button', { class: 'btn uic-da-stop', type: 'button', onclick: () => { run.stop = true; run.note = 'Stopping after this hit…'; paintStatus(); } }, '■ Stop');
+    statusEl = el('div', { class: 'uic-da-status', role: 'status', 'aria-live': 'polite' });
+    const link = (t, fn) => el('button', { class: 'uic-da-link', type: 'button', onclick: fn }, t);
+    bar = el('section', { class: 'panel uic-da' },
+      el('div', { class: 'h uic-da-head' }, '⚡ Quick attack'),
+      el('div', { class: 'uic-da-row uic-da-main' }, field('Skill', skillSel), field('Stop when', segEl)),
       bodyEl, optsEl,
-      el('div', { class: 'uic-da-row uic-da-actions' }, attackBtn, stopBtn, el('span', { class: 'core-dim' }, 'Select:'),
+      el('div', { class: 'uic-da-row uic-da-actions' }, attackBtn, stopBtn, el('span', { class: 'uic-da-select-label' }, 'Select:'),
         link('all alive', () => selectWhere(() => true)), link('not joined', () => selectWhere((c) => !isJoined(c))), link('joined', () => selectWhere((c) => isJoined(c))), link('none', () => selectWhere(() => false))),
       statusEl);
     first.parentNode.insertBefore(bar, first);
@@ -1148,27 +1151,45 @@ const VS = (() => {
   }
   function css() {
     const s = el('style', { id: 'uic-da-css' });
-    /* Layout only. Colours, buttons, inputs and the segmented switch are Core's own classes (.core-card .core-btn .core-input .core-seg .core-check .core-field .core-link). */
+    /* Layout is custom; colour, heading and button foundations are the game's own .panel, .h and .btn. */
     s.textContent = `
-      .uic-da{display:flex;flex-direction:column;gap:12px;margin:0 0 14px}
-      .uic-da-row{display:flex;flex-wrap:wrap;align-items:flex-end;gap:10px 16px}
-      .uic-da-actions{align-items:center}
-      .uic-da-opts{align-items:center}
+      .uic-da{display:flex;flex-direction:column;gap:12px;margin:0 0 14px;min-width:0}
+      .uic-da-head{margin:0 0 2px;font-size:18px;font-weight:700;color:#f9e2af}
+      .uic-da-row{display:flex;flex-wrap:wrap;align-items:flex-end;gap:10px 14px;min-width:0}
+      .uic-da-main{align-items:flex-start}
+      .uic-da-actions{align-items:center;gap:8px}
+      .uic-da-opts{align-items:center;padding-top:2px;border-top:1px solid rgba(255,255,255,.07)}
+      .uic-da-field{display:flex;flex-direction:column;gap:5px;min-width:0;font-size:13px}
+      .uic-da-field>label{font-size:12px;font-weight:700;color:#cfd3ea}
+      .uic-da-control{min-height:36px;max-width:100%;padding:7px 10px;border:1px solid #2b2d44;border-radius:8px;background:#12131a;color:#edeff6;font:inherit;font-size:13px}
+      .uic-da-control:focus{outline:2px solid #e1b65b;outline-offset:1px}
+      .uic-da select.uic-da-control{min-width:200px}
+      .uic-da-num{width:96px}.uic-da-cap{width:170px}
+      .uic-da-mode{display:flex;flex-wrap:wrap;gap:5px}
+      .uic-da-mode-btn{font-size:12px;padding:7px 10px;border:1px solid #3a3b4d}
+      .uic-da-mode-btn[aria-pressed="true"]{background:#6d5528;border-color:#caa65d;color:#fff0c4}
+      .uic-da-note,.uic-da-muted{font-size:11px;color:#9aa0b8}
+      .uic-da-note{max-width:560px;line-height:1.4}
       .uic-da-body{display:flex;flex-direction:column;gap:8px}
-      .uic-da-num{width:96px}
-      .uic-da-cap{width:170px}
-      .uic-da-moblist{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:6px 14px}
+      .uic-da-moblist{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:7px 14px}
       .uic-da-mob{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:0;font-size:13px}
       .uic-da-mobname{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
       .uic-da-mobcap{width:130px;flex:0 0 auto}
-      .uic-da select.core-input{min-width:200px}
-      .uic-da-status{min-height:18px;font-size:12px;color:#cfd8f6}
+      .uic-da-check{display:inline-flex;align-items:center;gap:6px;min-height:30px;font-size:12px;color:#cfd3ea;cursor:pointer}
+      .uic-da-check input{width:16px;height:16px;margin:0;accent-color:#d4aa55}
+      .uic-da-primary{border-color:#8a692f;background:#59431f;color:#fff0c4;font-weight:700}
+      .uic-da-primary:hover{background:#705528}
+      .uic-da-stop{border-color:#6a383c;color:#ffd5d8}
+      .uic-da-link{appearance:none;border:0;background:none;color:#c6b17d;padding:3px 2px;font:inherit;font-size:11px;text-decoration:underline;cursor:pointer}
+      .uic-da-select-label{font-size:11px;color:#9aa0b8}
+      .uic-da-status{min-height:18px;font-size:12px;color:#cfd8f6;line-height:1.45;overflow-wrap:anywhere}
       .uic-da-status.ok{color:#8ee6a8}.uic-da-status.bad{color:#ff8a97}
       .uic-da button:disabled{opacity:.45;cursor:not-allowed}
       .uic-da-pick{display:flex;align-items:flex-start;padding:2px 8px 0 0}
-      .uic-da-pick input{width:18px;height:18px;cursor:pointer;accent-color:#5b7cff}
-      .core-btn.uic-da-hit{padding:5px 10px;margin-left:8px;font-size:12px}
+      .uic-da-pick input{width:18px;height:18px;cursor:pointer;accent-color:#d4aa55}
+      .btn.uic-da-hit{padding:5px 10px;margin-left:8px;font-size:12px;vertical-align:middle}
       .mon.uic-da-dead{opacity:.55}
+      @media(max-width:600px){.uic-da{padding:12px}.uic-da-main,.uic-da-opts{align-items:stretch}.uic-da-main>.uic-da-field{flex:1 1 100%}.uic-da select.uic-da-control{width:100%;min-width:0}.uic-da-mode{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}.uic-da-mode-btn{width:100%}.uic-da-moblist{grid-template-columns:1fr}.uic-da-actions .uic-da-primary{flex:1 1 100%}}
     `;
     (document.head || document.documentElement).appendChild(s);
   }
@@ -1619,8 +1640,17 @@ const VS = (() => {
     if (j.status !== 'success') return { ok: false, msg: j.message || 'The upgrade was refused.', stop: true };
 
     if (goldNeed) spendGold(goldNeed);
-    try { applyForge(await getDoc(URL_FORGE)); } catch (_) { /* the next step reports it */ }
+    let refreshError = '';
+    try { applyForge(await getDoc(URL_FORGE)); }
+    catch (e) {
+      refreshError = (e && e.message) || 'The forge page could not be refreshed.';
+      if (S.forge) S.forge.stale = true;
+    }
     markStale('forge');
+    if (refreshError) {
+      if (S.forge) S.forge.stale = true;
+      return { ok: true, refreshError };
+    }
     const next = S.forge.items.find((x) => x.key === key) || S.forge.items.find((x) => x.name === it.name && x.level > lv);
     if (!next) return { ok: true, stop: true, note: `${it.name} is now past Lv ${lv}.` };
     if (!next.canUpgrade) return { ok: true, stop: true, note: `${it.name} reached Lv ${next.level}, the maximum.` };
@@ -1827,23 +1857,20 @@ const VS = (() => {
 
   function openUpgrade(key) {
     let cur = key;
-    const get = () => S.forge.items.find((x) => x.key === cur);
+    const get = () => S.forge && S.forge.items.find((x) => x.key === cur);
     const it0 = get();
+    if (!it0) return;
     const M = modal();
-    const qty = qtyControl({ max: Math.max(1, it0.levels), chips: [1, 2, 3, 5, 10], onChange: () => paint() });
     const body = h('div');
     const result = h('div', { class: 'uag-result', role: 'status', 'aria-live': 'polite' });
-    const prog = progress();
-    const go = h('button', { class: 'uag-btn uag-btn-primary uag-go', type: 'button' });
-    const runner = bindRun({ go, qty, prog, result });
-    M.onClose(() => { if (runner.ctl) runner.ctl.stop = true; renderBody(); });
-    M.dlg.append(body, h('h4', { class: 'uag-sub', text: 'Levels to upgrade' }), qty.el, prog.el, result, h('div', { class: 'uag-actions' }, go));
+    const go = h('button', { class: 'uag-btn uag-btn-primary uag-go', type: 'button', text: 'Upgrade once' });
+    const retry = h('button', { class: 'uag-btn', type: 'button', text: 'Retry forge refresh', hidden: true });
+    M.onClose(() => renderBody());
+    M.dlg.append(body, result, h('div', { class: 'uag-actions' }, go), retry);
 
     function paint() {
       const it = get() || it0;
-      qty.setMax(it.canUpgrade ? Math.max(it.levels, 0) : 0);
-      const mult = qty.value;
-      const goldShort = it.goldNeed && S.goldExact && S.gold < it.goldNeed * mult;
+      const goldShort = !!(it.goldNeed && S.goldExact && S.gold < it.goldNeed);
       body.replaceChildren(
         h('div', { class: 'uag-dlg-head' }, art(it.img, 'uag-dlg-art'),
           h('div', { class: 'uag-dlg-title' }, h('h3', { text: it.name }),
@@ -1855,30 +1882,61 @@ const VS = (() => {
           h('div', {}, h('dt', { text: it.nextTitle ? it.nextTitle.replace(/^Next Level\s*·\s*/i, 'Next: ') : 'Next level' }),
             h('dd', { text: it.deltas.length ? it.deltas.join(' · ') : '—' }))),
         it.canUpgrade
-          ? h('div', {}, h('h4', { class: 'uag-sub', text: 'Uses for the next level' }), matRows(it.mats, 1),
-            it.goldNeed ? h('div', { class: 'uag-gold' + (goldShort ? ' is-short' : '') }, '🪙 ', h('b', { text: fmt(it.goldNeed) }), ` gold per level · you have ${S.goldExact ? fmt(S.gold) : 'about ' + fmt(S.gold)}`) : null,
-            mult > 1 ? h('p', { class: 'uag-hint', text: 'Later levels can cost more. The run stops by itself when something runs short.' }) : null)
+          ? h('div', {}, h('h4', { class: 'uag-sub', text: 'Uses for the next level' }),
+            it.mats.length ? matRows(it.mats, 1) : h('p', { class: 'uag-hint', text: 'No additional materials are listed for this upgrade.' }),
+            it.goldNeed ? h('div', { class: 'uag-gold' + (goldShort ? ' is-short' : '') }, '🪙 ', h('b', { text: fmt(it.goldNeed) }), ` gold · you have ${S.goldExact ? fmt(S.gold) : 'about ' + fmt(S.gold)}`) : null)
           : h('p', { class: 'uag-hint', text: it.hint || 'Max level reached.' }));
-      go.textContent = !it.canUpgrade ? 'Max level' : it.levels < 1 ? 'Not enough to upgrade' : mult > 1 ? `Upgrade up to ${mult} levels` : 'Upgrade';
-      go.disabled = S.busy || !it.canUpgrade || it.levels < 1;
+      go.textContent = !it.canUpgrade ? 'Max level' : it.levels < 1 ? 'Not enough for next level' : 'Upgrade one level';
+      go.disabled = S.busy || !it.canUpgrade || it.levels < 1 || !!(S.forge && S.forge.stale);
+      retry.hidden = !(S.forge && S.forge.stale);
     }
-    paint();
 
+    async function refreshForge() {
+      if (S.busy) return;
+      S.busy = true; retry.disabled = true; retry.textContent = 'Refreshing…';
+      try {
+        await loadForge(true);
+        const refreshed = S.forge.items.find((x) => x.key === cur) || S.forge.items.find((x) => x.name === it0.name);
+        if (refreshed) cur = refreshed.key;
+        result.className = 'uag-result is-ok';
+        result.textContent = 'Forge data refreshed. Requirements below are current.';
+      } catch (e) {
+        result.className = 'uag-result is-bad';
+        result.textContent = 'Could not refresh the forge: ' + ((e && e.message) || 'unknown error');
+      } finally {
+        S.busy = false; retry.disabled = false; retry.textContent = 'Retry forge refresh';
+        paint(); renderBody();
+      }
+    }
+
+    retry.addEventListener('click', refreshForge);
+    paint();
     go.addEventListener('click', async () => {
-      const startLv = (get() || it0).level;
-      const n = qty.value;
-      const out = await runner.start({
-        count: n, delay: CFG.upgradeDelayMs,
-        step: async () => { const r = await upgradeOnce(cur); if (r.key) cur = r.key; return r; },
-        progressText: (d, t) => `Upgrading ${d} of ${t}…`,
-      });
-      if (!out) return;
-      const now = get();
-      result.className = 'uag-result ' + (out.fail ? 'is-bad' : 'is-ok');
-      const gained = out.done ? `Upgraded ${fmt(out.done)} level${out.done > 1 ? 's' : ''}${now ? `, now Lv ${now.level}` : ''}. ` : '';
-      result.textContent = (gained + (out.fail || out.note || '')).trim() || `Upgraded from Lv ${startLv}.`;
-      if (out.done) toast(`${it0.name} upgraded ×${out.done}`);
-      paint(); renderBody();
+      const before = get() || it0;
+      if (S.busy || go.disabled || !before.canUpgrade) return;
+      const from = before.level;
+      S.busy = true; go.disabled = true; go.textContent = 'Upgrading…';
+      result.className = 'uag-result'; result.textContent = '';
+      let out;
+      try { out = await upgradeOnce(cur); }
+      catch (e) { out = { ok: false, msg: (e && e.message) || 'Upgrade failed.' }; }
+      S.busy = false;
+      if (!M.dlg.isConnected) { renderBody(); return; }
+      if (out && out.key) cur = out.key;
+      if (!out || !out.ok) {
+        result.className = 'uag-result is-bad';
+        result.textContent = (out && out.msg) || 'The upgrade failed.';
+      } else if (out.refreshError) {
+        result.className = 'uag-result is-bad';
+        result.textContent = `Upgraded once from Lv ${from}, but the forge could not refresh (${out.refreshError}). Retry the refresh before upgrading again.`;
+      } else {
+        const after = get();
+        result.className = 'uag-result is-ok';
+        result.textContent = `Upgraded one level: Lv ${from}${after ? ' → Lv ' + after.level : ''}.` + (out.note ? ' ' + out.note : '');
+        toast(`${before.name} upgraded once`);
+      }
+      paint();
+      renderBody();
     });
   }
 
@@ -2033,9 +2091,44 @@ const VS = (() => {
     if (anchor) anchor.after(root); else container.prepend(root);
   }
 
+  function routeUrl() {
+    if (S.tab === 'craft') return '/' + URL_CRAFT + '?gate=' + encodeURIComponent(S.gate || liveGate());
+    return '/' + (S.mode === 'decraft' ? URL_DECRAFT : URL_FORGE);
+  }
+
+  function syncAddress() {
+    const next = routeUrl();
+    const current = location.pathname + location.search;
+    if (current !== next) {
+      try { history.pushState({ uicArtisans: true, tab: S.tab, mode: S.mode, gate: S.gate }, '', next); }
+      catch (_) { /* The panel still works if the host blocks History API writes. */ }
+    }
+    window.dispatchEvent(new Event('uic:routechange'));
+  }
+
+  function applyAddress() {
+    const path = location.pathname.toLowerCase();
+    const q = new URLSearchParams(location.search);
+    if (path.endsWith('/blacksmith.php')) {
+      S.tab = 'craft';
+      const gate = q.get('gate');
+      if (gate) { S.gate = gate; prefs.gate = gate; }
+    } else if (path.endsWith('/legendary_decraft.php')) {
+      S.tab = 'legendary'; S.mode = 'decraft';
+    } else if (path.endsWith('/legendary_forge.php')) {
+      S.tab = 'legendary'; S.mode = 'upgrade';
+    } else return;
+    prefs.tab = S.tab; prefs.mode = S.mode; savePrefs();
+    S.query = '';
+    renderBody();
+    window.dispatchEvent(new Event('uic:routechange'));
+  }
+
   function selectTab(id) {
+    if (id !== 'craft' && id !== 'legendary') return;
     S.tab = id; prefs.tab = id; savePrefs();
     S.query = '';
+    syncAddress();
     renderBody();
   }
 
@@ -2115,7 +2208,7 @@ const VS = (() => {
   function paintCraft() {
     const c = S.craft[S.gate]; if (!c) return;
     const gateBar = h('div', { class: 'uag-gates', role: 'group', 'aria-label': 'Recipe gate' }, S.gates.map((g) =>
-      h('button', { class: 'uag-gate', type: 'button', 'aria-pressed': String(g.gate === S.gate), onclick: () => { S.gate = g.gate; prefs.gate = g.gate; savePrefs(); S.query = ''; renderBody(); } },
+      h('button', { class: 'uag-gate', type: 'button', 'aria-pressed': String(g.gate === S.gate), onclick: () => { S.gate = g.gate; prefs.gate = g.gate; savePrefs(); S.query = ''; syncAddress(); renderBody(); } },
         g.label, g.count != null ? h('small', { text: String(g.count) }) : null)));
     const grid = h('div', { class: 'uag-grid' });
     const tb = toolbar({
@@ -2145,7 +2238,7 @@ const VS = (() => {
     return h('div', { class: 'uag-seg', role: 'group', 'aria-label': 'Legendary section' },
       [['upgrade', 'Upgrade'], ['decraft', 'Decraft']].map(([id, label]) =>
         h('button', { class: 'uag-segbtn', type: 'button', 'aria-pressed': String(S.mode === id), text: label,
-          onclick: () => { S.mode = id; prefs.mode = id; savePrefs(); S.query = ''; renderBody(); } })));
+          onclick: () => { S.mode = id; prefs.mode = id; savePrefs(); S.query = ''; syncAddress(); renderBody(); } })));
   }
 
   function paintUpgrade() {
@@ -2173,7 +2266,12 @@ const VS = (() => {
           bad: !ready, disabled: !x.canUpgrade,
           foot: h('span', { class: 'uag-stock' },
             x.canUpgrade && x.deltas.length ? h('span', { class: 'uag-deltas', text: x.deltas.join(' · ') }) : null,
-            h('span', { class: 'uag-stock-txt', text: !x.canUpgrade ? 'Max level' : ready ? `Can upgrade ${fmt(x.levels)} level${x.levels > 1 ? 's' : ''}` : 'Missing materials' })),
+            x.canUpgrade && (x.mats.some((m) => m.need > 0) || x.goldNeed > 0)
+              ? h('span', { class: 'uag-minimats' },
+                x.mats.filter((m) => m.need > 0).map((m) => h('span', { class: 'uag-mini' + (m.have < m.need ? ' is-short' : ''), title: `${m.name}: ${fmt(m.have)} / ${fmt(m.need)}` }, art(m.img, 'uag-mini-art'), h('b', { text: fmt(m.need) }))),
+                x.goldNeed ? h('span', { class: 'uag-mini uag-mini-gold' + (S.goldExact && S.gold < x.goldNeed ? ' is-short' : ''), title: `Gold: ${fmt(S.gold)} / ${fmt(x.goldNeed)}` }, '🪙 ', h('b', { text: fmt(x.goldNeed) })) : null)
+              : null,
+            h('span', { class: 'uag-stock-txt', text: !x.canUpgrade ? 'Max level' : ready ? 'Next level ready' : 'Missing materials' })),
           onClick: () => openUpgrade(x.key),
         });
       }) : [h('div', { class: 'uag-empty', text: 'No items match.' })]));
@@ -2281,6 +2379,7 @@ body.uag-lock{overflow:hidden}
 .uag-mini{display:inline-flex;align-items:center;gap:3px;background:#12131A;border:1px solid #2B2D44;border-radius:6px;padding:2px 5px 2px 2px;font-size:11px;color:#9fd5b0}
 .uag-mini.is-short{color:#f08a8a;border-color:#5a2f37}
 .uag-mini-art,.uag-mat-art{display:block;width:22px;height:22px;border-radius:5px;overflow:hidden;background:#20212E;flex-shrink:0}
+.uag-mini-gold{color:#ffd369;border-color:#66522a;padding:3px 6px}
 .uag-mini-art img,.uag-mat-art img{width:100%;height:100%;object-fit:cover;display:block}
 .uag-mat-art{width:30px;height:30px}
 /* dialog */
@@ -2383,6 +2482,7 @@ body.uag-lock{overflow:hidden}
 
     build();
     renderBody();
+    window.addEventListener('popstate', applyAddress);
     // Fill in the other tab's counts quietly once the page is idle.
     setTimeout(() => {
       Promise.allSettled([loadForge(), loadDecraft()]).then(() => { if (!S.busy) for (const t of TABS) tabEls[t.id].querySelector('.uag-tab-sub').textContent = tabInfo(t.id); });
