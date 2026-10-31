@@ -1,17 +1,20 @@
 /* ==========================================================================
  * Visuals  (Core addon, one file, five modules)
  *
- *   sidebar          every page      your menu order, submenus (Guild, PvP, Artisans, Merchant, Classes), Battle Pass daily quests
+ *   sidebar          every page      your menu order (drag to rearrange), submenus, the guild's OPEN DUNGEONS under Guild, Battle Pass daily quests,
+ *                                    your WEEKLY RANK and damage under your name
  *   pets             pets.php        Feed button on each pet with the treats that reach the next level
- *   dungeon-attack   guild_dungeon_location.php   attack every monster in one click, with potions
+ *   dungeon-attack   guild_dungeon_location.php   Quick attack panel: hit every monster you tick, for a set number of hits or until the
+ *                                    damage on each monster reaches its EXP cap / one cap / loot cap / a cap per kind of monster
  *   artisans-guild   blacksmith.php, legendary_forge.php, legendary_decraft.php   Craft / Legendary tabs, click-to-craft, repeat without reloads
  *   black-merchant   black_merchant.php            same look as the Merchant rework
  *
- * Needs Core 3.19+ (Core.settings.module): Addons panel > Visuals > Options shows ONE switch per module, with that module's own
- * options under it, instead of a long list of pages. A module that is off does not load, and the whole addon is skipped on a page
- * where no module is on. On an older Core everything still runs; the options are just not grouped.
+ * Needs Core 3.20+ (modules, drag-to-rearrange lists, hidden fields): Addons panel > Visuals > Options shows ONE switch per module, with that
+ * module's own options under it. A module that is off does not load, and the whole addon is skipped on a page where no module is on.
+ * Quick attack has NO entry in Options besides its switch: all of its settings live in the panel on the map, in one place.
+ * On an older Core everything still runs; the options are just not grouped (and lists reorder with the keys only).
  *
- * addons.json:  { "id": "visuals-addition", "name": "Visuals", "version": "2.0.0", "url": "addons/visuals-addition.js", "button": false }
+ * addons.json:  { "id": "visuals-addition", "name": "Visuals", "version": "2.1.0", "url": "addons/visuals-addition.js", "button": false }
  *   (no "match": the sidebar module needs every page; the other modules check their own page.)
  *
  * Your saved Sidebar / Pets / Dungeon Attack options from the old separate ids are copied across once, only where you
@@ -25,9 +28,9 @@ const VS = (() => {
   const PARENT = 'visuals-addition';
   const C = window.Core;
   const MODULES = [
-    { id: 'sidebar',        label: 'Sidebar',        icon: '☰',  pages: '*',                                    help: 'Your menu order, submenus and Battle Pass daily quests.' },
+    { id: 'sidebar',        label: 'Sidebar',        icon: '☰',  pages: '*',                                    help: 'Your menu order, submenus, the guild\'s open dungeons, daily quests and your weekly rank.' },
     { id: 'pets',           label: 'Pets',           icon: '🐾', pages: ['/pets.php'],                          help: 'A Feed button on each pet.' },
-    { id: 'dungeon-attack', label: 'Dungeon Attack', icon: '⚡', pages: ['/guild_dungeon_location.php'],        help: 'Attack every monster on the map in one click.' },
+    { id: 'dungeon-attack', label: 'Dungeon Attack', icon: '⚡', pages: ['/guild_dungeon_location.php'],        help: 'The Quick attack panel on the dungeon map. Its settings are in that panel, not here.' },
     { id: 'artisans-guild', label: 'Artisans Guild', icon: '⚒️', pages: ['/blacksmith.php', '/legendary_forge.php', '/legendary_decraft.php'], help: 'Craft, Upgrade and Decraft in one page, without reloads.' },
     { id: 'black-merchant', label: 'Black Merchant', icon: '🕯️', pages: ['/black_merchant.php'],               help: 'Same look as the Merchant rework.' },
   ];
@@ -99,7 +102,7 @@ const VS = (() => {
   const A = (id, icon, label, href) => ({ id, icon, label, href });
   const ITEMS = [
     { id: 'event',        icon: '🔥', label: 'Emberfall Event',   href: '/event_page.php', event: true },
-    { id: 'guild',        icon: '🏰', label: 'Guild',             href: '/guild_dash.php',
+    { id: 'guild',        icon: '🏰', label: 'Guild',             href: '/guild_dash.php', dungeons: true,
       kids: [A('war', '🗺️', 'Territory War', '/world_map.php'), A('gdungeon', '🕳️', 'Guild Dungeon', '/guild_dungeon.php')] },
     { id: 'battlepass',   icon: '🎟️', label: 'Battle Pass',       href: '/battle_pass.php', quests: true },
     { id: 'pvp',          icon: '⚔️', label: 'PvP',               href: '/pvp.php',
@@ -130,10 +133,12 @@ const VS = (() => {
     VS.define(ID, {
       title: 'Sidebar', icon: '☰',
       fields: [
-        { key: 'items', type: 'orderlist', label: 'Menu items', help: 'Tick = shown. Use ▲ ▼ to change the order.', items: ITEMS.map(({ id, icon, label, hidden }) => ({ id, icon, label, hidden: !!hidden })) },
+        { key: 'items', type: 'orderlist', label: 'Menu items', help: 'Tick = shown. Drag the bars on the right of a row to change the order.', items: ITEMS.map(({ id, icon, label, hidden }) => ({ id, icon, label, hidden: !!hidden })) },
         { key: 'showNew', type: 'bool', label: 'Keep new game menu items', help: 'A menu entry the game adds later that is not in the list above is shown at the end.', default: true },
         { key: 'submenus', type: 'bool', label: 'Show submenus', help: 'A ▸ button on Guild, PvP, Artisans Guild, Merchant and Classes opens their other pages.', default: true },
         { key: 'quests', type: 'bool', label: 'Daily quests under Battle Pass', help: 'A ▸ button on Battle Pass shows today\'s quests with progress. Loaded only when you open it.', default: true },
+        { key: 'dungeons', type: 'bool', label: 'Open dungeons under Guild', help: 'The Guild group lists the dungeons your guild has open right now, each linking to its map. It starts open; the list is read at most every 2 minutes.', default: true },
+        { key: 'weekly', type: 'bool', label: 'Weekly rank and damage', help: 'Your weekly leaderboard rank next to your level in the menu, and your weekly damage under it. Read from the Weekly page at most every 5 minutes.', default: true },
       ],
     });
   } else if (Core && Core.ui) console.warn('[sidebar] this Core has no Core.settings (needs 3.19+): using the default order, no options button.');
@@ -152,8 +157,8 @@ const VS = (() => {
     return n;
   };
   const cfg = () => (hasSettings
-    ? { list: (VS.list(ID, 'items') || []).length ? VS.list(ID, 'items') : ITEMS.map((i) => Object.assign({}, i, { hidden: !!i.hidden })), showNew: VS.get(ID, 'showNew') !== false, submenus: VS.get(ID, 'submenus') !== false, quests: VS.get(ID, 'quests') !== false }
-    : { list: ITEMS.map((i) => Object.assign({}, i, { hidden: !!i.hidden })), showNew: true, submenus: true, quests: true });
+    ? { list: (VS.list(ID, 'items') || []).length ? VS.list(ID, 'items') : ITEMS.map((i) => Object.assign({}, i, { hidden: !!i.hidden })), showNew: VS.get(ID, 'showNew') !== false, submenus: VS.get(ID, 'submenus') !== false, quests: VS.get(ID, 'quests') !== false, dungeons: VS.get(ID, 'dungeons') !== false, weekly: VS.get(ID, 'weekly') !== false }
+    : { list: ITEMS.map((i) => Object.assign({}, i, { hidden: !!i.hidden })), showNew: true, submenus: true, quests: true, dungeons: true, weekly: true });
 
   /* ------------------------------------------------------------------ build */
   let drawn = [], busy = false;
@@ -176,7 +181,7 @@ const VS = (() => {
   /* ---------------------------------------------------------- submenus */
   const OPEN_KEY = 'uic_sidebar_open';
   const openState = () => { try { return JSON.parse(localStorage.getItem(OPEN_KEY) || '{}') || {}; } catch (_) { return {}; } };
-  const setOpen = (id, on) => { const o = openState(); if (on) o[id] = 1; else delete o[id]; try { localStorage.setItem(OPEN_KEY, JSON.stringify(o)); } catch (_) {} };
+  const setOpen = (id, on) => { const o = openState(); o[id] = on ? 1 : 0; try { localStorage.setItem(OPEN_KEY, JSON.stringify(o)); } catch (_) {} };
   const samePage = (href, here) => path(href) === here.path;
 
   function link(item, active, cls) {
@@ -187,6 +192,9 @@ const VS = (() => {
   /* ----------------------------------------------------- daily quests */
   const BP_KEY = 'uic_sidebar_bp', BP_TTL = 5 * 60 * 1000;
   const clean = (s) => String(s || '').replace(/\s+/g, ' ').trim();
+  const who = () => { const a = document.querySelector('#sideDrawer a[href*="player.php?pid="], .side-drawer a[href*="player.php?pid="]'); const m = a && /pid=(\d+)/.exec(a.getAttribute('href') || ''); return m ? m[1] : ''; };
+  const cached = (key, ttl) => { try { const c = JSON.parse(sessionStorage.getItem(key) || 'null'); if (c && c.who === who() && Date.now() - c.t < ttl) return c.data; } catch (_) {} return null; };
+  const keep = (key, data) => { try { sessionStorage.setItem(key, JSON.stringify({ t: Date.now(), who: who(), data })); } catch (_) {} };
   function parseQuests(html) {
     const doc = new DOMParser().parseFromString(html, 'text/html');
     const card = [...doc.querySelectorAll('.card')].find((c) => /daily quests/i.test((c.querySelector('.title') || {}).textContent || ''));
@@ -202,12 +210,12 @@ const VS = (() => {
     };
   }
   async function getQuests(force) {
-    if (!force) { try { const c = JSON.parse(sessionStorage.getItem(BP_KEY) || 'null'); if (c && Date.now() - c.t < BP_TTL) return c.data; } catch (_) {} }
+    if (!force) { const c = cached(BP_KEY, BP_TTL); if (c) return c; }
     const res = await fetch('/battle_pass.php', { credentials: 'same-origin' });
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const data = parseQuests(await res.text());
     if (!data) throw new Error('no daily quests on the page');
-    try { sessionStorage.setItem(BP_KEY, JSON.stringify({ t: Date.now(), data })); } catch (_) {}
+    keep(BP_KEY, data);
     return data;
   }
   const bar = (pct, big) => el('span', { class: 'uic-sq-bar' + (big ? ' uic-sq-bar-lg' : '') }, el('i', { style: 'width:' + Math.max(0, Math.min(100, pct)) + '%' }));
@@ -222,6 +230,107 @@ const VS = (() => {
       box.replaceChildren(el('div', { class: 'uic-sq-msg' }, 'Could not load the quests. ', el('button', { class: 'uic-sq-refresh', type: 'button', onclick: () => fillQuests(box, true) }, 'Try again')));
     });
   }
+
+  /* --------------------------------------------- open guild dungeons */
+  const GD_KEY = 'uic_sidebar_gd', GD_TTL = 2 * 60 * 1000;
+  // guild_dungeon.php lists the dungeons your guild has OPEN under "Active Dungeon Templates" (one card each, with an Enter link).
+  function parseDungeons(doc) {
+    const title = [...doc.querySelectorAll('.section-title')].find((t) => /active dungeon/i.test(t.textContent));
+    if (!title) return null;                                          // not the dungeon list (signed out, no guild)
+    let grid = title.nextElementSibling;
+    while (grid && !grid.matches('.grid') && !grid.matches('.section-title')) grid = grid.nextElementSibling;
+    if (!grid || !grid.matches('.grid')) return [];                   // the section is empty
+    return [...grid.querySelectorAll('.card')].map((c) => {
+      const a = [...c.querySelectorAll('a')].find((x) => /guild_dungeon_enter\.php/i.test(x.getAttribute('href') || ''));
+      if (!a) return null;
+      const op = [...c.querySelectorAll('.tag')].map((t) => clean(t.textContent)).find((t) => /^opened/i.test(t)) || '';
+      return {
+        id: (/[?&]id=(\d+)/.exec(a.getAttribute('href')) || [])[1] || '',
+        name: clean((c.querySelector('.h') || {}).textContent) || 'Dungeon',
+        href: '/' + String(a.getAttribute('href')).replace(/^\/+/, ''),
+        opened: op.replace(/\d{4}-\d{2}-\d{2}\s+(\d{2}:\d{2}):\d{2}/, '$1'),
+      };
+    }).filter(Boolean);
+  }
+  async function getDungeons(force) {
+    if (!force) { const c = cached(GD_KEY, GD_TTL); if (c) return c; }
+    let doc;
+    if (path(location.pathname) === '/guild_dungeon.php') doc = document;   // already on the list: no request
+    else {
+      const res = await fetch('/guild_dungeon.php', { credentials: 'same-origin' });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      doc = new DOMParser().parseFromString(await res.text(), 'text/html');
+    }
+    const data = parseDungeons(doc);
+    if (!data) throw new Error('no dungeon list on the page');
+    keep(GD_KEY, data);
+    return data;
+  }
+  function fillDungeons(box, force) {
+    box.replaceChildren(el('div', { class: 'uic-sq-msg' }, 'Loading dungeons…'));
+    const q = new URLSearchParams(location.search);
+    const here = (/guild_dungeon_enter\.php/i.test(location.pathname) ? q.get('id') : q.get('instance_id')) || '';
+    getDungeons(force).then((list) => {
+      box.replaceChildren(
+        el('div', { class: 'uic-sq-head' }, el('span', {}, 'Open dungeons' + (list.length ? ' (' + list.length + ')' : '')),
+          el('button', { class: 'uic-sq-refresh', type: 'button', title: 'Reload', 'aria-label': 'Reload open dungeons', onclick: () => fillDungeons(box, true) }, '↻')),
+        ...(list.length
+          ? list.map((d) => el('a', { class: 'side-nav-item uic-sub uic-dg' + (d.id && d.id === here ? ' active' : ''), href: d.href, 'data-uic': 'gd-' + d.id, title: d.opened || null },
+            el('span', { class: 'side-icon' }, '🕳️'), el('span', { class: 'side-label' }, d.name, d.opened ? el('small', { class: 'uic-dg-when' }, d.opened) : null)))
+          : [el('div', { class: 'uic-sq-msg' }, 'No dungeon is open right now.')]));
+    }).catch(() => {
+      box.replaceChildren(el('div', { class: 'uic-sq-msg' }, 'Could not load the open dungeons. ', el('button', { class: 'uic-sq-refresh', type: 'button', onclick: () => fillDungeons(box, true) }, 'Try again')));
+    });
+  }
+
+  /* ------------------------------------------------ weekly rank + damage */
+  // weekly.php shows "YOUR RANKING": #265 and "• 701,864,411,299 damage". The rank goes next to your level, the damage under it.
+  // (Same element ids as the old Veyra script, so running both never shows it twice.)
+  const WK_KEY = 'uic_sidebar_weekly', WK_TTL = 5 * 60 * 1000;
+  function parseWeekly(doc) {
+    const box = doc.querySelector('#quick-rank-display');
+    if (!box) return null;
+    const spans = [...box.querySelectorAll('span')].map((x) => clean(x.textContent));
+    const i = spans.findIndex((t) => /^#\d+$/.test(t));
+    const rank = i >= 0 ? spans[i] : null;
+    let damage = (i >= 0 && spans[i + 1]) || spans.find((t) => /damage/i.test(t)) || null;
+    if (damage) damage = damage.replace(/^[•\s]+/, '').trim();
+    return rank || damage ? { rank, damage } : null;
+  }
+  async function getWeekly() {
+    const c = cached(WK_KEY, WK_TTL); if (c) return c;
+    let doc;
+    if (path(location.pathname) === '/weekly.php') doc = document;
+    else {
+      const res = await fetch('/weekly.php', { credentials: 'same-origin' });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      doc = new DOMParser().parseFromString(await res.text(), 'text/html');
+    }
+    const data = parseWeekly(doc);
+    if (!data) throw new Error('your ranking is not on the page');
+    keep(WK_KEY, data);
+    return data;
+  }
+  const levelEl = () => document.querySelector('.small-user .small-user-meta .small-level');
+  function unpaintWeekly() {
+    const lvl = levelEl(); if (!lvl) return;
+    if (lvl.dataset.uicBase !== undefined) lvl.textContent = lvl.dataset.uicBase;
+    const d = document.getElementById('weekly-damage'); if (d) d.remove();
+  }
+  function paintWeekly(d) {
+    const lvl = levelEl(); if (!lvl) return;
+    if (lvl.dataset.uicBase === undefined) lvl.dataset.uicBase = lvl.textContent.replace(/\s*Ranking\s*#\d+\s*$/i, '').trim();
+    lvl.textContent = lvl.dataset.uicBase + (d.rank ? ' Ranking ' + d.rank : '');
+    let dmg = document.getElementById('weekly-damage');
+    if (!d.damage) { if (dmg) dmg.remove(); return; }
+    if (!dmg) { dmg = el('div', { id: 'weekly-damage' }); lvl.after(dmg); }
+    dmg.textContent = d.damage; dmg.title = 'Your damage on this week\'s leaderboard';
+  }
+  function weekly() {
+    if (!cfg().weekly) { unpaintWeekly(); return; }
+    getWeekly().then(paintWeekly).catch((e) => console.debug('[sidebar] weekly rank not shown:', e && e.message));
+  }
+
   function questModal(q) {
     const back = el('div', { class: 'uic-sq-back' });
     const onKey = (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } };
@@ -237,24 +346,28 @@ const VS = (() => {
   function make(item, here, opt) {
     const kids = opt.submenus && item.kids && item.kids.length ? item.kids : null;
     const hasQ = !!(opt.quests && item.quests);
+    const hasD = !!(opt.dungeons && item.dungeons);
     const own = samePage(item.href, here) && (!item.event || query(item.href).get('event') === here.query.get('event'));
-    if (!kids && !hasQ) return link(item, own);
+    if (!kids && !hasQ && !hasD) return link(item, own);
 
     const kidActive = !!kids && kids.some((k) => samePage(k.href, here));
-    const open = !!openState()[item.id] || kidActive;
+    const saved = openState()[item.id];
+    const open = (saved === 1 ? true : saved === 0 ? false : hasD) || kidActive;   // untouched: the Guild group starts open so its dungeons show
     const grp = el('div', { class: 'uic-side-grp' + (open ? ' is-open' : ''), 'data-uic': item.id });
     const panel = hasQ ? el('div', { class: 'uic-side-quests' }) : null;
+    const dpanel = hasD ? el('div', { class: 'uic-side-open' }) : null;
+    const load = () => [[panel, fillQuests], [dpanel, fillDungeons]].forEach(([p, f]) => { if (p && !p.dataset.loaded) { p.dataset.loaded = '1'; f(p); } });
     const chev = el('button', { class: 'uic-side-chev', type: 'button', 'aria-expanded': String(open), title: 'Show / hide ' + item.label + ' pages', 'aria-label': 'Show or hide ' + item.label + ' pages',
       onclick: (e) => {
         e.preventDefault(); e.stopPropagation();
         const on = !grp.classList.contains('is-open');
         grp.classList.toggle('is-open', on); chev.setAttribute('aria-expanded', String(on)); setOpen(item.id, on);
-        if (on && panel && !panel.dataset.loaded) { panel.dataset.loaded = '1'; fillQuests(panel); }
+        if (on) load();
       } }, '▸');
     grp.append(
       el('div', { class: 'uic-side-head' }, link(item, own || kidActive), chev),
-      el('div', { class: 'uic-side-sub' }, kids ? kids.map((k) => link(k, samePage(k.href, here), 'uic-sub')) : null, panel));
-    if (open && panel) { panel.dataset.loaded = '1'; fillQuests(panel); }
+      el('div', { class: 'uic-side-sub' }, kids ? kids.map((k) => link(k, samePage(k.href, here), 'uic-sub')) : null, panel, dpanel));
+    if (open) load();
     return grp;
   }
 
@@ -266,13 +379,13 @@ const VS = (() => {
       // The game's own entries are read ONCE (our own are marked data-uic and skipped), then kept.
       const native = nav._uicNative || (nav._uicNative = nativeEntries(nav));
       const here = { path: path(location.pathname), query: new URLSearchParams(location.search) };
-      const { list, showNew, submenus, quests } = cfg();
+      const { list, showNew, submenus, quests, dungeons } = cfg();
       const nativeBy = new Map(native.map((n) => [path(n.href) + (path(n.href) === '/event_page.php' ? '' : ''), n]));
       const out = [], used = new Set();
       list.forEach((it) => {
         if (it.hidden) { used.add(path(it.href)); return; }
         const meta = ITEMS.find((x) => x.id === it.id) || it;
-        let item = { id: it.id, icon: meta.icon, label: it.label || meta.label, href: meta.href, kids: meta.kids, quests: meta.quests };
+        let item = { id: it.id, icon: meta.icon, label: it.label || meta.label, href: meta.href, kids: meta.kids, quests: meta.quests, dungeons: meta.dungeons };
         if (meta.event) {
           const ne = newestEvent(native);
           if (!ne) return;                               // no event running: nothing to show
@@ -297,7 +410,7 @@ const VS = (() => {
         void shownEvent;
       }
       if (!out.length) return;                         // nothing to draw: leave the game's own menu alone
-      nav.replaceChildren(...out.map((o) => make(o, here, { submenus, quests })));
+      nav.replaceChildren(...out.map((o) => make(o, here, { submenus, quests, dungeons })));
       drawn = out;
     } finally { busy = false; }
   }
@@ -327,7 +440,10 @@ const VS = (() => {
       '.uic-side-sub{display:none;margin:6px 0 0 14px}',
       '.uic-side-grp.is-open>.uic-side-sub{display:block}',
       '.side-nav-item.uic-sub{font-size:12px;padding:7px 10px;margin-bottom:6px;border-left:3px solid #7f89ff;box-shadow:none}',
-      '.uic-side-quests{margin-bottom:6px}',
+      '.uic-side-quests,.uic-side-open{margin-bottom:6px}',
+      '.side-nav-item.uic-dg{border-left-color:#5aa4e5}',
+      '.uic-dg-when{display:block;font-size:10px;font-weight:400;color:#9aa0b8;margin-top:1px}',
+      '#weekly-damage{font-size:11px;color:#89b4fa;margin-top:2px}',
       '.uic-sq-head{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:11px;font-weight:700;color:#cfd3ea;margin:0 0 6px}',
       '.uic-sq-refresh{background:none;border:0;color:#9aa0b8;font:inherit;font-size:12px;cursor:pointer;padding:2px 4px;text-decoration:underline}',
       '.uic-sq-refresh:hover{color:#fff}',
@@ -355,8 +471,8 @@ const VS = (() => {
 
   /* ------------------------------------------------------------------ start */
   function start() {
-    css(); addGear(); render();
-    if (hasSettings) VS.onChange(ID, () => render());
+    css(); addGear(); render(); weekly();
+    if (hasSettings) VS.onChange(ID, (k) => { render(); if (k === 'weekly') weekly(); });
     // If the game redraws its menu (or our list is wiped), draw ours again. The observer ignores our own changes.
     const nav = document.querySelector('#sideDrawer .side-nav, .side-drawer .side-nav');
     if (nav) {
@@ -637,20 +753,34 @@ const VS = (() => {
 
   const ID = 'dungeon-attack';
   const SKILLS = [[1, 0, 'Slash'], [10, -1, 'Power Slash'], [50, -2, 'Heroic Slash'], [100, -3, 'Ultimate Slash'], [200, -4, 'Legendary Slash'], [1000, -5, 'World Breaker Slash']];   // [stamina cost, skill_id, name]
-  const DEFAULTS = { skill: 1, hits: 1, delay: 250, autoJoin: true, staminaPotion: false, hpPotion: false };
+  /* Same stopping rules as Cube Suite's PvE caps (and the old Veyra auto farm): what "until damage on the monster" means. */
+  const MODES = [
+    ['hits',    'Hits',     'A set number of hits on every monster. A monster that dies is skipped early.'],
+    ['exp',     'EXP cap',  'Hit each monster until it reaches its own EXP cap (read from its battle page). Nothing to set up.'],
+    ['fixed',   'One cap',  'One damage cap for every monster.'],
+    ['loot',    'Loot cap', 'Hit each monster until you have done the damage needed for its rarest drop.'],
+    ['monster', 'Per mob',  'A cap for each kind of monster on this map. Blank or 0 leaves that monster alone.'],
+  ];
+  const DEFAULTS = { skill: 1, mode: 'hits', hits: 1, cap: 0, mobCaps: {}, overshoot: true, delay: 250, autoJoin: true, staminaPotion: false, hpPotion: false };
   const Core = window.Core;
   const hasSettings = VS.ok;
 
+  /* Every setting of this module lives in the Quick attack panel on the map, in ONE place, so none of them is drawn in Core's options window
+     (hidden: true: still stored, still shared between tabs). The module's own on / off switch stays in Options. */
   if (hasSettings) {
     VS.define(ID, {
       title: 'Dungeon Attack', icon: '⚡',
       fields: [
-        { key: 'skill', type: 'select', label: 'Skill', options: SKILLS.map((s) => [s[0], s[2] + ' (' + s[0] + ' stamina)']), default: DEFAULTS.skill },
-        { key: 'hits', type: 'number', label: 'Hits per monster', min: 1, max: 100000, default: DEFAULTS.hits, help: 'Stops earlier on a monster that dies.' },
-        { key: 'delay', type: 'number', label: 'Pause between hits (ms)', min: 0, max: 10000, step: 50, default: DEFAULTS.delay, help: 'The game may refuse hits that come too fast.' },
-        { key: 'autoJoin', type: 'bool', label: 'Join "not joined" monsters first', default: DEFAULTS.autoJoin },
-        { key: 'staminaPotion', type: 'bool', label: 'Drink a stamina potion when out of stamina', default: DEFAULTS.staminaPotion, help: 'Uses items from your inventory.' },
-        { key: 'hpPotion', type: 'bool', label: 'Drink a Full HP potion when dead', default: DEFAULTS.hpPotion, help: 'Uses items from your inventory.' },
+        { key: 'skill', type: 'select', hidden: true, options: SKILLS.map((s) => [s[0], s[2] + ' (' + s[0] + ' stamina)']), default: DEFAULTS.skill },
+        { key: 'mode', type: 'select', hidden: true, options: MODES.map((m) => [m[0], m[1]]), default: DEFAULTS.mode },
+        { key: 'hits', type: 'number', hidden: true, min: 1, max: 100000, default: DEFAULTS.hits },
+        { key: 'cap', type: 'number', hidden: true, min: 0, default: DEFAULTS.cap },
+        { key: 'mobCaps', type: 'json', hidden: true, default: DEFAULTS.mobCaps },
+        { key: 'overshoot', type: 'bool', hidden: true, default: DEFAULTS.overshoot },
+        { key: 'delay', type: 'number', hidden: true, min: 0, max: 10000, step: 50, default: DEFAULTS.delay },
+        { key: 'autoJoin', type: 'bool', hidden: true, default: DEFAULTS.autoJoin },
+        { key: 'staminaPotion', type: 'bool', hidden: true, default: DEFAULTS.staminaPotion },
+        { key: 'hpPotion', type: 'bool', hidden: true, default: DEFAULTS.hpPotion },
       ],
     });
   }
@@ -673,6 +803,8 @@ const VS = (() => {
   const params = new URLSearchParams(location.search);
   const instanceId = params.get('instance_id') || '';
   const skillOf = (cost) => SKILLS.find((s) => s[0] === Number(cost)) || SKILLS[0];
+  const norm = (s) => String(s || '').replace(/\s+/g, ' ').trim().toLowerCase();
+  const num = (v) => { const n = Core && Core.parseNum ? Core.parseNum(v) : parseFloat(String(v == null ? '' : v).replace(/,/g, '')); return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0; };   // "5,000,000", "5m", "3b" all work
   const el = (tag, attrs, ...kids) => {
     const n = document.createElement(tag);
     for (const [k, v] of Object.entries(attrs || {})) { if (v == null || v === false) continue; if (k === 'class') n.className = v; else if (k.startsWith('on')) n.addEventListener(k.slice(2), v); else n.setAttribute(k, v === true ? '' : v); }
@@ -681,6 +813,8 @@ const VS = (() => {
   };
   const parseJson = (raw) => { if (Core && Core.parseJson) return Core.parseJson(raw); try { return JSON.parse(raw); } catch (_) { return null; } };
   const DBG = { last: null };
+  const modeOf = () => { const m = String(S.get('mode')); return MODES.some((x) => x[0] === m) ? m : 'hits'; };
+  const mobCaps = () => { const v = S.get('mobCaps'); return v && typeof v === 'object' && !Array.isArray(v) ? v : {}; };
 
   /* ----------------------------------------------------------------- cards */
   const cards = () => [...document.querySelectorAll('.mon')].filter((c) => c.querySelector('a[href*="dgmid="]'));
@@ -748,14 +882,62 @@ const VS = (() => {
     return { kind: 'error', message: msg || 'The server refused the attack', data };
   }
 
+  /* The monster's own battle page: its EXP cap, the damage you already have on it, the damage the rarest drop needs.
+     (Same three things Cube Suite's PvE caps and the old Veyra auto farm read.) null = could not be read (signed out, error page). */
+  async function lookup(mid) {
+    let res, text;
+    try { res = await fetch('battle.php?dgmid=' + encodeURIComponent(mid) + '&instance_id=' + encodeURIComponent(instanceId), { credentials: 'same-origin' }); text = await res.text(); } catch (_) { return null; }
+    if (!res.ok) return null;
+    const doc = new DOMParser().parseFromString(text, 'text/html');
+    if (!doc.querySelector('#yourStats, #yourDamageValue, #hpText, .stat-block')) return null;   // a login or error page is not a battle page
+    const block = [...doc.querySelectorAll('.stat-block')].find((b) => norm((b.querySelector('.label') || {}).textContent) === 'exp cap');
+    let expCap = null;
+    if (block) {
+      const lab = block.querySelector('.label');
+      const m = /(\d[\d,]*)/.exec(block.textContent.replace(lab ? lab.textContent : '', ''));
+      expCap = m && Number(m[1].replace(/,/g, '')) > 0 ? Number(m[1].replace(/,/g, '')) : null;
+    }
+    const dmg = (doc.querySelector('#yourDamageValue') || {}).textContent;
+    let lootCap = 0;
+    doc.querySelectorAll('.loot-card .chip').forEach((chip) => {
+      const m = /dmg req:\s*([\d,]+)/i.exec(norm(chip.textContent));
+      if (m) lootCap = Math.max(lootCap, Number(m[1].replace(/,/g, '')) || 0);
+    });
+    return { damage: dmg ? Number(String(dmg).replace(/[^\d]/g, '')) || 0 : 0, expCap, lootCap: lootCap > 0 ? lootCap : null };
+  }
+
+  /* What a hit with each skill does, learned from this page's own replies. Used to avoid wasting a big hit when the cap is near. */
+  const learned = new Map();                                     // stamina cost -> { sum, n }
+  function learn(cost, dmg) { if (!(dmg > 0)) return; const l = learned.get(cost) || { sum: 0, n: 0 }; l.sum += dmg; l.n++; learned.set(cost, l); }
+  function estimate(cost) {
+    const l = learned.get(cost); if (l && l.n) return l.sum / l.n;
+    let td = 0, ts = 0; learned.forEach((v, c) => { td += v.sum; ts += c * v.n; });
+    return ts ? (td / ts) * cost : null;                         // not used yet: scale from what is known
+  }
+  // Which skill for the next hit when `left` damage remains before the cap: the chosen one while far away, a smaller one close to it, null = even Slash would overshoot.
+  function chooseCost(want, left) {
+    if (!S.get('overshoot')) return want;
+    const SAFE = 1.15, e = estimate(want);
+    if (e == null || e * SAFE <= left) return want;
+    for (let i = SKILLS.length - 1; i >= 0; i--) {
+      const c = SKILLS[i][0]; if (c >= want) continue;
+      const ec = estimate(c);
+      if (ec != null && ec * SAFE <= left) return c;
+    }
+    const e1 = estimate(1);
+    return e1 != null && e1 * SAFE > left ? null : 1;
+  }
+
   /* ------------------------------------------------------------------- run */
-  const run = { on: false, stop: false, queue: 0, done: 0, hits: 0, damage: 0, kills: 0, note: '' };
+  const run = { on: false, stop: false, queue: 0, done: 0, hits: 0, damage: 0, kills: 0, capped: 0, skipped: [], notes: [], cur: null, note: '' };
   const strip = (msg) => String(msg || '').replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim();
+  const capName = { exp: 'EXP cap', fixed: 'cap', loot: 'loot cap', monster: 'cap' };
 
   async function attackMonsters(mids) {
     if (run.on) return;
-    const cost = Number(S.get('skill')) || 1, hits = Math.max(1, Math.floor(Number(S.get('hits')) || 1)), delay = Math.max(0, Number(S.get('delay')) || 0);
-    Object.assign(run, { on: true, stop: false, queue: mids.length, done: 0, hits: 0, damage: 0, kills: 0, note: '' });
+    const mode = modeOf(), want = Number(S.get('skill')) || 1, hits = Math.max(1, Math.floor(Number(S.get('hits')) || 1)), delay = Math.max(0, Number(S.get('delay')) || 0);
+    if (mode === 'fixed' && !num(S.get('cap'))) { run.note = 'Type a damage cap first.'; paintStatus('bad'); return; }
+    Object.assign(run, { on: true, stop: false, queue: mids.length, done: 0, hits: 0, damage: 0, kills: 0, capped: 0, skipped: [], notes: [], cur: null, note: '' });
     paintStatus(); refreshBar();
     let why = '';
     outer:
@@ -763,26 +945,57 @@ const VS = (() => {
       if (run.stop) { why = 'stopped'; break; }
       let c = byMid(mid);
       if (!c || isDead(c)) { run.done++; continue; }
+      const name = nameOf(c);
+
+      // 1. What is the stopping point for this monster?
+      let cap = null, dealt = 0;
+      if (mode !== 'hits') {
+        if (mode === 'monster') {
+          cap = num(mobCaps()[norm(name)]);
+          if (!cap) { run.skipped.push(name + ': no cap set'); run.done++; continue; }
+        } else if (mode === 'fixed') cap = num(S.get('cap'));
+        run.note = 'Reading ' + name + '…'; run.cur = null; paintStatus();
+        const info = await lookup(mid);
+        if (run.stop) { why = 'stopped'; break; }
+        if (!info) { run.skipped.push(name + ': battle page unreadable'); run.done++; continue; }
+        dealt = info.damage;                                     // the damage you already have on it counts
+        if (mode === 'exp') cap = info.expCap;
+        else if (mode === 'loot') cap = info.lootCap;
+        if (cap == null) run.notes.push(name + ' has no ' + (mode === 'exp' ? 'EXP cap' : 'loot requirement') + ': ' + hits + ' hit' + (hits === 1 ? '' : 's') + ' used');
+        else if (dealt >= cap) { run.capped++; run.done++; run.notes.push(name + ' was already at its ' + capName[mode]); continue; }
+      }
+
+      // 2. Join it, then hit it until the stopping point.
       if (S.get('autoJoin') && !isJoined(c)) {
-        run.note = 'Joining ' + nameOf(c) + '…'; paintStatus();
+        run.note = 'Joining ' + name + '…'; paintStatus();
         let joined = false;
         try { joined = await joinMonster(mid); } catch (_) { /* below */ }
-        if (!joined) { why = 'Could not join ' + nameOf(c); break; }
+        if (!joined) { why = 'Could not join ' + name; break; }
         setPill(c, 'joined');
       }
-      let n = 0, cool = 0, retriedJoin = false, drinks = 0;
-      while (n < hits) {
+      let n = 0, cool = 0, retriedJoin = false, drinks = 0, flat = 0;
+      while (cap != null || n < hits) {
         if (run.stop) { why = 'stopped'; break outer; }
         c = byMid(mid);
-        run.note = nameOf(c || document.body) + ' · hit ' + (n + 1) + '/' + hits; paintStatus();
+        let cost = want;
+        if (cap != null) {
+          cost = chooseCost(want, cap - dealt);
+          if (cost == null) cost = 1;                            // even Slash may pass the cap: still hit, being short of it would lose the EXP or the drop
+        }
+        run.cur = { name, dealt, cap, n: n + 1, of: cap != null ? 0 : hits, label: capName[mode] };
+        run.note = ''; paintStatus();
         const r = await hit(mid, cost);
         if (r.kind === 'ok') {
-          n++; run.hits++; if (r.damage != null) run.damage += r.damage;
+          n++; run.hits++;
+          if (r.damage != null) { run.damage += r.damage; dealt += r.damage; learn(cost, r.damage); flat = r.damage > 0 ? 0 : flat + 1; }
+          else if (cap != null) { const again = await lookup(mid); if (again) dealt = again.damage; else flat++; }   // the reply gave no number: ask the battle page
           if (Core && Core.me && Core.me.fromAttack) { try { Core.me.fromAttack(r.data); } catch (_) { /* top bar only */ } }
           if (c) paintHp(c, r.data.hp);
           if (r.dead) { if (c) markDead(c); run.kills++; break; }
+          if (cap != null && dealt >= cap) { run.capped++; break; }
+          if (flat >= 5) { run.notes.push(name + ': five hits did no damage, left alone'); break; }
         } else if (r.kind === 'monster_dead') { if (c) markDead(c); break; }
-        else if (r.kind === 'cooldown') { if (++cool > 6) { why = 'The game keeps saying "slow down" — raise the pause between hits'; break outer; } await sleep(700); continue; }
+        else if (r.kind === 'cooldown') { if (++cool > 6) { why = 'The game keeps saying "slow down": raise the pause between hits'; break outer; } await sleep(700); continue; }
         else if (r.kind === 'notjoined') {
           if (retriedJoin) { why = 'Could not join ' + (c ? nameOf(c) : 'the monster'); break outer; }
           retriedJoin = true; let j = false; try { j = await joinMonster(mid); } catch (_) { /* */ }
@@ -791,31 +1004,40 @@ const VS = (() => {
         } else if (r.kind === 'stamina' || r.kind === 'dead_player') {
           const key = r.kind === 'stamina' ? 'staminaPotion' : 'hpPotion';
           if (S.get(key) && Core && Core.potions && drinks < 3) {
-            drinks++; run.note = r.kind === 'stamina' ? 'Out of stamina — drinking a potion…' : 'You died — drinking a Full HP potion…'; paintStatus();
+            drinks++; run.note = r.kind === 'stamina' ? 'Out of stamina: drinking a potion…' : 'You died: drinking a Full HP potion…'; paintStatus();
             let used = null; try { used = await (r.kind === 'stamina' ? Core.potions.stamina() : Core.potions.hp()); } catch (_) { /* */ }
             if (used && used.ok) { await sleep(400); continue; }
             why = (r.kind === 'stamina' ? 'Out of stamina' : 'You are dead') + ' and no potion could be used' + (used && used.reason ? ' (' + used.reason + ')' : '');
           } else why = r.kind === 'stamina' ? 'Out of stamina' : 'You are dead (heal, then press Attack again)';
           break outer;
         } else { why = strip(r.message) || 'The server refused the attack'; break outer; }
-        if (n < hits && delay) await sleep(delay);
+        if (delay) await sleep(delay);
       }
       run.done++;
       if (delay && !run.stop) await sleep(delay);
     }
-    run.on = false;
-    run.note = (why && why !== 'stopped' ? '⚠ ' + why + ' · ' : why === 'stopped' ? 'Stopped · ' : '✔ Done · ') + fmt(run.hits) + ' hits' + (run.damage ? ', ' + compact(run.damage) + ' damage' : '') + (run.kills ? ', ' + run.kills + ' killed' : '');
+    run.on = false; run.cur = null;
+    const bits = [fmt(run.hits) + ' hits'];
+    if (run.damage) bits.push(compact(run.damage) + ' damage');
+    if (run.kills) bits.push(run.kills + ' killed');
+    if (run.capped) bits.push(run.capped + ' at the ' + (mode === 'hits' ? 'cap' : capName[mode]));
+    if (run.skipped.length) bits.push('left alone: ' + run.skipped.slice(0, 3).join('; ') + (run.skipped.length > 3 ? ' and ' + (run.skipped.length - 3) + ' more' : ''));
+    run.note = (why && why !== 'stopped' ? '⚠ ' + why + ' · ' : why === 'stopped' ? 'Stopped · ' : '✔ Done · ') + bits.join(', ') + (run.notes.length ? ' · ' + run.notes.slice(0, 2).join('; ') : '');
     paintStatus(why && why !== 'stopped' ? 'bad' : 'ok'); refreshBar();
   }
 
   /* -------------------------------------------------------------------- UI */
-  let bar = null, statusEl = null, attackBtn = null, stopBtn = null, skillSel = null, hitsInp = null, selCount = null;
+  let bar = null, statusEl = null, attackBtn = null, stopBtn = null, skillSel = null, segEl = null, bodyEl = null, optsEl = null, selCount = null, delayInp = null;
+  const checks = {};
   const picked = () => cards().filter((c) => { const cb = c.querySelector('.uic-da-pick input'); return cb && cb.checked && !isDead(c); });
 
   function paintStatus(tone) {
     if (!statusEl) return;
     statusEl.className = 'uic-da-status' + (tone ? ' ' + tone : '');
-    statusEl.textContent = run.on ? '⏳ ' + run.note + ' · monster ' + Math.min(run.done + 1, run.queue) + '/' + run.queue + ' · ' + fmt(run.hits) + ' hits' + (run.damage ? ' · ' + compact(run.damage) : '') : run.note;
+    if (!run.on) { statusEl.textContent = run.note; return; }
+    const cur = run.cur;
+    const where = cur ? cur.name + ' · ' + (cur.cap != null ? compact(cur.dealt) + ' / ' + compact(cur.cap) + ' ' + cur.label : 'hit ' + cur.n + '/' + cur.of) : run.note;
+    statusEl.textContent = '⏳ ' + where + ' · monster ' + Math.min(run.done + 1, run.queue) + '/' + run.queue + ' · ' + fmt(run.hits) + ' hits' + (run.damage ? ' · ' + compact(run.damage) : '') + (run.cur && run.note ? ' · ' + run.note : '');
   }
   function refreshBar() {
     if (!bar) return;
@@ -825,7 +1047,46 @@ const VS = (() => {
     stopBtn.disabled = !run.on;
     document.querySelectorAll('.uic-da-hit').forEach((b) => { b.disabled = run.on; });
   }
-  function syncControls() { if (skillSel) skillSel.value = String(S.get('skill')); if (hitsInp) hitsInp.value = String(S.get('hits')); }
+
+  // The part of the panel that depends on the mode.
+  function drawBody() {
+    if (!bodyEl) return;
+    const mode = modeOf();
+    segEl.querySelectorAll('button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.mode === mode)));
+    const tip = MODES.find((m) => m[0] === mode)[2];
+    const note = el('div', { class: 'core-dim' }, tip);
+    const field = (label, input, hint) => el('div', { class: 'core-field' }, el('label', null, label), input, hint ? el('div', { class: 'core-dim' }, hint) : null);
+    if (mode === 'hits') {
+      const inp = el('input', { class: 'core-input uic-da-num', type: 'number', min: '1', max: '100000', value: String(S.get('hits')), title: 'Hits per monster' });
+      inp.addEventListener('change', () => { const v = Math.max(1, Math.floor(Number(inp.value) || 1)); inp.value = String(v); S.set('hits', v); });
+      bodyEl.replaceChildren(el('div', { class: 'uic-da-row' }, field('Hits per monster', inp), note));
+    } else if (mode === 'fixed') {
+      const inp = el('input', { class: 'core-input uic-da-cap', type: 'text', inputmode: 'numeric', placeholder: 'e.g. 5,000,000 or 5m', value: num(S.get('cap')) ? fmt(S.get('cap')) : '', title: 'Damage cap for every monster' });
+      inp.addEventListener('change', () => { const v = num(inp.value); inp.value = v ? fmt(v) : ''; S.set('cap', v); });
+      bodyEl.replaceChildren(el('div', { class: 'uic-da-row' }, field('Damage cap', inp, 'Counts the damage you already have on a monster.'), note));
+    } else if (mode === 'monster') {
+      const groups = new Map();
+      cards().forEach((c) => { const nm = nameOf(c), k = norm(nm); const g = groups.get(k) || { name: nm, n: 0 }; if (!isDead(c)) g.n++; groups.set(k, g); });
+      const saved = mobCaps(), list = el('div', { class: 'uic-da-moblist' });
+      groups.forEach((g, k) => {
+        const inp = el('input', { class: 'core-input uic-da-mobcap', type: 'text', inputmode: 'numeric', placeholder: 'skip', value: num(saved[k]) ? fmt(saved[k]) : '', 'data-mob': k, title: 'Damage cap for ' + g.name });
+        inp.addEventListener('change', () => {
+          const v = num(inp.value); inp.value = v ? fmt(v) : '';
+          const all = Object.assign({}, mobCaps()); if (v) all[k] = v; else delete all[k];
+          S.set('mobCaps', all);
+        });
+        list.append(el('label', { class: 'uic-da-mob' }, el('span', { class: 'uic-da-mobname' }, g.name, el('span', { class: 'core-dim' }, ' ×' + g.n)), inp));
+      });
+      bodyEl.replaceChildren(note, groups.size ? list : el('div', { class: 'core-dim' }, 'No monsters on this map.'));
+    } else bodyEl.replaceChildren(note);
+    if (checks.overshoot) checks.overshoot.label.style.display = mode === 'hits' ? 'none' : '';
+  }
+  function syncControls() {
+    if (skillSel) skillSel.value = String(S.get('skill'));
+    if (delayInp) delayInp.value = String(S.get('delay'));
+    ['autoJoin', 'staminaPotion', 'hpPotion', 'overshoot'].forEach((k) => { if (checks[k]) checks[k].input.checked = !!S.get(k); });
+    drawBody();
+  }
 
   function decorateCard(c) {
     if (c.dataset.uicDa) return;
@@ -836,7 +1097,7 @@ const VS = (() => {
     cb.addEventListener('change', refreshBar);
     c.insertBefore(el('label', { class: 'uic-da-pick' }, cb), c.firstChild);
     const fight = c.querySelector('a[href*="dgmid="]');
-    const btn = el('button', { class: 'uic-da-hit', type: 'button', title: 'Attack this monster with the chosen skill', onclick: (e) => { e.preventDefault(); attackMonsters([mid]); } }, '⚡ Hit');
+    const btn = el('button', { class: 'core-btn core-btn-soft uic-da-hit', type: 'button', title: 'Attack this monster with the panel\'s skill and mode', onclick: (e) => { e.preventDefault(); attackMonsters([mid]); } }, '⚡ Hit');
     if (dead) { btn.disabled = true; c.classList.add('uic-da-dead'); }
     if (fight && fight.parentNode) fight.after(btn); else c.append(btn);
   }
@@ -846,19 +1107,38 @@ const VS = (() => {
     const list = cards();
     if (!list.length) return false;
     const first = list[0].closest('.panel') || list[0].parentNode;
-    skillSel = el('select', { class: 'uic-da-in', title: 'Skill' }, SKILLS.map((s) => el('option', { value: String(s[0]) }, s[2] + ' · ' + s[0])));
+    if (Core && Core.ui && Core.ui.base) Core.ui.base();         // Core's shared styles (.core-card, .core-seg, ...)
+    const field = (label, ctl) => el('div', { class: 'core-field' }, el('label', null, label), ctl);
+    const check = (key, text, title) => {
+      const input = el('input', { type: 'checkbox' });
+      input.addEventListener('change', () => S.set(key, input.checked));
+      const label = el('label', { class: 'core-check', title: title || null }, input, text);
+      checks[key] = { input, label };
+      return label;
+    };
+    skillSel = el('select', { class: 'core-input', title: 'Skill' }, SKILLS.map((s) => el('option', { value: String(s[0]) }, s[2] + ' · ' + s[0] + ' stamina')));
     skillSel.addEventListener('change', () => S.set('skill', Number(skillSel.value)));
-    hitsInp = el('input', { class: 'uic-da-in uic-da-num', type: 'number', min: '1', max: '100000', title: 'Hits per monster' });
-    hitsInp.addEventListener('change', () => { const n = Math.max(1, Math.floor(Number(hitsInp.value) || 1)); hitsInp.value = String(n); S.set('hits', n); });
+    segEl = el('div', { class: 'core-seg uic-da-mode', role: 'group', 'aria-label': 'Stop when' }, MODES.map(([id, label, tip]) =>
+      el('button', { type: 'button', 'data-mode': id, 'aria-pressed': 'false', title: tip, onclick: () => { S.set('mode', id); drawBody(); } }, label)));
+    bodyEl = el('div', { class: 'uic-da-body' });
+    delayInp = el('input', { class: 'core-input uic-da-num', type: 'number', min: '0', max: '10000', step: '50', title: 'Pause between hits (ms). The game may refuse hits that come too fast.' });
+    delayInp.addEventListener('change', () => { const v = Math.max(0, Math.min(10000, Math.floor(Number(delayInp.value) || 0))); delayInp.value = String(v); S.set('delay', v); });
+    optsEl = el('div', { class: 'uic-da-row uic-da-opts' },
+      check('autoJoin', 'Join "not joined" monsters first'),
+      check('staminaPotion', 'Stamina potion when out', 'Uses items from your inventory.'),
+      check('hpPotion', 'Full HP potion when dead', 'Uses items from your inventory.'),
+      check('overshoot', 'Don\'t waste big hits near the cap', 'Close to the cap it switches to a smaller skill, so less stamina is spent passing it. It never stops short of the cap.'),
+      field('Pause (ms)', delayInp));
     selCount = el('b', null, '0');
-    attackBtn = el('button', { class: 'uic-da-go', type: 'button', onclick: () => attackMonsters(picked().map(midOf)) }, '⚡ Attack selected (', selCount, ')');
-    stopBtn = el('button', { class: 'uic-da-stop', type: 'button', onclick: () => { run.stop = true; run.note = 'Stopping after this hit…'; paintStatus(); } }, '■ Stop');
+    attackBtn = el('button', { class: 'core-btn core-btn-success', type: 'button', onclick: () => attackMonsters(picked().map(midOf)) }, '⚡ Attack selected (', selCount, ')');
+    stopBtn = el('button', { class: 'core-btn core-btn-danger', type: 'button', onclick: () => { run.stop = true; run.note = 'Stopping after this hit…'; paintStatus(); } }, '■ Stop');
     statusEl = el('div', { class: 'uic-da-status' });
-    const link = (t, fn) => el('button', { class: 'uic-da-link', type: 'button', onclick: fn }, t);
-    bar = el('div', { class: 'panel uic-da' },
-      el('div', { class: 'uic-da-row' }, el('span', { class: 'uic-da-title' }, '⚡ Quick attack'), skillSel, el('span', { class: 'uic-da-x' }, '×'), hitsInp, el('span', { class: 'uic-da-dim' }, 'hits each'),
-        hasSettings ? el('button', { class: 'uic-da-gear', type: 'button', title: 'Options', onclick: () => VS.open(ID) }, '⚙') : null),
-      el('div', { class: 'uic-da-row' }, attackBtn, stopBtn, el('span', { class: 'uic-da-dim' }, 'Select:'),
+    const link = (t, fn) => el('button', { class: 'core-link', type: 'button', onclick: fn }, t);
+    bar = el('div', { class: 'core-card uic-da' },
+      el('div', { class: 'core-card-h' }, '⚡ Quick attack'),
+      el('div', { class: 'uic-da-row' }, field('Skill', skillSel), field('Stop when', segEl)),
+      bodyEl, optsEl,
+      el('div', { class: 'uic-da-row uic-da-actions' }, attackBtn, stopBtn, el('span', { class: 'core-dim' }, 'Select:'),
         link('all alive', () => selectWhere(() => true)), link('not joined', () => selectWhere((c) => !isJoined(c))), link('joined', () => selectWhere((c) => isJoined(c))), link('none', () => selectWhere(() => false))),
       statusEl);
     first.parentNode.insertBefore(bar, first);
@@ -868,26 +1148,26 @@ const VS = (() => {
   }
   function css() {
     const s = el('style', { id: 'uic-da-css' });
+    /* Layout only. Colours, buttons, inputs and the segmented switch are Core's own classes (.core-card .core-btn .core-input .core-seg .core-check .core-field .core-link). */
     s.textContent = `
-      .uic-da{display:flex;flex-direction:column;gap:8px}
-      .uic-da-row{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
-      .uic-da-title{font-weight:800;margin-right:6px}
-      .uic-da-dim{color:#9aa0b8;font-size:12px}
-      .uic-da-x{color:#9aa0b8}
-      .uic-da-in{background:#0f1020;border:1px solid #232437;border-radius:8px;color:#f1f1ff;padding:7px 9px;font-size:13px}
-      .uic-da-num{width:84px}
-      .uic-da-go,.uic-da-stop,.uic-da-hit,.uic-da-gear{border:none;border-radius:9px;cursor:pointer;font-weight:800;font-size:13px;color:#fff}
-      .uic-da-go{background:linear-gradient(135deg,#5562ff,#7b4dff);padding:8px 14px}
-      .uic-da-stop{background:#7b3040;padding:8px 12px}
-      .uic-da-hit{background:#2b2d52;margin-left:8px;padding:5px 10px;border:1px solid #3a3d66}
-      .uic-da-gear{background:#222d49;padding:6px 9px;margin-left:auto}
-      .uic-da button:disabled,.uic-da-hit:disabled{opacity:.4;cursor:not-allowed}
-      .uic-da-link{background:none;border:none;color:#8fa6ff;cursor:pointer;font-size:12px;font-weight:700;padding:2px 4px}
-      .uic-da-link:hover{text-decoration:underline}
-      .uic-da-status{min-height:18px;font-size:12px;color:#cfd3ea}
-      .uic-da-status.ok{color:#90ee90}.uic-da-status.bad{color:#ff8a80}
+      .uic-da{display:flex;flex-direction:column;gap:12px;margin:0 0 14px}
+      .uic-da-row{display:flex;flex-wrap:wrap;align-items:flex-end;gap:10px 16px}
+      .uic-da-actions{align-items:center}
+      .uic-da-opts{align-items:center}
+      .uic-da-body{display:flex;flex-direction:column;gap:8px}
+      .uic-da-num{width:96px}
+      .uic-da-cap{width:170px}
+      .uic-da-moblist{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:6px 14px}
+      .uic-da-mob{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:0;font-size:13px}
+      .uic-da-mobname{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+      .uic-da-mobcap{width:130px;flex:0 0 auto}
+      .uic-da select.core-input{min-width:200px}
+      .uic-da-status{min-height:18px;font-size:12px;color:#cfd8f6}
+      .uic-da-status.ok{color:#8ee6a8}.uic-da-status.bad{color:#ff8a97}
+      .uic-da button:disabled{opacity:.45;cursor:not-allowed}
       .uic-da-pick{display:flex;align-items:flex-start;padding:2px 8px 0 0}
-      .uic-da-pick input{width:18px;height:18px;cursor:pointer;accent-color:#6f75ff}
+      .uic-da-pick input{width:18px;height:18px;cursor:pointer;accent-color:#5b7cff}
+      .core-btn.uic-da-hit{padding:5px 10px;margin-left:8px;font-size:12px}
       .mon.uic-da-dead{opacity:.55}
     `;
     (document.head || document.documentElement).appendChild(s);
@@ -900,10 +1180,15 @@ const VS = (() => {
     if (!build()) return;
     // Rows the page adds later (or redraws) get their controls too.
     const host = cards()[0] && cards()[0].parentNode;
-    if (host) new MutationObserver(() => { cards().forEach(decorateCard); refreshBar(); }).observe(host, { childList: true });
-    if (hasSettings) VS.onChange(ID, syncControls);
+    if (host) new MutationObserver(() => { cards().forEach(decorateCard); refreshBar(); if (modeOf() === 'monster' && !bodyEl.contains(document.activeElement)) drawBody(); }).observe(host, { childList: true });
+    if (hasSettings) {
+      let snap = '';
+      const shown = () => JSON.stringify(['skill', 'mode', 'hits', 'cap', 'mobCaps', 'overshoot', 'delay', 'autoJoin', 'staminaPotion', 'hpPotion'].map((k) => S.get(k)));
+      snap = shown();
+      VS.onChange(ID, () => { const now = shown(); if (now === snap) return; snap = now; if (!bar.contains(document.activeElement)) syncControls(); });   // another tab changed it
+    }
     window.addEventListener('beforeunload', () => { run.stop = true; });
-    window.__uicDungeonAttack = { run, get last() { return DBG.last; }, attack: attackMonsters, build };
+    window.__uicDungeonAttack = { run, get last() { return DBG.last; }, attack: attackMonsters, build, lookup, chooseCost, learned };
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start, { once: true }); else start();
 })();
