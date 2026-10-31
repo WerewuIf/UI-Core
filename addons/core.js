@@ -472,11 +472,16 @@
       .core-pill-loading{color:#ffd978;border-color:rgba(255,217,120,.4)}
       /* NO scrollbar here: the modal card is the one and only scroller (like the original modals). */
       .core-float-pane{min-width:0}
-      .core-addon{display:flex;gap:12px;align-items:center;padding:12px;background:#11192d;border:1px solid rgba(255,255,255,.06);border-radius:14px;margin-bottom:10px}
-      .core-addon-main{flex:1 1 auto;min-width:0}
-      .core-addon-name{font-weight:800}
-      .core-addon-meta{display:flex;flex-direction:column;align-items:flex-end;gap:3px}
-      .core-addon .core-btn{padding:6px 10px}
+      .core-addon{display:grid;grid-template-columns:38px 18px minmax(0,1fr) 132px 164px;gap:9px;align-items:center;padding:10px 11px;background:#11192d;border:1px solid rgba(255,255,255,.06);border-radius:13px;margin-bottom:8px;min-width:0;box-sizing:border-box}
+      .core-addon-main{min-width:0;overflow-wrap:anywhere}
+      .core-addon-name{font-weight:800;line-height:1.35}
+      .core-addon-meta{display:flex;flex-direction:column;align-items:flex-end;justify-content:center;gap:4px;min-width:0;width:132px;box-sizing:border-box}
+      .core-addon-meta .core-pill{white-space:nowrap}
+      .core-addon-actions{display:grid;grid-template-columns:86px 34px 32px;gap:6px;align-items:center;justify-content:end;min-width:0}
+      .core-addon-actions>.core-btn{width:100%;min-width:0;box-sizing:border-box;white-space:nowrap}
+      .core-addon-slot{display:block;width:100%;height:30px;box-sizing:border-box}
+      .core-addon-slot.delete{width:34px}
+      .core-addon-actions .core-grip{width:32px}
       .core-addon.core-placeholder{opacity:.35;border-style:dashed;border-color:rgba(110,168,255,.6)}
       .core-ghost{position:fixed;z-index:2147483002;margin:0 !important;box-sizing:border-box;pointer-events:none;will-change:transform;transform:scale(1.015);
         background:#17213a;border-color:rgba(110,168,255,.55);box-shadow:0 16px 34px rgba(0,0,0,.55)}
@@ -484,6 +489,8 @@
       .core-addon-ico{flex:0 0 auto;width:38px;height:38px;display:flex;align-items:center;justify-content:center;font-size:19px;
         background:#24263a;border:1px solid #2f324d;border-radius:11px}
       .core-addon-ico.none{background:none;border:1px dashed rgba(255,255,255,.18);color:#6d7aa3;font-size:15px}
+      @media(max-width:720px){.core-addon{grid-template-columns:32px 18px minmax(0,1fr) 158px;gap:7px;padding:9px}.core-addon-main{grid-column:3;grid-row:1}.core-addon-meta{grid-column:3;grid-row:2;width:auto;flex-direction:row;align-items:center;justify-content:flex-start;flex-wrap:wrap}.core-addon-actions{grid-column:4;grid-row:1 / span 2;grid-template-columns:76px 30px 30px;gap:5px}.core-addon-slot.delete{width:30px}.core-addon-ico{width:32px;height:32px}}
+      @media(max-width:430px){.core-addon{grid-template-columns:28px 16px minmax(0,1fr) 32px;gap:6px}.core-addon-actions{grid-column:4;grid-row:1 / span 2;grid-template-columns:30px;gap:4px}.core-addon-actions>.core-btn:first-child,.core-addon-actions>.core-addon-slot.option{display:none}.core-addon-actions>.core-btn.core-btn-danger,.core-addon-actions>.core-addon-slot.delete{display:none}.core-addon-meta{font-size:10px}.core-addon-ico{width:28px;height:28px}}
       .core-grip{flex:0 0 auto;width:32px;height:36px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;
         border-radius:9px;cursor:grab;touch-action:none;user-select:none;-webkit-user-select:none;outline:none}
       .core-grip i{display:block;width:16px;height:2px;border-radius:2px;background:#7f8ab8;transition:background .12s}
@@ -1382,6 +1389,10 @@
       const noBtn = !has && (declared(e) === false || s.state === 'ok') ? ' · no button' : '';
       const grip = h('div', { class: 'core-grip', tabindex: '0', role: 'button', title: 'Drag to rearrange', 'aria-label': 'Rearrange ' + (e.name || e.id) + ': drag, or press Up / Down', 'data-grip': e.id },
         h('i'), h('i'));
+      const canOptions = !!(schemaOf(e.id) || declaredPages(e.id).length > 1);
+      const optionControl = canOptions ? ui.btn('Options', 'soft', () => openOptions(e.id)) : h('span', { class: 'core-addon-slot option', 'aria-hidden': 'true' });
+      const deleteControl = e.source === 'custom' ? ui.btn('🗑', 'danger', () => removeCustom(e.id)) : h('span', { class: 'core-addon-slot delete', 'aria-hidden': 'true' });
+      const actions = h('div', { class: 'core-addon-actions' }, optionControl, deleteControl, grip);
       const row = h('div', { class: 'core-addon', 'data-id': e.id }, ico, cb,
         h('div', { class: 'core-addon-main' },
           h('div', { class: 'core-addon-name' }, e.name || e.id, h('span', { class: 'core-dim' }, '  ' + e.id + ((s.ver || e.version) ? ' v' + (s.ver || e.version) + (s.ver && e.version && s.ver !== e.version ? ' (v' + e.version + ' ready)' : '') : '') + ' · ' + e.source + noBtn)),
@@ -1390,9 +1401,7 @@
         h('div', { class: 'core-addon-meta' },
           h('span', { class: 'core-pill core-pill-' + s.state }, s.state + (s.update ? ' · update ready' : '')),
           s.from ? h('span', { class: 'core-dim' }, s.from + (s.bytes ? ' · ' + Math.round(s.bytes / 1024) + ' KB' : '')) : null),
-        (schemaOf(e.id) || declaredPages(e.id).length > 1) ? ui.btn('Options', 'soft', () => openOptions(e.id)) : null,
-        e.source === 'custom' ? ui.btn('🗑', 'danger', () => removeCustom(e.id)) : null,
-        grip);
+        actions);
       if (!has) {   // no button = nothing to arrange: keep the row's layout, drop the handle
         grip.style.visibility = 'hidden'; grip.removeAttribute('tabindex'); grip.removeAttribute('role'); grip.setAttribute('aria-hidden', 'true');
         return row;
@@ -3313,6 +3322,11 @@
     .core-opt-det{margin-top:8px;background:#11192d;border:1px solid rgba(255,255,255,.06);border-radius:14px;padding:6px 12px}
     .core-opt-det>summary{cursor:pointer;font-weight:700;font-size:13px;padding:6px 0;color:#cfd8f6}
     .core-pgrp{margin:6px 0 12px}
+    .core-page-groups{display:grid;gap:6px;padding:4px 0 6px}
+    .core-page-group{background:#0d1425;border:1px solid rgba(255,255,255,.06);border-radius:9px;padding:0 9px;min-width:0}
+    .core-page-group>summary{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 0;cursor:pointer;list-style:none;color:#cfd8f6;font-size:11px;font-weight:800}
+    .core-page-group-tools{display:flex;gap:10px;padding:0 0 7px}
+    .core-page-group .core-chips{padding:0 0 8px}
     .core-pgrp-h{display:flex;align-items:center;gap:8px;font-size:11px;color:#9caad0;font-weight:800;text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px}
     .core-chips{display:flex;flex-wrap:wrap;gap:6px}
     .core-chip{border:1px solid #2b3859;background:#0d1322;color:#8f9bc2;border-radius:999px;padding:5px 11px;font:700 12px Arial,sans-serif;cursor:pointer;margin:0}
@@ -3411,29 +3425,31 @@
   function pagePicker(id) {
     if (!pageList(id).length) return null;
     const summary = h('div', { class: 'core-dim', style: { marginBottom: '2px' } });
-    const det = h('details', { class: 'core-opt-det' }), body = h('div');
-    const sec = h('div', { class: 'core-opt-sec' }, h('div', { class: 'core-opt-h' }, 'Where it runs'), summary, det);
-    det.append(h('summary', {}, 'Choose pages'), body);
+    const det = h('details', { class: 'core-opt-det' }), body = h('div', { class: 'core-page-groups' });
+    const sec = h('div', { class: 'core-opt-sec' }, h('div', { class: 'core-opt-h' }, 'Page access'), summary, det);
+    det.append(h('summary', {}, 'Manage page access'), body);
     const draw = () => {
       const list = pageList(id), off = list.filter((p) => !p.on), by = new Map(list.map((p) => [normPath(p.path), p]));
-      summary.textContent = off.length
-        ? 'Off on ' + off.length + ' of ' + list.length + ' pages: ' + off.slice(0, 4).map((p) => p.label).join(', ') + (off.length > 4 ? ' and more' : '') + '. Applies from the next page load.'
-        : (list.length >= PAGE_DIR.length ? 'Every page.' : 'All ' + list.length + ' pages it supports.') + ' Switch pages off below if you do not want it on some.';
+      const onN = list.length - off.length;
+      summary.textContent = onN + ' of ' + list.length + ' supported pages enabled' + (off.length ? ' · ' + off.length + ' off' : '') + '. Changes apply on the next page load.';
       const groups = PAGE_GROUPS.map(([title, paths]) => [title, paths.map((x) => by.get(normPath(x))).filter(Boolean)]);
       const seen = new Set(groups.flatMap(([, ps]) => ps.map((p) => normPath(p.path))));
       const rest = list.filter((p) => !seen.has(normPath(p.path)));
       if (rest.length) groups.push(['Other', rest]);
       body.replaceChildren(...groups.filter(([, ps]) => ps.length).map(([title, ps]) => {
+        const enabled = ps.filter((p) => p.on).length;
         const setAll = (on) => { ps.forEach((p) => pageSet(id, p.path, on)); draw(); };
-        return h('div', { class: 'core-pgrp' },
-          h('div', { class: 'core-pgrp-h' }, title, h('div', { class: 'core-spacer' }),
-            h('button', { class: 'core-opt-link', type: 'button', onclick: () => setAll(true) }, 'All'),
-            h('button', { class: 'core-opt-link', type: 'button', onclick: () => setAll(false) }, 'None')),
+        const group = h('details', { class: 'core-page-group' });
+        const tools = h('div', { class: 'core-page-group-tools' },
+          h('button', { class: 'core-opt-link', type: 'button', onclick: () => setAll(true) }, 'All on'),
+          h('button', { class: 'core-opt-link', type: 'button', onclick: () => setAll(false) }, 'All off'));
+        group.append(h('summary', {}, h('span', {}, title), h('span', { class: 'core-dim' }, enabled + '/' + ps.length)),
+          tools,
           h('div', { class: 'core-chips' }, ps.map((p) => h('button', { class: 'core-chip' + (p.on ? ' on' : ''), type: 'button', 'aria-pressed': String(p.on), title: p.path, onclick: () => { pageSet(id, p.path, !p.on); draw(); } }, p.label))));
+        return group;
       }));
     };
     draw();
-    if (pageList(id).some((p) => !p.on)) det.open = true;
     return sec;
   }
   function renderOptions(id, el) {
@@ -3485,7 +3501,7 @@
 
   /* ------------------------------------------------------------ export --- */
   const Core = {
-    __isCore: true, apiLevel: API, version: '3.20.1', debug: false, tabId: TAB,
+    __isCore: true, apiLevel: API, version: '3.20.2', debug: false, tabId: TAB,
     esc, sleep, debounce, fmt, int, compact, parseNum, parseJson,
     on, off, once, emit,
     state, store, player,
