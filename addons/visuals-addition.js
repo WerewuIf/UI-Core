@@ -1,60 +1,146 @@
 /* ==========================================================================
- * Sidebar  (Core addon, every page that has the game's side drawer)
+ * Visuals  (Core addon, one file, five modules)
  *
- *  - Rebuilds the menu list in YOUR order. Items you don't want are hidden, not deleted: they stay in the options list.
- *  - Uses the game's own sidebar classes (side-nav-item / side-icon / side-label), so it follows whatever the game's CSS looks like today.
- *    The only CSS this adds is the small ⚙ button.
- *  - ⚙ in the sidebar header opens this addon's options (the same window as Addons panel > Options): tick to show, ▲ ▼ to re-order.
- *  - "Emberfall" always points at the NEWEST event the game lists, whatever it is called this season.
- *  - A menu entry the game adds later that isn't in this list is kept (at the end) instead of silently disappearing.
+ *   sidebar          every page      your menu order, submenus (Guild, PvP, Artisans, Merchant, Classes), Battle Pass daily quests
+ *   pets             pets.php        Feed button on each pet with the treats that reach the next level
+ *   dungeon-attack   guild_dungeon_location.php   attack every monster in one click, with potions
+ *   artisans-guild   blacksmith.php, legendary_forge.php, legendary_decraft.php   Craft / Legendary tabs, click-to-craft, repeat without reloads
+ *   black-merchant   black_merchant.php            same look as the Merchant rework
  *
- * Needs Core 3.18+ (Core.settings). On an older Core it still re-orders with the default order, just without the ⚙.
- * Add to addons.json:  { "id": "sidebar", "name": "Sidebar", "version": "1.0.0", "url": "addons/sidebar.js", "button": false }
+ * Needs Core 3.19+ (Core.settings.module): Addons panel > Visuals > Options shows ONE switch per module, with that module's own
+ * options under it, instead of a long list of pages. A module that is off does not load, and the whole addon is skipped on a page
+ * where no module is on. On an older Core everything still runs; the options are just not grouped.
  *
- * Debugging: window.__uicSidebar.render() redraws, .items() shows what was drawn.
+ * addons.json:  { "id": "visuals-addition", "name": "Visuals", "version": "2.0.0", "url": "addons/visuals-addition.js", "button": false }
+ *   (no "match": the sidebar module needs every page; the other modules check their own page.)
+ *
+ * Your saved Sidebar / Pets / Dungeon Attack options from the old separate ids are copied across once, only where you
+ * had changed something and the new option is still at its default.
+ *
+ * Debugging handles: window.__uicSidebar, __uicPets, __uicDungeonAttack, __uicArtisans, __uicBlackMerchant.
  * ========================================================================== */
+
+/* ------------------------------------------------------------------ shared: modules + options (one Options window for all five) */
+const VS = (() => {
+  const PARENT = 'visuals-addition';
+  const C = window.Core;
+  const MODULES = [
+    { id: 'sidebar',        label: 'Sidebar',        icon: '☰',  pages: '*',                                    help: 'Your menu order, submenus and Battle Pass daily quests.' },
+    { id: 'pets',           label: 'Pets',           icon: '🐾', pages: ['/pets.php'],                          help: 'A Feed button on each pet.' },
+    { id: 'dungeon-attack', label: 'Dungeon Attack', icon: '⚡', pages: ['/guild_dungeon_location.php'],        help: 'Attack every monster on the map in one click.' },
+    { id: 'artisans-guild', label: 'Artisans Guild', icon: '⚒️', pages: ['/blacksmith.php', '/legendary_forge.php', '/legendary_decraft.php'], help: 'Craft, Upgrade and Decraft in one page, without reloads.' },
+    { id: 'black-merchant', label: 'Black Merchant', icon: '🕯️', pages: ['/black_merchant.php'],               help: 'Same look as the Merchant rework.' },
+  ];
+  const ok = !!(C && C.settings && C.settings.define);
+  const hasModules = ok && typeof C.settings.module === 'function';
+  const norm = (p) => String(p || '').split(/[?#]/)[0].replace(/\/+$/, '').toLowerCase() || '/';
+  const here = () => norm(location.pathname);
+  const pageMatch = (m) => m.pages === '*' || [].concat(m.pages).some((x) => norm(x) === here());
+  const specs = {};
+  const key = (part, k) => part + '.' + k;
+  const full = () => ({
+    title: 'Visuals', icon: '🎨', modules: MODULES,
+    fields: Object.keys(specs).flatMap((part) => specs[part].fields.map((f) => (f.key ? Object.assign({}, f, { key: key(part, f.key), module: part }) : Object.assign({}, f, { module: part })))),
+  });
+  const api = {
+    ok,
+    on(id) {
+      const m = MODULES.find((x) => x.id === id);
+      if (!m) return false;
+      return hasModules ? !!C.settings.module(PARENT, id) : pageMatch(m);
+    },
+    define(part, spec) { specs[part] = spec; if (ok) { try { C.settings.define(PARENT, full()); } catch (e) { console.warn('[visuals] options not registered', e); } } },   // registered at once: a module reads its own options in the same tick
+    get(part, k) { return C.settings.get(PARENT, key(part, k)); },
+    set(part, k, v) { C.settings.set(PARENT, key(part, k), v); },
+    list(part, k) { return C.settings.list(PARENT, key(part, k)); },
+    onChange(part, fn) { return C.settings.onChange(PARENT, (k, v, all) => { if (k.indexOf(part + '.') === 0) fn(k.slice(part.length + 1), v, all); }); },
+    open() { C.settings.open(PARENT); },
+    /* call once, after all five modules had their turn: registers every module's options on EVERY page so the Options window is complete anywhere */
+    finish() {
+      if (!ok) return;
+      try { C.settings.define(PARENT, full()); } catch (e) { console.warn('[visuals] options not registered', e); return; }
+      try { migrate(); } catch (e) { console.warn('[visuals] option migration skipped', e); }
+    },
+  };
+  if (ok) { try { C.settings.define(PARENT, { title: 'Visuals', icon: '🎨', modules: MODULES, fields: [] }); } catch (_) {} }   // so on() works before the options are registered
+
+  const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+  const dflt = (f) => {
+    if (f.default !== undefined) return f.default;
+    if (f.type === 'bool') return false;
+    if (f.type === 'number') return typeof f.min === 'number' ? f.min : 0;
+    if (f.type === 'orderlist') return { order: (f.items || []).map((i) => i.id), hidden: (f.items || []).filter((i) => i.hidden).map((i) => i.id) };
+    if (f.type === 'select') { const o = (f.options || [])[0]; return Array.isArray(o) ? o[0] : o; }
+    return '';
+  };
+  function migrate() {
+    let done = false; try { done = localStorage.getItem('uic:visuals:migrated') === '1'; } catch (_) {}
+    if (done) return;
+    Object.keys(specs).forEach((part) => specs[part].fields.forEach((f) => {
+      if (!f.key || f.type === 'heading' || f.type === 'button') return;
+      const old = C.settings.get(part, f.key);                                   // the old separate id ("sidebar", "pets", "dungeon-attack")
+      if (old === undefined) return;
+      const d = dflt(f), cur = C.settings.get(PARENT, key(part, f.key));
+      if (!same(old, d) && same(cur, d)) C.settings.set(PARENT, key(part, f.key), old);
+    }));
+    try { localStorage.setItem('uic:visuals:migrated', '1'); } catch (_) {}
+  }
+  return api;
+})();
+
+/* ====================================================================== SIDEBAR ====================================================================== */
 (function sidebar() {
   'use strict';
 
-  if (window.__uicSidebar) return;
 
   const ID = 'sidebar';
 
   /* The order you asked for. `native` = the href prefix of the game's own entry (used to borrow its current label/icon and to find the newest event). */
+  const A = (id, icon, label, href) => ({ id, icon, label, href });
   const ITEMS = [
     { id: 'event',        icon: '🔥', label: 'Emberfall Event',   href: '/event_page.php', event: true },
-    { id: 'guild',        icon: '🏰', label: 'Guild',             href: '/guild_dash.php' },
-    { id: 'battlepass',   icon: '🎟️', label: 'Battle Pass',       href: '/battle_pass.php' },
-    { id: 'pvp',          icon: '⚔️', label: 'PvP',               href: '/pvp.php' },
-    { id: 'artisans',     icon: '⚒️', label: 'Artisans Guild',    href: '/blacksmith.php' },
+    { id: 'guild',        icon: '🏰', label: 'Guild',             href: '/guild_dash.php',
+      kids: [A('war', '🗺️', 'Territory War', '/world_map.php'), A('gdungeon', '🕳️', 'Guild Dungeon', '/guild_dungeon.php')] },
+    { id: 'battlepass',   icon: '🎟️', label: 'Battle Pass',       href: '/battle_pass.php', quests: true },
+    { id: 'pvp',          icon: '⚔️', label: 'PvP',               href: '/pvp.php',
+      kids: [A('colosseum', '🏟️', 'Colosseum', '/colosseum.php')] },
+    { id: 'artisans',     icon: '⚒️', label: 'Artisans Guild',    href: '/blacksmith.php',
+      kids: [A('blacksmith', '⚒️', 'Blacksmith', '/blacksmith.php'), A('forge', '🔥', 'Legendary Forge', '/legendary_forge.php'), A('decraft', '🪓', 'Decraft Altar', '/legendary_decraft.php')] },
     { id: 'adventurers',  icon: '✨', label: 'Adventurers Guild', href: '/adventurers_guild.php', keepNativeLabel: true },
     { id: 'crystals',     icon: '💎', label: 'Power Crystals',    href: '/power_crystals.php' },
     { id: 'pets',         icon: '🐾', label: 'Pets',              href: '/pets.php' },
     { id: 'inventory',    icon: '🎒', label: 'Inventory',         href: '/inventory.php' },
-    { id: 'merchant',     icon: '🛒', label: 'Merchant',          href: '/merchant.php' },
+    { id: 'merchant',     icon: '🛒', label: 'Merchant',          href: '/merchant.php',
+      kids: [A('blackmerchant', '🕯️', 'Black Merchant', '/black_merchant.php')] },
     { id: 'collections',  icon: '📚', label: 'Collections',       href: '/collections.php' },
     { id: 'achievements', icon: '🏆', label: 'Achievements',      href: '/achievements.php' },
-    { id: 'classes',      icon: '🎓', label: 'Classes',           href: '/classes.php' },
+    { id: 'classes',      icon: '🎓', label: 'Classes',           href: '/classes.php',
+      kids: [A('secondary', '☾', 'Secondary Class', '/secondary_classes.php'), A('advanced', '✦', 'Advanced Class', '/advanced_classes.php')] },
     { id: 'shadow',       icon: '🥷', label: 'Shadow Army',       href: '/shadow_army.php' },
     // off by default (still in the options list if you want them back)
     { id: 'home',         icon: '🏠', label: 'Home',              href: '/game_dash.php',         hidden: true },
     { id: 'mail',         icon: '✉',  label: 'Mail',              href: '/game_mail.php',         hidden: true },
     { id: 'stats',        icon: '📊', label: 'Stats',             href: '/stats.php',             hidden: true },
     { id: 'browse',       icon: '⚑',  label: 'Browse Guilds',     href: '/guild_join_create.php', hidden: true },
-    { id: 'blackmerchant', icon: '🕯️', label: 'Black Merchant',   href: '/black_merchant.php',    hidden: true },
   ];
 
   const Core = window.Core;
-  const hasSettings = !!(Core && Core.settings && Core.settings.define);
+  const hasSettings = VS.ok;
   if (hasSettings) {
-    Core.settings.define(ID, {
+    VS.define(ID, {
       title: 'Sidebar', icon: '☰',
       fields: [
         { key: 'items', type: 'orderlist', label: 'Menu items', help: 'Tick = shown. Use ▲ ▼ to change the order.', items: ITEMS.map(({ id, icon, label, hidden }) => ({ id, icon, label, hidden: !!hidden })) },
         { key: 'showNew', type: 'bool', label: 'Keep new game menu items', help: 'A menu entry the game adds later that is not in the list above is shown at the end.', default: true },
+        { key: 'submenus', type: 'bool', label: 'Show submenus', help: 'A ▸ button on Guild, PvP, Artisans Guild, Merchant and Classes opens their other pages.', default: true },
+        { key: 'quests', type: 'bool', label: 'Daily quests under Battle Pass', help: 'A ▸ button on Battle Pass shows today\'s quests with progress. Loaded only when you open it.', default: true },
       ],
     });
-  } else if (Core && Core.ui) console.warn('[sidebar] this Core has no Core.settings (needs 3.18+): using the default order, no options button.');
+  } else if (Core && Core.ui) console.warn('[sidebar] this Core has no Core.settings (needs 3.19+): using the default order, no options button.');
+  /* module gate: runs only when this module is switched on in Options and the page matches */
+  if (window.__uicSidebar) return;
+  if (!VS.on('sidebar')) return;
+
 
   /* --------------------------------------------------------------- helpers */
   const path = (s) => String(s || '').replace(/^[a-z]+:\/\/[^/]+/i, '').split(/[?#]/)[0].replace(/\/+$/, '').toLowerCase() || '/';
@@ -65,7 +151,9 @@
     kids.flat().forEach((c) => { if (c != null) n.append(c.nodeType ? c : document.createTextNode(String(c))); });
     return n;
   };
-  const cfg = () => (hasSettings ? { list: Core.settings.list(ID, 'items'), showNew: Core.settings.get(ID, 'showNew') !== false } : { list: ITEMS.map((i) => Object.assign({}, i, { hidden: !!i.hidden })), showNew: true });
+  const cfg = () => (hasSettings
+    ? { list: (VS.list(ID, 'items') || []).length ? VS.list(ID, 'items') : ITEMS.map((i) => Object.assign({}, i, { hidden: !!i.hidden })), showNew: VS.get(ID, 'showNew') !== false, submenus: VS.get(ID, 'submenus') !== false, quests: VS.get(ID, 'quests') !== false }
+    : { list: ITEMS.map((i) => Object.assign({}, i, { hidden: !!i.hidden })), showNew: true, submenus: true, quests: true });
 
   /* ------------------------------------------------------------------ build */
   let drawn = [], busy = false;
@@ -85,10 +173,89 @@
     return ev[0] || null;
   }
 
-  function make(item, here) {
-    const active = path(item.href) === here.path && (!item.event || query(item.href).get('event') === here.query.get('event'));
-    return el('a', { class: 'side-nav-item' + (active ? ' active' : ''), href: item.href, 'data-uic': item.id },
+  /* ---------------------------------------------------------- submenus */
+  const OPEN_KEY = 'uic_sidebar_open';
+  const openState = () => { try { return JSON.parse(localStorage.getItem(OPEN_KEY) || '{}') || {}; } catch (_) { return {}; } };
+  const setOpen = (id, on) => { const o = openState(); if (on) o[id] = 1; else delete o[id]; try { localStorage.setItem(OPEN_KEY, JSON.stringify(o)); } catch (_) {} };
+  const samePage = (href, here) => path(href) === here.path;
+
+  function link(item, active, cls) {
+    return el('a', { class: 'side-nav-item' + (cls ? ' ' + cls : '') + (active ? ' active' : ''), href: item.href, 'data-uic': item.id },
       el('span', { class: 'side-icon' }, item.icon), el('span', { class: 'side-label' }, item.label));
+  }
+
+  /* ----------------------------------------------------- daily quests */
+  const BP_KEY = 'uic_sidebar_bp', BP_TTL = 5 * 60 * 1000;
+  const clean = (s) => String(s || '').replace(/\s+/g, ' ').trim();
+  function parseQuests(html) {
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+    const card = [...doc.querySelectorAll('.card')].find((c) => /daily quests/i.test((c.querySelector('.title') || {}).textContent || ''));
+    if (!card) return null;
+    return {
+      title: clean((card.querySelector('.title') || {}).textContent) || 'Daily Quests',
+      quests: [...card.querySelectorAll('.quest')].map((q) => {
+        const mutes = q.querySelectorAll('.muted'), bar = q.querySelector('.progress div');
+        const progress = clean((mutes[mutes.length - 1] || {}).textContent);
+        return { name: clean((q.querySelector('strong') || {}).textContent), details: clean((mutes[0] || {}).textContent),
+          pct: parseFloat(bar && bar.style && bar.style.width) || 0, progress, done: /completed|✅/i.test(progress) };
+      }),
+    };
+  }
+  async function getQuests(force) {
+    if (!force) { try { const c = JSON.parse(sessionStorage.getItem(BP_KEY) || 'null'); if (c && Date.now() - c.t < BP_TTL) return c.data; } catch (_) {} }
+    const res = await fetch('/battle_pass.php', { credentials: 'same-origin' });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = parseQuests(await res.text());
+    if (!data) throw new Error('no daily quests on the page');
+    try { sessionStorage.setItem(BP_KEY, JSON.stringify({ t: Date.now(), data })); } catch (_) {}
+    return data;
+  }
+  const bar = (pct, big) => el('span', { class: 'uic-sq-bar' + (big ? ' uic-sq-bar-lg' : '') }, el('i', { style: 'width:' + Math.max(0, Math.min(100, pct)) + '%' }));
+  function fillQuests(box, force) {
+    box.replaceChildren(el('div', { class: 'uic-sq-msg' }, 'Loading quests…'));
+    getQuests(force).then((d) => {
+      box.replaceChildren(
+        el('div', { class: 'uic-sq-head' }, el('span', {}, d.title), el('button', { class: 'uic-sq-refresh', type: 'button', title: 'Reload', 'aria-label': 'Reload quests', onclick: () => fillQuests(box, true) }, '↻')),
+        ...d.quests.map((q) => el('button', { class: 'uic-sq' + (q.done ? ' is-done' : ''), type: 'button', onclick: () => questModal(q) },
+          el('span', { class: 'uic-sq-name' }, q.name), bar(q.pct), el('span', { class: 'uic-sq-txt' }, q.progress))));
+    }).catch(() => {
+      box.replaceChildren(el('div', { class: 'uic-sq-msg' }, 'Could not load the quests. ', el('button', { class: 'uic-sq-refresh', type: 'button', onclick: () => fillQuests(box, true) }, 'Try again')));
+    });
+  }
+  function questModal(q) {
+    const back = el('div', { class: 'uic-sq-back' });
+    const onKey = (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } };
+    function close() { back.remove(); document.removeEventListener('keydown', onKey, true); }
+    back.addEventListener('mousedown', (e) => { if (e.target === back) close(); });
+    document.addEventListener('keydown', onKey, true);
+    back.append(el('div', { class: 'uic-sq-dlg', role: 'dialog', 'aria-modal': 'true', 'aria-label': q.name },
+      el('button', { class: 'uic-sq-x', type: 'button', 'aria-label': 'Close', onclick: close }, '×'),
+      el('div', { class: 'uic-sq-type' }, 'Daily quest'), el('h3', {}, q.name), el('p', {}, q.details), bar(q.pct, true), el('div', { class: 'uic-sq-txt' }, q.progress)));
+    document.body.append(back);
+  }
+
+  function make(item, here, opt) {
+    const kids = opt.submenus && item.kids && item.kids.length ? item.kids : null;
+    const hasQ = !!(opt.quests && item.quests);
+    const own = samePage(item.href, here) && (!item.event || query(item.href).get('event') === here.query.get('event'));
+    if (!kids && !hasQ) return link(item, own);
+
+    const kidActive = !!kids && kids.some((k) => samePage(k.href, here));
+    const open = !!openState()[item.id] || kidActive;
+    const grp = el('div', { class: 'uic-side-grp' + (open ? ' is-open' : ''), 'data-uic': item.id });
+    const panel = hasQ ? el('div', { class: 'uic-side-quests' }) : null;
+    const chev = el('button', { class: 'uic-side-chev', type: 'button', 'aria-expanded': String(open), title: 'Show / hide ' + item.label + ' pages', 'aria-label': 'Show or hide ' + item.label + ' pages',
+      onclick: (e) => {
+        e.preventDefault(); e.stopPropagation();
+        const on = !grp.classList.contains('is-open');
+        grp.classList.toggle('is-open', on); chev.setAttribute('aria-expanded', String(on)); setOpen(item.id, on);
+        if (on && panel && !panel.dataset.loaded) { panel.dataset.loaded = '1'; fillQuests(panel); }
+      } }, '▸');
+    grp.append(
+      el('div', { class: 'uic-side-head' }, link(item, own || kidActive), chev),
+      el('div', { class: 'uic-side-sub' }, kids ? kids.map((k) => link(k, samePage(k.href, here), 'uic-sub')) : null, panel));
+    if (open && panel) { panel.dataset.loaded = '1'; fillQuests(panel); }
+    return grp;
   }
 
   function render() {
@@ -99,13 +266,13 @@
       // The game's own entries are read ONCE (our own are marked data-uic and skipped), then kept.
       const native = nav._uicNative || (nav._uicNative = nativeEntries(nav));
       const here = { path: path(location.pathname), query: new URLSearchParams(location.search) };
-      const { list, showNew } = cfg();
+      const { list, showNew, submenus, quests } = cfg();
       const nativeBy = new Map(native.map((n) => [path(n.href) + (path(n.href) === '/event_page.php' ? '' : ''), n]));
       const out = [], used = new Set();
       list.forEach((it) => {
         if (it.hidden) { used.add(path(it.href)); return; }
         const meta = ITEMS.find((x) => x.id === it.id) || it;
-        let item = { id: it.id, icon: meta.icon, label: it.label || meta.label, href: meta.href };
+        let item = { id: it.id, icon: meta.icon, label: it.label || meta.label, href: meta.href, kids: meta.kids, quests: meta.quests };
         if (meta.event) {
           const ne = newestEvent(native);
           if (!ne) return;                               // no event running: nothing to show
@@ -119,7 +286,7 @@
         out.push(item);
       });
       if (showNew) {
-        const known = new Set(ITEMS.map((i) => path(i.href)));
+        const known = new Set(ITEMS.flatMap((i) => [path(i.href)].concat((i.kids || []).map((k) => path(k.href)))));
         const shownEvent = out.find((o) => o.id === 'event');
         native.forEach((n) => {
           const p = path(n.href);
@@ -129,7 +296,8 @@
         });
         void shownEvent;
       }
-      nav.replaceChildren(...out.map((o) => make(o, here)));
+      if (!out.length) return;                         // nothing to draw: leave the game's own menu alone
+      nav.replaceChildren(...out.map((o) => make(o, here, { submenus, quests })));
       drawn = out;
     } finally { busy = false; }
   }
@@ -138,22 +306,57 @@
     if (!hasSettings) return;
     const title = document.querySelector('#sideDrawer .side-title, .side-drawer .side-title');
     if (!title || title.querySelector('.uic-side-gear')) return;
-    const gear = el('button', { class: 'uic-side-gear', type: 'button', title: 'Sidebar options', 'aria-label': 'Sidebar options', onclick: (e) => { e.preventDefault(); e.stopPropagation(); Core.settings.open(ID); } }, '⚙');
+    const gear = el('button', { class: 'uic-side-gear', type: 'button', title: 'Sidebar options', 'aria-label': 'Sidebar options', onclick: (e) => { e.preventDefault(); e.stopPropagation(); VS.open(ID); } }, '⚙');
     const close = title.querySelector('.side-close-btn');
     if (close) close.before(gear); else title.append(gear);
   }
   function css() {
     if (document.getElementById('uic-sidebar-css')) return;
     const s = el('style', { id: 'uic-sidebar-css' });
-    s.textContent = '.uic-side-gear{margin-left:auto;margin-right:6px;background:#1e1f2c;border:1px solid #2b2d44;color:#cfd3ea;border-radius:8px;padding:3px 8px;font-size:13px;line-height:1.2;cursor:pointer}'
-      + '.uic-side-gear:hover{background:#2a2c44;color:#fff}';
+    s.textContent = [
+      '.uic-side-gear{margin-left:auto;margin-right:6px;background:#1e1f2c;border:1px solid #2b2d44;color:#cfd3ea;border-radius:8px;padding:3px 8px;font-size:13px;line-height:1.2;cursor:pointer}',
+      '.uic-side-gear:hover{background:#2a2c44;color:#fff}',
+      /* group = the game's own row + a small toggle; children reuse .side-nav-item so they follow the game's look */
+      '.uic-side-grp{margin-bottom:8px}',
+      '.uic-side-head{display:flex;gap:6px;align-items:stretch}',
+      '.uic-side-head>.side-nav-item{flex:1;min-width:0;margin-bottom:0}',
+      '.uic-side-chev{flex:0 0 34px;background:#1a1b25;border:1px solid #2b2d44;color:#cfd3ea;border-radius:10px;cursor:pointer;font-size:13px;line-height:1;box-shadow:0 4px 12px rgba(0,0,0,.4);transition:transform .12s ease,background .12s ease}',
+      '.uic-side-chev:hover{background:#2a2c44;color:#fff}',
+      '.uic-side-chev:focus-visible,.uic-sq:focus-visible,.uic-sq-refresh:focus-visible{outline:2px solid #7f89ff;outline-offset:2px}',
+      '.uic-side-grp.is-open>.uic-side-head>.uic-side-chev{transform:rotate(90deg)}',
+      '.uic-side-sub{display:none;margin:6px 0 0 14px}',
+      '.uic-side-grp.is-open>.uic-side-sub{display:block}',
+      '.side-nav-item.uic-sub{font-size:12px;padding:7px 10px;margin-bottom:6px;border-left:3px solid #7f89ff;box-shadow:none}',
+      '.uic-side-quests{margin-bottom:6px}',
+      '.uic-sq-head{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:11px;font-weight:700;color:#cfd3ea;margin:0 0 6px}',
+      '.uic-sq-refresh{background:none;border:0;color:#9aa0b8;font:inherit;font-size:12px;cursor:pointer;padding:2px 4px;text-decoration:underline}',
+      '.uic-sq-refresh:hover{color:#fff}',
+      '.uic-sq-msg{font-size:11px;color:#9aa0b8;padding:6px 2px}',
+      '.uic-sq{display:flex;flex-direction:column;gap:5px;width:100%;text-align:left;font:inherit;color:#d5d9f5;background:#1a1b25;border:1px solid #2b2d44;border-left:3px solid #7f89ff;border-radius:8px;padding:7px 9px;margin-bottom:6px;cursor:pointer}',
+      '.uic-sq:hover{background:#22243a}',
+      '.uic-sq.is-done{border-left-color:#5fbf86}',
+      '.uic-sq-name{font-size:11px;font-weight:700;line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}',
+      '.uic-sq-bar{display:block;height:5px;border-radius:999px;background:#2a2b3a;overflow:hidden}',
+      '.uic-sq-bar i{display:block;height:100%;background:#7f89ff;border-radius:999px}',
+      '.uic-sq.is-done .uic-sq-bar i{background:#5fbf86}',
+      '.uic-sq-bar-lg{height:8px;margin:12px 0 6px}',
+      '.uic-sq-txt{font-size:10.5px;color:#9aa0b8}',
+      '.uic-sq-back{position:fixed;inset:0;z-index:2147483000;display:flex;align-items:center;justify-content:center;padding:16px;background:rgba(0,0,0,.68)}',
+      '.uic-sq-dlg{position:relative;width:min(380px,100%);background:#1a1b25;color:#e0e0e0;border:1px solid #2b2d44;border-radius:14px;padding:18px;box-shadow:0 16px 40px rgba(0,0,0,.55);font-family:"Segoe UI",Arial,sans-serif}',
+      '.uic-sq-dlg h3{margin:4px 22px 8px 0;font-size:16px;color:#f1f2fa;line-height:1.3}',
+      '.uic-sq-dlg p{margin:0;font-size:13px;line-height:1.5;color:#b9bbd1}',
+      '.uic-sq-type{font-size:11px;font-weight:700;color:#9aa0ff;text-transform:uppercase;letter-spacing:.04em}',
+      '.uic-sq-x{position:absolute;top:8px;right:10px;background:none;border:0;color:#9aa0b8;font-size:24px;line-height:1;cursor:pointer;padding:4px 8px}',
+      '.uic-sq-x:hover{color:#fff}',
+      '@media (prefers-reduced-motion:reduce){.uic-side-chev{transition:none}}',
+    ].join('');
     (document.head || document.documentElement).appendChild(s);
   }
 
   /* ------------------------------------------------------------------ start */
   function start() {
     css(); addGear(); render();
-    if (hasSettings) Core.settings.onChange(ID, () => render());
+    if (hasSettings) VS.onChange(ID, () => render());
     // If the game redraws its menu (or our list is wiped), draw ours again. The observer ignores our own changes.
     const nav = document.querySelector('#sideDrawer .side-nav, .side-drawer .side-nav');
     if (nav) {
@@ -180,37 +383,19 @@
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot, { once: true }); else boot();
 })();
 
-/* ==========================================================================
- * Pets  (Core addon, pets.php only)
- *
- *  - Every pet card (equipped and inventory) gets a line under its EXP numbers:  "Needs 91,410 EXP  ·  10 M + 3 S"  and a [Feed] button.
- *  - The treats (name, EXP each, how many you own) are read from the game's own Feed window on the page, so a new treat size
- *    or a changed value is picked up by itself. Nothing is hard-coded except a fallback if that window is missing.
- *  - Hover (or tap) the line for every way to cover the gap: each treat alone and mixes. Treats you don't own enough of are marked.
- *  - [Feed] sends the shown combo to pet_feed.php (the same request the game's Feed window makes), largest treats first, and updates
- *    the card, every other card of that pet, and your treat counts. It only feeds what you own, and asks first (switch off in Options).
- *  - The line stays right after feeding, levelling, or anything else that changes the numbers. The old version only calculated once.
- *
- * Options (Addons panel > Options): show the Feed button, ask before feeding.
- * Add to addons.json:  { "id": "pets", "name": "Pets", "version": "1.0.0", "url": "addons/pets.js", "button": false,
- *                        "match": "^/pets\\.php" }
- *
- * Debugging: window.__uicPets.treats() = what was read from the Feed window, .refresh() redraws, .last = last pet_feed.php reply.
- * ========================================================================== */
+/* ====================================================================== PETS ====================================================================== */
 (function pets() {
   'use strict';
 
-  if (!/\/pets\.php/i.test(location.pathname)) return;
-  if (window.__uicPets) return;
 
   const ID = 'pets';
   const DEFAULTS = { feedButton: true, confirm: true };
   const FALLBACK = [{ id: '36', label: 'XL', exp: 100000 }, { id: '96', label: 'M', exp: 9000 }, { id: '32', label: 'S', exp: 300 }];   // only used if the Feed window is missing
   const Core = window.Core;
-  const hasSettings = !!(Core && Core.settings && Core.settings.define);
+  const hasSettings = VS.ok;
 
   if (hasSettings) {
-    Core.settings.define(ID, {
+    VS.define(ID, {
       title: 'Pets', icon: '🐾',
       fields: [
         { key: 'feedButton', type: 'bool', label: 'Show a Feed button on each pet', default: DEFAULTS.feedButton, help: 'Feeds the treats shown beside it, to reach the next level.' },
@@ -218,9 +403,14 @@
       ],
     });
   }
+  /* module gate: runs only when this module is switched on in Options and the page matches */
+  if (!/\/pets\.php/i.test(location.pathname)) return;
+  if (window.__uicPets) return;
+  if (!VS.on('pets')) return;
+
   const mem = Object.assign({}, DEFAULTS);
   const S = {
-    get: (k) => (hasSettings ? Core.settings.get(ID, k) : mem[k]),
+    get: (k) => (hasSettings ? VS.get(ID, k) : mem[k]),
   };
 
   /* --------------------------------------------------------------- helpers */
@@ -434,44 +624,25 @@
     if (modal) new MutationObserver(queue).observe(modal, { childList: true, subtree: true, characterData: true });
     document.addEventListener('click', (e) => { if (tip.pinned && !(tip.node && tip.node.contains(e.target))) hideTip(); });
     document.addEventListener('keydown', (e) => { if (e.key === 'Escape') hideTip(); });
-    if (hasSettings) Core.settings.onChange(ID, refresh);
+    if (hasSettings) VS.onChange(ID, refresh);
     window.__uicPets = { treats: () => treats.map((x) => ({ id: x.id, label: x.label, exp: x.exp, own: x.own })), refresh, get last() { return DBG.last; } };
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start, { once: true }); else start();
 })();
 
-/* ==========================================================================
- * Dungeon Attack  (Core addon, guild_dungeon_location.php only)
- *
- *  Attack from the monster list itself, without opening battle.php for every monster.
- *   - A "Quick attack" bar above the list: skill, hits per monster, [Attack selected] / [Stop], and a live status line.
- *   - A tick box on every monster, and a ⚡ Hit button next to its Fight link (hits THAT monster with the chosen skill × hits).
- *   - Joins a monster first when it says "not joined" (switch off under ⚙ Options).
- *   - Every reply updates the card (HP bar and numbers, joined / dead), the "Left:" counter and your top bar (stamina, exp).
- *   - Stops by itself when: you press Stop, stamina runs out, you die, or the server refuses. With the potion options ticked it drinks a
- *     stamina / full HP potion through Core.potions (shared with every other addon, so one potion is used, not one per addon) and carries on.
- *   - Same requests the battle page makes: POST dungeon_join_battle.php {dgmid, instance_id} and POST damage.php {instance_id, dgmid, skill_id, stamina_cost}.
- *
- * Options (Addons panel > Options, or ⚙ on the bar): skill, hits per monster, pause between hits, auto-join, potions.
- * Add to addons.json:  { "id": "dungeon-attack", "name": "Dungeon Attack", "version": "1.0.0", "url": "addons/dungeon-attack.js", "button": false,
- *                        "match": "^/guild_dungeon_location\\.php" }
- *
- * Debugging: window.__uicDungeonAttack.last = the last raw reply from damage.php.
- * ========================================================================== */
+/* ====================================================================== DUNGEON-ATTACK ====================================================================== */
 (function dungeonAttack() {
   'use strict';
 
-  if (!/\/guild_dungeon_location\.php/i.test(location.pathname)) return;
-  if (window.__uicDungeonAttack) return;
 
   const ID = 'dungeon-attack';
   const SKILLS = [[1, 0, 'Slash'], [10, -1, 'Power Slash'], [50, -2, 'Heroic Slash'], [100, -3, 'Ultimate Slash'], [200, -4, 'Legendary Slash'], [1000, -5, 'World Breaker Slash']];   // [stamina cost, skill_id, name]
   const DEFAULTS = { skill: 1, hits: 1, delay: 250, autoJoin: true, staminaPotion: false, hpPotion: false };
   const Core = window.Core;
-  const hasSettings = !!(Core && Core.settings && Core.settings.define);
+  const hasSettings = VS.ok;
 
   if (hasSettings) {
-    Core.settings.define(ID, {
+    VS.define(ID, {
       title: 'Dungeon Attack', icon: '⚡',
       fields: [
         { key: 'skill', type: 'select', label: 'Skill', options: SKILLS.map((s) => [s[0], s[2] + ' (' + s[0] + ' stamina)']), default: DEFAULTS.skill },
@@ -483,10 +654,15 @@
       ],
     });
   }
+  /* module gate: runs only when this module is switched on in Options and the page matches */
+  if (!/\/guild_dungeon_location\.php/i.test(location.pathname)) return;
+  if (window.__uicDungeonAttack) return;
+  if (!VS.on('dungeon-attack')) return;
+
   const mem = Object.assign({}, DEFAULTS);
   const S = {
-    get: (k) => (hasSettings ? Core.settings.get(ID, k) : mem[k]),
-    set: (k, v) => { if (hasSettings) Core.settings.set(ID, k, v); else mem[k] = v; },
+    get: (k) => (hasSettings ? VS.get(ID, k) : mem[k]),
+    set: (k, v) => { if (hasSettings) VS.set(ID, k, v); else mem[k] = v; },
   };
 
   /* --------------------------------------------------------------- helpers */
@@ -681,7 +857,7 @@
     const link = (t, fn) => el('button', { class: 'uic-da-link', type: 'button', onclick: fn }, t);
     bar = el('div', { class: 'panel uic-da' },
       el('div', { class: 'uic-da-row' }, el('span', { class: 'uic-da-title' }, '⚡ Quick attack'), skillSel, el('span', { class: 'uic-da-x' }, '×'), hitsInp, el('span', { class: 'uic-da-dim' }, 'hits each'),
-        hasSettings ? el('button', { class: 'uic-da-gear', type: 'button', title: 'Options', onclick: () => Core.settings.open(ID) }, '⚙') : null),
+        hasSettings ? el('button', { class: 'uic-da-gear', type: 'button', title: 'Options', onclick: () => VS.open(ID) }, '⚙') : null),
       el('div', { class: 'uic-da-row' }, attackBtn, stopBtn, el('span', { class: 'uic-da-dim' }, 'Select:'),
         link('all alive', () => selectWhere(() => true)), link('not joined', () => selectWhere((c) => !isJoined(c))), link('joined', () => selectWhere((c) => isJoined(c))), link('none', () => selectWhere(() => false))),
       statusEl);
@@ -725,40 +901,21 @@
     // Rows the page adds later (or redraws) get their controls too.
     const host = cards()[0] && cards()[0].parentNode;
     if (host) new MutationObserver(() => { cards().forEach(decorateCard); refreshBar(); }).observe(host, { childList: true });
-    if (hasSettings) Core.settings.onChange(ID, syncControls);
+    if (hasSettings) VS.onChange(ID, syncControls);
     window.addEventListener('beforeunload', () => { run.stop = true; });
     window.__uicDungeonAttack = { run, get last() { return DBG.last; }, attack: attackMonsters, build };
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start, { once: true }); else start();
 })();
 
-
-/* ==========================================================================
- * Artisans Guild  (UI Cleanup module: blacksmith.php, legendary_forge.php, legendary_decraft.php)
- *
- *  Two tabs, same look as the Merchant rework:
- *    Craft      recipes from the Blacksmith, with a Grakthar / Olympus / Events switch
- *    Legendary  Upgrade (Legendary Forge) and Decraft, switched inside the tab
- *
- *  - Click a tile to open a dialog: quantity, quick chips, Max, what it will use, one button.
- *  - Craft and Upgrade keep going until the count is done, you press Stop, or something runs out.
- *    Every request updates the materials on screen from the server's reply. No page reloads, no alert().
- *  - Max is worked out from your materials (and gold for upgrades). Decraft always keeps 1 copy.
- *  - "Decraft spares" lists everything with 2+ copies; nothing is ticked until you tick it.
- *  - All three pages show the same view; the URL only decides which tab opens first.
- *
- * Self-contained. Append to the end of addons/ui-cleanup.js, or load as its own addon with
- *   "match": "^/(blacksmith|legendary_forge|legendary_decraft)\\.php"
- *
- * Debugging: after any action, window.__uicArtisans.last holds the raw server reply
- * (status, url, first 1500 characters). Paste that if a craft misbehaves.
- * ========================================================================== */
+/* ====================================================================== ARTISANS-GUILD ====================================================================== */
 (function artisansGuild() {
   'use strict';
 
   const PATH = (location.pathname.match(/([a-z_]+)\.php/i) || [])[1] || '';
   if (!/^(blacksmith|legendary_forge|legendary_decraft)$/i.test(PATH)) return;
   if (window.__uicArtisans) return;
+  if (!VS.on('artisans-guild')) return;
 
   /* ---------------------------------------------------------------- config */
   const CFG = {
@@ -1965,26 +2122,13 @@ body.uag-lock{overflow:hidden}
   boot();
 })();
 
-/* ==========================================================================
- * Black Merchant  (UI Cleanup module, black_merchant.php only)
- *
- *  - One tab per store (Soul Shop, Boss Shop, ...), each showing its own currency and balance.
- *    Tabs are built from whatever stores the page lists, so a new store appears by itself.
- *  - Click a tile to open a buy dialog: quantity, quick chips, Max, total cost, balance after.
- *  - Max is the smaller of what you have left to buy and what your balance covers.
- *  - Search, sort, "Hide sold out". These, and the store you were on, are remembered.
- *  - Balances update on every store that uses the same currency after each purchase.
- *
- * Self-contained. Append to the end of addons/ui-cleanup.js, or load as its own addon with
- *   "match": "^/black_merchant\\.php"
- *
- * Debugging: window.__uicBlackMerchant.last holds the last raw reply from black_buy.php.
- * ========================================================================== */
+/* ====================================================================== BLACK-MERCHANT ====================================================================== */
 (function blackMerchant() {
   'use strict';
 
   if (!/\/black_merchant\.php/i.test(location.pathname)) return;
   if (window.__uicBlackMerchant) return;
+  if (!VS.on('black-merchant')) return;
 
   /* ---------------------------------------------------------------- config */
   const CFG = { prefsKey: 'uic_blackmerchant_prefs', maxPerBuy: 100000 };
@@ -2398,3 +2542,6 @@ body.ubm-lock{overflow:hidden}
   }
   boot();
 })();
+
+/* ====================================================================== */
+VS.finish();
