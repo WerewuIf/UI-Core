@@ -14,7 +14,7 @@
  * Quick attack has NO entry in Options besides its switch: all of its settings live in the panel on the map, in one place.
  * On an older Core everything still runs; the options are just not grouped (and lists reorder with the keys only).
  *
- * addons.json:  { "id": "visuals-addition", "name": "Visuals", "version": "2.1.2", "url": "addons/visuals-addition.js", "button": false }
+ * addons.json:  { "id": "visuals-addition", "name": "Visuals", "version": "2.1.4", "url": "addons/visuals-addition.js", "button": false }
  *   (no "match": the sidebar module needs every page; the other modules check their own page.)
  *
  * Your saved Sidebar / Pets / Dungeon Attack options from the old separate ids are copied across once, only where you
@@ -756,7 +756,18 @@ const VS = (() => {
 
 
   const ID = 'dungeon-attack';
-  const SKILLS = [[1, 0, 'Slash'], [10, -1, 'Power Slash'], [50, -2, 'Heroic Slash'], [100, -3, 'Ultimate Slash'], [200, -4, 'Legendary Slash'], [1000, -5, 'World Breaker Slash']];   // [stamina cost, skill_id, name]
+  const ATTACKS = [
+    { id: 'slash', stamina: 1, skill: 0, label: 'Slash' },
+    { id: 'power', stamina: 10, skill: -1, label: 'Power Slash' },
+    { id: 'heroic', stamina: 50, skill: -2, label: 'Heroic Slash' },
+    { id: 'ultimate', stamina: 100, skill: -3, label: 'Ultimate Slash' },
+    { id: 'legendary', stamina: 200, skill: -4, label: 'Legendary Slash' },
+    { id: 'worldbreak', stamina: 1000, skill: -5, label: 'World Breaker Slash' },
+  ];
+  const SKILLS = ATTACKS.map((a) => [a.stamina, a.skill, a.label]);
+  const STARTING_ATTACK_ID = 'power';
+  const ATTACK_DMG_KEY = 'autocube_pve_attackdmg_';
+  const DMG_HISTORY_MAX = 20, OUTLIER_LOW_MULT = 0.5, OUTLIER_MULT = 1.5, KEEP_FRACTION = 0.6;
   /* Same stopping rules as Cube Suite's PvE caps (and the old Veyra auto farm): what "until damage on the monster" means. */
   const MODES = [
     ['hits',    'Hits',     'A set number of hits on every monster. A monster that dies is skipped early.'],
@@ -765,7 +776,7 @@ const VS = (() => {
     ['loot',    'Loot cap', 'Hit each monster until you have done the damage needed for its rarest drop.'],
     ['monster', 'Per mob',  'A cap for each kind of monster on this map. Blank or 0 leaves that monster alone.'],
   ];
-  const DEFAULTS = { skill: 1, mode: 'hits', hits: 1, cap: 0, mobCaps: {}, overshoot: true, delay: 250, autoJoin: true, staminaPotion: false, hpPotion: false };
+  const DEFAULTS = { skill: 1, mode: 'hits', hits: 1, cap: 0, mobCaps: {}, damageModel: 'eco', delay: 250, autoJoin: true, staminaPotion: false, hpPotion: false };
   const Core = window.Core;
   const hasSettings = VS.ok;
 
@@ -780,7 +791,7 @@ const VS = (() => {
         { key: 'hits', type: 'number', hidden: true, min: 1, max: 100000, default: DEFAULTS.hits },
         { key: 'cap', type: 'number', hidden: true, min: 0, default: DEFAULTS.cap },
         { key: 'mobCaps', type: 'json', hidden: true, default: DEFAULTS.mobCaps },
-        { key: 'overshoot', type: 'bool', hidden: true, default: DEFAULTS.overshoot },
+        { key: 'damageModel', type: 'select', hidden: true, options: [['eco', 'Eco'], ['fast', 'Fast']], default: DEFAULTS.damageModel },
         { key: 'delay', type: 'number', hidden: true, min: 0, max: 10000, step: 50, default: DEFAULTS.delay },
         { key: 'autoJoin', type: 'bool', hidden: true, default: DEFAULTS.autoJoin },
         { key: 'staminaPotion', type: 'bool', hidden: true, default: DEFAULTS.staminaPotion },
@@ -818,6 +829,7 @@ const VS = (() => {
   const parseJson = (raw) => { if (Core && Core.parseJson) return Core.parseJson(raw); try { return JSON.parse(raw); } catch (_) { return null; } };
   const DBG = { last: null };
   const modeOf = () => { const m = String(S.get('mode')); return MODES.some((x) => x[0] === m) ? m : 'hits'; };
+  const damageModelOf = () => S.get('damageModel') === 'fast' ? 'fast' : 'eco';
   const mobCaps = () => { const v = S.get('mobCaps'); return v && typeof v === 'object' && !Array.isArray(v) ? v : {}; };
 
   /* ----------------------------------------------------------------- cards */
@@ -830,6 +842,100 @@ const VS = (() => {
   const isJoined = (c) => hasPill(c, 'joined');
   const hpTextEl = (c) => [...c.querySelectorAll('.muted')].find((m) => /\bHP\b/.test(m.textContent) && /\d\s*\/\s*\d/.test(m.textContent) && !m.querySelector('a'));
   const byMid = (mid) => cards().find((c) => midOf(c) === String(mid));
+
+  // Shared verbatim data shape and selection strategy with Cube Suite. This deliberately
+  // uses the same localStorage key so both tools learn from the same PvE hits.
+  const attackHistoryKey = () => ATTACK_DMG_KEY + instanceId;
+  function loadAttackHistory() {
+    try { return JSON.parse(localStorage.getItem(attackHistoryKey())) || {}; } catch (_) { return {}; }
+  }
+  function saveAttackHistory(map) {
+    try { localStorage.setItem(attackHistoryKey(), JSON.stringify(map)); }
+    catch (_) {
+      const keys = Object.keys(map);
+      keys.slice(0, Math.ceil(keys.length / 2) || 1).forEach((k) => delete map[k]);
+      try { localStorage.setItem(attackHistoryKey(), JSON.stringify(map)); } catch (_) { /* storage may be unavailable */ }
+    }
+  }
+  function recordAttackDamage(monsterName, attackId, dmg) {
+    if (!(dmg > 0)) return;
+    const key = norm(monsterName) || '__unknown__';
+    const map = loadAttackHistory(), node = map[key] || (map[key] = {}), hist = node[attackId] || (node[attackId] = []);
+    hist.push(dmg); if (hist.length > DMG_HISTORY_MAX) hist.shift();
+    saveAttackHistory(map);
+  }
+  function conservativeEstimate(hist) {
+    if (!hist || !hist.length) return null;
+    const sorted0 = [...hist].sort((a, b) => a - b);
+    const median = sorted0[Math.floor(sorted0.length / 2)];
+    const trimmed = median > 0 ? hist.filter((v) => v >= median * OUTLIER_LOW_MULT && v <= median * OUTLIER_MULT) : [...hist];
+    const pool = (trimmed.length ? trimmed : hist).slice().sort((a, b) => a - b);
+    const keepN = Math.max(1, Math.ceil(pool.length * KEEP_FRACTION));
+    const bottom = pool.slice(0, keepN);
+    return bottom.reduce((sum, v) => sum + v, 0) / bottom.length;
+  }
+  function estimatedDamage(monsterName, attackId) {
+    const key = norm(monsterName) || '__unknown__';
+    return conservativeEstimate(loadAttackHistory()[key]?.[attackId]);
+  }
+  function downgradeAttack(preferredId, staminaAvailable) {
+    const ordered = [...ATTACKS].sort((a, b) => b.stamina - a.stamina);
+    const idx = ordered.findIndex((a) => a.id === preferredId);
+    const sequence = idx === -1 ? ordered : ordered.slice(idx);
+    return sequence.find((a) => a.stamina <= staminaAvailable) || null;
+  }
+  function pickAttackBlindFallback(monsterName, preferredId, staminaAvailable) {
+    const hist = loadAttackHistory()[norm(monsterName) || '__unknown__'] || {};
+    const known = ATTACKS.filter((a) => a.stamina <= staminaAvailable && hist[a.id]?.length);
+    return known.length ? known.sort((a, b) => b.stamina - a.stamina)[0] : downgradeAttack(preferredId, staminaAvailable);
+  }
+  function pickAttackFast(monsterName, preferredId, staminaAvailable, remaining) {
+    const fallback = downgradeAttack(preferredId, staminaAvailable);
+    if (typeof remaining !== 'number' || remaining <= 0) return pickAttackBlindFallback(monsterName, preferredId, staminaAvailable);
+    const knownRates = ATTACKS.map((a) => { const est = estimatedDamage(monsterName, a.id); return est != null && est > 0 ? est / a.stamina : null; }).filter((r) => r != null);
+    if (!knownRates.length) return fallback;
+    const sorted = [...knownRates].sort((a, b) => a - b), baseRate = sorted[Math.floor(sorted.length / 2)];
+    const affordable = ATTACKS.filter((a) => a.stamina <= staminaAvailable).map((a) => {
+      const direct = estimatedDamage(monsterName, a.id), est = direct != null && direct > 0 ? direct : baseRate * a.stamina;
+      return Object.assign({}, a, { est });
+    }).filter((a) => a.est > 0);
+    if (!affordable.length) return fallback;
+    const scored = affordable.map((a) => {
+      const hits = Math.ceil(remaining / a.est);
+      const effectiveHits = hits === 1 && a.est > remaining * 1.5 ? 2 : hits;
+      return Object.assign({}, a, { hits, effectiveHits });
+    });
+    const minEffective = Math.min(...scored.map((a) => a.effectiveHits));
+    return scored.filter((a) => a.effectiveHits === minEffective).sort((a, b) => a.stamina - b.stamina)[0] || fallback;
+  }
+  function pickAttackEco(monsterName, preferredId, staminaAvailable, remaining) {
+    const fallback = downgradeAttack(preferredId, staminaAvailable);
+    if (typeof remaining !== 'number' || remaining <= 0) return pickAttackBlindFallback(monsterName, preferredId, staminaAvailable);
+    const monsterHist = loadAttackHistory()[norm(monsterName) || '__unknown__'] || {};
+    const withCeil = ATTACKS.filter((a) => a.stamina <= staminaAvailable).map((a) => {
+      const hist = monsterHist[a.id], ceil = hist && hist.length ? Math.max(...hist) : null;
+      return Object.assign({}, a, { ceil, proven: ceil != null });
+    });
+    const provenRates = withCeil.filter((a) => a.proven && a.stamina > 0).map((a) => a.ceil / a.stamina);
+    const worstRate = provenRates.length ? Math.max(...provenRates) : null;
+    const withEstimate = withCeil.map((a) => a.proven ? a : Object.assign({}, a, { ceil: worstRate != null ? worstRate * a.stamina : null, proven: false }));
+    const fits = withEstimate.filter((a) => a.ceil != null && a.ceil <= remaining).sort((a, b) => b.stamina - a.stamina);
+    if (fits.length) return fits[0];
+    const anyKnown = withEstimate.filter((a) => a.ceil != null).sort((a, b) => a.stamina - b.stamina);
+    return anyKnown.length ? anyKnown[0] : fallback;
+  }
+  function pickAttack(monsterName, preferredId, staminaAvailable, remaining, model) {
+    return model === 'fast' ? pickAttackFast(monsterName, preferredId, staminaAvailable, remaining) : pickAttackEco(monsterName, preferredId, staminaAvailable, remaining);
+  }
+  function readStamina() {
+    try {
+      const value = Core && Core.me && Core.me.get ? Number(Core.me.get().stamina) : NaN;
+      if (Number.isFinite(value) && value >= 0) return value;
+    } catch (_) { /* use page fallback */ }
+    const span = document.getElementById('stamina_span');
+    const parsed = span ? num(span.textContent) : 0;
+    return parsed > 0 ? parsed : Infinity;
+  }
 
   function setPill(c, text) {
     let p = pills(c).find((x) => /^(joined|not joined|dead)$/i.test(x.textContent.trim()));
@@ -879,9 +985,10 @@ const VS = (() => {
       const reported = data.totaldmgdealt == null ? NaN : Number(data.totaldmgdealt);
       return { kind: 'ok', data, damage: m ? Number(m[1].replace(/,/g, '')) : null,
         totalDamage: Number.isFinite(reported) && reported >= 0 ? reported : null,
+        stamina: data.stamina == null || !Number.isFinite(Number(data.stamina)) ? null : Number(data.stamina),
         dead: !!(data.hp && Number(data.hp.value) <= 0) };
     }
-    if (low.includes('not enough stamina')) return { kind: 'stamina', message: msg };
+    if (low.includes('not enough stamina')) return { kind: 'stamina', message: msg, data, stamina: data.stamina == null || !Number.isFinite(Number(data.stamina)) ? null : Number(data.stamina) };
     if (low.includes('you are dead') || low.includes('you are defeated')) return { kind: 'dead_player', message: msg };
     if (low.includes('slow down') || low.includes('too quickly') || low.includes('cooldown')) return { kind: 'cooldown', message: msg };
     if (low.includes('not joined') || low.includes('join the battle') || low.includes('must join')) return { kind: 'notjoined', message: msg };
@@ -919,30 +1026,7 @@ const VS = (() => {
     return { damage: dmg ? Number(String(dmg).replace(/[^\d]/g, '')) || 0 : 0, expCap, lootCap: lootCap > 0 ? lootCap : null, monsterMaxHp: monsterMaxHp > 0 ? monsterMaxHp : null };
   }
 
-  /* Conservative per-monster history. Use the maximum observed hit for each stamina tier (not an average),
-     matching Cube Suite's damage ceiling when choosing a smaller attack near a cap/HP limit. */
-  const learned = new Map();                                      // normalized monster -> stamina cost -> hit damage samples
-  function learn(name, cost, dmg) {
-    if (!(dmg > 0)) return;
-    const key = norm(name), byCost = learned.get(key) || new Map(), hist = byCost.get(cost) || [];
-    hist.push(dmg); if (hist.length > 20) hist.shift();
-    byCost.set(cost, hist); learned.set(key, byCost);
-  }
-  function estimate(name, cost) {
-    const hist = learned.get(norm(name))?.get(cost);
-    return hist && hist.length ? Math.max(...hist) : null;
-  }
-  function chooseCost(name, want, left) {
-    if (!S.get('overshoot') || typeof left !== 'number' || left <= 0) return want;
-    const rows = SKILLS.filter((skill) => skill[0] <= want).map((skill) => ({ cost: skill[0], damage: estimate(name, skill[0]) }));
-    const rates = rows.filter((r) => r.damage != null && r.damage > 0).map((r) => r.damage / r.cost);
-    const worstRate = rates.length ? Math.max(...rates) : null;
-    rows.forEach((r) => { if (r.damage == null && worstRate != null) r.damage = worstRate * r.cost; });
-    const fits = rows.filter((r) => r.damage != null && r.damage <= left).sort((a, b) => b.cost - a.cost);
-    if (fits.length) return fits[0].cost;
-    const known = rows.filter((r) => r.damage != null).sort((a, b) => a.cost - b.cost);
-    return known.length ? known[0].cost : want;
-  }
+  // Damage history/attack selection is shared with Cube Suite above; no separate Hits-mode estimator.
 
   /* ------------------------------------------------------------------- run */
   const run = { on: false, stop: false, queue: 0, done: 0, hits: 0, damage: 0, kills: 0, capped: 0, skipped: [], notes: [], cur: null, note: '' };
@@ -952,6 +1036,7 @@ const VS = (() => {
   async function attackMonsters(mids) {
     if (run.on) return;
     const mode = modeOf(), want = Number(S.get('skill')) || 1, hits = Math.max(1, Math.floor(Number(S.get('hits')) || 1)), delay = Math.max(0, Number(S.get('delay')) || 0);
+    let staminaAvailable = readStamina();
     if (mode === 'fixed' && !num(S.get('cap'))) { run.note = 'Type a damage cap first.'; paintStatus('bad'); return; }
     Object.assign(run, { on: true, stop: false, queue: mids.length, done: 0, hits: 0, damage: 0, kills: 0, capped: 0, skipped: [], notes: [], cur: null, note: '' });
     paintStatus(); refreshBar();
@@ -996,11 +1081,20 @@ const VS = (() => {
       while (mode !== 'hits' || n < hits) {
         if (run.stop) { why = 'stopped'; break outer; }
         c = byMid(mid);
-        let cost = want;
+        let attack = mode === 'hits' ? ATTACKS.find((a) => a.stamina === want) || ATTACKS[0] : null;
         const capRemaining = cap != null ? cap - dealt : null;
         const hpRemaining = monsterMaxHp != null ? Math.max(0, monsterMaxHp - dealt) : null;
-        const left = [capRemaining, hpRemaining].filter((x) => typeof x === 'number').sort((a, b) => a - b)[0];
-        if (mode !== 'hits' && left != null) cost = chooseCost(name, want, left);
+        const left = [capRemaining, hpRemaining].filter((x) => typeof x === 'number').sort((a, b) => a - b)[0] ?? null;
+        if (mode !== 'hits') attack = pickAttack(name, STARTING_ATTACK_ID, staminaAvailable, left, damageModelOf());
+        if (!attack) {
+          if (S.get('staminaPotion') && Core && Core.potions && drinks < 3) {
+            drinks++; run.note = 'Out of stamina: drinking a potion…'; paintStatus();
+            let used = null; try { used = await Core.potions.stamina(); } catch (_) {}
+            if (used && used.ok) { staminaAvailable = Infinity; await sleep(400); continue; }
+          }
+          why = 'Out of stamina'; break outer;
+        }
+        const cost = attack.stamina;
         run.cur = { name, dealt, cap, monsterMaxHp, n: n + 1, of: mode === 'hits' ? hits : 0, label: capName[mode] };
         run.note = ''; paintStatus();
         const r = await hit(mid, cost);
@@ -1009,9 +1103,11 @@ const VS = (() => {
           const before = dealt;
           if (r.totalDamage != null) dealt = r.totalDamage;
           else if (r.damage != null) dealt += r.damage;
+          if (r.stamina != null) staminaAvailable = r.stamina;
+          else if (Number.isFinite(staminaAvailable)) staminaAvailable = Math.max(0, staminaAvailable - cost);
           const delta = Math.max(0, dealt - before);
           run.damage += r.damage != null ? r.damage : delta;
-          if (delta > 0) learn(name, cost, delta);
+          if (delta > 0 && r.totalDamage != null) recordAttackDamage(name, attack.id, delta);
           flat = delta > 0 ? 0 : flat + 1;
           // Older replies may omit the cumulative total; refresh the battle page to reconcile state.
           if (r.totalDamage == null && (cap != null || monsterMaxHp != null)) { const again = await lookup(mid); if (again) { dealt = again.damage; monsterMaxHp = again.monsterMaxHp || monsterMaxHp; } }
@@ -1028,14 +1124,26 @@ const VS = (() => {
           retriedJoin = true; let j = false; try { j = await joinMonster(mid); } catch (_) { /* */ }
           if (!j) { why = 'Could not join ' + (c ? nameOf(c) : 'the monster'); break outer; }
           if (c) setPill(c, 'joined'); continue;
-        } else if (r.kind === 'stamina' || r.kind === 'dead_player') {
-          const key = r.kind === 'stamina' ? 'staminaPotion' : 'hpPotion';
-          if (S.get(key) && Core && Core.potions && drinks < 3) {
-            drinks++; run.note = r.kind === 'stamina' ? 'Out of stamina: drinking a potion…' : 'You died: drinking a Full HP potion…'; paintStatus();
-            let used = null; try { used = await (r.kind === 'stamina' ? Core.potions.stamina() : Core.potions.hp()); } catch (_) { /* */ }
+        } else if (r.kind === 'stamina') {
+          staminaAvailable = Number.isFinite(cost) ? Math.max(0, cost - 1) : 0; // same downgrade rule as Cube Suite
+          if (mode !== 'hits') {
+            const lower = pickAttack(name, STARTING_ATTACK_ID, staminaAvailable, left, damageModelOf());
+            if (lower && lower.stamina < cost) continue;
+          }
+          if (S.get('staminaPotion') && Core && Core.potions && drinks < 3) {
+            drinks++; run.note = 'Out of stamina: drinking a potion…'; paintStatus();
+            let used = null; try { used = await Core.potions.stamina(); } catch (_) { /* */ }
+            if (used && used.ok) { staminaAvailable = Infinity; await sleep(400); continue; }
+            why = 'Out of stamina and no potion could be used' + (used && used.reason ? ' (' + used.reason + ')' : '');
+          } else why = 'Out of stamina';
+          break outer;
+        } else if (r.kind === 'dead_player') {
+          if (S.get('hpPotion') && Core && Core.potions && drinks < 3) {
+            drinks++; run.note = 'You died: drinking a Full HP potion…'; paintStatus();
+            let used = null; try { used = await Core.potions.hp(); } catch (_) { /* */ }
             if (used && used.ok) { await sleep(400); continue; }
-            why = (r.kind === 'stamina' ? 'Out of stamina' : 'You are dead') + ' and no potion could be used' + (used && used.reason ? ' (' + used.reason + ')' : '');
-          } else why = r.kind === 'stamina' ? 'Out of stamina' : 'You are dead (heal, then press Attack again)';
+            why = 'You are dead and no potion could be used' + (used && used.reason ? ' (' + used.reason + ')' : '');
+          } else why = 'You are dead (heal, then press Attack again)';
           break outer;
         } else { why = strip(r.message) || 'The server refused the attack'; break outer; }
         if (delay) await sleep(delay);
@@ -1054,7 +1162,7 @@ const VS = (() => {
   }
 
   /* -------------------------------------------------------------------- UI */
-  let bar = null, statusEl = null, attackBtn = null, stopBtn = null, skillSel = null, segEl = null, bodyEl = null, optsEl = null, selCount = null, delayInp = null;
+  let bar = null, statusEl = null, attackBtn = null, stopBtn = null, skillSel = null, modeSel = null, modelSel = null, modelField = null, bodyEl = null, optsEl = null, selCount = null, delayInp = null;
   const checks = {};
   const picked = () => cards().filter((c) => { const cb = c.querySelector('.uic-da-pick input'); return cb && cb.checked && !isDead(c); });
 
@@ -1075,43 +1183,59 @@ const VS = (() => {
     document.querySelectorAll('.uic-da-hit').forEach((b) => { b.disabled = run.on; });
   }
 
-  // The part of the panel that depends on the mode.
+  // The part of the panel that depends on the selected stop condition.
+  const mobCountEls = new Map();
+  function refreshMobGroupCounts() {
+    mobCountEls.forEach((elCount, key) => {
+      const groupCards = cards().filter((c) => norm(nameOf(c)) === key);
+      const selected = groupCards.filter((c) => { const cb = c.querySelector('.uic-da-pick input'); return cb && cb.checked && !isDead(c); }).length;
+      elCount.textContent = `${selected} selected / ${groupCards.length}`;
+    });
+  }
   function drawBody() {
     if (!bodyEl) return;
-    const mode = modeOf();
-    segEl.querySelectorAll('button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.mode === mode)));
+    const mode = modeOf(), capMode = mode !== 'hits';
+    if (modelField) modelField.hidden = !capMode;
     const tip = MODES.find((m) => m[0] === mode)[2];
     const note = el('div', { class: 'uic-da-note' }, tip);
     const field = (label, input, hint) => el('div', { class: 'uic-da-field' }, el('label', null, label), input, hint ? el('div', { class: 'uic-da-note' }, hint) : null);
+    mobCountEls.clear();
     if (mode === 'hits') {
       const inp = el('input', { class: 'uic-da-control uic-da-num', type: 'number', min: '1', max: '100000', value: String(S.get('hits')), title: 'Hits per monster' });
       inp.addEventListener('change', () => { const v = Math.max(1, Math.floor(Number(inp.value) || 1)); inp.value = String(v); S.set('hits', v); });
-      bodyEl.replaceChildren(el('div', { class: 'uic-da-row' }, field('Hits per monster', inp), note));
+      bodyEl.replaceChildren(note, el('div', { class: 'uic-da-row uic-da-config' }, field('Attack', skillSel, 'Manual skill and hit count apply only in Hits mode.'), field('Hits per monster', inp)));
     } else if (mode === 'fixed') {
       const inp = el('input', { class: 'uic-da-control uic-da-cap', type: 'text', inputmode: 'numeric', placeholder: 'e.g. 5,000,000 or 5m', value: num(S.get('cap')) ? fmt(S.get('cap')) : '', title: 'Damage cap for every monster' });
       inp.addEventListener('change', () => { const v = num(inp.value); inp.value = v ? fmt(v) : ''; S.set('cap', v); });
-      bodyEl.replaceChildren(el('div', { class: 'uic-da-row' }, field('Damage cap', inp, 'Counts the damage you already have on a monster.'), note));
+      bodyEl.replaceChildren(note, field('Damage cap', inp, 'Existing damage counts toward the cap.'));
     } else if (mode === 'monster') {
       const groups = new Map();
-      cards().forEach((c) => { const nm = nameOf(c), k = norm(nm); const g = groups.get(k) || { name: nm, n: 0 }; if (!isDead(c)) g.n++; groups.set(k, g); });
+      cards().forEach((c) => {
+        const nm = nameOf(c), k = norm(nm), g = groups.get(k) || { name: nm, total: 0 };
+        g.total++; groups.set(k, g);
+      });
       const saved = mobCaps(), list = el('div', { class: 'uic-da-moblist' });
       groups.forEach((g, k) => {
+        const count = el('span', { class: 'uic-da-muted uic-da-group-count', 'data-mob-count': k }, '0 selected / ' + g.total);
+        mobCountEls.set(k, count);
         const inp = el('input', { class: 'uic-da-control uic-da-mobcap', type: 'text', inputmode: 'numeric', placeholder: 'skip', value: num(saved[k]) ? fmt(saved[k]) : '', 'data-mob': k, title: 'Damage cap for ' + g.name });
         inp.addEventListener('change', () => {
           const v = num(inp.value); inp.value = v ? fmt(v) : '';
           const all = Object.assign({}, mobCaps()); if (v) all[k] = v; else delete all[k];
           S.set('mobCaps', all);
         });
-        list.append(el('label', { class: 'uic-da-mob' }, el('span', { class: 'uic-da-mobname' }, g.name, el('span', { class: 'uic-da-muted' }, ' ×' + g.n)), inp));
+        list.append(el('label', { class: 'uic-da-mob' }, el('span', { class: 'uic-da-mobname' }, g.name, count), inp));
       });
       bodyEl.replaceChildren(note, groups.size ? list : el('div', { class: 'uic-da-note' }, 'No monsters on this map.'));
+      refreshMobGroupCounts();
     } else bodyEl.replaceChildren(note);
-    if (checks.overshoot) checks.overshoot.label.style.display = mode === 'hits' ? 'none' : '';
   }
   function syncControls() {
     if (skillSel) skillSel.value = String(S.get('skill'));
+    if (modeSel) modeSel.value = modeOf();
+    if (modelSel) modelSel.value = damageModelOf();
     if (delayInp) delayInp.value = String(S.get('delay'));
-    ['autoJoin', 'staminaPotion', 'hpPotion', 'overshoot'].forEach((k) => { if (checks[k]) checks[k].input.checked = !!S.get(k); });
+    ['autoJoin', 'staminaPotion', 'hpPotion'].forEach((k) => { if (checks[k]) checks[k].input.checked = !!S.get(k); });
     drawBody();
   }
 
@@ -1121,21 +1245,20 @@ const VS = (() => {
     c.dataset.uicDa = '1';
     const dead = isDead(c);
     const cb = el('input', { type: 'checkbox', title: 'Select for Attack selected' }); cb.disabled = dead;
-    cb.addEventListener('change', refreshBar);
+    cb.addEventListener('change', () => { refreshBar(); refreshMobGroupCounts(); });
     c.insertBefore(el('label', { class: 'uic-da-pick' }, cb), c.firstChild);
     const fight = c.querySelector('a[href*="dgmid="]');
     const btn = el('button', { class: 'btn uic-da-hit', type: 'button', title: 'Attack this monster with the panel\'s skill and mode', onclick: (e) => { e.preventDefault(); attackMonsters([mid]); } }, '⚡ Hit');
     if (dead) { btn.disabled = true; c.classList.add('uic-da-dead'); }
     if (fight && fight.parentNode) fight.after(btn); else c.append(btn);
   }
-  function selectWhere(fn) { cards().forEach((c) => { const cb = c.querySelector('.uic-da-pick input'); if (cb) cb.checked = !cb.disabled && !isDead(c) && fn(c); }); refreshBar(); }
+  function selectWhere(fn) { cards().forEach((c) => { const cb = c.querySelector('.uic-da-pick input'); if (cb) cb.checked = !cb.disabled && !isDead(c) && fn(c); }); refreshBar(); refreshMobGroupCounts(); }
 
   function build() {
     const list = cards();
     if (!list.length) return false;
     const first = list[0].closest('.panel') || list[0].parentNode;
-    // Match the game's native .panel / .h / .btn vocabulary; this panel deliberately
-    // does not call Core.ui.base() or depend on Core's component stylesheet.
+    // Game-native panel/buttons; all configuration stays in one compact panel.
     const field = (label, ctl) => el('div', { class: 'uic-da-field' }, el('label', null, label), ctl);
     const check = (key, text, title) => {
       const input = el('input', { type: 'checkbox' });
@@ -1144,19 +1267,22 @@ const VS = (() => {
       checks[key] = { input, label };
       return label;
     };
-    skillSel = el('select', { class: 'uic-da-control', title: 'Skill' }, SKILLS.map((s) => el('option', { value: String(s[0]) }, s[2] + ' · ' + s[0] + ' stamina')));
+    skillSel = el('select', { class: 'uic-da-control', title: 'Manual attack used only in Hits mode' }, SKILLS.map((s) => el('option', { value: String(s[0]) }, s[2] + ' · ' + s[0])));
     skillSel.addEventListener('change', () => S.set('skill', Number(skillSel.value)));
-    segEl = el('div', { class: 'uic-da-mode', role: 'group', 'aria-label': 'Stop when' }, MODES.map(([id, label, tip]) =>
-      el('button', { class: 'btn uic-da-mode-btn', type: 'button', 'data-mode': id, 'aria-pressed': 'false', title: tip, onclick: () => { S.set('mode', id); drawBody(); } }, label)));
+    modeSel = el('select', { class: 'uic-da-control', title: 'Stop condition' }, MODES.map(([id, label]) => el('option', { value: id }, label)));
+    modeSel.addEventListener('change', () => { S.set('mode', modeSel.value); drawBody(); });
+    modelSel = el('select', { class: 'uic-da-control', title: 'Cube Suite PvE damage selection model' }, [el('option', { value: 'eco' }, 'Eco'), el('option', { value: 'fast' }, 'Fast')]);
+    modelSel.addEventListener('change', () => S.set('damageModel', modelSel.value));
+    modelField = field('Damage model', modelSel);
     bodyEl = el('div', { class: 'uic-da-body' });
     delayInp = el('input', { class: 'uic-da-control uic-da-num', type: 'number', min: '0', max: '10000', step: '50', title: 'Pause between hits (ms). The game may refuse hits that come too fast.' });
     delayInp.addEventListener('change', () => { const v = Math.max(0, Math.min(10000, Math.floor(Number(delayInp.value) || 0))); delayInp.value = String(v); S.set('delay', v); });
-    optsEl = el('div', { class: 'uic-da-row uic-da-opts' },
-      check('autoJoin', 'Join "not joined" monsters first'),
-      check('staminaPotion', 'Stamina potion when out', 'Uses items from your inventory.'),
-      check('hpPotion', 'Full HP potion when dead', 'Uses items from your inventory.'),
-      check('overshoot', "Don't waste big hits near the cap", 'Close to the cap it switches to a smaller skill, so less stamina is spent passing it. It never stops short of the cap.'),
+    const advancedGrid = el('div', { class: 'uic-da-advanced-grid' },
+      check('autoJoin', 'Auto-join selected monsters'),
+      check('staminaPotion', 'Use stamina potion when needed', 'Uses a stamina potion if no attack is affordable.'),
+      check('hpPotion', 'Use Full HP potion after death', 'Uses items from your inventory.'),
       field('Pause (ms)', delayInp));
+    optsEl = el('details', { class: 'uic-da-advanced' }, el('summary', null, 'Advanced'), advancedGrid);
     selCount = el('b', null, '0');
     attackBtn = el('button', { class: 'btn uic-da-primary', type: 'button', onclick: () => attackMonsters(picked().map(midOf)) }, '⚡ Attack selected (', selCount, ')');
     stopBtn = el('button', { class: 'btn uic-da-stop', type: 'button', onclick: () => { run.stop = true; run.note = 'Stopping after this hit…'; paintStatus(); } }, '■ Stop');
@@ -1164,56 +1290,57 @@ const VS = (() => {
     const link = (t, fn) => el('button', { class: 'uic-da-link', type: 'button', onclick: fn }, t);
     bar = el('section', { class: 'panel uic-da' },
       el('div', { class: 'h uic-da-head' }, '⚡ Quick attack'),
-      el('div', { class: 'uic-da-row uic-da-main' }, field('Skill', skillSel), field('Stop when', segEl)),
+      el('div', { class: 'uic-da-row uic-da-main' }, field('Stop when', modeSel), modelField),
       bodyEl, optsEl,
       el('div', { class: 'uic-da-row uic-da-actions' }, attackBtn, stopBtn, el('span', { class: 'uic-da-select-label' }, 'Select:'),
-        link('all alive', () => selectWhere(() => true)), link('not joined', () => selectWhere((c) => !isJoined(c))), link('joined', () => selectWhere((c) => isJoined(c))), link('none', () => selectWhere(() => false))),
+        link('All', () => selectWhere(() => true)), link('Not joined', () => selectWhere((c) => !isJoined(c))), link('Joined', () => selectWhere((c) => isJoined(c))), link('None', () => selectWhere(() => false))),
       statusEl);
     first.parentNode.insertBefore(bar, first);
     list.forEach(decorateCard);
-    syncControls(); refreshBar();
+    syncControls(); refreshBar(); refreshMobGroupCounts();
     return true;
   }
+
   function css() {
     const s = el('style', { id: 'uic-da-css' });
-    /* Layout is custom; colour, heading and button foundations are the game's own .panel, .h and .btn. */
     s.textContent = `
-      .uic-da{display:flex;flex-direction:column;gap:8px;margin:0 0 12px;padding:10px;min-width:0;max-width:100%;width:100%;box-sizing:border-box;overflow:hidden}
-      .uic-da-head{margin:0;font-size:16px;font-weight:700;color:#f9e2af;line-height:1.25}
-      .uic-da-row{display:flex;flex-wrap:wrap;align-items:flex-end;gap:8px 10px;min-width:0;max-width:100%}
-      .uic-da-main{display:grid;grid-template-columns:minmax(125px,185px) minmax(0,1fr);align-items:start;gap:8px 12px}
-      .uic-da-actions{align-items:center;gap:6px;padding-top:7px;border-top:1px solid rgba(255,255,255,.07)}
-      .uic-da-opts{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));align-items:center;gap:4px 10px;padding-top:7px;border-top:1px solid rgba(255,255,255,.07)}
-      .uic-da-field{display:flex;flex-direction:column;gap:4px;min-width:0;max-width:100%;font-size:12px}
-      .uic-da-field>label{font-size:11px;font-weight:700;color:#cfd3ea}
-      .uic-da-control{min-height:32px;width:100%;max-width:100%;min-width:0;box-sizing:border-box;padding:6px 8px;border:1px solid #2b2d44;border-radius:8px;background:#12131a;color:#edeff6;font:inherit;font-size:12px}
+      .uic-da{display:flex;flex-direction:column;gap:6px;margin:0 0 10px;padding:9px;min-width:0;max-width:100%;width:100%;box-sizing:border-box;overflow:hidden}
+      .uic-da-head{margin:0;font-size:15px;font-weight:700;color:#f9e2af;line-height:1.2}
+      .uic-da-row{display:flex;flex-wrap:wrap;align-items:flex-end;gap:6px 8px;min-width:0;max-width:100%}
+      .uic-da-main{display:grid;grid-template-columns:minmax(0,1fr) minmax(115px,0.7fr);align-items:end;gap:6px 8px}
+      .uic-da-config{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));align-items:end;gap:6px 8px}
+      .uic-da-actions{align-items:center;gap:5px;padding-top:6px;border-top:1px solid rgba(255,255,255,.07)}
+      .uic-da-field{display:flex;flex-direction:column;gap:3px;min-width:0;max-width:100%;font-size:12px}
+      .uic-da-field>label{font-size:10px;font-weight:700;color:#cfd3ea}
+      .uic-da-control{min-height:30px;width:100%;max-width:100%;min-width:0;box-sizing:border-box;padding:5px 7px;border:1px solid #2b2d44;border-radius:7px;background:#12131a;color:#edeff6;font:inherit;font-size:12px}
       .uic-da-control:focus{outline:2px solid #e1b65b;outline-offset:1px}
-      .uic-da-num{width:96px}.uic-da-cap{width:170px}
-      .uic-da-mode{display:grid;grid-template-columns:repeat(auto-fit,minmax(72px,1fr));gap:4px;min-width:0;width:100%}
-      .uic-da-mode-btn{min-width:0;width:100%;font-size:11px;padding:6px 7px;border:1px solid #3a3b4d;white-space:normal;line-height:1.2}
-      .uic-da-mode-btn[aria-pressed="true"]{background:#6d5528;border-color:#caa65d;color:#fff0c4}
-      .uic-da-note,.uic-da-muted{font-size:10.5px;color:#9aa0b8}
-      .uic-da-note{max-width:100%;line-height:1.35}
-      .uic-da-body{display:flex;flex-direction:column;gap:7px;min-width:0}
-      .uic-da-moblist{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,190px),1fr));gap:6px 10px;min-width:0}
-      .uic-da-mob{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:0;font-size:12px;min-width:0}
-      .uic-da-mobname{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-      .uic-da-mobcap{width:112px;max-width:42%;flex:0 1 112px;min-width:0}
-      .uic-da-check{display:inline-flex;align-items:center;gap:6px;min-height:27px;font-size:11px;color:#cfd3ea;cursor:pointer;min-width:0}
-      .uic-da-check input{width:15px;height:15px;margin:0;flex:0 0 auto;accent-color:#d4aa55}
+      .uic-da-num{width:90px}.uic-da-cap{width:170px;max-width:100%}
+      .uic-da-note,.uic-da-muted{font-size:10px;color:#9aa0b8}
+      .uic-da-note{max-width:100%;line-height:1.3}
+      .uic-da-body{display:flex;flex-direction:column;gap:6px;min-width:0}
+      .uic-da-moblist{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,205px),1fr));gap:5px 9px;min-width:0}
+      .uic-da-mob{display:flex;align-items:center;justify-content:space-between;gap:7px;margin:0;font-size:11px;min-width:0}
+      .uic-da-mobname{display:flex;flex-direction:column;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+      .uic-da-group-count{white-space:nowrap}
+      .uic-da-mobcap{width:100px;max-width:42%;flex:0 1 100px;min-width:0}
+      .uic-da-advanced{border-top:1px solid rgba(255,255,255,.07);padding-top:5px}
+      .uic-da-advanced>summary{font-size:10px;color:#9aa0b8;cursor:pointer;user-select:none;padding:2px 0}
+      .uic-da-advanced-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));align-items:center;gap:3px 8px;padding:5px 0 1px}
+      .uic-da-check{display:inline-flex;align-items:center;gap:5px;min-height:24px;font-size:10px;color:#cfd3ea;cursor:pointer;min-width:0}
+      .uic-da-check input{width:14px;height:14px;margin:0;flex:0 0 auto;accent-color:#d4aa55}
       .uic-da-primary{border-color:#8a692f;background:#59431f;color:#fff0c4;font-weight:700}
       .uic-da-primary:hover{background:#705528}
       .uic-da-stop{border-color:#6a383c;color:#ffd5d8}
-      .uic-da-link{appearance:none;border:0;background:none;color:#c6b17d;padding:3px 2px;font:inherit;font-size:11px;text-decoration:underline;cursor:pointer}
-      .uic-da-select-label{font-size:11px;color:#9aa0b8}
-      .uic-da-status{min-height:18px;font-size:12px;color:#cfd8f6;line-height:1.45;overflow-wrap:anywhere}
+      .uic-da-link{appearance:none;border:0;background:none;color:#c6b17d;padding:2px 2px;font:inherit;font-size:10px;text-decoration:underline;cursor:pointer}
+      .uic-da-select-label{font-size:10px;color:#9aa0b8}
+      .uic-da-status{min-height:16px;font-size:11px;color:#cfd8f6;line-height:1.35;overflow-wrap:anywhere}
       .uic-da-status.ok{color:#8ee6a8}.uic-da-status.bad{color:#ff8a97}
       .uic-da button:disabled{opacity:.45;cursor:not-allowed}
       .uic-da-pick{display:flex;align-items:flex-start;padding:2px 7px 0 0}
       .uic-da-pick input{width:17px;height:17px;cursor:pointer;accent-color:#d4aa55}
       .btn.uic-da-hit{padding:5px 10px;margin-left:8px;font-size:12px;vertical-align:middle}
       .mon.uic-da-dead{opacity:.55}
-      @media(max-width:600px){.uic-da{padding:9px}.uic-da-main{grid-template-columns:minmax(0,1fr)}.uic-da-opts{grid-template-columns:repeat(2,minmax(0,1fr))}.uic-da-mode{grid-template-columns:repeat(2,minmax(0,1fr))}.uic-da-moblist{grid-template-columns:1fr}.uic-da-actions .uic-da-primary{flex:1 1 100%}}
+      @media(max-width:600px){.uic-da{padding:8px}.uic-da-main{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}.uic-da-config{grid-template-columns:1fr 1fr}.uic-da-moblist{grid-template-columns:1fr}.uic-da-actions .uic-da-primary{flex:1 1 100%}}
     `;
     (document.head || document.documentElement).appendChild(s);
   }
@@ -1225,15 +1352,15 @@ const VS = (() => {
     if (!build()) return;
     // Rows the page adds later (or redraws) get their controls too.
     const host = cards()[0] && cards()[0].parentNode;
-    if (host) new MutationObserver(() => { cards().forEach(decorateCard); refreshBar(); if (modeOf() === 'monster' && !bodyEl.contains(document.activeElement)) drawBody(); }).observe(host, { childList: true });
+    if (host) new MutationObserver(() => { cards().forEach(decorateCard); refreshBar(); if (modeOf() === 'monster' && !bodyEl.contains(document.activeElement)) drawBody(); else refreshMobGroupCounts(); }).observe(host, { childList: true });
     if (hasSettings) {
       let snap = '';
-      const shown = () => JSON.stringify(['skill', 'mode', 'hits', 'cap', 'mobCaps', 'overshoot', 'delay', 'autoJoin', 'staminaPotion', 'hpPotion'].map((k) => S.get(k)));
+      const shown = () => JSON.stringify(['skill', 'mode', 'hits', 'cap', 'mobCaps', 'damageModel', 'delay', 'autoJoin', 'staminaPotion', 'hpPotion'].map((k) => S.get(k)));
       snap = shown();
       VS.onChange(ID, () => { const now = shown(); if (now === snap) return; snap = now; if (!bar.contains(document.activeElement)) syncControls(); });   // another tab changed it
     }
     window.addEventListener('beforeunload', () => { run.stop = true; });
-    window.__uicDungeonAttack = { run, get last() { return DBG.last; }, attack: attackMonsters, build, lookup, chooseCost, learned };
+    window.__uicDungeonAttack = { run, get last() { return DBG.last; }, attack: attackMonsters, build, lookup, pickAttack, loadAttackHistory, damageModelOf };
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start, { once: true }); else start();
 })();
@@ -1423,7 +1550,6 @@ const VS = (() => {
         canUpgrade: !!btn && !btn.disabled && !!m,
         hint: txt(card.querySelector('.hint')),
       };
-      Object.defineProperty(it, 'levels', { get() { return this.canUpgrade ? upgradeLevels(this) : 0; }, enumerable: true });
       return it;
     }).filter(Boolean);
 
@@ -1488,8 +1614,7 @@ const VS = (() => {
 
   function applyForge(doc) {
     const f = parseForge(doc);
-    const cap = Math.max(0, ...f.items.filter((x) => !x.canUpgrade && !x.mythical && x.level > 1).map((x) => x.level));
-    S.forge = { items: f.items, cap, csrf: f.csrf || (S.forge && S.forge.csrf) || '', stale: false };
+    S.forge = { items: f.items, csrf: f.csrf || (S.forge && S.forge.csrf) || '', stale: false };
     if (f.gold != null) { S.gold = f.gold; S.goldExact = true; showGold(); }
     return S.forge;
   }
@@ -1628,22 +1753,19 @@ const VS = (() => {
       : { ok: false, msg: 'No materials were used, so the server did not craft it.', stop: true };
   }
 
-  /* ----- upgrade */
-  function upgradeLevels(it) {
-    const per = it.mats.filter((m) => m.need > 0).map((m) => Math.floor(m.have / m.need));
-    if (it.goldNeed > 0 && S.goldExact) per.push(Math.floor(S.gold / it.goldNeed));
-    // Legendary items stop at a level cap the page never states. It is read off the items that have no
-    // Upgrade button (the highest level among those). If the game raises the cap, those items get a
-    // button again, the number below drops out, and nothing is capped until the page shows a new one.
-    const cap = S.forge && S.forge.cap;
-    if (cap && !it.mythical) per.push(Math.max(0, cap - it.level));
-    return per.length ? Math.min(...per) : 0;
+  /* The server's current Forge card defines exactly one next step. Never infer later-level costs. */
+  function requirementsMet(it) {
+    if (!it || !it.canUpgrade) return false;
+    const matsReady = (it.mats || []).every((m) => !(m.need > 0) || m.have >= m.need);
+    const goldReady = !(it.goldNeed > 0) || !S.goldExact || S.gold >= it.goldNeed;
+    return matsReady && goldReady;
   }
 
   async function upgradeOnce(key) {
     const f = S.forge;
     const it = f && f.items.find((x) => x.key === key);
     if (!it || !it.canUpgrade) return { ok: false, msg: 'This item cannot be upgraded any further.', stop: true };
+    if (!requirementsMet(it)) return { ok: false, msg: 'You do not have the materials or gold for the next upgrade.', stop: true };
     if (!f.csrf) return { ok: false, msg: 'Could not read the forge security token. Reload the page.', stop: true };
     const lv = it.level, goldNeed = it.goldNeed;
 
@@ -1677,8 +1799,8 @@ const VS = (() => {
     }
     const next = S.forge.items.find((x) => x.key === key) || S.forge.items.find((x) => x.name === it.name && x.level > lv);
     if (!next) return { ok: true, stop: true, note: `${it.name} is now past Lv ${lv}.` };
-    if (!next.canUpgrade) return { ok: true, stop: true, note: `${it.name} reached Lv ${next.level}, the maximum.` };
-    if (next.levels < 1) return { ok: true, stop: true, note: `${it.name} is Lv ${next.level}. You are short on materials${S.goldExact ? ' or gold' : ''} for the next level.` };
+    if (!next.canUpgrade) return { ok: true, stop: true, note: `${it.name} reached Lv ${next.level}; no further upgrade is currently offered.` };
+    if (!requirementsMet(next)) return { ok: true, stop: true, note: `${it.name} is Lv ${next.level}. The refreshed next-level requirements are not met.` };
     return { ok: true, key: next.key };
   }
 
@@ -1887,7 +2009,7 @@ const VS = (() => {
     const M = modal();
     const body = h('div');
     const result = h('div', { class: 'uag-result', role: 'status', 'aria-live': 'polite' });
-    const go = h('button', { class: 'uag-btn uag-btn-primary uag-go', type: 'button', text: 'Upgrade once' });
+    const go = h('button', { class: 'uag-btn uag-btn-primary uag-go', type: 'button', text: 'Upgrade' });
     const retry = h('button', { class: 'uag-btn', type: 'button', text: 'Retry forge refresh', hidden: true });
     M.onClose(() => renderBody());
     M.dlg.append(body, result, h('div', { class: 'uag-actions' }, go), retry);
@@ -1910,8 +2032,9 @@ const VS = (() => {
             it.mats.length ? matRows(it.mats, 1) : h('p', { class: 'uag-hint', text: 'No additional materials are listed for this upgrade.' }),
             it.goldNeed ? h('div', { class: 'uag-gold' + (goldShort ? ' is-short' : '') }, '🪙 ', h('b', { text: fmt(it.goldNeed) }), ` gold · you have ${S.goldExact ? fmt(S.gold) : 'about ' + fmt(S.gold)}`) : null)
           : h('p', { class: 'uag-hint', text: it.hint || 'Max level reached.' }));
-      go.textContent = !it.canUpgrade ? 'Max level' : it.levels < 1 ? 'Not enough for next level' : 'Upgrade one level';
-      go.disabled = S.busy || !it.canUpgrade || it.levels < 1 || !!(S.forge && S.forge.stale);
+      const ready = requirementsMet(it);
+      go.textContent = !it.canUpgrade ? 'No next upgrade' : ready ? 'Upgrade' : 'Missing materials';
+      go.disabled = S.busy || !ready || !!(S.forge && S.forge.stale);
       retry.hidden = !(S.forge && S.forge.stale);
     }
 
@@ -2088,7 +2211,7 @@ const VS = (() => {
       return `${c.recipes.filter((r) => r.max > 0).length} of ${c.recipes.length} ready`;
     }
     const bits = [];
-    if (S.forge) bits.push(`${S.forge.items.filter((x) => x.canUpgrade && x.levels > 0).length} upgradable`);
+    if (S.forge) bits.push(`${S.forge.items.filter((x) => requirementsMet(x)).length} upgradable`);
     if (S.decraft) bits.push(`${S.decraft.items.filter((x) => x.max > 0).length} with spares`);
     return bits.join(' · ') || 'Upgrade and decraft';
   }
@@ -2212,13 +2335,14 @@ const VS = (() => {
     panel.replaceChildren(...kids);
   }
 
-  function tile({ item, img, pillText, pillKind, name, lines, foot, disabled, onClick, bad }) {
-    return h('button', { class: 'uag-tile' + (disabled ? ' is-off' : '') + (bad ? ' is-poor' : ''), type: 'button', onclick: onClick },
+  function tile({ item, img, pillText, pillKind, name, lines, foot, disabled, onClick, bad, action }) {
+    return h('article', { class: 'uag-tile' + (disabled ? ' is-off' : '') + (bad ? ' is-poor' : ''), tabindex: '0', role: 'button', 'aria-label': name + ' details', onclick: (e) => { if (e.target.closest('.uag-card-action')) return; onClick && onClick(); }, onkeydown: (e) => { if ((e.key === 'Enter' || e.key === ' ') && e.target === e.currentTarget) { e.preventDefault(); onClick && onClick(); } } },
       h('span', { class: 'uag-art' }, img ? h('img', { src: img, alt: '', loading: 'lazy' }) : null,
         pillText ? h('span', { class: 'uag-pill uag-pill-' + (pillKind || 'leg') + ' uag-pill-abs', text: pillText }) : null),
       h('span', { class: 'uag-name', text: name }),
       h('span', { class: 'uag-lines' }, lines),
-      foot);
+      foot,
+      action || null);
   }
 
   function sortBy(list, mode, getters) {
@@ -2250,7 +2374,14 @@ const VS = (() => {
         bad: r.max < 1, disabled: r.max < 1,
         foot: h('span', { class: 'uag-stock' },
           h('span', { class: 'uag-minimats' }, r.reqs.map((m) => h('span', { class: 'uag-mini' + (m.have < m.need ? ' is-short' : ''), title: `${m.name}: ${fmt(m.have)} / ${fmt(m.need)}` }, art(m.img, 'uag-mini-art'), h('b', { text: fmt(m.need) })))),
-          h('span', { class: 'uag-stock-txt', text: r.max > 0 ? `Can craft ${fmt(r.max)}` : 'Missing materials' })),
+          null),
+        action: h('button', { class: 'uag-card-action', type: 'button', text: 'Craft', disabled: r.max < 1, onclick: async (e) => {
+          e.stopPropagation(); if (S.busy || r.max < 1) return; S.busy = true;
+          const out = await craftOnce(S.gate, r.id); S.busy = false;
+          if (out.ok) { markStale(String(S.gate)); try { await loadGate(S.gate, true); } catch (_) { if (S.craft[S.gate]) S.craft[S.gate].stale = true; } toast(`Crafted ${r.name}`); }
+          else toast(out.msg || 'Craft failed', false);
+          renderBody();
+        } }),
         onClick: () => openCraft(S.gate, r.id),
       })) : [h('div', { class: 'uag-empty', text: 'No recipes match.' })]));
     };
@@ -2276,14 +2407,14 @@ const VS = (() => {
     shell(segmented(), tb, grid);
     paintList = () => {
       const q = S.query.trim().toLowerCase();
-      let list = f.items.filter((x) => (!q || x.name.toLowerCase().includes(q)) && (!getOnly() || (x.canUpgrade && x.levels > 0)));
+      let list = f.items.filter((x) => (!q || x.name.toLowerCase().includes(q)) && (!getOnly() || requirementsMet(x)));
       list = sortBy(list, getSort(), {
-        ready: (a, b) => (b.canUpgrade && b.levels > 0) - (a.canUpgrade && a.levels > 0) || b.levels - a.levels,
+        ready: (a, b) => Number(requirementsMet(b)) - Number(requirementsMet(a)),
         level: (a, b) => b.level - a.level,
         name: (a, b) => a.name.localeCompare(b.name),
       });
       grid.replaceChildren(...(list.length ? list.map((x) => {
-        const ready = x.canUpgrade && x.levels > 0;
+        const ready = requirementsMet(x);
         return tile({
           img: x.img, pillText: x.badge, pillKind: x.mythical ? 'myth' : 'leg', name: x.name,
           lines: [`Lv ${x.level} · 🔪 ${fmt(x.atk)} · 🛡️ ${fmt(x.def)}`],
@@ -2295,7 +2426,16 @@ const VS = (() => {
                 x.mats.filter((m) => m.need > 0).map((m) => h('span', { class: 'uag-mini' + (m.have < m.need ? ' is-short' : ''), title: `${m.name}: ${fmt(m.have)} / ${fmt(m.need)}` }, art(m.img, 'uag-mini-art'), h('b', { text: fmt(m.need) }))),
                 x.goldNeed ? h('span', { class: 'uag-mini uag-mini-gold' + (S.goldExact && S.gold < x.goldNeed ? ' is-short' : ''), title: `Gold: ${fmt(S.gold)} / ${fmt(x.goldNeed)}` }, '🪙 ', h('b', { text: fmt(x.goldNeed) })) : null)
               : null,
-            h('span', { class: 'uag-stock-txt', text: !x.canUpgrade ? 'Max level' : ready ? 'Next level ready' : 'Missing materials' })),
+            null),
+          action: h('button', { class: 'uag-card-action', type: 'button', text: 'Upgrade', disabled: !ready || S.busy, onclick: async (e) => {
+            e.stopPropagation(); if (S.busy || !requirementsMet(x)) return; S.busy = true;
+            const before = x.level; let out;
+            try { out = await upgradeOnce(x.key); } catch (err) { out = { ok: false, msg: err.message || 'Upgrade failed.' }; }
+            S.busy = false;
+            if (out && out.ok && !out.refreshError) { toast(`${x.name} upgraded${S.forge.items.find((a) => a.key === x.key) ? '' : ''}`); }
+            else toast((out && (out.msg || out.refreshError)) || 'Upgrade failed. Refresh the Forge before trying again.', false);
+            renderBody();
+          } }),
           onClick: () => openUpgrade(x.key),
         });
       }) : [h('div', { class: 'uag-empty', text: 'No items match.' })]));
@@ -2396,7 +2536,7 @@ body.uag-lock{overflow:hidden}
 .uag-name{font-weight:600;font-size:13.5px;color:#F1F2FA;line-height:1.25;min-height:2.5em;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .uag-lines{font-size:12.5px;color:#B9BBD1;font-variant-numeric:tabular-nums}
 .uag-stock{display:flex;flex-direction:column;gap:6px;margin-top:auto}
-.uag-stock-txt{font-size:11.5px;color:#9aa0b8}
+.uag-stock-txt{font-size:10.5px;color:#9aa0b8}.uag-card-action{appearance:none;width:100%;border:1px solid var(--acc);background:var(--acc);color:var(--ink);font:700 12px 'Segoe UI',Arial,sans-serif;border-radius:8px;padding:7px 9px;cursor:pointer}.uag-card-action:hover:not(:disabled){filter:brightness(1.08)}.uag-card-action:disabled{opacity:.45;cursor:not-allowed}
 .uag-tile:not(.is-poor) .uag-stock-txt{color:var(--acc)}
 .uag-deltas{font-size:11.5px;color:#9fd5b0;line-height:1.3}
 .uag-minimats{display:flex;flex-wrap:wrap;gap:4px}
@@ -2483,9 +2623,11 @@ body.uag-lock{overflow:hidden}
     if (!document.querySelector('.container')) return false;
     document.head.append(h('style', { id: 'uag-css', text: CSS }));
 
-    S.tab = PATH === 'blacksmith' ? 'craft' : 'legendary';
-    if (PATH === 'legendary_decraft') S.mode = 'decraft';
-    else if (PATH === 'legendary_forge') S.mode = 'upgrade';
+    // The page opened by the user is authoritative. Preferences only restore the last
+    // selected tab on non-canonical entry points; they never hijack these three URLs.
+    if (PATH === 'blacksmith') { S.tab = 'craft'; S.mode = 'upgrade'; }
+    else if (PATH === 'legendary_decraft') { S.tab = 'legendary'; S.mode = 'decraft'; }
+    else if (PATH === 'legendary_forge') { S.tab = 'legendary'; S.mode = 'upgrade'; }
     else { S.tab = prefs.tab === 'legendary' ? 'legendary' : 'craft'; S.mode = prefs.mode === 'decraft' ? 'decraft' : 'upgrade'; }
     if (!['upgrade', 'decraft'].includes(S.mode)) S.mode = 'upgrade';
 
@@ -2747,17 +2889,25 @@ body.uag-lock{overflow:hidden}
 
   function build() {
     const container = document.querySelector('.container') || document.body;
-    container.querySelectorAll(':scope > .storePanel').forEach((p) => p.classList.add('ubm-native'));
+    // Avoid :scope selectors here: the game's classic panels must also be found in JSDOM.
+    const nativePanels = Array.from(container.children || []).filter((p) => p.classList && p.classList.contains('storePanel'));
+    nativePanels.forEach((p) => p.classList.add('ubm-native'));
+    let classic = false;
     const switchbar = h('div', { class: 'ubm-switchbar' },
-      h('button', { class: 'ubm-link', type: 'button', text: 'Show classic view', onclick: (e) => {
-        const on = document.body.classList.toggle('ubm-classic');
-        e.currentTarget.textContent = on ? 'Show new view' : 'Show classic view';
+      h('button', { class: 'ubm-link', type: 'button', text: 'Show classic view', 'aria-pressed': 'false', onclick: (e) => {
+        classic = !classic;
+        document.body.classList.toggle('ubm-classic', classic);
+        nativePanels.forEach((p) => p.classList.toggle('ubm-native', !classic));
+        e.currentTarget.textContent = classic ? 'Show new view' : 'Show classic view';
+        e.currentTarget.setAttribute('aria-pressed', String(classic));
       } }));
     tabsEl = h('div', { class: 'ubm-tabs', role: 'tablist' });
     panel = h('div', { class: 'ubm-panel' });
-    root = h('section', { class: 'ubm', 'aria-label': 'Black Merchant' }, switchbar, tabsEl, panel);
+    // Keep the view toggle OUTSIDE .ubm: classic mode hides the redesigned panel,
+    // so a toggle nested inside it would disappear and leave no way back.
+    root = h('section', { class: 'ubm', 'aria-label': 'Black Merchant' }, tabsEl, panel);
     const anchor = container.querySelector('.topbar');
-    if (anchor) anchor.after(root); else container.prepend(root);
+    if (anchor) anchor.after(switchbar, root); else container.prepend(switchbar, root);
   }
 
   const storeStock = (st) => st.offers.filter((o) => canBuy(st, o) > 0).length;
@@ -2822,7 +2972,7 @@ body.uag-lock{overflow:hidden}
 .ubm *,.ubm-dlg *{box-sizing:border-box}
 .ubm-native{display:none!important}
 body.ubm-classic .ubm-native{display:block!important}
-body.ubm-classic .ubm{display:none}
+body.ubm-classic .ubm{display:none!important}
 body.ubm-lock{overflow:hidden}
 .ubm-switchbar{display:flex;justify-content:flex-end;margin:-4px 0 -8px}
 .ubm-link{background:none;border:0;color:#9aa0b8;font:inherit;font-size:12px;cursor:pointer;padding:4px 2px;text-decoration:underline}
