@@ -14,7 +14,7 @@
  * Quick attack has NO entry in Options besides its switch: all of its settings live in the panel on the map, in one place.
  * On an older Core everything still runs; the options are just not grouped (and lists reorder with the keys only).
  *
- * addons.json:  { "id": "visuals-addition", "name": "Visuals", "version": "2.1.4", "url": "addons/visuals-addition.js", "button": false }
+ * addons.json:  { "id": "visuals-addition", "name": "Visuals", "version": "2.1.5", "url": "addons/visuals-addition.js", "button": false }
  *   (no "match": the sidebar module needs every page; the other modules check their own page.)
  *
  * Your saved Sidebar / Pets / Dungeon Attack options from the old separate ids are copied across once, only where you
@@ -1287,13 +1287,15 @@ const VS = (() => {
     attackBtn = el('button', { class: 'btn uic-da-primary', type: 'button', onclick: () => attackMonsters(picked().map(midOf)) }, '⚡ Attack selected (', selCount, ')');
     stopBtn = el('button', { class: 'btn uic-da-stop', type: 'button', onclick: () => { run.stop = true; run.note = 'Stopping after this hit…'; paintStatus(); } }, '■ Stop');
     statusEl = el('div', { class: 'uic-da-status', role: 'status', 'aria-live': 'polite' });
-    const link = (t, fn) => el('button', { class: 'uic-da-link', type: 'button', onclick: fn }, t);
+    const link = (t, fn) => el('button', { class: 'uic-da-chip', type: 'button', onclick: fn }, t);
     bar = el('section', { class: 'panel uic-da' },
-      el('div', { class: 'h uic-da-head' }, '⚡ Quick attack'),
+      el('div', { class: 'uic-da-head' }, el('span', { class: 'uic-da-title' }, '⚡ Quick attack'), el('span', { class: 'uic-da-sub' }, 'Hit every monster you tick')),
       el('div', { class: 'uic-da-row uic-da-main' }, field('Stop when', modeSel), modelField),
       bodyEl, optsEl,
-      el('div', { class: 'uic-da-row uic-da-actions' }, attackBtn, stopBtn, el('span', { class: 'uic-da-select-label' }, 'Select:'),
-        link('All', () => selectWhere(() => true)), link('Not joined', () => selectWhere((c) => !isJoined(c))), link('Joined', () => selectWhere((c) => isJoined(c))), link('None', () => selectWhere(() => false))),
+      el('div', { class: 'uic-da-actions' },
+        el('div', { class: 'uic-da-go' }, attackBtn, stopBtn),
+        el('div', { class: 'uic-da-select' }, el('span', { class: 'uic-da-select-label' }, 'Select'),
+          link('All', () => selectWhere(() => true)), link('Not joined', () => selectWhere((c) => !isJoined(c))), link('Joined', () => selectWhere((c) => isJoined(c))), link('None', () => selectWhere(() => false)))),
       statusEl);
     first.parentNode.insertBefore(bar, first);
     list.forEach(decorateCard);
@@ -1304,43 +1306,76 @@ const VS = (() => {
   function css() {
     const s = el('style', { id: 'uic-da-css' });
     s.textContent = `
-      .uic-da{display:flex;flex-direction:column;gap:6px;margin:0 0 10px;padding:9px;min-width:0;max-width:100%;width:100%;box-sizing:border-box;overflow:hidden}
-      .uic-da-head{margin:0;font-size:15px;font-weight:700;color:#f9e2af;line-height:1.2}
-      .uic-da-row{display:flex;flex-wrap:wrap;align-items:flex-end;gap:6px 8px;min-width:0;max-width:100%}
-      .uic-da-main{display:grid;grid-template-columns:minmax(0,1fr) minmax(115px,0.7fr);align-items:end;gap:6px 8px}
-      .uic-da-config{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));align-items:end;gap:6px 8px}
-      .uic-da-actions{align-items:center;gap:5px;padding-top:6px;border-top:1px solid rgba(255,255,255,.07)}
-      .uic-da-field{display:flex;flex-direction:column;gap:3px;min-width:0;max-width:100%;font-size:12px}
-      .uic-da-field>label{font-size:10px;font-weight:700;color:#cfd3ea}
-      .uic-da-control{min-height:30px;width:100%;max-width:100%;min-width:0;box-sizing:border-box;padding:5px 7px;border:1px solid #2b2d44;border-radius:7px;background:#12131a;color:#edeff6;font:inherit;font-size:12px}
-      .uic-da-control:focus{outline:2px solid #e1b65b;outline-offset:1px}
-      .uic-da-num{width:90px}.uic-da-cap{width:170px;max-width:100%}
-      .uic-da-note,.uic-da-muted{font-size:10px;color:#9aa0b8}
-      .uic-da-note{max-width:100%;line-height:1.3}
-      .uic-da-body{display:flex;flex-direction:column;gap:6px;min-width:0}
-      .uic-da-moblist{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,205px),1fr));gap:5px 9px;min-width:0}
-      .uic-da-mob{display:flex;align-items:center;justify-content:space-between;gap:7px;margin:0;font-size:11px;min-width:0}
-      .uic-da-mobname{display:flex;flex-direction:column;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+      /* Same look as the Artisans / Black Merchant panels: dark card, soft borders, readable 12-13px text. */
+      .uic-da,.uic-da *{box-sizing:border-box}
+      .uic-da.panel{display:flex;flex-direction:column;gap:12px;margin:0 0 14px;padding:14px;width:100%;max-width:100%;min-width:0;overflow:hidden;background:#1A1B25;border:1px solid #2B2D44;border-radius:14px;box-shadow:0 6px 18px rgba(0,0,0,.35);color:#E0E0E0;font-family:'Segoe UI',Arial,sans-serif}
+      .uic-da-head{display:flex;align-items:baseline;flex-wrap:wrap;gap:4px 10px;margin:0;padding:0 0 10px;border-bottom:1px solid #2B2D44;background:none;border-radius:0}
+      .uic-da-title{font-size:17px;font-weight:700;color:#FFD369;line-height:1.2}
+      .uic-da-sub{font-size:12px;color:#9aa0b8}
+      .uic-da-row{display:flex;flex-wrap:wrap;align-items:flex-end;gap:10px;min-width:0;max-width:100%}
+      .uic-da-main{display:grid;grid-template-columns:minmax(0,1.4fr) minmax(0,1fr);align-items:end;gap:10px}
+      .uic-da-main>[hidden]{display:none}
+      .uic-da-config{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));align-items:end;gap:10px}
+      .uic-da-field{display:flex;flex-direction:column;gap:5px;min-width:0;max-width:100%}
+      .uic-da-field>label{margin:0;font-size:12px;font-weight:600;color:#B9BBD1}
+      .uic-da-control{display:block;height:36px;width:100%;max-width:100%;min-width:0;padding:0 10px;border:1px solid #2B2D44;border-radius:9px;background:#12131A;color:#EDEFF6;font:inherit;font-size:13px;box-shadow:none}
+      select.uic-da-control{padding-right:28px}
+      .uic-da-control:hover{border-color:#3a3d5a}
+      .uic-da-control:focus{outline:2px solid #FFD369;outline-offset:1px;border-color:transparent}
+      .uic-da-num{width:100%}.uic-da-cap{width:100%;max-width:260px}
+      .uic-da-note,.uic-da-muted{font-size:12px;color:#9aa0b8}
+      .uic-da-note{line-height:1.4}
+      .uic-da-body{display:flex;flex-direction:column;gap:10px;min-width:0;padding:10px 12px;background:#171923;border:1px solid #2B2D44;border-radius:10px}
+      .uic-da-moblist{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,230px),1fr));gap:8px;min-width:0}
+      .uic-da-mob{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:0;padding:6px 8px 6px 10px;font-size:13px;min-width:0;background:#12131A;border:1px solid #2B2D44;border-radius:9px}
+      .uic-da-mobname{display:flex;flex-direction:column;gap:2px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#EDEFF6;font-weight:600}
+      .uic-da-mobname .uic-da-muted{font-size:11px;font-weight:400}
       .uic-da-group-count{white-space:nowrap}
-      .uic-da-mobcap{width:100px;max-width:42%;flex:0 1 100px;min-width:0}
-      .uic-da-advanced{border-top:1px solid rgba(255,255,255,.07);padding-top:5px}
-      .uic-da-advanced>summary{font-size:10px;color:#9aa0b8;cursor:pointer;user-select:none;padding:2px 0}
-      .uic-da-advanced-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));align-items:center;gap:3px 8px;padding:5px 0 1px}
-      .uic-da-check{display:inline-flex;align-items:center;gap:5px;min-height:24px;font-size:10px;color:#cfd3ea;cursor:pointer;min-width:0}
-      .uic-da-check input{width:14px;height:14px;margin:0;flex:0 0 auto;accent-color:#d4aa55}
-      .uic-da-primary{border-color:#8a692f;background:#59431f;color:#fff0c4;font-weight:700}
-      .uic-da-primary:hover{background:#705528}
-      .uic-da-stop{border-color:#6a383c;color:#ffd5d8}
-      .uic-da-link{appearance:none;border:0;background:none;color:#c6b17d;padding:2px 2px;font:inherit;font-size:10px;text-decoration:underline;cursor:pointer}
-      .uic-da-select-label{font-size:10px;color:#9aa0b8}
-      .uic-da-status{min-height:16px;font-size:11px;color:#cfd8f6;line-height:1.35;overflow-wrap:anywhere}
-      .uic-da-status.ok{color:#8ee6a8}.uic-da-status.bad{color:#ff8a97}
-      .uic-da button:disabled{opacity:.45;cursor:not-allowed}
-      .uic-da-pick{display:flex;align-items:flex-start;padding:2px 7px 0 0}
-      .uic-da-pick input{width:17px;height:17px;cursor:pointer;accent-color:#d4aa55}
-      .btn.uic-da-hit{padding:5px 10px;margin-left:8px;font-size:12px;vertical-align:middle}
+      .uic-da-mobcap{width:110px;max-width:45%;flex:0 1 110px;min-width:0;height:32px;text-align:right}
+      .uic-da-advanced{border:1px solid #2B2D44;border-radius:10px;background:#171923;padding:0}
+      .uic-da-advanced>summary{display:flex;align-items:center;gap:8px;padding:9px 12px;font-size:13px;font-weight:600;color:#B9BBD1;cursor:pointer;user-select:none;list-style:none}
+      .uic-da-advanced>summary::-webkit-details-marker{display:none}
+      .uic-da-advanced>summary::before{content:'›';display:inline-block;font-size:16px;line-height:1;transition:transform .15s}
+      .uic-da-advanced[open]>summary::before{transform:rotate(90deg)}
+      .uic-da-advanced>summary:hover{color:#EDEFF6}
+      .uic-da-advanced-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));align-items:stretch;gap:8px;padding:0 12px 12px}
+      .uic-da-advanced-grid .uic-da-field{justify-content:center;padding:6px 10px;background:#12131A;border:1px solid #2B2D44;border-radius:9px}
+      .uic-da-advanced-grid .uic-da-control{height:32px}
+      .uic-da-check{display:flex;flex-direction:row-reverse;align-items:center;justify-content:space-between;gap:12px;min-height:40px;margin:0;padding:6px 10px;font-size:13px;color:#d7dbf0;cursor:pointer;min-width:0;background:#12131A;border:1px solid #2B2D44;border-radius:9px}
+      .uic-da-check:hover{border-color:#3a3d5a}
+      .uic-da-check input{appearance:none;-webkit-appearance:none;position:relative;flex:0 0 auto;width:36px;height:20px;margin:0;border-radius:999px;background:#2B2D44;cursor:pointer;transition:background .15s}
+      .uic-da-check input::after{content:'';position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#B9BBD1;transition:transform .15s,background .15s}
+      .uic-da-check input:checked{background:#8a692f}
+      .uic-da-check input:checked::after{transform:translateX(16px);background:#FFE08A}
+      .uic-da-check input:focus-visible{outline:2px solid #FFD369;outline-offset:2px}
+      .uic-da-actions{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:10px;padding-top:12px;border-top:1px solid #2B2D44}
+      .uic-da-go{display:flex;gap:8px;flex:1 1 auto;min-width:0}
+      .uic-da .btn.uic-da-primary,.uic-da .btn.uic-da-stop{display:inline-flex;align-items:center;justify-content:center;gap:6px;height:38px;margin:0;padding:0 16px;border-radius:9px;font:inherit;font-size:13px;font-weight:700;cursor:pointer;transition:filter .15s,background .15s}
+      .uic-da .btn.uic-da-primary{flex:1 1 auto;min-width:160px;border:1px solid #FFD369;background:#FFD369;color:#241a00}
+      .uic-da .btn.uic-da-primary:hover:not(:disabled){filter:brightness(1.08);background:#FFD369}
+      .uic-da .btn.uic-da-stop{flex:0 0 auto;border:1px solid #6b2f3b;background:#3a1f26;color:#ffb3bf}
+      .uic-da .btn.uic-da-stop:hover:not(:disabled){background:#4a2630}
+      .uic-da button:disabled{opacity:.4;cursor:not-allowed}
+      .uic-da-select{display:flex;flex-wrap:wrap;align-items:center;gap:6px}
+      .uic-da-select-label{font-size:12px;color:#9aa0b8;margin-right:2px}
+      .uic-da-chip{appearance:none;margin:0;padding:6px 12px;border:1px solid #2B2D44;border-radius:999px;background:#171923;color:#B9BBD1;font:inherit;font-size:12px;font-weight:600;cursor:pointer;transition:color .15s,border-color .15s}
+      .uic-da-chip:hover{color:#fff;border-color:#FFD369}
+      .uic-da-status{display:flex;align-items:center;min-height:38px;padding:8px 12px;font-size:13px;line-height:1.4;color:#cfd8f6;background:#12131A;border:1px solid #2B2D44;border-left:3px solid #6ea8ff;border-radius:9px;overflow-wrap:anywhere}
+      .uic-da-status:empty{display:none}
+      .uic-da-status.ok{color:#9fd5b0;border-left-color:#4cc27a}
+      .uic-da-status.bad{color:#f4a3ae;border-left-color:#e0566c}
+      .uic-da-pick{display:flex;align-items:flex-start;padding:2px 8px 0 0}
+      .uic-da-pick input{width:18px;height:18px;cursor:pointer;accent-color:#FFD369}
+      .btn.uic-da-hit{padding:5px 12px;margin-left:8px;font-size:12px;font-weight:700;vertical-align:middle;border-radius:8px}
       .mon.uic-da-dead{opacity:.55}
-      @media(max-width:600px){.uic-da{padding:8px}.uic-da-main{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}.uic-da-config{grid-template-columns:1fr 1fr}.uic-da-moblist{grid-template-columns:1fr}.uic-da-actions .uic-da-primary{flex:1 1 100%}}
+      @media(max-width:600px){
+        .uic-da.panel{padding:12px;gap:10px}
+        .uic-da-main,.uic-da-config{grid-template-columns:1fr}
+        .uic-da-moblist{grid-template-columns:1fr}
+        .uic-da-advanced-grid{grid-template-columns:1fr}
+        .uic-da-go{flex:1 1 100%}
+        .uic-da-select{flex:1 1 100%}
+      }
     `;
     (document.head || document.documentElement).appendChild(s);
   }
@@ -1396,6 +1431,20 @@ const VS = (() => {
   const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
   const num = (s) => parseInt(String(s ?? '').replace(/[^\d-]/g, ''), 10) || 0;
   const norm = (s) => String(s || '').replace(/\s+/g, ' ').trim();
+  // Shorthand for big numbers: 3,000,000 -> 3M, 1,250 -> 1.3K. Below `from` the exact number is kept.
+  const fmtC = (n, from = 10000) => {
+    n = Math.max(0, Math.floor(Number(n) || 0));
+    if (n < from || n < 1000) return NF.format(n);
+    const U = ['', 'K', 'M', 'B', 'T']; let i = 0, x = n;
+    while (x >= 1000 && i < 4) { x /= 1000; i++; }
+    let t = x >= 100 ? Math.round(x) : Math.round(x * 10) / 10;
+    if (t >= 1000 && i < 4) { t = 1; i++; }
+    return (Number.isInteger(t) ? String(t) : t.toFixed(1)) + U[i];
+  };
+  // Native append()/replaceChildren() turn null into the text "null", so anything that can be empty goes through here.
+  const put = (parent, ...kids) => { parent.append(...kids.flat(Infinity).filter((k) => k != null && k !== false)); return parent; };
+  // Relics only work as a set of ten (Olympus divine shield), so decraft always leaves ten of them.
+  const keepOf = (name) => (/\brelics?\b/i.test(String(name || '')) ? 10 : 1);
 
   function fixText(s) {
     return String(s || '')
@@ -1455,6 +1504,8 @@ const VS = (() => {
     craft: {},                   // gate -> { recipes, stale }
     forge: null,                 // { items, csrf, stale }
     decraft: null,               // { items, stale }
+    inv: null,                   // { counts: Map(lower-case item name -> how many you own), at } from inventory.php
+    invBusy: null,
     gold: 0,
     goldExact: false,
     query: '',
@@ -1577,7 +1628,8 @@ const VS = (() => {
         atk: num((/ATK:\s*([\d,]+)/i.exec(meta) || [])[1]),
         def: num((/DEF:\s*([\d,]+)/i.exec(meta) || [])[1]),
         have,
-        max: Math.max(0, have - 1),
+        keep: keepOf(txt(card.querySelector('.name'))),
+        max: Math.max(0, have - keepOf(txt(card.querySelector('.name')))),
       };
     }).filter(Boolean);
   }
@@ -1630,6 +1682,42 @@ const VS = (() => {
     S.decraft = { items: parseDecraft(doc), stale: false };
     return S.decraft;
   }
+
+  /* How many of each item you own, from the inventory page (equipped copies count too). Read once, kept for two minutes,
+     and adjusted locally after a craft. A failure just leaves the counters blank. */
+  const invKey = (name) => norm(fixText(name)).toLowerCase();
+  async function loadInventory(force) {
+    if (S.inv && !force && Date.now() - S.inv.at < 120000) return S.inv;
+    if (S.invBusy) return S.invBusy;
+    S.invBusy = (async () => {
+      try {
+        const doc = await getDoc('inventory.php');
+        const counts = new Map();
+        doc.querySelectorAll('.slot-box').forEach((b) => {
+          const name = txt(b.querySelector('.equipment-item-name')) || fixText(b.querySelector('.info-btn')?.getAttribute('data-name') || '') || fixText(b.querySelector('img')?.getAttribute('alt') || '');
+          if (!name) return;
+          // The stack size is its own little element ("x46"); equipped copies have none and count as 1.
+          let n = 1; const own = [...b.querySelectorAll('div,span')].filter((e) => !e.children.length && /^x\s*\d[\d,]*$/i.test(norm(e.textContent)));
+          if (own.length) n = num(own[own.length - 1].textContent) || 1;
+          const k = invKey(name); counts.set(k, (counts.get(k) || 0) + n);
+        });
+        if (!counts.size) throw new Error('empty inventory');
+        S.inv = { counts, at: Date.now() };
+        return S.inv;
+      } finally { S.invBusy = null; }
+    })();
+    return S.invBusy;
+  }
+  const ownedOf = (name) => (S.inv ? (S.inv.counts.get(invKey(name)) || 0) : null);
+  const bumpOwned = (name, n) => { if (S.inv && n > 0) S.inv.counts.set(invKey(name), (ownedOf(name) || 0) + n); };
+  function refreshOwned() {
+    document.querySelectorAll('[data-own]').forEach((e) => {
+      const n = ownedOf(e.getAttribute('data-own'));
+      e.textContent = n == null ? '…' : fmtC(n, 100000);
+      e.title = n == null ? '' : fmt(n) + ' owned';
+    });
+  }
+  function wantInventory() { loadInventory().then(refreshOwned, () => { document.querySelectorAll('[data-own]').forEach((e) => { e.textContent = '–'; }); }); }
 
   // After any successful action the other lists may be out of date. They reload when next shown.
   function markStale(except) {
@@ -1821,7 +1909,7 @@ const VS = (() => {
     const it = (S.decraft?.items || []).find((x) => x.id === id);
     if (it) {
       const rem = Number.isFinite(Number(j.remaining_qty)) ? Number(j.remaining_qty) : it.have - qty;
-      it.have = rem; it.max = Math.max(0, rem - 1);
+      it.have = rem; it.max = Math.max(0, rem - (it.keep || 1));
     }
     markStale('decraft');
     return { ok: true, returned: j.returned_materials };
@@ -1838,7 +1926,7 @@ const VS = (() => {
       bag[k] = (bag[k] || 0) + q;
     }
   }
-  const bagLine = (bag) => Object.entries(bag).map(([k, v]) => (v ? `${k} ×${fmt(v)}` : k)).join(', ');
+  const bagLine = (bag) => Object.entries(bag).map(([k, v]) => (v ? `${k} ×${fmtC(v, 1000)}` : k)).join(', ');
 
   /* ------------------------------------------------------------ UI pieces */
   function modal(extra) {
@@ -1904,7 +1992,7 @@ const VS = (() => {
     };
   }
 
-  const art = (src, cls) => h('span', { class: cls || 'uag-art' }, src ? h('img', { src, alt: '', loading: 'lazy' }) : null);
+  const art = (src, cls) => h('span', { class: cls || 'uag-art' }, src ? h('img', { src, alt: '', loading: 'lazy', decoding: 'async' }) : null);
   const pill = (text, kind) => h('span', { class: 'uag-pill' + (kind ? ' uag-pill-' + kind : ''), text });
 
   function matRows(mats, mult) {
@@ -1914,7 +2002,7 @@ const VS = (() => {
       return h('div', { class: 'uag-mat' + (short ? ' is-short' : '') },
         art(m.img, 'uag-mat-art'),
         h('span', { class: 'uag-mat-name', text: m.name }),
-        h('span', { class: 'uag-mat-num' }, h('b', { text: fmt(m.have) }), h('i', { text: ` needs ${fmt(need)}` })),
+        h('span', { class: 'uag-mat-num', title: `${fmt(m.have)} owned · needs ${fmt(need)}` }, h('b', { text: fmtC(m.have, 100000) }), h('i', { text: ` needs ${fmtC(need, 100000)}` })),
       );
     }));
   }
@@ -1961,12 +2049,14 @@ const VS = (() => {
 
     const facts = [['Attack', fmt(r0.atk)], ['Defense', fmt(r0.def)]];
     if (r0.element) facts.push(['Element', r0.element]);
-    M.dlg.append(
+    facts.push(['Owned', ownedOf(r0.name) == null ? '…' : fmtC(ownedOf(r0.name), 100000), r0.name]);
+    if (S.inv == null) wantInventory();
+    put(M.dlg,
       h('div', { class: 'uag-dlg-head' }, art(r0.img, 'uag-dlg-art'),
         h('div', { class: 'uag-dlg-title' }, h('h3', { text: r0.name }),
           h('div', { class: 'uag-dlg-tags' }, r0.legendary ? pill('Legendary', 'leg') : null),
           r0.desc ? h('p', { class: 'uag-desc', text: r0.desc }) : null)),
-      h('dl', { class: 'uag-facts' }, facts.map(([k, v]) => h('div', {}, h('dt', { text: k }), h('dd', { text: v })))),
+      h('dl', { class: 'uag-facts' }, facts.map(([k, v, own]) => h('div', {}, h('dt', { text: k }), h('dd', { text: v, 'data-own': own })))),
       r0.power ? h('p', { class: 'uag-power', text: '⚡ ' + r0.power }) : null,
       h('h4', { class: 'uag-sub', text: 'Uses per craft' }), mats,
       h('h4', { class: 'uag-sub', text: 'How many?' }), qty.el, prog.el, result, h('div', { class: 'uag-actions' }, go),
@@ -1996,7 +2086,7 @@ const VS = (() => {
       result.textContent = out.fail
         ? `${used ? `Crafted ${fmt(used)} of ${fmt(n)}. ` : ''}${out.fail}`
         : `Crafted ${fmt(used)} × ${get()?.name || r0.name}.`;
-      if (used) toast(`Crafted ${fmt(used)} × ${r0.name}`);
+      if (used) { bumpOwned(r0.name, used); refreshOwned(); toast(`Crafted ${fmt(used)} × ${r0.name}`); }
       paint(); renderBody();
     });
   }
@@ -2030,7 +2120,7 @@ const VS = (() => {
         it.canUpgrade
           ? h('div', {}, h('h4', { class: 'uag-sub', text: 'Uses for the next level' }),
             it.mats.length ? matRows(it.mats, 1) : h('p', { class: 'uag-hint', text: 'No additional materials are listed for this upgrade.' }),
-            it.goldNeed ? h('div', { class: 'uag-gold' + (goldShort ? ' is-short' : '') }, '🪙 ', h('b', { text: fmt(it.goldNeed) }), ` gold · you have ${S.goldExact ? fmt(S.gold) : 'about ' + fmt(S.gold)}`) : null)
+            it.goldNeed ? h('div', { class: 'uag-gold' + (goldShort ? ' is-short' : ''), title: `${fmt(it.goldNeed)} gold needed` }, '🪙 ', h('b', { text: fmtC(it.goldNeed, 1000) }), ` gold · you have ${S.goldExact ? fmtC(S.gold, 1000) : 'about ' + fmtC(S.gold, 1000)}`) : null)
           : h('p', { class: 'uag-hint', text: it.hint || 'Max level reached.' }));
       const ready = requirementsMet(it);
       go.textContent = !it.canUpgrade ? 'No next upgrade' : ready ? 'Upgrade' : 'Missing materials';
@@ -2108,12 +2198,12 @@ const VS = (() => {
         h('div', { class: 'uag-dlg-head' }, art(it.img, 'uag-dlg-art'),
           h('div', { class: 'uag-dlg-title' }, h('h3', { text: it.name }),
             h('div', { class: 'uag-dlg-tags' }, pill(it.badge, 'leg')),
-            h('p', { class: 'uag-desc', text: `You have ${fmt(it.have)}. You always keep 1, so you can decraft up to ${fmt(it.max)}. This destroys the items and returns their crafting materials.` }))),
+            h('p', { class: 'uag-desc', text: `You have ${fmt(it.have)}. You always keep ${fmt(it.keep || 1)}${it.keep > 1 ? ' (relics only work as a full set)' : ''}, so you can decraft up to ${fmt(it.max)}. This destroys the items and returns their crafting materials.` }))),
         h('dl', { class: 'uag-facts' },
           h('div', {}, h('dt', { text: 'Attack' }), h('dd', { text: fmt(it.atk) })),
           h('div', {}, h('dt', { text: 'Defense' }), h('dd', { text: fmt(it.def) })),
           h('div', {}, h('dt', { text: 'You keep' }), h('dd', { text: fmt(it.have - qty.value) }))));
-      go.textContent = it.max < 1 ? 'Need 2 copies' : `Decraft ${fmt(qty.value)}`;
+      go.textContent = it.max < 1 ? `Need ${fmt((it.keep || 1) + 1)} copies` : `Decraft ${fmt(qty.value)}`;
       go.disabled = S.busy || it.max < 1;
     }
     paint();
@@ -2157,7 +2247,7 @@ const VS = (() => {
         const cb = h('input', { type: 'checkbox', checked: picked.has(x.id), onchange: (e) => { e.target.checked ? picked.add(x.id) : picked.delete(x.id); paint(); } });
         return h('label', { class: 'uag-pick-row' + (picked.has(x.id) ? ' is-on' : '') }, cb, art(x.img, 'uag-mat-art'),
           h('span', { class: 'uag-mat-name', text: x.name }),
-          h('span', { class: 'uag-mat-num' }, h('b', { text: '×' + fmt(x.max) }), h('i', { text: ` keeps 1 of ${fmt(x.have)}` })));
+          h('span', { class: 'uag-mat-num' }, h('b', { text: '×' + fmtC(x.max) }), h('i', { text: ` keeps ${fmt(x.keep || 1)} of ${fmtC(x.have)}` })));
       }));
       summary.textContent = picked.size ? `${picked.size} item type${picked.size > 1 ? 's' : ''} selected · ${fmt(total())} copies will be destroyed.` : 'Tick what you want to decraft. Nothing is selected yet.';
       go.textContent = picked.size ? `Decraft ${fmt(total())} copies` : 'Select items first';
@@ -2166,7 +2256,7 @@ const VS = (() => {
 
     M.dlg.append(
       h('h3', { class: 'uag-ba-title', text: 'Decraft spares' }),
-      h('p', { class: 'uag-desc', text: 'Each ticked item is decrafted down to 1 copy. You get the crafting materials back.' }),
+      h('p', { class: 'uag-desc', text: 'Each ticked item is decrafted down to 1 copy (relics keep 10). You get the crafting materials back.' }),
       h('div', { class: 'uag-pick-tools' },
         h('button', { class: 'uag-link', type: 'button', text: 'Select all', onclick: () => { items.forEach((x) => picked.add(x.id)); paint(); } }),
         h('button', { class: 'uag-link', type: 'button', text: 'Clear', onclick: () => { picked.clear(); paint(); } })),
@@ -2218,13 +2308,17 @@ const VS = (() => {
 
   function build() {
     const container = document.querySelector('.container') || document.body;
-    [...container.children].forEach((c) => {
-      if (c.matches('.gate-menu, .gate-selection, .recipe-grid, .grid, .note')) c.classList.add('uag-native');
-    });
+    const natives = [...container.children].filter((c) => c.matches('.gate-menu, .gate-selection, .recipe-grid, .grid, .note'));
+    natives.forEach((c) => c.classList.add('uag-native'));
+    let classic = false;
+    // The toggle lives OUTSIDE .uag: classic view hides the redesigned panel, so a toggle inside it would vanish and leave no way back.
     const switchbar = h('div', { class: 'uag-switchbar' },
-      h('button', { class: 'uag-link', type: 'button', text: 'Show classic view', onclick: (e) => {
-        const on = document.body.classList.toggle('uag-classic');
-        e.currentTarget.textContent = on ? 'Show new view' : 'Show classic view';
+      h('button', { class: 'uag-link', type: 'button', text: 'Show classic view', 'aria-pressed': 'false', onclick: (e) => {
+        classic = !classic;
+        document.body.classList.toggle('uag-classic', classic);
+        natives.forEach((c) => c.classList.toggle('uag-native', !classic));   // the page's own panels go back exactly as the site draws them
+        e.currentTarget.textContent = classic ? 'Show new view' : 'Show classic view';
+        e.currentTarget.setAttribute('aria-pressed', String(classic));
       } }));
     const tabs = h('div', { class: 'uag-tabs', role: 'tablist' }, TABS.map((t) => {
       const b = h('button', { class: 'uag-tab', type: 'button', role: 'tab', 'data-tab': t.id, onclick: () => selectTab(t.id) },
@@ -2233,9 +2327,9 @@ const VS = (() => {
       tabEls[t.id] = b; return b;
     }));
     panel = h('div', { class: 'uag-panel' });
-    root = h('section', { class: 'uag', 'data-tab': S.tab }, switchbar, tabs, panel);
+    root = h('section', { class: 'uag', 'data-tab': S.tab }, tabs, panel);
     const anchor = container.querySelector('.topbar');
-    if (anchor) anchor.after(root); else container.prepend(root);
+    if (anchor) anchor.after(switchbar, root); else container.prepend(switchbar, root);
   }
 
   function routeUrl() {
@@ -2321,7 +2415,7 @@ const VS = (() => {
 
   function toolbar({ sorts, readyLabel, extra }) {
     const search = h('input', { class: 'uag-search', type: 'search', placeholder: 'Search…', value: S.query, 'aria-label': 'Search' });
-    search.addEventListener('input', () => { S.query = search.value; paintList(); });
+    let typing = 0; search.addEventListener('input', () => { S.query = search.value; clearTimeout(typing); typing = setTimeout(() => paintList(), 140); });
     const sort = h('select', { class: 'uag-select', 'aria-label': 'Sort' }, sorts.map(([v, l]) => h('option', { value: v, text: l, selected: getSort() === v })));
     sort.addEventListener('change', () => { prefs.sort[viewKey()] = sort.value; savePrefs(); paintList(); });
     const cb = h('input', { type: 'checkbox', checked: getOnly() });
@@ -2337,12 +2431,34 @@ const VS = (() => {
 
   function tile({ item, img, pillText, pillKind, name, lines, foot, disabled, onClick, bad, action }) {
     return h('article', { class: 'uag-tile' + (disabled ? ' is-off' : '') + (bad ? ' is-poor' : ''), tabindex: '0', role: 'button', 'aria-label': name + ' details', onclick: (e) => { if (e.target.closest('.uag-card-action')) return; onClick && onClick(); }, onkeydown: (e) => { if ((e.key === 'Enter' || e.key === ' ') && e.target === e.currentTarget) { e.preventDefault(); onClick && onClick(); } } },
-      h('span', { class: 'uag-art' }, img ? h('img', { src: img, alt: '', loading: 'lazy' }) : null,
+      h('span', { class: 'uag-art' }, img ? h('img', { src: img, alt: '', loading: 'lazy', decoding: 'async' }) : null,
         pillText ? h('span', { class: 'uag-pill uag-pill-' + (pillKind || 'leg') + ' uag-pill-abs', text: pillText }) : null),
       h('span', { class: 'uag-name', text: name }),
       h('span', { class: 'uag-lines' }, lines),
       foot,
       action || null);
+  }
+
+  /* Big lists (a gate can hold well over a hundred recipes, each with several images) are drawn in slices, so the page stays
+     responsive while it fills in; a newer draw cancels an older one that is still running. */
+  const later = (fn) => (window.requestIdleCallback ? window.requestIdleCallback(fn, { timeout: 250 }) : setTimeout(fn, 16));
+  let fillToken = 0;
+  function fillGrid(grid, list, mk, emptyText) {
+    const token = ++fillToken;
+    if (!list.length) { grid.replaceChildren(h('div', { class: 'uag-empty', text: emptyText })); return; }
+    const FIRST = 30, STEP = 40;
+    const first = document.createDocumentFragment();
+    list.slice(0, FIRST).forEach((x) => first.append(mk(x)));
+    grid.replaceChildren(first);
+    let i = FIRST;
+    const more = () => {
+      if (token !== fillToken || !grid.isConnected) return;
+      const frag = document.createDocumentFragment();
+      list.slice(i, i + STEP).forEach((x) => frag.append(mk(x)));
+      grid.append(frag); i += STEP;
+      if (i < list.length) later(more);
+    };
+    if (i < list.length) later(more);
   }
 
   function sortBy(list, mode, getters) {
@@ -2368,24 +2484,20 @@ const VS = (() => {
       const q = S.query.trim().toLowerCase();
       let list = c.recipes.filter((r) => (!q || r.name.toLowerCase().includes(q) || r.reqs.some((m) => m.name.toLowerCase().includes(q))) && (!getOnly() || r.max > 0));
       list = sortBy(list, getSort(), { ready: (a, b) => b.max - a.max, name: (a, b) => a.name.localeCompare(b.name) });
-      grid.replaceChildren(...(list.length ? list.map((r) => tile({
+      fillGrid(grid, list, (r) => tile({
         img: r.img, pillText: r.legendary ? 'Legendary' : '', name: r.name,
-        lines: [`🔪 ${fmt(r.atk)} · 🛡️ ${fmt(r.def)}`],
+        lines: [`🔪 ${fmtC(r.atk)} · 🛡️ ${fmtC(r.def)}`],
         bad: r.max < 1, disabled: r.max < 1,
         foot: h('span', { class: 'uag-stock' },
-          h('span', { class: 'uag-minimats' }, r.reqs.map((m) => h('span', { class: 'uag-mini' + (m.have < m.need ? ' is-short' : ''), title: `${m.name}: ${fmt(m.have)} / ${fmt(m.need)}` }, art(m.img, 'uag-mini-art'), h('b', { text: fmt(m.need) })))),
-          null),
-        action: h('button', { class: 'uag-card-action', type: 'button', text: 'Craft', disabled: r.max < 1, onclick: async (e) => {
-          e.stopPropagation(); if (S.busy || r.max < 1) return; S.busy = true;
-          const out = await craftOnce(S.gate, r.id); S.busy = false;
-          if (out.ok) { markStale(String(S.gate)); try { await loadGate(S.gate, true); } catch (_) { if (S.craft[S.gate]) S.craft[S.gate].stale = true; } toast(`Crafted ${r.name}`); }
-          else toast(out.msg || 'Craft failed', false);
-          renderBody();
-        } }),
+          h('span', { class: 'uag-minimats' }, r.reqs.map((m) => h('span', { class: 'uag-mini' + (m.have < m.need ? ' is-short' : ''), title: `${m.name}: ${fmt(m.have)} / ${fmt(m.need)}` }, art(m.img, 'uag-mini-art'), h('b', { text: fmtC(m.need, 100000) })))),
+          h('span', { class: 'uag-counts' },
+            h('span', { class: 'uag-count uag-count-can' + (r.max < 1 ? ' is-zero' : ''), title: r.max > 0 ? `You have the materials for ${fmt(r.max)} more` : 'Not enough materials' }, '🔨 ', h('b', { text: '×' + fmtC(r.max, 100000) }), ' craftable'),
+            h('span', { class: 'uag-count uag-count-own', title: 'How many you already own (from your inventory)' }, '🎒 ', h('b', { 'data-own': r.name, text: ownedOf(r.name) == null ? '…' : fmtC(ownedOf(r.name), 100000) }), ' owned'))),
         onClick: () => openCraft(S.gate, r.id),
-      })) : [h('div', { class: 'uag-empty', text: 'No recipes match.' })]));
+      }), 'No recipes match.');
     };
     paintList();
+    wantInventory();
   }
 
   /* ----- upgrade view */
@@ -2399,7 +2511,7 @@ const VS = (() => {
   function paintUpgrade() {
     const f = S.forge;
     const grid = h('div', { class: 'uag-grid' });
-    const goldChip = h('span', { class: 'uag-goldchip', title: S.goldExact ? '' : 'Read from the top bar, so it may be rounded' }, '🪙 ', h('b', { text: (S.goldExact ? '' : '≈ ') + fmt(S.gold) }));
+    const goldChip = h('span', { class: 'uag-goldchip', title: S.goldExact ? '' : 'Read from the top bar, so it may be rounded' }, '🪙 ', h('b', { title: fmt(S.gold), text: (S.goldExact ? '' : '≈ ') + fmtC(S.gold, 1000) }));
     const tb = toolbar({
       sorts: [['default', 'Page order'], ['ready', 'Upgradable first'], ['level', 'Highest level'], ['name', 'Name']],
       readyLabel: 'Only upgradable now', extra: goldChip,
@@ -2413,18 +2525,18 @@ const VS = (() => {
         level: (a, b) => b.level - a.level,
         name: (a, b) => a.name.localeCompare(b.name),
       });
-      grid.replaceChildren(...(list.length ? list.map((x) => {
+      fillGrid(grid, list, (x) => {
         const ready = requirementsMet(x);
         return tile({
           img: x.img, pillText: x.badge, pillKind: x.mythical ? 'myth' : 'leg', name: x.name,
-          lines: [`Lv ${x.level} · 🔪 ${fmt(x.atk)} · 🛡️ ${fmt(x.def)}`],
+          lines: [`Lv ${x.level} · 🔪 ${fmtC(x.atk)} · 🛡️ ${fmtC(x.def)}`],
           bad: !ready, disabled: !x.canUpgrade,
           foot: h('span', { class: 'uag-stock' },
             x.canUpgrade && x.deltas.length ? h('span', { class: 'uag-deltas', text: x.deltas.join(' · ') }) : null,
             x.canUpgrade && (x.mats.some((m) => m.need > 0) || x.goldNeed > 0)
               ? h('span', { class: 'uag-minimats' },
-                x.mats.filter((m) => m.need > 0).map((m) => h('span', { class: 'uag-mini' + (m.have < m.need ? ' is-short' : ''), title: `${m.name}: ${fmt(m.have)} / ${fmt(m.need)}` }, art(m.img, 'uag-mini-art'), h('b', { text: fmt(m.need) }))),
-                x.goldNeed ? h('span', { class: 'uag-mini uag-mini-gold' + (S.goldExact && S.gold < x.goldNeed ? ' is-short' : ''), title: `Gold: ${fmt(S.gold)} / ${fmt(x.goldNeed)}` }, '🪙 ', h('b', { text: fmt(x.goldNeed) })) : null)
+                x.mats.filter((m) => m.need > 0).map((m) => h('span', { class: 'uag-mini' + (m.have < m.need ? ' is-short' : ''), title: `${m.name}: ${fmt(m.have)} / ${fmt(m.need)}` }, art(m.img, 'uag-mini-art'), h('b', { text: fmtC(m.need) }))),
+                x.goldNeed ? h('span', { class: 'uag-mini uag-mini-gold' + (S.goldExact && S.gold < x.goldNeed ? ' is-short' : ''), title: `Gold: ${fmt(S.gold)} / ${fmt(x.goldNeed)}` }, '🪙 ', h('b', { text: fmtC(x.goldNeed, 1000) })) : null)
               : null,
             null),
           action: h('button', { class: 'uag-card-action', type: 'button', text: 'Upgrade', disabled: !ready || S.busy, onclick: async (e) => {
@@ -2438,7 +2550,7 @@ const VS = (() => {
           } }),
           onClick: () => openUpgrade(x.key),
         });
-      }) : [h('div', { class: 'uag-empty', text: 'No items match.' })]));
+      }, 'No items match.');
     };
     paintList();
   }
@@ -2458,13 +2570,13 @@ const VS = (() => {
       const q = S.query.trim().toLowerCase();
       let list = d.items.filter((x) => (!q || x.name.toLowerCase().includes(q)) && (!getOnly() || x.max > 0));
       list = sortBy(list, getSort(), { ready: (a, b) => b.max - a.max, name: (a, b) => a.name.localeCompare(b.name) });
-      grid.replaceChildren(...(list.length ? list.map((x) => tile({
+      fillGrid(grid, list, (x) => tile({
         img: x.img, pillText: x.badge, name: x.name,
-        lines: [`🔪 ${fmt(x.atk)} · 🛡️ ${fmt(x.def)}`],
+        lines: [`🔪 ${fmtC(x.atk)} · 🛡️ ${fmtC(x.def)}`],
         bad: x.max < 1, disabled: x.max < 1,
-        foot: h('span', { class: 'uag-stock' }, h('span', { class: 'uag-stock-txt', text: x.max > 0 ? `${fmt(x.have)} owned · ${fmt(x.max)} spare` : `${fmt(x.have)} owned · need 2 to decraft` })),
+        foot: h('span', { class: 'uag-stock' }, h('span', { class: 'uag-stock-txt', title: x.keep > 1 ? `Always keeps ${x.keep}: relics only work as a set of ${x.keep}.` : `${fmt(x.have)} owned`, text: x.max > 0 ? `${fmtC(x.have)} owned · ${fmtC(x.max)} spare` : `${fmtC(x.have)} owned · need ${fmt(x.keep + 1)} to decraft` })),
         onClick: () => openDecraft(x.id),
-      })) : [h('div', { class: 'uag-empty', text: 'No items match.' })]));
+      }), 'No items match.');
     };
     paintList();
   }
@@ -2475,11 +2587,9 @@ const VS = (() => {
 .uag[data-tab="legendary"],.uag-dlg{--acc:#FFD369;--ink:#241a00}
 .uag *,.uag-dlg *{box-sizing:border-box}
 .uag-native{display:none!important}
-body.uag-classic .uag-native{display:block!important}
-body.uag-classic .uag-native.recipe-grid,body.uag-classic .uag-native.grid{display:grid!important}
-body.uag-classic .uag{display:none}
+body.uag-classic .uag{display:none!important}
 body.uag-lock{overflow:hidden}
-.uag-switchbar{display:flex;justify-content:flex-end;margin:-4px 0 -8px}
+.uag-switchbar{display:flex;justify-content:flex-end;margin:8px 0 0}
 .uag-link{background:none;border:0;color:#9aa0b8;font:inherit;font-size:12px;cursor:pointer;padding:4px 2px;text-decoration:underline}
 .uag-link:hover{color:#EDEFF6}
 .uag-tabs{display:grid;grid-template-columns:1fr 1fr;gap:10px}
@@ -2520,7 +2630,7 @@ body.uag-lock{overflow:hidden}
 .uag-empty{grid-column:1/-1;padding:28px 0;text-align:center;color:#9aa0b8}
 .uag-empty p{margin:0 0 10px}
 .uag-hint{margin:14px 0 0;font-size:12px;color:#7f869f}
-.uag-tile{appearance:none;font:inherit;color:inherit;text-align:left;cursor:pointer;display:flex;flex-direction:column;gap:7px;padding:9px;background:#171923;border:1px solid #2B2D44;border-radius:12px;min-width:0;transition:border-color .15s,transform .12s,background .15s}
+.uag-tile{content-visibility:auto;contain-intrinsic-size:auto 250px;appearance:none;font:inherit;color:inherit;text-align:left;cursor:pointer;display:flex;flex-direction:column;gap:7px;padding:9px;background:#171923;border:1px solid #2B2D44;border-radius:12px;min-width:0;transition:border-color .15s,transform .12s,background .15s}
 .uag-tile:hover{border-color:var(--acc);background:#1b1d29;transform:translateY(-2px)}
 .uag-tile:active{transform:translateY(0)}
 .uag-tile:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
@@ -2530,7 +2640,7 @@ body.uag-lock{overflow:hidden}
 .uag-art{position:relative;display:block;aspect-ratio:1;border-radius:9px;overflow:hidden;background:#20212E}
 .uag-art img{width:100%;height:100%;object-fit:cover;display:block}
 .uag-pill{font-size:10.5px;font-weight:700;line-height:1;padding:4px 7px;border-radius:999px;background:rgba(18,19,26,.82);border:1px solid #3a3d5a;color:#cfd4ff;display:inline-block}
-.uag-pill-abs{position:absolute;top:6px;left:6px;backdrop-filter:blur(3px)}
+.uag-pill-abs{position:absolute;top:6px;left:6px}
 .uag-pill-leg{border-color:#7a6320;color:#ffe08a}
 .uag-pill-myth{border-color:#426fd1;color:#a9c4ff}
 .uag-name{font-weight:600;font-size:13.5px;color:#F1F2FA;line-height:1.25;min-height:2.5em;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
@@ -2540,6 +2650,13 @@ body.uag-lock{overflow:hidden}
 .uag-tile:not(.is-poor) .uag-stock-txt{color:var(--acc)}
 .uag-deltas{font-size:11.5px;color:#9fd5b0;line-height:1.3}
 .uag-minimats{display:flex;flex-wrap:wrap;gap:4px}
+.uag-counts{display:flex;flex-wrap:wrap;gap:4px;margin-top:2px}
+.uag-count{display:inline-flex;align-items:center;gap:4px;font-size:11px;line-height:1;padding:5px 7px;border-radius:7px;background:#12131A;border:1px solid #2B2D44;color:#9aa0b8;white-space:nowrap}
+.uag-count b{font-variant-numeric:tabular-nums;color:#F1F2FA;font-weight:700}
+.uag-count-can{color:var(--acc);border-color:color-mix(in srgb,var(--acc) 40%,#2B2D44)}
+.uag-count-can b{color:var(--acc)}
+.uag-count-can.is-zero{color:#7f869f;border-color:#2B2D44}
+.uag-count-can.is-zero b{color:#7f869f}
 .uag-mini{display:inline-flex;align-items:center;gap:3px;background:#12131A;border:1px solid #2B2D44;border-radius:6px;padding:2px 5px 2px 2px;font-size:11px;color:#9fd5b0}
 .uag-mini.is-short{color:#f08a8a;border-color:#5a2f37}
 .uag-mini-art,.uag-mat-art{display:block;width:22px;height:22px;border-radius:5px;overflow:hidden;background:#20212E;flex-shrink:0}
@@ -2561,7 +2678,7 @@ body.uag-lock{overflow:hidden}
 .uag-dlg-tags:empty{display:none}
 .uag-desc{margin:0;font-size:13px;line-height:1.45;color:#B9BBD1;max-height:8em;overflow:auto}
 .uag-power{margin:10px 0 0;font-size:12.5px;line-height:1.4;color:#cbd1ff}
-.uag-facts{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:16px 0 10px}
+.uag-facts{display:grid;grid-template-columns:repeat(auto-fit,minmax(96px,1fr));gap:8px;margin:16px 0 10px}
 .uag-facts div{background:#171923;border:1px solid #2B2D44;border-radius:9px;padding:8px 10px;min-width:0}
 .uag-facts dt{font-size:11.5px;color:#9aa0b8;margin-bottom:2px}
 .uag-facts dd{margin:0;font-size:13px;font-weight:600;color:#F1F2FA;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
