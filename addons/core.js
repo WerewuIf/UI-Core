@@ -472,25 +472,29 @@
       .core-pill-loading{color:#ffd978;border-color:rgba(255,217,120,.4)}
       /* NO scrollbar here: the modal card is the one and only scroller (like the original modals). */
       .core-float-pane{min-width:0}
-      .core-addon{display:grid;grid-template-columns:38px 18px minmax(0,1fr) 132px 164px;gap:9px;align-items:center;padding:10px 11px;background:#11192d;border:1px solid rgba(255,255,255,.06);border-radius:13px;margin-bottom:8px;min-width:0;box-sizing:border-box}
-      .core-addon-main{min-width:0;overflow-wrap:anywhere}
-      .core-addon-name{font-weight:800;line-height:1.35}
-      .core-addon-meta{display:flex;flex-direction:column;align-items:flex-end;justify-content:center;gap:4px;min-width:0;width:132px;box-sizing:border-box}
-      .core-addon-meta .core-pill{white-space:nowrap}
-      .core-addon-actions{display:grid;grid-template-columns:86px 34px 32px;gap:6px;align-items:center;justify-content:end;min-width:0}
-      .core-addon-actions>.core-btn{width:100%;min-width:0;box-sizing:border-box;white-space:nowrap}
-      .core-addon-slot{display:block;width:100%;height:30px;box-sizing:border-box}
-      .core-addon-slot.delete{width:34px}
-      .core-addon-actions .core-grip{width:32px}
+      .core-addon{display:grid;grid-template-columns:32px 16px minmax(0,1fr) 104px 92px;gap:7px;align-items:center;padding:7px 8px;background:#11192d;border:1px solid rgba(255,255,255,.06);border-radius:10px;margin-bottom:5px;min-width:0;box-sizing:border-box}
+      .core-addon-main{min-width:0;overflow-wrap:anywhere;line-height:1.25}
+      .core-addon-name{font-weight:800;line-height:1.25;font-size:12.5px}
+      .core-addon-meta{display:flex;flex-direction:column;align-items:flex-end;justify-content:center;gap:3px;min-width:0;width:104px;box-sizing:border-box}
+      .core-addon-meta .core-pill{white-space:nowrap;min-width:64px;text-align:center;box-sizing:border-box}
+      .core-addon-actions{display:grid;grid-template-columns:30px 28px 28px;gap:3px;align-items:center;justify-content:end;min-width:0}
+      .core-addon-actions>.core-btn{width:100%;min-width:0;box-sizing:border-box;white-space:nowrap;padding:0}
+      .core-addon-settings{width:30px;min-width:30px;height:28px;display:flex;align-items:center;justify-content:center;font-size:16px;line-height:1;border-radius:8px;box-shadow:none!important}
+      .core-addon-actions>.core-btn.core-addon-settings{background:#222d49;border:1px solid #344467}
+      .core-addon-slot{display:block;width:100%;height:28px;box-sizing:border-box}
+      .core-addon-slot.option{width:30px}
+      .core-addon-slot.delete{width:28px}
+      .core-addon-actions .core-grip{width:28px;height:28px}
       .core-addon.core-placeholder{opacity:.35;border-style:dashed;border-color:rgba(110,168,255,.6)}
       .core-ghost{position:fixed;z-index:2147483002;margin:0 !important;box-sizing:border-box;pointer-events:none;will-change:transform;transform:scale(1.015);
         background:#17213a;border-color:rgba(110,168,255,.55);box-shadow:0 16px 34px rgba(0,0,0,.55)}
       html.core-dragging .core-modal,html.core-dragging .core-modal *{cursor:grabbing !important;user-select:none !important;-webkit-user-select:none !important}
-      .core-addon-ico{flex:0 0 auto;width:38px;height:38px;display:flex;align-items:center;justify-content:center;font-size:19px;
-        background:#24263a;border:1px solid #2f324d;border-radius:11px}
-      .core-addon-ico.none{background:none;border:1px dashed rgba(255,255,255,.18);color:#6d7aa3;font-size:15px}
-      @media(max-width:720px){.core-addon{grid-template-columns:32px 18px minmax(0,1fr) 158px;gap:7px;padding:9px}.core-addon-main{grid-column:3;grid-row:1}.core-addon-meta{grid-column:3;grid-row:2;width:auto;flex-direction:row;align-items:center;justify-content:flex-start;flex-wrap:wrap}.core-addon-actions{grid-column:4;grid-row:1 / span 2;grid-template-columns:76px 30px 30px;gap:5px}.core-addon-slot.delete{width:30px}.core-addon-ico{width:32px;height:32px}}
-      @media(max-width:430px){.core-addon{grid-template-columns:28px 16px minmax(0,1fr) 32px;gap:6px}.core-addon-actions{grid-column:4;grid-row:1 / span 2;grid-template-columns:30px;gap:4px}.core-addon-actions>.core-btn:first-child,.core-addon-actions>.core-addon-slot.option{display:none}.core-addon-actions>.core-btn.core-btn-danger,.core-addon-actions>.core-addon-slot.delete{display:none}.core-addon-meta{font-size:10px}.core-addon-ico{width:28px;height:28px}}
+      .core-addon-ico{flex:0 0 auto;width:32px;height:32px;display:flex;align-items:center;justify-content:center;font-size:16px;
+        background:#24263a;border:1px solid #2f324d;border-radius:9px}
+      .core-addon-ico.none{background:none;border:1px dashed rgba(255,255,255,.18);color:#6d7aa3;font-size:13px}
+      .core-addon-main>.core-dim{font-size:10px;line-height:1.2;margin-top:2px}
+      @media(max-width:720px){.core-addon{grid-template-columns:30px 16px minmax(0,1fr) 96px;gap:6px;padding:7px}.core-addon-main{grid-column:3;grid-row:1}.core-addon-meta{grid-column:3;grid-row:2;width:auto;flex-direction:row;align-items:center;justify-content:flex-start;flex-wrap:wrap}.core-addon-actions{grid-column:4;grid-row:1 / span 2;grid-template-columns:28px 26px 26px;gap:2px}.core-addon-slot.option{width:28px}.core-addon-slot.delete{width:26px}.core-addon-ico{width:30px;height:30px}}
+      @media(max-width:430px){.core-addon{grid-template-columns:26px 15px minmax(0,1fr) 57px;gap:5px;padding:6px}.core-addon-actions{grid-column:4;grid-row:1 / span 2;grid-template-columns:28px 26px;gap:2px}.core-addon-actions>.core-btn.core-btn-danger,.core-addon-actions>.core-addon-slot.delete{display:none}.core-addon-meta{font-size:10px}.core-addon-meta .core-pill{min-width:58px}.core-addon-ico{width:26px;height:26px}.core-addon-main>.core-dim{display:none}}
       .core-grip{flex:0 0 auto;width:32px;height:36px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;
         border-radius:9px;cursor:grab;touch-action:none;user-select:none;-webkit-user-select:none;outline:none}
       .core-grip i{display:block;width:16px;height:2px;border-radius:2px;background:#7f8ab8;transition:background .12s}
@@ -1390,7 +1394,7 @@
       const grip = h('div', { class: 'core-grip', tabindex: '0', role: 'button', title: 'Drag to rearrange', 'aria-label': 'Rearrange ' + (e.name || e.id) + ': drag, or press Up / Down', 'data-grip': e.id },
         h('i'), h('i'));
       const canOptions = !!(schemaOf(e.id) || declaredPages(e.id).length > 1);
-      const optionControl = canOptions ? ui.btn('Options', 'soft', () => openOptions(e.id)) : h('span', { class: 'core-addon-slot option', 'aria-hidden': 'true' });
+      const optionControl = canOptions ? h('button', { class: 'core-btn core-btn-soft core-addon-settings', type: 'button', title: 'Settings', 'aria-label': 'Settings for ' + (e.name || e.id), onclick: () => openOptions(e.id) }, '⚙️') : h('span', { class: 'core-addon-slot option', 'aria-hidden': 'true' });
       const deleteControl = e.source === 'custom' ? ui.btn('🗑', 'danger', () => removeCustom(e.id)) : h('span', { class: 'core-addon-slot delete', 'aria-hidden': 'true' });
       const actions = h('div', { class: 'core-addon-actions' }, optionControl, deleteControl, grip);
       const row = h('div', { class: 'core-addon', 'data-id': e.id }, ico, cb,
@@ -3319,28 +3323,30 @@
     .core-opt-pg{display:flex;align-items:center;gap:8px;padding:7px 9px;background:#11192d;border:1px solid rgba(255,255,255,.06);border-radius:10px;cursor:pointer;font-size:13px}
     .core-opt-pg input{width:16px;height:16px;accent-color:#5b7cff;cursor:pointer}
     .core-opt-pg.off{opacity:.55}
-    .core-opt-det{margin-top:8px;background:#11192d;border:1px solid rgba(255,255,255,.06);border-radius:14px;padding:6px 12px}
-    .core-opt-det>summary{cursor:pointer;font-weight:700;font-size:13px;padding:6px 0;color:#cfd8f6}
+    .core-opt-det{margin-top:6px;background:#11192d;border:1px solid rgba(255,255,255,.06);border-radius:10px;padding:4px 9px}
+    .core-order-det{margin-top:6px}
+    .core-order-det>summary{display:flex;align-items:center;justify-content:space-between;gap:8px}
+    .core-opt-det>summary{cursor:pointer;font-weight:700;font-size:11px;padding:5px 0;color:#cfd8f6}
     .core-pgrp{margin:6px 0 12px}
-    .core-page-groups{display:grid;gap:6px;padding:4px 0 6px}
-    .core-page-group{background:#0d1425;border:1px solid rgba(255,255,255,.06);border-radius:9px;padding:0 9px;min-width:0}
-    .core-page-group>summary{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 0;cursor:pointer;list-style:none;color:#cfd8f6;font-size:11px;font-weight:800}
+    .core-page-groups{display:grid;gap:4px;padding:3px 0 5px}
+    .core-page-group{background:#0d1425;border:1px solid rgba(255,255,255,.06);border-radius:8px;padding:0 8px;min-width:0}
+    .core-page-group>summary{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:6px 0;cursor:pointer;list-style:none;color:#cfd8f6;font-size:10.5px;font-weight:800}
     .core-page-group-tools{display:flex;gap:10px;padding:0 0 7px}
     .core-page-group .core-chips{padding:0 0 8px}
     .core-pgrp-h{display:flex;align-items:center;gap:8px;font-size:11px;color:#9caad0;font-weight:800;text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px}
     .core-chips{display:flex;flex-wrap:wrap;gap:6px}
-    .core-chip{border:1px solid #2b3859;background:#0d1322;color:#8f9bc2;border-radius:999px;padding:5px 11px;font:700 12px Arial,sans-serif;cursor:pointer;margin:0}
+    .core-chip{border:1px solid #2b3859;background:#0d1322;color:#8f9bc2;border-radius:999px;padding:4px 9px;font:700 11px Arial,sans-serif;cursor:pointer;margin:0}
     .core-chip:hover{color:#fff;border-color:#3d4f80}
     .core-chip.on{background:linear-gradient(135deg,#3657a7,#4b6dd0);border-color:transparent;color:#fff}
     .core-opt-row.core-placeholder{opacity:.35;border:1px dashed rgba(110,168,255,.6)}
     .core-ghost.core-opt-row{padding:6px 8px;background:#17213a}
-    .core-mod{background:#11192d;border:1px solid rgba(255,255,255,.06);border-radius:14px;padding:8px 12px;margin-bottom:10px}
+    .core-mod{background:#11192d;border:1px solid rgba(255,255,255,.06);border-radius:10px;padding:6px 9px;margin-bottom:5px}
     .core-mod.off{opacity:.6}
-    .core-mod-head{display:flex;align-items:center;gap:10px;cursor:pointer;padding:4px 2px}
-    .core-mod-head input{width:18px;height:18px;flex:0 0 auto;cursor:pointer;accent-color:#5b7cff}
+    .core-mod-head{display:flex;align-items:center;gap:8px;cursor:pointer;padding:2px}
+    .core-mod-head input{width:16px;height:16px;flex:0 0 auto;cursor:pointer;accent-color:#5b7cff}
     .core-mod-title{font-weight:800}
-    .core-mod-pages{font-size:12px;color:#8fa2d8;margin-top:2px}
-    .core-mod-body{margin-top:8px;padding-left:28px}
+    .core-mod-pages{font-size:10.5px;color:#8fa2d8;margin-top:1px}
+    .core-mod-body{margin-top:5px;padding-left:24px}
     .core-mod.off .core-mod-body{display:none}
   `);
 
@@ -3381,9 +3387,12 @@
     }
     if (f.type === 'orderlist') {
       const box = h('div', { class: 'core-opt-list' });
+      const count = h('span', { class: 'core-order-count' });
+      const fold = h('details', { class: 'core-opt-det core-order-det' }, h('summary', {}, count, h('span', { class: 'core-dim' }, ' · show menu items')) , box);
       const commit = (items) => { settingsSet(id, key, { order: items.map((i) => i.id), hidden: items.filter((i) => i.hidden).map((i) => i.id) }); draw(); };
       const draw = () => {
         const items = settingsList(id, key);
+        count.textContent = items.filter((it) => !it.hidden).length + ' of ' + items.length + ' shown';
         box.replaceChildren(...items.map((it, i) => {
           const cb = h('input', { type: 'checkbox', title: 'Show' }); cb.checked = !it.hidden;
           cb.addEventListener('change', () => { items[i].hidden = !cb.checked; commit(items); });
@@ -3408,7 +3417,7 @@
       draw();
       return h('div', { class: 'core-opt-sec' },
         h('div', { class: 'core-opt-h' }, label, h('div', { class: 'core-spacer' }), h('button', { class: 'core-opt-link', type: 'button', onclick: () => { settingsReset(id, key); draw(); } }, 'Reset to default order')),
-        f.help ? h('div', { class: 'core-dim', style: { marginBottom: '8px' } }, f.help) : null, box);
+        f.help ? h('div', { class: 'core-dim', style: { marginBottom: '8px' } }, f.help) : null, fold);
     }
     const inp = h('input', { class: 'core-input', type: 'text', placeholder: f.placeholder || '' }); inp.value = cur == null ? '' : cur;
     inp.addEventListener('change', () => settingsSet(id, key, inp.value));
@@ -3427,7 +3436,7 @@
     const summary = h('div', { class: 'core-dim', style: { marginBottom: '2px' } });
     const det = h('details', { class: 'core-opt-det' }), body = h('div', { class: 'core-page-groups' });
     const sec = h('div', { class: 'core-opt-sec' }, h('div', { class: 'core-opt-h' }, 'Page access'), summary, det);
-    det.append(h('summary', {}, 'Manage page access'), body);
+    det.append(h('summary', {}, '⚙️ Page access · choose pages'), body);
     const draw = () => {
       const list = pageList(id), off = list.filter((p) => !p.on), by = new Map(list.map((p) => [normPath(p.path), p]));
       const onN = list.length - off.length;
@@ -3501,7 +3510,7 @@
 
   /* ------------------------------------------------------------ export --- */
   const Core = {
-    __isCore: true, apiLevel: API, version: '3.20.2', debug: false, tabId: TAB,
+    __isCore: true, apiLevel: API, version: '3.20.4', debug: false, tabId: TAB,
     esc, sleep, debounce, fmt, int, compact, parseNum, parseJson,
     on, off, once, emit,
     state, store, player,
