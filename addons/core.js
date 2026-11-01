@@ -3327,17 +3327,18 @@
     .core-order-det{margin-top:6px}
     .core-order-det>summary{display:flex;align-items:center;justify-content:space-between;gap:8px}
     .core-opt-det>summary{cursor:pointer;font-weight:700;font-size:11px;padding:5px 0;color:#cfd8f6}
-    .core-pgrp{margin:6px 0 12px}
-    .core-page-groups{display:grid;gap:4px;padding:3px 0 5px}
-    .core-page-group{background:#0d1425;border:1px solid rgba(255,255,255,.06);border-radius:8px;padding:0 8px;min-width:0}
-    .core-page-group>summary{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:6px 0;cursor:pointer;list-style:none;color:#cfd8f6;font-size:10.5px;font-weight:800}
-    .core-page-group-tools{display:flex;gap:10px;padding:0 0 7px}
-    .core-page-group .core-chips{padding:0 0 8px}
-    .core-pgrp-h{display:flex;align-items:center;gap:8px;font-size:11px;color:#9caad0;font-weight:800;text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px}
+    .core-pg-sum{margin:0 0 6px;font-size:12px}
+    .core-pg-meter{height:6px;margin:0 0 12px;border-radius:999px;background:#0d1322;border:1px solid #2b3859;overflow:hidden}
+    .core-pg-meter i{display:block;height:100%;width:0;border-radius:999px;background:linear-gradient(90deg,#3657a7,#4b6dd0);transition:width .2s ease}
+    .core-pg-groups{display:grid;grid-template-columns:repeat(auto-fit,minmax(290px,1fr));gap:8px;align-items:start}
+    .core-pg-group{margin:0;padding:9px 11px 10px}
+    .core-pg-group .core-mod-head{padding:0 0 8px}
+    .core-pg-group .core-mod-head .core-pill{margin-left:auto;flex:0 0 auto}
     .core-chips{display:flex;flex-wrap:wrap;gap:6px}
-    .core-chip{border:1px solid #2b3859;background:#0d1322;color:#8f9bc2;border-radius:999px;padding:4px 9px;font:700 11px Arial,sans-serif;cursor:pointer;margin:0}
+    .core-chip{border:1px solid #2b3859;background:#0d1322;color:#8f9bc2;border-radius:999px;padding:5px 10px;font:700 11.5px Arial,sans-serif;cursor:pointer;margin:0;transition:color .12s,border-color .12s,background .12s}
     .core-chip:hover{color:#fff;border-color:#3d4f80}
     .core-chip.on{background:linear-gradient(135deg,#3657a7,#4b6dd0);border-color:transparent;color:#fff}
+    .core-chip:focus-visible,.core-pg-group input:focus-visible{outline:2px solid #6ea8ff;outline-offset:2px}
     .core-opt-row.core-placeholder{opacity:.35;border:1px dashed rgba(110,168,255,.6)}
     .core-ghost.core-opt-row{padding:6px 8px;background:#17213a}
     .core-mod{background:#11192d;border:1px solid rgba(255,255,255,.06);border-radius:10px;padding:6px 9px;margin-bottom:5px}
@@ -3433,29 +3434,35 @@
   ];
   function pagePicker(id) {
     if (!pageList(id).length) return null;
-    const summary = h('div', { class: 'core-dim', style: { marginBottom: '2px' } });
-    const det = h('details', { class: 'core-opt-det' }), body = h('div', { class: 'core-page-groups' });
-    const sec = h('div', { class: 'core-opt-sec' }, h('div', { class: 'core-opt-h' }, 'Page access'), summary, det);
-    det.append(h('summary', {}, '⚙️ Page access · choose pages'), body);
+    const summary = h('div', { class: 'core-dim core-pg-sum' });
+    const meter = h('div', { class: 'core-pg-meter', role: 'presentation' }, h('i'));
+    const grid = h('div', { class: 'core-pg-groups' });
+    const setEvery = (on) => { pageList(id).forEach((p) => pageSet(id, p.path, on)); draw(); };
+    const sec = h('div', { class: 'core-opt-sec' },
+      h('div', { class: 'core-opt-h' }, 'Where it runs', h('div', { class: 'core-spacer' }),
+        h('button', { class: 'core-opt-link', type: 'button', onclick: () => setEvery(true) }, 'All on'),
+        h('button', { class: 'core-opt-link', type: 'button', onclick: () => setEvery(false) }, 'All off')),
+      summary, meter, grid);
     const draw = () => {
-      const list = pageList(id), off = list.filter((p) => !p.on), by = new Map(list.map((p) => [normPath(p.path), p]));
-      const onN = list.length - off.length;
-      summary.textContent = onN + ' of ' + list.length + ' supported pages enabled' + (off.length ? ' · ' + off.length + ' off' : '') + '. Changes apply on the next page load.';
+      const list = pageList(id), by = new Map(list.map((p) => [normPath(p.path), p]));
+      const onN = list.filter((p) => p.on).length;
+      summary.textContent = onN + ' of ' + list.length + ' pages enabled. Changes apply from the next page load.';
+      meter.firstChild.style.width = (list.length ? Math.round((onN / list.length) * 100) : 0) + '%';
       const groups = PAGE_GROUPS.map(([title, paths]) => [title, paths.map((x) => by.get(normPath(x))).filter(Boolean)]);
       const seen = new Set(groups.flatMap(([, ps]) => ps.map((p) => normPath(p.path))));
       const rest = list.filter((p) => !seen.has(normPath(p.path)));
       if (rest.length) groups.push(['Other', rest]);
-      body.replaceChildren(...groups.filter(([, ps]) => ps.length).map(([title, ps]) => {
+      grid.replaceChildren(...groups.filter(([, ps]) => ps.length).map(([title, ps]) => {
         const enabled = ps.filter((p) => p.on).length;
-        const setAll = (on) => { ps.forEach((p) => pageSet(id, p.path, on)); draw(); };
-        const group = h('details', { class: 'core-page-group' });
-        const tools = h('div', { class: 'core-page-group-tools' },
-          h('button', { class: 'core-opt-link', type: 'button', onclick: () => setAll(true) }, 'All on'),
-          h('button', { class: 'core-opt-link', type: 'button', onclick: () => setAll(false) }, 'All off'));
-        group.append(h('summary', {}, h('span', {}, title), h('span', { class: 'core-dim' }, enabled + '/' + ps.length)),
-          tools,
-          h('div', { class: 'core-chips' }, ps.map((p) => h('button', { class: 'core-chip' + (p.on ? ' on' : ''), type: 'button', 'aria-pressed': String(p.on), title: p.path, onclick: () => { pageSet(id, p.path, !p.on); draw(); } }, p.label))));
-        return group;
+        // Same card as the Modules list: one switch for the whole group, the pages themselves as toggle chips underneath.
+        const cb = h('input', { type: 'checkbox', title: 'Turn this whole group on or off' });
+        cb.checked = enabled === ps.length; cb.indeterminate = enabled > 0 && enabled < ps.length;
+        cb.addEventListener('change', () => { ps.forEach((p) => pageSet(id, p.path, cb.checked)); draw(); });
+        return h('div', { class: 'core-mod core-pg-group' + (enabled ? '' : ' off') },
+          h('label', { class: 'core-mod-head' }, cb,
+            h('div', { class: 'core-opt-main' }, h('div', { class: 'core-mod-title' }, title)),
+            h('span', { class: 'core-pill' + (enabled === ps.length ? ' core-pill-ok' : '') }, enabled + '/' + ps.length)),
+          h('div', { class: 'core-chips core-pg-chips' }, ps.map((p) => h('button', { class: 'core-chip' + (p.on ? ' on' : ''), type: 'button', 'aria-pressed': String(p.on), title: p.path, onclick: () => { pageSet(id, p.path, !p.on); draw(); } }, p.label))));
       }));
     };
     draw();
@@ -3467,7 +3474,7 @@
     const shown = (f) => !f.hidden && f.type !== 'json';
     const loose = fields.filter((f) => shown(f) && (!f.module || !mods.some((m) => m.id === f.module)));
     if (loose.length) kids.push(h('div', { class: 'core-opt-sec' }, loose.map((f) => optionField(id, f))));
-    else if (!fields.some(shown) && !mods.length) kids.push(h('div', { class: 'core-dim', style: { marginBottom: '16px' } }, 'This addon has no options of its own' + (defs.has(id) ? '.' : ' (or it has not run in this browser yet).')));
+    else if (!fields.some(shown) && !mods.length && !defs.has(id)) kids.push(h('div', { class: 'core-dim', style: { marginBottom: '16px' } }, 'This addon has not run in this browser yet. Its own options appear here after it has run once.'));
     if (mods.length) {
       const labelOf = (m) => [].concat(m.pages == null || m.pages === '*' ? ['*'] : m.pages).map((x) => (x === '*' ? 'every page' : (PAGE_LABEL.get(x) || x))).join(', ');
       kids.push(h('div', { class: 'core-opt-sec' },
@@ -3487,6 +3494,7 @@
       const sec = pagePicker(id);
       if (sec) kids.push(sec);
     }
+    if (!kids.length) kids.push(h('div', { class: 'core-dim', style: { marginBottom: '16px' } }, 'Nothing to configure for this addon.'));
     el.replaceChildren(...kids);
   }
   let optModal = null;
@@ -3510,7 +3518,7 @@
 
   /* ------------------------------------------------------------ export --- */
   const Core = {
-    __isCore: true, apiLevel: API, version: '3.20.4', debug: false, tabId: TAB,
+    __isCore: true, apiLevel: API, version: '3.20.5', debug: false, tabId: TAB,
     esc, sleep, debounce, fmt, int, compact, parseNum, parseJson,
     on, off, once, emit,
     state, store, player,
