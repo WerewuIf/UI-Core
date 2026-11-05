@@ -3821,9 +3821,10 @@ const Guild = (() => {
     const active = !!(finish || donate || giveUp || prog), meta = extractCombatQuestData({ requirements: req, description: desc, isActive: active });
     const kill = !!(meta.monsterName && meta.amountNeeded > 0 && meta.minimumDamage > 0 && !meta.isCollectionQuest && !meta.skillUsageQuest);
     const kind = meta.skillUsageQuest ? 'skill' : (meta.isCollectionQuest || donate) ? 'collect' : kill ? 'kill' : 'other';
-    const cdOn = cool * 1000 > nowMs();                                   // a timestamp that has passed is no cooldown (the attribute can linger)
+    const cdOn = cool > 0;                                                // the original Quest Center's rule: a cooldown node is a cooldown (the site reloads the page itself when its timer hits zero)
     return { name, desc, req, progress: prog, cooldown: cdOn, cooldownTs: cool, active, available: !!accept && !active && !cdOn, acceptId: parseIntSafe(argsOf(accept, 'acceptQuest')[0]), finishId: parseIntSafe(argsOf(finish, 'finishQuest')[0]),
-      donateQ: parseIntSafe(dArgs[0]), donateItem: parseIntSafe(dArgs[1]), kind, kill, meta };
+      donateQ: parseIntSafe(dArgs[0]), donateItem: parseIntSafe(dArgs[1]), kind, kill, meta,
+      note: txt(q('.quest-status-note')) };                                  // the site's own reason a quest cannot be taken ("Finish or abandon your current quest first.")
   }
   const parseBoard = (doc) => Array.from(doc.querySelectorAll('section.quests-section .quest-row, section.section.quests-section .quest-row')).map(readRow).filter(Boolean);
   const setInfo = (p) => Tasks.info('guild', p);
@@ -3896,13 +3897,15 @@ const Guild = (() => {
 
   async function tick() {
     const G = kinds(); if (!G.enabled) return;
+    setInfo({ state: 'run', line: 'reading the quest board…' });
     const doc = parseHtml(await netText(URL_GUILD, { force: true, ttl: 0, key: 'ma:guild' })), st = Guard.pageState(doc);
     if (st !== 'ok') { Guard.fault(st, 'guild'); setInfo({ state: 'err', line: 'not signed in' }); return 5 * MIN; }
     const rows = parseBoard(doc);
-    Tasks.info('guild', { board: rows.map((r) => ({ name: r.name, kind: r.kind, active: !!r.active, available: !!r.available, done: !!r.finishId, cooldown: !!r.cooldown, cdTs: r.cooldownTs || 0, cur: r.progress ? r.progress.current : null, total: r.progress ? r.progress.total : null, mob: (r.meta && r.meta.monsterName) || '', minDmg: (r.meta && r.meta.minimumDamage) || 0 })) });
+    Tasks.info('guild', { board: rows.map((r) => ({ name: r.name, kind: r.kind, active: !!r.active, available: !!r.available, done: !!r.finishId, cooldown: !!r.cooldown, cdTs: r.cooldownTs || 0, note: r.note || '', cur: r.progress ? r.progress.current : null, total: r.progress ? r.progress.total : null, mob: (r.meta && r.meta.monsterName) || '', minDmg: (r.meta && r.meta.minimumDamage) || 0 })) });
     if (!rows.length) { setInfo({ state: 'warn', line: 'no quest board on the guild page (not in the guild yet, or the page changed)' }); Farm.drop('guild'); return 30 * MIN; }
     const fin = rows.find((r) => r.finishId);
     if (fin) {                                                           // 1. a quest that is done: turn it in
+      setInfo({ state: 'run', line: `handing in “${fin.name}”…` });
       const r = await Act.run(() => post('/adventurers_finish_quest.php', { quest_id: String(fin.finishId) }), 250), good = ok200(r && r.json, r && r.text);
       log(good ? `🏁 quest finished: ${esc(fin.name)}` : `⚠️ could not finish ${esc(fin.name)}: ${esc(msgOf(r) || 'no reply')}`, good ? 'ok' : 'warn');
       setInfo({ state: good ? 'ok' : 'warn', line: good ? `finished “${fin.name}”` : 'finish was refused — retrying' }); return good ? 3000 : MIN;
@@ -3937,6 +3940,7 @@ const Guild = (() => {
         .sort((x, y) => ({ skill: 0, kill: 1, collect: 2 }[x.kind] - { skill: 0, kill: 1, collect: 2 }[y.kind]));
       for (const r of cand) {
         if (r.kind === 'kill') { const c = await Farm.canFarm(r.meta.monsterName); if (!c.ok) { Diag.skip('guild-skip-available', `${r.name}: ${c.why}`); continue; } }
+        setInfo({ state: 'run', line: `accepting “${r.name}”…` });
         const res = await Act.run(() => post('/adventurers_accept_quest.php', { quest_id: String(r.acceptId) }), 250), good = ok200(res && res.json, res && res.text);
         log(good ? `📜 quest accepted: ${esc(r.name)} (${r.kind}${r.kind === 'kill' ? `: ${r.meta.amountNeeded} × ${esc(r.meta.monsterName)} ≥ ${fmtNum(r.meta.minimumDamage)}` : ''})` : `⚠️ could not accept ${esc(r.name)}: ${esc(msgOf(res) || 'no reply')}`, good ? 'ok' : 'warn');
         if (good) { setInfo({ state: 'ok', line: `accepted “${r.name}”` }); return 3000; }
@@ -3967,6 +3971,7 @@ const Battle = (() => {
   }
   async function tick() {
     if (!cfg.tasks.bp.enabled) return;
+    setInfo({ state: 'run', line: 'reading the pass page…' });
     const doc = parseHtml(await netText('/battle_pass.php', { force: true, ttl: 0, key: 'ma:bp' })), st = Guard.pageState(doc);
     if (st !== 'ok') { Guard.fault(st, 'battle pass'); setInfo({ state: 'err', line: 'not signed in' }); return 5 * 60000; }
     let hunt = null, stam = null;
@@ -4013,6 +4018,7 @@ const Merchant = (() => {
   const untilReset = () => { try { const n = Core.clock.next('sun', '00:00'); if (n > Date.now()) return n - Date.now() + 60000; } catch (_) { /* no server clock yet */ } return 6 * 3600000; };   // asleep until the weekly reset
   async function tick() {
     const t = cfg.tasks.merchant; if (!t.enabled) return;
+    setInfo({ state: 'run', line: 'reading the merchant…' });
     const wk = weekStart(), s = store.get() || {};
     if (wk && s.week === wk && s.done) { setInfo({ state: 'ok', line: `this week's restock is bought (${fmtNum(s.spent || 0)} gold) · next reset ${(() => { try { return new Date(Core.clock.next('sun', '00:00')).toLocaleString(); } catch (_) { return 'Sunday'; } })()} server time` }); return untilReset(); }
     const doc = parseHtml(await netText('/merchant.php', { force: true, ttl: 0, key: 'ma:merchant' })), st = Guard.pageState(doc);
@@ -4482,7 +4488,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   const dotOf = (st) => (!Tab.isMain() ? 'follower' : /FIGHT|RUN|DUEL|SCAN|GRAVE|SWITCH|PLAN|FARM/.test(st) ? 'running' : /WAIT|STAMINA/.test(st) ? 'waiting' : /PAUSE/.test(st) ? 'follower' : '');
   function footer() {
     const st = Status.get(), cur = Engine.current(), run = Run.wanted();
-    const wk = Work.get('build') || Work.get('scan'), sub = Farm.busy() ? '🌾 auto-farm · ' + (Farm.line() || 'running') : wk ? (wk.step ? `${wk.label} · ${wk.step}${wk.total > 1 ? ` (${Math.min(wk.done + 1, wk.total)}/${wk.total})` : ''}` : wk.label) : cur ? '🎯 ' + cur.name : (Tab.isMain() ? (cfg.targets.length ? 'no target right now' : 'no bosses selected') : 'this tab is following');
+    const wk = Work.get('build') || Work.get('scan'), tk = Tasks.list().find((d) => d.id !== 'monsters' && Tasks.busy(d.id)), sub = Farm.busy() ? '🌾 auto-farm · ' + (Farm.line() || 'running') : tk ? `${tk.icon} ${tk.name} · ${Tasks.info(tk.id).line || 'working'}` : wk ? (wk.step ? `${wk.label} · ${wk.step}${wk.total > 1 ? ` (${Math.min(wk.done + 1, wk.total)}/${wk.total})` : ''}` : wk.label) : cur ? '🎯 ' + cur.name : (Tab.isMain() ? (cfg.targets.length ? 'no target right now' : 'no bosses selected') : 'this tab is following');
     return h('div', { class: 'ma-foot' },
       h('div', { class: 'ma-foot-st' }, h('b', {}, h('i', { class: 'ma-dot ' + dotOf(st) }), STATE_TXT[st] || st), h('span', { title: sub }, sub), wk && wk.total > 1 ? h('div', { class: 'ma-bar' }, h('i', { style: { width: Math.max(6, pctOf({ done: wk.done + 0.5, total: wk.total })).toFixed(1) + '%' } })) : null),
       run ? btn('⏹ Stop', 'danger', () => { Run.stop('stopped from the panel'); draw(); }) : btn('▶ Start', 'success', () => { Run.start(); draw(); }));
@@ -4588,7 +4594,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
       const gi = Tasks.info('guild'), board = Array.isArray(gi.board) ? gi.board : [], act = board.filter((q) => q.active || q.done);
       out.push(fold('ov:guild', true, ['📜 Adventure Guild', h('small', {}, act.length ? `${act.length} in progress` : board.length ? 'nothing in progress' : '')], () => [
         ...(board.length ? board : []).map((q) => { const k = KIND[q.kind] || ['📜', q.kind || 'quest'], cd = q.cooldown && q.cdTs > 0 ? Math.max(0, q.cdTs * 1000 - Date.now()) : 0;
-          return barRow(k[0], q.name, q.cur || 0, q.total || 0, [k[1], q.kind === 'kill' && q.mob ? `${q.mob} ≥ ${fmtNum(q.minDmg)}` : '', q.total ? `${fmtNum(q.cur || 0)} / ${fmtNum(q.total)}` : ''].filter(Boolean).join(' · '), pill(q.done ? 'hand it in' : q.active ? 'active' : q.cooldown ? (cd ? 'cooldown ' + fmtDur(cd) : 'cooldown') : q.available ? 'available' : '—', q.done ? 'ok' : q.active ? 'blue' : q.cooldown ? '' : 'warn')); }),
+          return barRow(k[0], q.name, q.cur || 0, q.total || 0, [k[1], q.kind === 'kill' && q.mob ? `${q.mob} ≥ ${fmtNum(q.minDmg)}` : '', q.total ? `${fmtNum(q.cur || 0)} / ${fmtNum(q.total)}` : ''].filter(Boolean).join(' · '), pill(q.done ? 'hand it in' : q.active ? 'active' : q.cooldown ? (cd ? 'cooldown ' + fmtDur(cd) : 'cooldown') : q.available ? 'available' : q.note ? (/finish or abandon/i.test(q.note) ? 'blocked' : q.note.slice(0, 28)) : '—', q.done ? 'ok' : q.active ? 'blue' : q.cooldown ? '' : 'warn')); }),
         tStatus('guild'), nextNote('guild')], { aside: stPill(gi) }));
     }
     if (tcfg.bp.enabled) {
