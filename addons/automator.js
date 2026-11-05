@@ -100,11 +100,11 @@ const DEFAULT_CFG = {
   autoLoot: { enabled: false, mode: 'toLevel', claimGapMs: 250 },
   parts: { bosses: true, dungeons: true, duels: true, loot: true },
   tasks: {                             // the Tasks tab: one switch per task (Monsters is the boss run itself)
-    guild:    { enabled: false, everyMin: 60, accept: true, kill: true, collect: true, skill: true },   // everyMin = the longest wait only: a task wakes itself when something is due
-    bp:       { enabled: false, everyMin: 60, targets: 'Lizardman Flamecaster, Lizardman Shadowclaw' },
-    merchant: { enabled: false, everyMin: 60, keepGold: 0, damon: true },
+    guild:    { enabled: false, everyMin: 60, collect: true, skill: true },   // everyMin = the longest wait only: a task wakes itself when something is due
+    bp:       { enabled: false, everyMin: 60 },
+    merchant: { enabled: false, everyMin: 60 },
     pvp:      { solo: { enabled: false }, team: { enabled: false } },   // placeholders until the PvP module registers itself
-    farm:     { stallMin: 10, waves: '', ids: '', auto: true },        // auto: use Auto-Farm when the game allows it (level 400+); the normal attack path otherwise
+    farm:     { auto: true },        // auto: use Auto-Farm when the game allows it (level 400+); the normal attack path otherwise
   },
   logFilter: 'all',
 };
@@ -3207,7 +3207,7 @@ Object.assign(LootScan, (() => {
  *                      (join → tier by damage profile → stamina / HP potions) on basic wave mobs until your damage on each reaches the
  *                      minimum. Needs only the mob's name. Nothing is sent to the Auto-Farm API while it is locked or off.
  *     Reaching level 400 or flipping the switch while a run is going ends that run cleanly and the next one uses the other way.
- *     Ids for Auto-Farm come from a learned cache (every wave page that DOES show the panel teaches it) or "name = id" lines in Tasks → Auto-farm.
+ *     Ids for Auto-Farm come from a learned cache (every wave page that DOES show the panel teaches it) or nothing to type.
  *   - LOOT is found the way the Dragon Realm script does it: the wave page is read in its dead view (checked to BE the dead view, asked again
  *     if the cookie swap handed back the alive one), cards that are dead + joined + damaged + not despawned count, a stack counts as its size,
  *     a corpse far bigger than what is still needed is left alone, and live mobs that already carry the minimum damage are only waited for.
@@ -3295,9 +3295,7 @@ Object.assign(Farm, (() => {
     if (n) patch({ ids });
     return n;
   }
-  function typed() {                                                      // "name = id" lines from Tasks → Auto-farm (for accounts that never see the panel)
-    const out = {}; for (const line of String((cfg.tasks.farm || {}).ids || '').split(/\r?\n/)) { const m = line.match(/^\s*(.+?)\s*[=:]\s*(\d+)\s*$/); if (m) out[keyOf(m[1])] = m[2]; } return out;
-  }
+  const typed = () => ({});                                               // (ids are learned from the site's own panel, nothing to type)
   function lookup(name) {
     const k = keyOf(name), all = Object.assign({}, stateOf().ids, typed());
     if (all[k]) return all[k];
@@ -3310,7 +3308,6 @@ Object.assign(Farm, (() => {
   function waveUrls() {
     const seen = new Set(), out = [];
     const add = (u) => { try { const x = new URL(u, BASE), k = x.pathname + x.search; if (!seen.has(k)) { seen.add(k); out.push(k); } } catch (_) { /* not a url */ } };
-    String((cfg.tasks.farm || {}).waves || '').split(/[\s,]+/).filter(Boolean).forEach(add);                     // event waves etc. you added
     for (const d of Roster.list) { if (d.kind !== 'wave') continue; const l = bossLoc(d.low); if (l) add(`/active_wave.php?gate=${l.gate}&wave=${l.wave}`); }
     [[3, 3], [3, 5], [3, 8], [5, 9]].forEach(([g, w]) => add(`/active_wave.php?gate=${g}&wave=${w}`));
     return out;
@@ -3372,7 +3369,7 @@ Object.assign(Farm, (() => {
     if (seen && seen.boss) return { ok: false, why: 'a boss — only basic wave mobs are done here' };
     if (!pr.ok) return { ok: true, manual: true, locked: !!pr.locked, why: pr.why, seen: !!seen };                  // locked / off / refused: the normal attack path
     const id = lookup(name);
-    if (!id) return { ok: true, manual: true, why: `no Auto-Farm id for "${name}" yet (open a wave page on an account that shows the panel, or add "${name} = <id>" in Tasks → Auto-farm)`, seen: !!seen };
+    if (!id) return { ok: true, manual: true, why: `no Auto-Farm id for "${name}" yet (it is learned from a wave page that shows the site's Auto-Farm panel)`, seen: !!seen };
     return { ok: true, id, seen: !!seen };
   }
 
@@ -3447,7 +3444,7 @@ Object.assign(Farm, (() => {
     for (const t of snap.targets || []) { const r = await putTarget(t); (r.ok ? put : left).push(t.name || t.monsterId || '?'); await sleep(100); }
     if (snap.enabled && put.length) { await api('toggle', { enabled: 1 }); AF.clearPaused(); }
     else if (snap.enabled && !(snap.targets || []).length) AF.clearPaused();
-    if (left.length) { patch({ owed: false, snap: Object.assign({}, snap, { left }) }); log(`⚠️ auto-farm: put back ${put.length} of ${put.length + left.length} of your targets (${why || 'restore'}) — could not re-add: ${left.map(esc).join(', ')} (an ended event?). Your saved set-up is kept; Tasks → Auto-farm → Restore tries again`, 'warn'); }
+    if (left.length) { patch({ owed: false, snap: Object.assign({}, snap, { left }) }); log(`⚠️ auto-farm: put back ${put.length} of ${put.length + left.length} of your targets (${why || 'restore'}) — could not re-add: ${left.map(esc).join(', ')} (an ended event?). Your saved set-up is kept; it is tried again on the next run and after a reload`, 'warn'); }
     else { patch({ owed: false }); if (put.length) log(`↩ auto-farm: your ${put.length} target${put.length === 1 ? '' : 's'} and settings are back${snap.enabled ? ' (running again)' : ''}`, 'ok'); }
     return { ok: !left.length, put: put.length, left };
   }
@@ -3472,7 +3469,7 @@ Object.assign(Farm, (() => {
     return { n, of: c.total };
   }
   async function waitFor(batch) {
-    const stallMs = Math.max(2, Number((cfg.tasks.farm || {}).stallMin) || 10) * 60000; let last = -1, moved = Date.now(), offSince = 0;
+    const stallMs = 10 * 60000; let last = -1, moved = Date.now(), offSince = 0;
     for (;;) {
       if (S.stop || !Tab.isMain()) return 'stopped';
       if (!wantAuto()) return 'switched';                                  // the switch went off (or the level says no): this run ends, the next one uses the attack path
@@ -3612,7 +3609,7 @@ Object.assign(Farm, (() => {
     }
     catch (e) { log(`⚠️ auto-farm: ${esc(e.message)}`, 'warn'); Diag.skip('auto-farm-failed', e.message); }
     finally {
-      if (!manual) { try { await restore('run over'); } catch (e) { log(`⚠️ auto-farm restore: ${esc(e.message)} — Tasks → Auto-farm → Restore tries again`, 'warn'); } }
+      if (!manual) { try { await restore('run over'); } catch (e) { log(`⚠️ auto-farm restore: ${esc(e.message)} — it is tried again on the next run and after a reload`, 'warn'); } }
       S.busy = false; S.manual = false; say(''); if (manual) { try { await AF.resumeIfWePaused('hunt over'); } catch (_) { /* */ } } if (paused) Run.resume('farm');
       owners.forEach((o) => { S.demands.delete(o); try { Tasks.poke(o, waitFor); } catch (_) { /* tasks not up yet */ } });     // the owners re-read their numbers and ask again if something is left
     }
@@ -3889,6 +3886,7 @@ const Guild = (() => {
     const doc = parseHtml(await netText(URL_GUILD, { force: true, ttl: 0, key: 'ma:guild' })), st = Guard.pageState(doc);
     if (st !== 'ok') { Guard.fault(st, 'guild'); setInfo({ state: 'err', line: 'not signed in' }); return 5 * MIN; }
     const rows = parseBoard(doc);
+    Tasks.info('guild', { board: rows.map((r) => ({ name: r.name, kind: r.kind, active: !!r.active, available: !!r.available, done: !!r.finishId, cooldown: !!r.cooldown, cdTs: r.cooldownTs || 0, cur: r.progress ? r.progress.current : null, total: r.progress ? r.progress.total : null, mob: (r.meta && r.meta.monsterName) || '', minDmg: (r.meta && r.meta.minimumDamage) || 0 })) });
     if (!rows.length) { setInfo({ state: 'warn', line: 'no quest board on the guild page (not in the guild yet, or the page changed)' }); Farm.drop('guild'); return 30 * MIN; }
     const fin = rows.find((r) => r.finishId);
     if (fin) {                                                           // 1. a quest that is done: turn it in
@@ -3911,7 +3909,6 @@ const Guild = (() => {
         if (r.n) log(`✨ skill quest “${esc(a.name)}”: ${r.n} cast${r.n === 1 ? '' : 's'}`, 'ok');
         if (r.why) { notes.push(`“${a.name}”: ${r.why}`); later(r.wait); } else return 2500;       // all casts went through: look at the board again
       } else if (a.kind === 'kill') {
-        if (G.kill === false) { notes.push(`“${a.name}”: kill quests are switched off`); later(60 * MIN); continue; }
         const mob = a.meta.monsterName, c = await Farm.canFarm(mob);
         if (!c.ok) { notes.push(`“${a.name}”: ${mob} — ${c.why}`); Diag.skip('guild-not-farmable', `${mob}: ${c.why}`); later(c.locked ? 30 * MIN : 20 * MIN); continue; }
         const have = a.progress ? a.progress.current : 0, total = a.progress ? a.progress.total : a.meta.amountNeeded;
@@ -3921,9 +3918,9 @@ const Guild = (() => {
     }
     if (wants.length) Farm.want('guild', wants); else Farm.drop('guild');
     const worked = working || did > 0;
-    if (!rows.some((r) => r.active) && G.accept) {                       // 3. no quest in progress (the guild holds one at a time): take the next one that can be done
+    if (!rows.some((r) => r.active)) {                       // 3. no quest in progress (the guild holds one at a time): take the next one that can be done
       let noClass = false; if (G.skill !== false && rows.some((x) => x.available && x.kind === 'skill') && !effectiveClass()) { try { await detectClass(); } catch (_) { /* */ } noClass = !effectiveClass(); }
-      const cand = rows.filter((x) => x.available && ((x.kind === 'skill' && G.skill !== false && !noClass) || (x.kind === 'kill' && G.kill !== false) || (x.kind === 'collect' && G.collect !== false)))
+      const cand = rows.filter((x) => x.available && ((x.kind === 'skill' && G.skill !== false && !noClass) || x.kind === 'kill' || (x.kind === 'collect' && G.collect !== false)))
         .sort((x, y) => ({ skill: 0, kill: 1, collect: 2 }[x.kind] - { skill: 0, kill: 1, collect: 2 }[y.kind]));
       for (const r of cand) {
         if (r.kind === 'kill') { const c = await Farm.canFarm(r.meta.monsterName); if (!c.ok) { Diag.skip('guild-skip-available', `${r.name}: ${c.why}`); continue; } }
@@ -3933,7 +3930,7 @@ const Guild = (() => {
         notes.push(`could not accept “${r.name}”: ${msgOf(res) || 'no reply'}`); later(30 * MIN); break;
       }
     }
-    if (!rows.some((r) => r.active) && G.accept && rows.some((r) => r.available && r.kind === 'skill') && !effectiveClass()) notes.push('a skill quest is waiting but no class is picked (the site\'s Classes page)');
+    if (!rows.some((r) => r.active) && rows.some((r) => r.available && r.kind === 'skill') && !effectiveClass()) notes.push('a skill quest is waiting but no class is picked (the site\'s Classes page)');
     const cds = rows.filter((r) => r.cooldownTs > 0).map((r) => r.cooldownTs * 1000 - nowMs() + 3000).filter((ms) => ms > 0);
     if (cds.length && !worked) later(Math.min(...cds));                  // the next quest comes off cooldown then
     const idle = !notes.length;
@@ -3964,8 +3961,9 @@ const Battle = (() => {
     const sx = stam ? ` · stamina ${stam.current}/${stam.total}` : '';
     if (!hunt) { Farm.drop('bp'); setInfo({ state: 'idle', line: 'no hunt on the pass page' + sx }); return 60 * 60000; }
     if (hunt.current >= hunt.total) { Farm.drop('bp'); setInfo({ state: 'ok', line: `hunt done ${hunt.current}/${hunt.total}` + sx }); return 60 * 60000; }
-    const names = String(cfg.tasks.bp.targets || '').split(/[,\n]/).map((s) => s.trim()).filter(Boolean); let pick = null, why = '', lockedNow = false;
-    for (const n of names) { const c = await Farm.canFarm(n); if (c.ok) { pick = n; break; } why = `${n}: ${c.why}`; if (c.locked) { lockedNow = true; break; } }
+    const names = ['Lizardman Flamecaster', 'Lizardman Shadowclaw']; let pick = null, any = null, why = '', lockedNow = false;     // the first one Auto-Farm can do; else the first the attack path can
+    for (const n of names) { const c = await Farm.canFarm(n); if (c.ok && !c.manual) { pick = n; break; } if (c.ok) { any = any || n; if (c.locked) lockedNow = true; } else why = `${n}: ${c.why}`; }
+    pick = pick || any;
     if (!pick) { Farm.drop('bp'); setInfo({ state: 'warn', line: `hunt ${hunt.current}/${hunt.total} — ${why || 'no target names set'}` + sx }); Diag.skip('bp-not-farmable', why); return lockedNow ? 30 * 60000 : 20 * 60000; }
     Farm.want('bp', [{ name: pick, need: hunt.total - hunt.current, minDamage: hunt.minimumDamage }]);
     setInfo({ state: 'run', line: `hunt ${hunt.current}/${hunt.total} — ${pick} ≥ ${fmtNum(hunt.minimumDamage)}${Farm.busy() ? ' · farming now' : ' · queued'}` + sx, have: hunt.current, total: hunt.total });
@@ -4006,8 +4004,8 @@ const Merchant = (() => {
     if (wk && s.week === wk && s.done) { setInfo({ state: 'ok', line: `this week's restock is bought (${fmtNum(s.spent || 0)} gold) · next reset ${(() => { try { return new Date(Core.clock.next('sun', '00:00')).toLocaleString(); } catch (_) { return 'Sunday'; } })()} server time` }); return untilReset(); }
     const doc = parseHtml(await netText('/merchant.php', { force: true, ttl: 0, key: 'ma:merchant' })), st = Guard.pageState(doc);
     if (st !== 'ok') { Guard.fault(st, 'merchant'); setInfo({ state: 'err', line: 'not signed in' }); return 5 * 60000; }
-    let items = scrape(doc); if (t.damon !== false) items = [...(await damon()), ...items];
-    let gold = goldOf(doc); const keep = Math.max(0, Number(t.keepGold) || 0);
+    let items = [...(await damon()), ...scrape(doc)];
+    let gold = goldOf(doc); const keep = 0;
     const cands = items.filter((i) => weekly(i) && left(i) > 0 && i.price > 0).sort((a, b) => left(a) * a.price - left(b) * b.price);
     if (!cands.length) { store.set({ week: wk, done: true, at: Date.now(), spent: s.week === wk ? s.spent || 0 : 0, bought: s.week === wk ? s.bought || 0 : 0 }); setInfo({ state: 'ok', line: 'nothing left to buy this week' }); return untilReset(); }
     let spent = 0, n = 0, short = false;
@@ -4075,13 +4073,13 @@ Object.assign(Tasks, (() => {
  * ================================================================================================================ */
 const Panel = (() => {
   const { h, btn } = Core.ui;
-  const TABS = [['tasks', 'Tasks', '✅'], ['home', 'Overview', '🏠'], ['bosses', 'Bosses', '👹'], ['loot', 'Loot', '🪦'], ['settings', 'Settings', '⚙️'], ['activity', 'Activity', '📜']];
+  const TABS = [['home', 'Overview', '🏠'], ['tasks', 'Tasks', '✅'], ['bosses', 'Bosses', '👹'], ['loot', 'Loot', '🪦'], ['settings', 'Settings', '⚙️'], ['activity', 'Activity', '📜']];
   const DIRTY_TAB = { status: 'home', tasks: 'tasks', log: 'activity', diag: 'activity', loot: 'loot', relics: 'bosses' };   // 'scan' repaints only the strip
-  const uiStore = Core.store(ID + '-ui', { def: { tab: 'tasks', open: {}, filter: '', bsec: 'waves' } });
-  const ui = Object.assign({ tab: 'tasks', open: {}, filter: '', bsec: 'waves' }, uiStore.get() || {}); if (!ui.open || typeof ui.open !== 'object') ui.open = {};
+  const uiStore = Core.store(ID + '-ui', { def: { tab: 'home', open: {}, filter: '', bsec: 'waves' } });
+  const ui = Object.assign({ tab: 'home', open: {}, filter: '', bsec: 'waves' }, uiStore.get() || {}); if (!ui.open || typeof ui.open !== 'object') ui.open = {};
   const saveUi = () => uiStore.set(ui);
   if (ui.tab === 'supplies') ui.tab = 'settings';                  // the Supplies tab is part of Settings now
-  let root = null, tab = TABS.some((t) => t[0] === ui.tab) ? ui.tab : 'tasks', shown = false, drawT = 0;
+  let root = null, tab = TABS.some((t) => t[0] === ui.tab) ? ui.tab : 'home', shown = false, drawT = 0;
   const phaseSel = {};                                              // boss entry -> which phase the boss page is on
   /* Select mode (Bosses tab): tap bosses to tick them, pick gear / crystal / pet / cap once, apply to all. Not saved: it is a one-off action. */
   const BK = { on: false, sel: new Set(), ph: null, pick: {}, cap: '', n: 3e9, msg: '', from: '' };
@@ -4487,7 +4485,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   const nextNote = (id) => { const d = Tasks.nextDue(id) - Date.now(); return Tasks.busy(id) ? null : h('div', { class: 'ma-note' }, d > 1500 ? '⏱ next look in ' + fmtDur(d) + ' — it wakes itself when something is due' : '⏱ looking at it now'); };
   const area = (value, rows, ph, set) => h('textarea', { class: 'ma-in', rows, placeholder: ph, style: { width: '100%', resize: 'vertical' }, onclick: stop, onchange: (e) => { set(e.target.value); saveCfg(); } }, value || '');
   function tTasks() {
-    const out = [], T = cfg.tasks, F = Farm.info(), cur = Engine.current();
+    const out = [], T = cfg.tasks, cur = Engine.current();
     if (!Tab.isMain()) out.push(h('div', { class: 'ma-alert info' }, 'Another tab is the main one and runs the tasks. This tab only shows them.', h('div', {}, btn('Take over this tab', 'soft', () => { Tab.takeOver(); }))));
     out.push(caption('Tasks — switch on what the automator should keep doing'));
     // Monsters
@@ -4499,34 +4497,16 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
       h('div', { class: 'ma-card-b' }, ['pvp.solo', 'pvp.team'].map((id) => { const d = Tasks.get(id), k = id.split('.')[1];
         return h('div', {}, srow(d.icon, d.name.replace('PvP · ', ''), d.placeholder ? 'placeholder: nothing runs yet' : d.desc, sw(() => T.pvp[k].enabled, (v) => { T.pvp[k].enabled = v; }), []), d.placeholder ? null : tStatus(id)); }))));
     // Adventure Guild
-    out.push(card('📜', 'Adventure Guild', 'Finishes quests, takes the next one: kills (auto-farm), collections (donates) and skill quests (casts)', T.guild.enabled, (v) => { T.guild.enabled = v; if (v) Tasks.poke('guild'); else Farm.drop('guild'); },
-      [tStatus('guild'), T.guild.enabled ? nextNote('guild') : null,
-        h('div', { class: 'ma-two' }, opt('Accept new quests', sw(() => T.guild.accept, (v) => { T.guild.accept = v; })), opt('Kill quests', sw(() => T.guild.kill !== false, (v) => { T.guild.kill = v; }), 'Auto-Farm from level 400, the normal attack path below — chosen automatically')),
-        h('div', { class: 'ma-two' }, opt('Collection quests', sw(() => T.guild.collect !== false, (v) => { T.guild.collect = v; }), 'donates the quest item'), opt('Skill quests', sw(() => T.guild.skill !== false, (v) => { T.guild.skill = v; }), 'casts your class skill')),
-        T.guild.enabled ? btn('Check now', 'soft', () => { Tasks.poke('guild'); draw(); }) : null]));
+    out.push(card('📜', 'Adventure Guild', 'Finishes quests and takes the next one: kills, collections and skill quests', T.guild.enabled, (v) => { T.guild.enabled = v; if (v) Tasks.poke('guild'); else Farm.drop('guild'); },
+      [tStatus('guild'), T.guild.enabled ? nextNote('guild') : null, T.guild.enabled ? btn('Check now', 'soft', () => { Tasks.poke('guild'); draw(); }) : null]));
     // Battle Pass
-    out.push(card('🎫', 'Battle Pass', 'The hunt of the pass, auto-farmed (the stamina goal fills by itself)', T.bp.enabled, (v) => { T.bp.enabled = v; if (v) Tasks.poke('bp'); else Farm.drop('bp'); },
-      [tStatus('bp'), opt('Hunt targets', area(T.bp.targets, 2, 'Lizardman Flamecaster, Lizardman Shadowclaw', (v) => { T.bp.targets = v; }), 'the first one Auto-Farm can do is used', 'row'), T.bp.enabled ? nextNote('bp') : null, T.bp.enabled ? btn('Check now', 'soft', () => { Tasks.poke('bp'); draw(); }) : null]));
+    out.push(card('🎫', 'Battle Pass', 'The hunt of the pass (the stamina goal fills by itself)', T.bp.enabled, (v) => { T.bp.enabled = v; if (v) Tasks.poke('bp'); else Farm.drop('bp'); },
+      [tStatus('bp'), T.bp.enabled ? nextNote('bp') : null, T.bp.enabled ? btn('Check now', 'soft', () => { Tasks.poke('bp'); draw(); }) : null]));
     // Merchant
     const ms = Merchant.state();
     out.push(card('🛒', 'Merchant', 'Buys the weekly restock (gold items + Damon) once per server week — resets Sunday 00:00 server time', T.merchant.enabled, (v) => { T.merchant.enabled = v; if (v) Tasks.poke('merchant'); },
-      [tStatus('merchant'), h('div', { class: 'ma-two' }, opt('Keep this much gold', num(() => T.merchant.keepGold, (v) => { T.merchant.keepGold = v; }, { min: 0, w: 96, fmt: fmtNum })), opt('Include Damon', sw(() => T.merchant.damon !== false, (v) => { T.merchant.damon = v; }))), T.merchant.enabled ? nextNote('merchant') : null,
+      [tStatus('merchant'), T.merchant.enabled ? nextNote('merchant') : null,
         T.merchant.enabled ? btn(ms.done ? 'Check again' : 'Buy now', 'soft', () => { Merchant.reset(); Tasks.poke('merchant'); draw(); }) : null]));
-    // Auto-farm (shared)
-    const pr = F.probe, md = Farm.mode(), pbadge = pill(md.kind === 'auto' ? 'Auto-Farm' : 'attack path', md.kind === 'auto' ? 'ok' : 'warn');
-    out.push(h('div', { class: 'ma-card' },
-      h('div', { class: 'ma-card-h' }, h('span', { class: 'ma-ico' }, '🌾'), h('div', { class: 'ma-card-t' }, h('b', {}, 'Auto-farm ', pbadge), h('small', {}, 'Shared by the tasks above — basic wave mobs only; Auto-Farm or the normal attack path, picked for you'))),
-      h('div', { class: 'ma-card-b' },
-        opt('Use Auto-Farm', sw(() => T.farm.auto !== false, (v) => { T.farm.auto = v; Farm.nudge(); draw(); }), 'on: Auto-Farm whenever the game allows it (level 400+), the normal attack path below; off: always the attack path'),
-        h('div', { class: 'ma-note' }, Farm.busy() ? '🌾 ' + (Farm.line() || 'running') : md.kind === 'hand' ? md.why + ' — using the normal attack path' : `idle · ${F.ids} monster id${F.ids === 1 ? '' : 's'} known · ${F.runs} run${F.runs === 1 ? '' : 's'} this session${F.demands ? ' · ' + F.demands + ' request' + (F.demands === 1 ? '' : 's') + ' waiting' : ''}`),
-        ...Object.values(F.skipped).map((s) => h('div', { class: 'ma-note' }, '⚠️ ' + s)),
-        F.snap && F.snap.left && F.snap.left.length ? h('div', { class: 'ma-note' }, '⚠️ could not put back: ' + F.snap.left.join(', ')) : null,
-        fold('farm-more', false, 'More', () => [
-          opt('Stop a stalled run after', num(() => T.farm.stallMin, (v) => { T.farm.stallMin = v; }, { min: 2, max: 120, w: 56, unit: 'min', parse: (s) => parseInt(s, 10) }), 'no new kill for this long (out of stamina)'),
-          opt('Extra wave pages', area(T.farm.waves, 2, '/active_wave.php?event=13&gate=…&wave=…', (v) => { T.farm.waves = v; }), 'event waves etc., one per line — searched for ids and corpses', 'row'),
-          opt('Monster ids', area(T.farm.ids, 3, 'Lizardman Flamecaster = 123', (v) => { T.farm.ids = v; }), 'only needed where the site shows no Auto-Farm panel: “name = id”, one per line', 'row'),
-          h('div', { class: 'ma-actions' }, btn('Re-check', 'soft', () => { Farm.probe(true).then(() => draw()); }), btn('Restore my auto-farm now', 'soft', () => { Farm.restoreNow().then(() => draw()).catch((e) => log('⚠️ ' + esc(e.message), 'warn')); }), btn('Forget saved set-up', 'soft', () => { Farm.forget(); draw(); })),
-        ]))));
     return out;
   }
 
@@ -4589,6 +4569,35 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
       }
       return body;
     }));
+
+    // the other tasks: one collapsible each, only for the ones that are switched on
+    const tcfg = cfg.tasks, KIND = { kill: ['⚔️', 'kill'], collect: ['📦', 'collect'], skill: ['✨', 'skill'] };
+    const stPill = (i) => pill({ run: 'working', ok: 'ok', warn: 'check', err: 'error', idle: 'idle' }[i.state] || 'idle', { run: 'blue', ok: 'ok', warn: 'warn', err: 'warn' }[i.state]);
+    const barRow = (ico, name, cur2, tot, sub, pl) => h('div', { class: 'ma-q' }, h('span', { class: 'ma-ico' }, ico), h('div', { class: 'ma-q-n' }, h('b', {}, name), tot > 0 ? h('div', { class: 'ma-bar' + (cur2 >= tot ? ' done' : '') }, h('i', { style: { width: Math.min(100, cur2 / tot * 100).toFixed(1) + '%' } })) : null, sub ? h('small', {}, sub) : null), pl || null);
+    if (tcfg.guild.enabled) {
+      const gi = Tasks.info('guild'), board = Array.isArray(gi.board) ? gi.board : [], act = board.filter((q) => q.active || q.done);
+      out.push(fold('ov:guild', true, ['📜 Adventure Guild', h('small', {}, act.length ? `${act.length} in progress` : board.length ? 'nothing in progress' : '')], () => [
+        ...(board.length ? board : []).map((q) => { const k = KIND[q.kind] || ['📜', q.kind || 'quest'], cd = q.cooldown && q.cdTs > 0 ? Math.max(0, q.cdTs * 1000 - Date.now()) : 0;
+          return barRow(k[0], q.name, q.cur || 0, q.total || 0, [k[1], q.kind === 'kill' && q.mob ? `${q.mob} ≥ ${fmtNum(q.minDmg)}` : '', q.total ? `${fmtNum(q.cur || 0)} / ${fmtNum(q.total)}` : ''].filter(Boolean).join(' · '), pill(q.done ? 'hand it in' : q.active ? 'active' : q.cooldown ? (cd ? 'cooldown ' + fmtDur(cd) : 'cooldown') : q.available ? 'available' : '—', q.done ? 'ok' : q.active ? 'blue' : q.cooldown ? '' : 'warn')); }),
+        tStatus('guild'), nextNote('guild')], { aside: stPill(gi) }));
+    }
+    if (tcfg.bp.enabled) {
+      const bi = Tasks.info('bp');
+      out.push(fold('ov:bp', true, ['🎫 Battle Pass', h('small', {}, bi.total ? `hunt ${bi.have || 0} / ${bi.total}` : '')], () => [
+        bi.total ? barRow('🎫', 'Hunt', bi.have || 0, bi.total, `${fmtNum(bi.have || 0)} / ${fmtNum(bi.total)}`, null) : null, tStatus('bp'), nextNote('bp')], { aside: stPill(bi) }));
+    }
+    if (tcfg.merchant.enabled) {
+      const mi = Tasks.info('merchant'), mst = Merchant.state();
+      out.push(fold('ov:merchant', false, ['🛒 Merchant', h('small', {}, mst.done ? 'bought this week' : '')], () => [
+        mst.done ? note(`Bought ${fmtNum(mst.bought || 0)} item${mst.bought === 1 ? '' : 's'} for ${fmtNum(mst.spent || 0)} gold this week.`) : null, tStatus('merchant'), nextNote('merchant')], { aside: stPill(mi) }));
+    }
+    if (tcfg.guild.enabled || tcfg.bp.enabled) {
+      const F = Farm.info(), md = Farm.mode();
+      out.push(fold('ov:farm', true, ['🌾 Auto-Farm', h('small', {}, Farm.busy() ? (Farm.line() || 'running') : '')], () => [
+        h('div', { class: 'ma-note' }, Farm.busy() ? '🌾 ' + (Farm.line() || 'running') : md.kind === 'hand' ? md.why + ' — using the normal attack path' : `idle · ${F.ids} monster id${F.ids === 1 ? '' : 's'} known · ${F.runs} run${F.runs === 1 ? '' : 's'} this session${F.demands ? ' · ' + F.demands + ' request' + (F.demands === 1 ? '' : 's') + ' waiting' : ''}`),
+        ...Object.values(F.skipped).map((x) => note('⚠️ ' + x)),
+        F.snap && F.snap.left && F.snap.left.length ? note('⚠️ could not put back: ' + F.snap.left.join(', ')) : null], { aside: pill(md.kind === 'auto' ? 'Auto-Farm' : 'attack path', md.kind === 'auto' ? 'ok' : 'warn') }));
+    }
 
     // numbers
     const up = Date.now() - (stats.started || Date.now()), ap = Presets.summary();
@@ -4963,6 +4972,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   }
 
   /* =============================== SETTINGS (potions, fighting, timing) =============================== */
+  const afDesc = () => { const md = Farm.mode(); return md.kind === 'auto' ? 'On: Auto-Farm whenever the game allows it (level 400+), the normal attack path below — picked for you' : md.why + ' — using the normal attack path'; };
   function tSettings() {
     const S = cfg.stam, SV = S.save, H = cfg.hp, M = cfg.mana, L = cfg.autoLoot;
     const au = Guard.info(), cls = effectiveClass(), cs = cls ? CLASS_SKILLS[cls] : null;
@@ -4985,6 +4995,11 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
           opt('Pierce shielded mobs', sw(() => cfg.sideMob.enabled, (v) => { cfg.sideMob.enabled = v; }, { redraw: false, sm: true }), `${cs ? cs.label : 'class skill'} on a regular mob`, 'row')] : null),
         srow('⚔️', 'Phase duels', 'Fought automatically', sw(() => cfg.autoDuel, (v) => { cfg.autoDuel = v; }, { redraw: false })),
         srow('⏸️', 'Pause server auto-farm', 'So the two never fight over stamina', sw(() => cfg.autoFarmControl, (v) => { cfg.autoFarmControl = v; }, { redraw: false }))),
+      caption('Tasks'),
+      group(
+        srow('🌾', 'Use Auto-Farm', afDesc(), sw(() => cfg.tasks.farm.auto !== false, (v) => { cfg.tasks.farm.auto = v; Farm.nudge(); })),
+        srow('📦', 'Collection quests', 'Adventure Guild: donates the quest item', sw(() => cfg.tasks.guild.collect !== false, (v) => { cfg.tasks.guild.collect = v; })),
+        srow('✨', 'Skill quests', 'Adventure Guild: casts your class skill', sw(() => cfg.tasks.guild.skill !== false, (v) => { cfg.tasks.guild.skill = v; }))),
       caption('Advanced'),
       fold('adv', false, ['⏱ Timing', h('small', {}, 'pauses between requests')], () => [h('div', { class: 'ma-sr-o tm' },
         opt(['Scan every', h('small', {}, 'Waves, dungeons, and loot')], num(() => cfg.fightScanMs / 60000, (n) => { cfg.fightScanMs = Math.round(n * 60000); }, { unit: 'min', min: 0.1, parse: parseFloat })),
