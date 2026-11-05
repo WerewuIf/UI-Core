@@ -104,6 +104,7 @@ const DEFAULT_CFG = {
     bp:       { enabled: false, everyMin: 60 },
     merchant: { enabled: false, everyMin: 60 },
     pvp:      { solo: { enabled: false }, team: { enabled: false } },   // placeholders until the PvP module registers itself
+    monsters: { enabled: true },       // the boss engine's own switch (Start / Stop is the master switch for everything)
     farm:     { auto: true },        // auto: use Auto-Farm when the game allows it (level 400+); the normal attack path otherwise
   },
   logFilter: 'all',
@@ -156,6 +157,7 @@ function mergeCfg(saved) {
 }
 let cfg = mergeCfg(cfgStore.get());
 function saveCfg() { cfgStore.set(cfg); }
+const monstersOn = () => !(cfg.tasks && cfg.tasks.monsters && cfg.tasks.monsters.enabled === false);   // (a saved config from before this switch has none: on)
 cfgStore.watch((v) => { if (v && JSON.stringify(v) !== JSON.stringify(cfg)) { cfg = mergeCfg(v); UI.dirty(); } });
 
 /* ---- log (batched writes, newest last) -------------------------------------------------------------------------- */
@@ -473,9 +475,10 @@ const Run = (() => {
   const pausedBy = new Set();
   const persist = (v) => { wanted = v; stateStore.update((s) => { s.run = v; }); };
   function start() {
-    if (wanted && !pausedBy.size) return;
-    if (!cfg.targets.length && !Tasks.list().some((d) => d.tick && d.enabled())) { log('⚠️ nothing to run — tick a boss in Bosses or switch a task on in Tasks', 'warn'); return; }
-    pausedBy.clear(); persist(true); Kernel.engineStart(true); log('🚀 started', 'ok'); UI.dirty();
+    if (wanted && !Run.halted()) return;
+    if (!(monstersOn() && cfg.targets.length) && !Tasks.list().some((d) => d.tick && d.enabled())) { log('⚠️ nothing to run — tick a boss in Bosses or switch a task on in Tasks', 'warn'); return; }
+    for (const w of [...pausedBy]) if (w !== 'farm') pausedBy.delete(w);
+    persist(true); if (!pausedBy.size) Kernel.engineStart(true); log('🚀 started', 'ok'); UI.dirty();
   }
   function stop(reason) {
     persist(false); pausedBy.clear(); Engine.halt(); Kernel.engineStop();
@@ -484,7 +487,7 @@ const Run = (() => {
     if (Tab.isMain() && Presets.origin.get()) Presets.restore('the run stopped').catch(() => {});
     try { Farm.stop(); } catch (_) { /* farm not up yet */ }                 // an auto-farm / hunt in flight ends too
   }
-  function pause(why) { pausedBy.add(why); Engine.halt(); if (wanted) Status.set('PAUSED'); UI.dirty(); }     // (a stopped run has nothing to pause: it must not show "Paused")
+  function pause(why) { pausedBy.add(why); Engine.halt(); if (wanted) Status.set(why === 'farm' ? 'FARMING' : 'PAUSED'); UI.dirty(); }     // (a stopped run has nothing to pause: it must not show "Paused")
   function resume(why) {
     pausedBy.delete(why);
     if (wanted && !pausedBy.size) Kernel.engineStart(true);
@@ -503,9 +506,10 @@ const Run = (() => {
   return {
     wanted: () => wanted,
     paused: () => pausedBy.size > 0, pausedBy: () => [...pausedBy],
+    halted: () => [...pausedBy].some((w) => w !== 'farm'),
     tasksOn: () => wanted && ![...pausedBy].some((w) => w !== 'farm'),   // Start / Stop is the master switch for the tasks too; only a real halt (signed out / site down) holds them, the farm borrowing the boss engine's stamina does not             // a real stop (signed out / site down): tasks stand down. The farm borrowing the boss engine's stamina is NOT one: tasks are independent
 
-    active: () => wanted && pausedBy.size === 0 && Tab.isMain(),
+    active: () => wanted && pausedBy.size === 0 && Tab.isMain() && monstersOn(),     // the BOSS engine: Start pressed, nothing holding it, and Monsters switched on
     start, stop, pause, resume,
   };
 })();
@@ -536,7 +540,7 @@ const Kernel = (() => {
   function keepAlive(on) {
     try { if (on) Core.keepAlive.start(); else Core.keepAlive.stop(); } catch (_) { /* older Core */ }
   }
-  function engineStart(force) { if (!Tab.isMain()) return; keepAlive(true); Engine.start(force); }
+  function engineStart(force) { if (!Tab.isMain()) return; keepAlive(true); if (!monstersOn()) { Engine.halt(); Status.set('RUNNING'); return; } Engine.start(force); }    // bosses switched off: the run is still on for the tasks
   function engineStop() { keepAlive(false); }
   function becameMain() {
     Board.load();                      // shared state is reloaded whenever leadership changes (3.0.0 never did)
@@ -4016,7 +4020,7 @@ const Merchant = (() => {
     let gold = goldOf(doc); const keep = 0;
     const cands = items.filter((i) => weekly(i) && left(i) > 0 && i.price > 0).sort((a, b) => left(a) * a.price - left(b) * b.price);
     if (!cands.length) { store.set({ week: wk, done: true, at: Date.now(), spent: s.week === wk ? s.spent || 0 : 0, bought: s.week === wk ? s.bought || 0 : 0 }); setInfo({ state: 'ok', line: 'nothing left to buy this week' }); return untilReset(); }
-    let spent = 0, n = 0, short = false;
+    let spent = 0, n = 0, short = false, failed = 0;
     for (const it of cands) {
       const qty = Math.min(left(it), Math.floor(Math.max(0, gold - keep) / it.price), 99999);
       if (qty < 1) { short = true; continue; }
@@ -4024,13 +4028,13 @@ const Merchant = (() => {
       setInfo({ state: 'run', line: `buying ${qty} × ${it.name}…` });
       const r = await buy(it, qty);
       if (r.ok) { gold -= qty * it.price; spent += qty * it.price; n++; if (qty < left(it)) short = true; log(`🛒 merchant: ${qty} × ${esc(it.name)} for ${fmtNum(qty * it.price)} gold`, 'ok'); }
-      else { log(`⚠️ merchant: ${esc(it.name)} — ${esc(r.msg || 'failed')}`, 'warn'); if (/not enough/i.test(r.msg)) short = true; }
+      else { log(`⚠️ merchant: ${esc(it.name)} — ${esc(r.msg || 'failed')}`, 'warn'); if (/not enough/i.test(r.msg)) short = true; else failed++; }
       await sleep(150);
     }
     const prev = s.week === wk ? s : {};
-    store.set({ week: wk, done: !short, at: Date.now(), spent: (prev.spent || 0) + spent, bought: (prev.bought || 0) + n });
-    setInfo({ state: short ? 'warn' : 'ok', line: short ? `bought ${n} item${n === 1 ? '' : 's'} (${fmtNum(spent)} gold) — not enough gold for the rest${keep ? ' (keeping ' + fmtNum(keep) + ')' : ''}, will look again` : `bought ${n} weekly item${n === 1 ? '' : 's'} for ${fmtNum(spent)} gold` });
-    return short ? 30 * 60000 : untilReset();
+    store.set({ week: wk, done: !short && !failed, at: Date.now(), spent: (prev.spent || 0) + spent, bought: (prev.bought || 0) + n });
+    setInfo({ state: short || failed ? 'warn' : 'ok', line: failed && !short ? `bought ${n} item${n === 1 ? '' : 's'} (${fmtNum(spent)} gold) — ${failed} purchase${failed === 1 ? '' : 's'} failed, will look again` : short ? `bought ${n} item${n === 1 ? '' : 's'} (${fmtNum(spent)} gold) — not enough gold for the rest${keep ? ' (keeping ' + fmtNum(keep) + ')' : ''}, will look again` : `bought ${n} weekly item${n === 1 ? '' : 's'} for ${fmtNum(spent)} gold` });
+    return short || failed ? 30 * 60000 : untilReset();
   }
   return { tick, scrape, weekly, left, state: () => store.get() || {}, reset: () => store.set({ week: 0, done: false, at: 0, spent: 0, bought: 0 }) };
 })();
@@ -4473,10 +4477,10 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   const selectedEntries = () => { const seen = new Set(), out = []; cfg.targets.forEach((low) => { const d = Roster.get(low); if (!d) return; const c = Roster.canon(d); if (!seen.has(c.low)) { seen.add(c.low); out.push(c); } }); return out.sort((x, y) => rIdx(x.low) - rIdx(y.low)); };
 
   /* ---- footer (always visible): status + Start / Stop ---- */
-  const STATE_TXT = { FIGHTING: 'Fighting', RUNNING: 'Running', SCANNING: '🔎 Scanning bosses', GRAVEYARD: '🪦 Scanning graveyard', WAITING: 'Waiting for a boss', 'NO STAMINA': 'Out of stamina', DUEL: 'Phase duel', SWITCHING: '🎒 Switching build', PLANNING: '🧭 Planning build order', PAUSED: 'Paused', STOPPED: 'Stopped', FOLLOWER: 'Another tab is running it' };
-  const dotOf = (st) => (!Tab.isMain() ? 'follower' : /FIGHT|RUN|DUEL|SCAN|GRAVE|SWITCH|PLAN/.test(st) ? 'running' : /WAIT|STAMINA/.test(st) ? 'waiting' : /PAUSE/.test(st) ? 'follower' : '');
+  const STATE_TXT = { FIGHTING: 'Fighting', RUNNING: 'Running', SCANNING: '🔎 Scanning bosses', GRAVEYARD: '🪦 Scanning graveyard', WAITING: 'Waiting for a boss', 'NO STAMINA': 'Out of stamina', DUEL: 'Phase duel', SWITCHING: '🎒 Switching build', PLANNING: '🧭 Planning build order', PAUSED: 'Paused', FARMING: '🌾 Auto-farming', STOPPED: 'Stopped', FOLLOWER: 'Another tab is running it' };
+  const dotOf = (st) => (!Tab.isMain() ? 'follower' : /FIGHT|RUN|DUEL|SCAN|GRAVE|SWITCH|PLAN|FARM/.test(st) ? 'running' : /WAIT|STAMINA/.test(st) ? 'waiting' : /PAUSE/.test(st) ? 'follower' : '');
   function footer() {
-    const st = Status.get(), cur = Engine.current(), run = Run.wanted() && !Run.paused();
+    const st = Status.get(), cur = Engine.current(), run = Run.wanted();
     const wk = Work.get('build') || Work.get('scan'), sub = Farm.busy() ? '🌾 auto-farm · ' + (Farm.line() || 'running') : wk ? (wk.step ? `${wk.label} · ${wk.step}${wk.total > 1 ? ` (${Math.min(wk.done + 1, wk.total)}/${wk.total})` : ''}` : wk.label) : cur ? '🎯 ' + cur.name : (Tab.isMain() ? (cfg.targets.length ? 'no target right now' : 'no bosses selected') : 'this tab is following');
     return h('div', { class: 'ma-foot' },
       h('div', { class: 'ma-foot-st' }, h('b', {}, h('i', { class: 'ma-dot ' + dotOf(st) }), STATE_TXT[st] || st), h('span', { title: sub }, sub), wk && wk.total > 1 ? h('div', { class: 'ma-bar' }, h('i', { style: { width: Math.max(6, pctOf({ done: wk.done + 0.5, total: wk.total })).toFixed(1) + '%' } })) : null),
@@ -4494,8 +4498,8 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     if (!Tab.isMain()) out.push(h('div', { class: 'ma-alert info' }, 'Another tab is the main one and runs the tasks. This tab only shows them.', h('div', {}, btn('Take over this tab', 'soft', () => { Tab.takeOver(); }))));
     out.push(caption('Tasks — switch on what the automator should keep doing'));
     // Monsters
-    out.push(card('👹', 'Monsters', 'Wave bosses, Generals and dungeon bosses with their gear, pets and cap', Run.wanted(), (v) => { if (v) Run.start(); else Run.stop('stopped from Tasks'); },
-      [h('div', { class: 'ma-note' }, cur ? '🎯 fighting ' + cur.name : (cfg.targets.length ? `${cfg.targets.length} boss${cfg.targets.length === 1 ? '' : 'es'} ticked — ${STATE_TXT[Status.get()] || Status.get()}` : 'no bosses ticked yet')), btn('Choose bosses ›', 'soft', () => go('bosses'))]));
+    out.push(card('👹', 'Monsters', 'Wave bosses, Generals and dungeon bosses with their gear, pets and cap', monstersOn(), (v) => { cfg.tasks.monsters = { enabled: !!v }; if (Run.wanted() && !Run.paused()) { if (v) Kernel.engineStart(true); else { Engine.halt(); Status.set('RUNNING'); } } },   // only the bosses: Start / Stop below is the master switch
+      [h('div', { class: 'ma-note' }, !monstersOn() ? 'bosses are off — the tasks below still run' : cur ? '🎯 fighting ' + cur.name : (cfg.targets.length ? `${cfg.targets.length} boss${cfg.targets.length === 1 ? '' : 'es'} ticked — ${STATE_TXT[Status.get()] || Status.get()}` : 'no bosses ticked yet')), btn('Choose bosses ›', 'soft', () => go('bosses'))]));
     // PvP (placeholders: your module registers itself with Automator.tasks.define)
     out.push(h('div', { class: 'ma-card' },
       h('div', { class: 'ma-card-h' }, h('span', { class: 'ma-ico' }, '⚔️'), h('div', { class: 'ma-card-t' }, h('b', {}, 'PvP'), h('small', {}, 'Solo and Team — your PvP module plugs in here'))),
