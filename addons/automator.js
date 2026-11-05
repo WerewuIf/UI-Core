@@ -23,7 +23,7 @@
  * default cap of a boss is its highest loot requirement, and bosses the roster did not know yet are added. Export .txt writes it all out.
  */
 Core.module({
-  id: 'automator', name: 'Automator', icon: '🤖', version: '1.11.0',
+  id: 'automator', name: 'Automator', icon: '🤖', version: '1.11.1',
   // Offered to other addons through Core capabilities (guides/CAPABILITIES.md):
   //   automator.status() -> the status string     automator.start() / automator.stop()     automator.scan() -> scan the bosses now
   provides: (api) => api && api.start ? {
@@ -34,7 +34,7 @@ Core.module({
   } : {},
   init(Core) {
 'use strict';
-const ID = 'automator', VERSION = '1.11.0';
+const ID = 'automator', VERSION = '1.11.1';
 if (window.__automatorLoaded) { console.warn('[automator] already loaded', window.__automatorLoaded); return null; }
 window.__automatorLoaded = VERSION;
 
@@ -352,7 +352,7 @@ const Tab = (() => {
 
 /* ---- auth guard: a login / maintenance page is a STOP signal, never "the boss is dead" --------------------------- */
 const Guard = (() => {
-  let faulted = '', resumeIntent = false, busy = false, lastInfo = '';
+  let faulted = '', busy = false, lastInfo = '';
   const BLOCK_RE = /just a moment|challenges\.cloudflare\.com|checking your browser|under maintenance|be right back/i;
   const CHROME_RE = /gtb-inner|id\s*=\s*["']stamina_span["']/i;
   // 'blocked' when the page looks like a challenge / maintenance page AND has none of the game's own top bar
@@ -386,13 +386,12 @@ const Guard = (() => {
   async function handle(kind) {
     if (busy) return; busy = true;
     try {
-      resumeIntent = Run.wanted();
       Run.pause('auth');
       if (kind === 'signedout' && Core.auth) {
         const st = Core.auth.status ? Core.auth.status() : {};
         if (!st.configured) { log('⚠️ re-login is UNCONFIGURED — add a login source (Account Switcher) or sign in by hand; the Automator stays stopped', 'warn'); lastInfo = 'unconfigured'; return; }
         const ok = await Core.auth.ensure();
-        if (ok) { clear(); log('🔓 signed back in — resuming', 'ok'); if (resumeIntent) Run.resume('auth'); }
+        if (ok) { clear(); log('🔓 signed back in — resuming', 'ok'); Run.resume('auth'); }
         else log('❌ automatic re-login failed (' + ((Core.auth.status() || {}).lastError || 'unknown') + ') — staying stopped', 'err');
         return;
       }
@@ -400,16 +399,16 @@ const Guard = (() => {
       for (let i = 0; i < 120 && faulted; i++) {
         await sleep(30000);
         let up = false; try { up = Core.auth ? await Core.auth.check({ force: true }) : true; } catch (_) { up = false; }
-        if (up) { clear(); log('🔓 site is back — resuming', 'ok'); if (resumeIntent) Run.resume('auth'); return; }
+        if (up) { clear(); log('🔓 site is back — resuming', 'ok'); Run.resume('auth'); return; }
       }
     } finally { busy = false; }
   }
   function clear() { faulted = ''; lastInfo = ''; }
   // a validated, signed-in page: lets a manual login (or another tab's) lift the fault
-  function ok() { if (faulted) { clear(); if (resumeIntent) Run.resume('auth'); } }
+  function ok() { if (faulted) { clear(); Run.resume('auth'); } }
   const info = () => ({ faulted, lastInfo, status: Core.auth && Core.auth.status ? Core.auth.status() : null });
   if (Core.on) {
-    Core.on('auth:signedin', () => { if (faulted) { clear(); log('🔓 signed in — resuming', 'ok'); if (resumeIntent) Run.resume('auth'); } });
+    Core.on('auth:signedin', () => { if (faulted) { clear(); log('🔓 signed in — resuming', 'ok'); Run.resume('auth'); } });
     Core.on('auth:signedout', () => { if (!faulted && Run.wanted()) fault('signedout', 'another tab'); });
     Core.on('auth:blocked', (d) => { if (!faulted && Run.wanted()) fault((d && d.state) || 'blocked', 'auth'); });
   }
@@ -475,7 +474,7 @@ const Run = (() => {
   const persist = (v) => { wanted = v; stateStore.update((s) => { s.run = v; }); };
   function start() {
     if (wanted && !pausedBy.size) return;
-    if (!cfg.targets.length) { log('⚠️ no bosses selected — tick at least one in Bosses', 'warn'); return; }
+    if (!cfg.targets.length && !Tasks.list().some((d) => d.tick && d.enabled())) { log('⚠️ nothing to run — tick a boss in Bosses or switch a task on in Tasks', 'warn'); return; }
     pausedBy.clear(); persist(true); Kernel.engineStart(true); log('🚀 started', 'ok'); UI.dirty();
   }
   function stop(reason) {
@@ -483,21 +482,29 @@ const Run = (() => {
     log('🛑 ' + (reason || 'stopped'), 'info'); Status.set('STOPPED'); UI.dirty();
     if (Tab.isMain()) AF.resumeIfWePaused('stopped').catch(() => {});
     if (Tab.isMain() && Presets.origin.get()) Presets.restore('the run stopped').catch(() => {});
+    try { Farm.stop(); } catch (_) { /* farm not up yet */ }                 // an auto-farm / hunt in flight ends too
   }
-  function pause(why) { pausedBy.add(why); Engine.halt(); Status.set('PAUSED'); UI.dirty(); }
-  function resume(why) { pausedBy.delete(why); if (wanted && !pausedBy.size) Kernel.engineStart(true); UI.dirty(); }
+  function pause(why) { pausedBy.add(why); Engine.halt(); if (wanted) Status.set('PAUSED'); UI.dirty(); }     // (a stopped run has nothing to pause: it must not show "Paused")
+  function resume(why) {
+    pausedBy.delete(why);
+    if (wanted && !pausedBy.size) Kernel.engineStart(true);
+    else if (!wanted && !pausedBy.size && Status.get() === 'PAUSED') Status.set('STOPPED');
+    UI.dirty();
+  }
   // other tabs start / stop the run through the shared state
   stateStore.watch((s) => {
     if (!s) return;
     const w = !!s.run;
     if (w === wanted) return;
     wanted = w;
-    if (w) Kernel.engineStart(true); else { pausedBy.clear(); Engine.halt(); Kernel.engineStop(); }
+    if (w) Kernel.engineStart(true); else { pausedBy.clear(); Engine.halt(); Kernel.engineStop(); try { Farm.stop(); } catch (_) { /* */ } }
     UI.dirty();
   });
   return {
     wanted: () => wanted,
     paused: () => pausedBy.size > 0, pausedBy: () => [...pausedBy],
+    tasksOn: () => wanted && ![...pausedBy].some((w) => w !== 'farm'),   // Start / Stop is the master switch for the tasks too; only a real halt (signed out / site down) holds them, the farm borrowing the boss engine's stamina does not             // a real stop (signed out / site down): tasks stand down. The farm borrowing the boss engine's stamina is NOT one: tasks are independent
+
     active: () => wanted && pausedBy.size === 0 && Tab.isMain(),
     start, stop, pause, resume,
   };
@@ -3592,7 +3599,7 @@ Object.assign(Farm, (() => {
     const out = []; for (const [o, d] of S.demands) { if (Date.now() - d.at > DEMAND_TTL) { S.demands.delete(o); continue; } d.items.forEach((i) => out.push(Object.assign({ owner: o }, i))); } return out;
   }
   async function service() {
-    if (S.busy || !Tab.isMain() || Guard.isFaulted()) return;
+    if (S.busy || !Tab.isMain() || Guard.isFaulted() || !Run.tasksOn()) return;                 // stopped / halted: nothing starts, queued demands wait
     const list = collect(); if (!list.length) { if (S.line) say(''); return; }
     const pr = await probe(); if (!pr.ok && pr.transient) { say(pr.why); return; }
     const items = []; for (const d of list) { const c = await canFarm(d.name); if (c.ok) items.push(Object.assign({}, d, { id: c.id, manual: !!c.manual, why: c.why })); else { S.skipped.set(d.owner, `${d.name}: ${c.why}`); Diag.skip('auto-farm-target', `${d.name}: ${c.why}`); } }
@@ -3830,6 +3837,7 @@ const Guild = (() => {
     if (!a.donateQ || !a.donateItem) return { n: 0, wait: 15 * MIN, why: 'the quest row has no donate ids (donateGatherItem)' };
     let n = 0;
     for (let i = 0, cap = Math.min(Math.max(1, left(a)), 300); i < cap; i++) {
+      if (!Run.tasksOn() || Guard.isFaulted()) break;                          // Stop (or a halt) mid-donation stops the next one stops the next one
       const r = await Act.run(() => post('/adventurers_donate_gather.php', { quest_id: String(a.donateQ), item_id: String(a.donateItem) }), 150), m = msgOf(r);
       if (ok200(r && r.json, r && r.text)) { n++; await sleep(150); continue; }
       if (SHORT_RE.test(m)) return { n, wait: 15 * MIN, why: `not enough items to donate yet${m ? ' (' + m + ')' : ''}` };
@@ -3858,7 +3866,7 @@ const Guild = (() => {
     const total = a.progress ? a.progress.total : (a.meta.amountNeeded || SKILL_QUEST_USES);
     let need = Math.min(60, Math.max(0, left(a) || total)), n = 0, mob = null, bad = 0, afTried = false; const skip = new Set();
     while (n < need) {
-      if (!Tab.isMain() || Guard.isFaulted()) return { n, wait: 5 * MIN, why: 'paused' };
+      if (!Tab.isMain() || Guard.isFaulted() || !Run.tasksOn()) return { n, wait: 5 * MIN, why: 'stopped or halted' };
       if (!Me.mpKnown) await Me.refresh(0);
       if (Me.mpKnown && Me.mp < cs.cost) { await Potions.refillMana('skill quest', cs.cost); if (Me.mp < cs.cost) return { n, wait: 10 * MIN, why: `not enough mana for ${cs.label} (${cs.cost}) and no mana potion to drink` }; }
       if (!mob) { mob = await skillTarget(skip); if (!mob) return { n, wait: 10 * MIN, why: 'no living basic mob on wave 3/5 to cast on right now' }; if (!(await SideMob.join(mob, true))) { skip.add(mob.monsterId); mob = null; if (++bad >= 4) return { n, wait: 10 * MIN, why: 'could not join any mob on wave 3/5' }; continue; } }
@@ -4012,6 +4020,7 @@ const Merchant = (() => {
     for (const it of cands) {
       const qty = Math.min(left(it), Math.floor(Math.max(0, gold - keep) / it.price), 99999);
       if (qty < 1) { short = true; continue; }
+      if (!Run.tasksOn() || Guard.isFaulted()) { setInfo({ state: 'idle', line: 'stopped or halted — carries on later' }); return 15000; }       // Stop (or a halt) mid-shop stops the next purchase
       setInfo({ state: 'run', line: `buying ${qty} × ${it.name}…` });
       const r = await buy(it, qty);
       if (r.ok) { gold -= qty * it.price; spent += qty * it.price; n++; if (qty < left(it)) short = true; log(`🛒 merchant: ${qty} × ${esc(it.name)} for ${fmtNum(qty * it.price)} gold`, 'ok'); }
@@ -4035,7 +4044,7 @@ Object.assign(Tasks, (() => {
   const poked = new Map();
   function poke(id, inMs) { due.set(id, Date.now() + (inMs || 0)); poked.set(id, Date.now()); }
   async function beat() {
-    if (!Tab.isMain() || Guard.isFaulted() || Date.now() - t0 < 15000) return;
+    if (!Tab.isMain() || Guard.isFaulted() || !Run.tasksOn() || Date.now() - t0 < 15000) return;       // stopped, or halted (signed out / site down): no task starts anything. Each task has its own timer, so one busy task never holds another
     const now = Date.now();
     for (const d of defs.values()) {
       if (!d.tick || busy.has(d.id) || !d.enabled() || now < (due.get(d.id) || 0)) continue;
@@ -4384,8 +4393,6 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   const num = (get, set, o = {}) => h('span', { class: 'ma-num' }, h('input', { class: 'ma-in', inputmode: 'decimal', style: o.w ? { width: o.w + 'px' } : null, value: o.fmt ? o.fmt(get()) : get(), onclick: stop,
     onchange: (e) => { const n = (o.parse || parseCap)(e.target.value); if (n != null && Number.isFinite(n) && (o.min == null || n >= o.min) && (o.max == null || n <= o.max)) { set(n); saveCfg(); e.target.value = o.fmt ? o.fmt(n) : n; } else e.target.value = o.fmt ? o.fmt(get()) : get(); } }),
     o.unit ? h('i', {}, o.unit) : null);
-  const setting = (title, desc, ctl) => h('div', { class: 'ma-set' }, h('div', { class: 'ma-set-t' }, h('b', {}, title), desc ? h('small', {}, desc) : null), ctl);
-  const field = (label, hint, ...kids) => h('div', { class: 'ma-fld' }, h('div', { class: 'ma-lbl' }, label, hint ? h('small', {}, hint) : null), ...kids);
   const caption = (t) => h('div', { class: 'ma-cap' }, t);
   const note = (t) => h('div', { class: 'ma-note' }, t);
   const pill = (txt, kind) => h('span', { class: 'ma-pill' + (kind ? ' ' + kind : '') }, txt);
@@ -4432,7 +4439,6 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   const targetSet = () => { if (tSrc !== cfg.targets || tN !== cfg.targets.length) { tSrc = cfg.targets; tN = cfg.targets.length; tSet = new Set(cfg.targets); } return tSet; };
   const isOn = (def) => { const t = targetSet(); return Roster.members(def).some((m) => t.has(m.low)); };
   const iconOfBoss = (low) => { const e = Board.get(low); return e && e.icon; };
-  const waveOf = (def) => { const l = bossLoc(def.low); return l ? l.wave : 0; };
   function bossState(low) {
     const def = Roster.get(low), e = Board.get(low), cap = bossCap(low); if (!def) return ['?', 'err'];
     if (cap <= 0) return ['skipped', ''];
@@ -4482,8 +4488,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   /* =================================================== TASKS =================================================== */
   const SDOT = { ok: '✅ ', run: '▶ ', warn: '⚠️ ', err: '⛔ ', idle: '' };
   const tStatus = (id) => { const i = Tasks.info(id); return i.line ? h('div', { class: 'ma-note' }, (SDOT[i.state] || '') + i.line + (i.at ? ' · ' + ago(i.at) : '')) : null; };
-  const nextNote = (id) => { const d = Tasks.nextDue(id) - Date.now(); return Tasks.busy(id) ? null : h('div', { class: 'ma-note' }, d > 1500 ? '⏱ next look in ' + fmtDur(d) + ' — it wakes itself when something is due' : '⏱ looking at it now'); };
-  const area = (value, rows, ph, set) => h('textarea', { class: 'ma-in', rows, placeholder: ph, style: { width: '100%', resize: 'vertical' }, onclick: stop, onchange: (e) => { set(e.target.value); saveCfg(); } }, value || '');
+  const nextNote = (id) => { const d = Tasks.nextDue(id) - Date.now(); return Tasks.busy(id) ? null : !Run.tasksOn() ? h('div', { class: 'ma-note' }, Run.wanted() ? '⏸ halted (signed out) — it carries on when you are back' : '⏹ stopped — press ▶ Start to run tasks') : h('div', { class: 'ma-note' }, d > 1500 ? '⏱ next look in ' + fmtDur(d) + ' — it wakes itself when something is due' : '⏱ looking at it now'); };
   function tTasks() {
     const out = [], T = cfg.tasks, cur = Engine.current();
     if (!Tab.isMain()) out.push(h('div', { class: 'ma-alert info' }, 'Another tab is the main one and runs the tasks. This tab only shows them.', h('div', {}, btn('Take over this tab', 'soft', () => { Tab.takeOver(); }))));
