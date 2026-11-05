@@ -13,15 +13,17 @@
  *   PART 3  DUELS      Phase duels, shared by wave and dungeon bosses
  *   PART 4  LOOT       graveyard scan + EXP-aware auto-loot
  *   PART 4b LOOT SCAN  reads every boss's loot / level / EXP cap into the cap choices; Export .txt (swappable)
- *   PART 5  [slots]    quests / adventurers guild / PvP / dailies: Kernel.register({ id, name, icon, every, tick, panel })
- *   PART 5  PANEL      Core.float panel: Overview, Bosses (Waves | Dungeons, waves grouped by area), Loot, Settings, Activity
+ *   PART 5a FARM       the one auto-farm service (basic wave mobs only): level-400 tolerant, 10% batching, safe restore of your own set-up
+ *   PART 5b TASKS      task master: Monsters, Adventure Guild, Battle Pass, Merchant (weekly), PvP placeholders; Automator.tasks.define({...}) adds more
+ *   PART 5  [slots]    other parts: Kernel.register({ id, name, icon, every, tick, panel })
+ *   PART 5  PANEL      Core.float panel: Tasks, Overview, Bosses (Waves | Dungeons, waves grouped by area), Loot, Settings, Activity
  *
  * LOOT DATA: the Loot scan (PART 4b, the Scan button at the top of the Bosses tab) reads every boss's battle page and saves its loot DMG
  * requirements, Level Req and EXP Cap into one store ('automator-loot'). Here they become the cap choices of each boss, the
  * default cap of a boss is its highest loot requirement, and bosses the roster did not know yet are added. Export .txt writes it all out.
  */
 Core.module({
-  id: 'automator', name: 'Automator', icon: '🤖', version: '1.10.1',
+  id: 'automator', name: 'Automator', icon: '🤖', version: '1.11.0',
   // Offered to other addons through Core capabilities (guides/CAPABILITIES.md):
   //   automator.status() -> the status string     automator.start() / automator.stop()     automator.scan() -> scan the bosses now
   provides: (api) => api && api.start ? {
@@ -32,7 +34,7 @@ Core.module({
   } : {},
   init(Core) {
 'use strict';
-const ID = 'automator', VERSION = '1.10.19';
+const ID = 'automator', VERSION = '1.11.0';
 if (window.__automatorLoaded) { console.warn('[automator] already loaded', window.__automatorLoaded); return null; }
 window.__automatorLoaded = VERSION;
 
@@ -97,6 +99,13 @@ const DEFAULT_CFG = {
   sideMob: { enabled: false },                         // shield pierce on a side mob: automatic once switched on (off: it shouldn't be needed)
   autoLoot: { enabled: false, mode: 'toLevel', claimGapMs: 250 },
   parts: { bosses: true, dungeons: true, duels: true, loot: true },
+  tasks: {                             // the Tasks tab: one switch per task (Monsters is the boss run itself)
+    guild:    { enabled: false, everyMin: 60, accept: true, kill: true, collect: true, skill: true },   // everyMin = the longest wait only: a task wakes itself when something is due
+    bp:       { enabled: false, everyMin: 60, targets: 'Lizardman Flamecaster, Lizardman Shadowclaw' },
+    merchant: { enabled: false, everyMin: 60, keepGold: 0, damon: true },
+    pvp:      { solo: { enabled: false }, team: { enabled: false } },   // placeholders until the PvP module registers itself
+    farm:     { stallMin: 10, waves: '', ids: '', auto: true },        // auto: use Auto-Farm when the game allows it (level 400+); the normal attack path otherwise
+  },
   logFilter: 'all',
 };
 const cfgStore = Core.store(ID, { def: DEFAULT_CFG });
@@ -111,6 +120,9 @@ function mergeCfg(saved) {
   delete out.sideMob.locked; delete out.sideMob.lockedKey; delete out.sideMob.source;      // (old picks: the pierce is automatic now)
   out.autoLoot.mode = 'toLevel';                                     // claims only what levels you up: not a setting any more
   out.parts = Object.assign({}, DEFAULT_CFG.parts); Object.keys(out.parts).forEach((k) => { out.parts[k] = true; });   // modules are always on
+  out.tasks = (() => { const d = JSON.parse(JSON.stringify(DEFAULT_CFG.tasks)), t = s.tasks && typeof s.tasks === 'object' ? s.tasks : {};
+    for (const k of Object.keys(d)) { const v = t[k]; if (!v || typeof v !== 'object') continue; if (k === 'pvp') { for (const j of Object.keys(d.pvp)) d.pvp[j] = Object.assign({}, d.pvp[j], v[j] && typeof v[j] === 'object' ? v[j] : {}); } else d[k] = Object.assign({}, d[k], v); }
+    return d; })();
   out.maxTier = 'WORLD_BREAKER';
   // stamina: one potion (Large or Full). Older saves had two slots (A, then B): keep whichever was switched on.
   const os = s.stam || {}, A = os.A || {}, B = os.B || {};
@@ -522,6 +534,7 @@ const Kernel = (() => {
   function becameMain() {
     Board.load();                      // shared state is reloaded whenever leadership changes (3.0.0 never did)
     startBeat(); AF.recover();
+    setTimeout(() => { try { if (Tab.isMain()) Farm.recover(); } catch (_) { /* */ } }, 9000);   // a run cut short by a reload: put your auto-farm set-up back
     // a restore that was cut short (page reload / crash) leaves the saved build behind with the run stopped: finish it once the engine's own recovery has settled
     setTimeout(() => { try { if (Tab.isMain() && !Run.wanted() && typeof Presets !== 'undefined' && Presets.origin.get()) Presets.restore('recovered after reload').catch(() => {}); } catch (_) { /* */ } }, 12000);
     for (const p of parts.values()) { try { p.onMain && p.onMain(); } catch (_) { /* */ } }
@@ -846,6 +859,8 @@ const targetKey = (t) => `${t.kind}:${t.instanceId || ''}:${t.monsterId}`;
 const Dungeons = { nextCheck: () => Infinity, refresh: async () => {}, sideMobs: null, corpses: null };   // PART 2 fills this
 const Duels = { fight: null, bootPage: () => {} };                                                         // PART 3 fills this
 const Loot = { onStamStall: async () => {} };                                                              // PART 4 fills this
+const Farm = { busy: () => false, manual: () => false, locked: () => '', mode: () => ({ kind: 'auto', why: '' }), nudge: () => {}, wantAuto: () => true, recover: () => {}, info: () => ({}) };                                   // PART 5a fills this (the shared auto-farm service)
+const Tasks = {};                                                                                          // PART 5b fills this (task registry)
 const LootScan = { available: false, state: { running: false, stop: false, label: '', done: 0, total: 0, read: 0, added: 0, notes: [], error: '', startedAt: 0, endedAt: 0 }, run: async () => {}, stop() {}, download() {}, text: () => '', learn() {} };   // PART 4b fills this
 
 /* ---- skills, tiers, damage profile (3.0.0 algorithm kept; profile keyed per boss NAME so it can't grow forever) ---- */
@@ -1026,10 +1041,11 @@ const AF = (() => {
   const raw = (url, body) => { const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), 15000); return fetch(url + (body ? '' : '?_=' + Date.now()), body ? { method: 'POST', credentials: 'include', signal: ctl.signal, headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-Requested-With': 'XMLHttpRequest' }, body } : { credentials: 'include', signal: ctl.signal }).then((r) => r.json()).catch(() => null).finally(() => clearTimeout(timer)); };
   const set = async (en) => { const j = await Act.run(() => raw('/auto_farm_actions.php', `action=toggle&enabled=${en ? 1 : 0}`)); return !!(j && j.ok); };
   const paused = () => !!(stateStore.get() || {}).afPaused;
+  const clearPaused = () => { if (paused()) stateStore.update((s) => { s.afPaused = 0; }); };
   // Called only when damage.php / the join said "auto farm is on": the site's own reply is the check, so there is no status request per swing
   // (or per fighting stretch). true = it is off now; false = it could not be turned off (or you disabled "Pause server auto-farm").
   async function pauseIfNeeded() {
-    if (!cfg.autoFarmControl) return false;
+    if (!cfg.autoFarmControl || (Farm.busy() && !Farm.manual())) return false;              // a task's own auto-farm run is never paused by the boss engine
     const was = paused();
     if (!was) stateStore.update((s) => { s.afPaused = Date.now(); });       // flag first: a crash between the two steps still gets it resumed on reload
     if (await set(false)) { log('🛑 paused server Auto-Farm', 'info'); return true; }
@@ -1037,11 +1053,11 @@ const AF = (() => {
     return false;
   }
   async function resumeIfWePaused(why) {
-    if (!paused()) return;
+    if (!paused() || Farm.busy()) return;                                // (Farm puts your set-up back itself when its run is over)
     if (await set(true)) { stateStore.update((s) => { s.afPaused = 0; }); log(`▶️ resumed server Auto-Farm${why ? ' (' + why + ')' : ''}`, 'info'); }
   }
   function recover() { if (paused() && !Run.wanted()) resumeIfWePaused('recovered after reload').catch(() => {}); }
-  return { pauseIfNeeded, resumeIfWePaused, recover };
+  return { pauseIfNeeded, resumeIfWePaused, recover, paused, clearPaused };
 })();
 
 /* ---- potions: Core.potions coordinates stamina / HP / any item across tabs and scripts ---------------------------- */
@@ -1569,10 +1585,43 @@ const Presets = (() => {
   let chain = Promise.resolve();                                      // ensure() and restore() take turns, never overlap
   const exclusive = (fn) => { const p = chain.then(fn, fn); chain = p.catch(() => {}); return p; };
 
+  /* An interrupted 'loadout' change (page reloaded / tab closed mid-apply, or a failed apply whose own undo failed too) leaves an OPEN journal in
+   * Core.tx. While it is there every new build change is refused with error 'orphan' (Core.tx.run, step 3), and nothing clears it mid-session:
+   * Core only looks for orphans on load / sign-in. So "putting your build back" failed the same way every 5 minutes, for ever.
+   * Before any build change: (1) let Core replay the journal (Core.tx.recover puts its `before` back, needs a recovery handler: the Build Engine
+   * registers one for its own journals); (2) if that is not possible, drop the dead journal when this addon has its own record of what to put
+   * back (Origin), or when the journal is useless anyway (no `before`), so one stuck journal can no longer block builds for good.
+   * Returns { ok, dismissed?, message? }. Never throws. */
+  const txOrphan = () => { try { return Core.tx && typeof Core.tx.orphan === 'function' ? Core.tx.orphan('loadout') : null; } catch (_) { return null; } };
+  async function healOrphan(why, allowDismiss) {
+    let j = txOrphan(); if (!j) return { ok: true };
+    const label = j.label || 'loadout';
+    // a live change in this or another tab is not an orphan: wait for it instead of touching its journal
+    if (buildBusyNow()) return { ok: false, message: 'a build change is running right now' };
+    log(`🩹 an interrupted ${esc(label)} change is blocking build changes (${esc(why)}) — recovering it…`, 'info');
+    let r = null;
+    try { r = await withTimeout(Promise.resolve(Core.tx.recover('loadout')), 240000, { ok: false, error: 'timed out' }); }
+    catch (e) { r = { ok: false, error: (e && e.message) || String(e) }; }
+    j = txOrphan();
+    if (!j) { log('✅ the interrupted change was recovered', 'ok'); try { await syncMe(); } catch (_) { /* */ } Me.statsAt = 0; return { ok: true, recovered: true }; }
+    const why2 = (r && (r.error || r.message)) || 'recovery failed';
+    if (allowDismiss || !j.before) {
+      try { Core.tx.dismiss('loadout'); } catch (_) { /* */ }
+      if (!txOrphan()) { log(`⚠️ could not recover the interrupted ${esc(label)} change (${esc(why2)}) — dropped it so builds are not blocked; the state of your gear / pets is checked against what the automator remembered`, 'warn'); return { ok: true, dismissed: true }; }
+    }
+    return { ok: false, message: 'an interrupted ' + label + ' change is still open (' + why2 + ')' };
+  }
+  const buildBusyNow = () => { try { return Core.tx && typeof Core.tx.busy === 'function' ? Core.tx.busy('loadout') : null; } catch (_) { return null; } };
+
   let ensuring = false, ownUntil = 0;                                   // ownUntil: loadout events of this tab right after our own change are ours
   const ensure = (low, t) => exclusive(() => ensureNow(low, t));
   async function ensureNow(low, t) {
     const W = wanted(low, t), auto = autoFor(low, t), sig = sigilAuto(low, t);
+    if (Object.keys(W).length && txOrphan()) {                           // a stuck journal refuses every apply with 'orphan': clear it first
+      ensuring = true;
+      let h; try { h = await healOrphan('before ' + bossName(low), !!Origin.get()); } finally { ensuring = false; ownUntil = Date.now() + 2500; }
+      if (!h.ok) { const key = 'orphan:' + low; if (Date.now() - (failedAt[key] || 0) > 60000) { failedAt[key] = Date.now(); log(`⚠️ build for ${esc(bossName(low))} not applied: ${esc(h.message)}`, 'warn'); } return; }
+    }
     ensuring = true;
     let changedAny = false;
     try {
@@ -1646,17 +1695,23 @@ const Presets = (() => {
   async function restoreNow(why) {
     const o = Origin.get(); if (!o) return { ok: false, message: 'nothing remembered to put back' };
     ensuring = true;
-    const notes = []; let liveSel = null;
+    const notes = []; let liveSel = null, force = why === 'you asked';
     try {
+      if (txOrphan()) {                                               // an unfinished change refuses every apply ('orphan'): recover / drop it first
+        const h = await healOrphan(why || 'restore', true);
+        if (!h.ok) { log(`⚠️ not everything went back: ${esc(h.message)} — it is still remembered, try again`, 'warn'); return { ok: false, message: h.message }; }
+        // after an interrupted change the gear / pets on now are a half-way state, not something you chose: put the remembered build back regardless
+        if (h.dismissed || h.recovered) force = true;
+      }
       // Crystals: the Crystal Presets / the crystals page do not announce a change, so it is read: what sits on the gear now (still the gear we left)
       // against what we left there. Different = you moved them yourself: they stay as they are.
-      if (o.crystals && !o.crystalsLeft && !(o.placed || []).length && why !== 'you asked') { o.crystals = null; originStore.set(o); }   // never moved by this automator: nothing to put back
-      if (o.crystals && o.crystalsLeft && why !== 'you asked') {
+      if (o.crystals && !o.crystalsLeft && !(o.placed || []).length && !force) { o.crystals = null; originStore.set(o); }   // never moved by this automator: nothing to put back
+      if (o.crystals && o.crystalsLeft && !force) {
         const now = await BuildKit.crystals.current(), norm = (l) => JSON.stringify(Object.keys(l || {}).sort().map((k) => [k, (l[k] || []).map(String).sort()]));
         if (now && norm(now) !== norm(o.crystalsLeft)) { o.crystals = null; o.placed = []; originStore.set(o); log('📌 your crystals are not what the automator left, so they were moved by you: they stay as they are', 'info'); }
       }
       // The build on now is not the one this automator left (you changed it while it was paused / idle / the page was closed): leave it alone.
-      if (o.sel && o.left && o.probe && why !== 'you asked') {
+      if (o.sel && o.left && o.probe && !force) {
         const live = liveSel = await Origin.read(o.probe);
         if (live && Plan.distance(Plan.sigFromSel(live, null), Plan.sigFromSel(o.left, null)) > 0) {
           Origin.clear(); Object.keys(applied).forEach((k) => delete applied[k]); buildEpoch++;   // what we remembered applying is not on any more
@@ -1670,7 +1725,12 @@ const Presets = (() => {
       log(`↩ putting your build back${why ? ' (' + esc(why) + ')' : ''}…`, 'info');
       if (o.sel && Core.has && Core.has('build.apply')) {
         Prog.at('Gear + pets'); const lab = 'Gear + pets' + (backWhat ? ' · ' + backWhat : ''), ex = Prog.exact(lab); if (backWhat) Prog.note('Gear + pets', lab);
-        const r = await withTimeout(Promise.resolve(Core.call('build.apply', { sel: o.sel }, { label: 'Your build', onStep: ex })), 240000, { ok: false, message: 'timed out' });
+        const applyBack = () => withTimeout(Promise.resolve(Core.call('build.apply', { sel: o.sel }, { label: 'Your build', onStep: ex })), 240000, { ok: false, message: 'timed out' });
+        let r = await applyBack();
+        if (r && r.ok === false && /orphan/i.test(String(r.error || r.message || ''))) {   // a journal appeared between the check and the apply (another tab / addon): heal once, try again
+          const h = await healOrphan('retry', true);
+          if (h.ok) r = await applyBack();
+        }
         if (!ex.ran) Prog.note(lab, 'Gear + pets · ' + (r && r.ok !== false ? 'already as before' : 'failed'));
         if (r && r.ok !== false) log(`✅ gear + pets ${r.changed === false ? 'were already as before' : 'put back'}`, 'ok'); else notes.push('gear + pets: ' + ((r && r.message) || 'failed'));
       } else if (!o.sel) notes.push('gear + pets were not read, so they stay as they are');
@@ -2207,6 +2267,7 @@ const Engine = (() => {
       }
       case 'shielded': await sleepLive(tk, res.backoffMs || 3000); return;
       case 'autofarm':
+        if (Farm.busy()) { await sleepLive(tk, 3000); return; }          // a task's auto-farm run is going: wait, do not fight it
         warnOnce(cfg.autoFarmControl ? '⛔ the site says Auto-Farm is on and pausing it failed' : '⛔ the site says Auto-Farm is on — turn it off, or enable "Pause server auto-farm" in Settings');
         Diag.skip('auto-farm-on', 'the site refuses attacks while its Auto-Farm is on'); await sleepLive(tk, 3000); return;
       default: {                                                      // unknown / net / mp / cooldown that ran out: log ONCE, then wait
@@ -3135,6 +3196,869 @@ Object.assign(LootScan, (() => {
 })());
 
 /* ===================================================================================================================
+ * PART 5a — FARM: the ONE auto-farm service every task shares (Adventure Guild quests, Battle Pass hunt, whatever comes next)
+ *
+ * The site's Auto-Farm only works on BASIC MOBS IN WAVES (never bosses, dungeons or the cube), so that is the only thing it is used for:
+ * the Monsters task keeps fighting bosses by hand, tasks ask Farm for "N kills of mob X at >= D damage" (Farm.want) and Farm does the rest.
+ *
+ *   - TWO WAYS to do a request, chosen AUTOMATICALLY for every run (nothing to configure but one switch, "Use Auto-Farm", which is live):
+ *       Auto-Farm      level 400+ and the switch on: the site's API batches several mobs (needs the monster type ids, below)
+ *       attack path    under level 400 (the game locks Auto-Farm), switch off, or the site refuses it: the same swings the boss engine makes
+ *                      (join → tier by damage profile → stamina / HP potions) on basic wave mobs until your damage on each reaches the
+ *                      minimum. Needs only the mob's name. Nothing is sent to the Auto-Farm API while it is locked or off.
+ *     Reaching level 400 or flipping the switch while a run is going ends that run cleanly and the next one uses the other way.
+ *     Ids for Auto-Farm come from a learned cache (every wave page that DOES show the panel teaches it) or "name = id" lines in Tasks → Auto-farm.
+ *   - LOOT is found the way the Dragon Realm script does it: the wave page is read in its dead view (checked to BE the dead view, asked again
+ *     if the cookie swap handed back the alive one), cards that are dead + joined + damaged + not despawned count, a stack counts as its size,
+ *     a corpse far bigger than what is still needed is left alone, and live mobs that already carry the minimum damage are only waited for.
+ *   - Several targets share one run when their stacks are within 10% of each other (the Dragon Realm orchestrator's rule: a small remainder
+ *     never drags a full 250-stack along). Each target stacks at most 250 per cycle; kills = stack x cycles.
+ *   - Your own Auto-Farm set-up is captured BEFORE it is touched and put back afterwards (owed + persisted: a reload mid-run still restores it).
+ *     The restore trusts the ids it captured (an event mob that is not in the base waves still goes back), asks for a new id by name only if the
+ *     server refuses one, never throws the snapshot away when a target cannot be put back, and says which ones.
+ *   - While a run is going the Monsters engine is paused (one stamina pool), and put back to work when the run is over.
+ * ================================================================================================================ */
+Object.assign(Farm, (() => {
+  const ACT = '/auto_farm_actions.php', STAT = '/auto_farm_status.php';
+  const LEVEL_LOCK = 400, MAX_STACK = 250, SIMILAR = 0.9, GAP = 180, POLL = 5000, BLIND_POLL = 20000, EXTRA = 1, UNLIMITED = 999999, DEMAND_TTL = 20 * 60000, PROBE_TTL = 10 * 60000;
+  const store = Core.store(ID + '-farm', { def: { snap: null, owed: false, ids: {} } });
+  const S = { busy: false, stop: false, recheck: false, looted: new Set(), line: '', last: '', probe: null, probeAt: 0, demands: new Map(), skipped: new Map(), runs: 0, kills: 0, waves: { at: 0, alive: new Map() } };
+  const stateOf = () => Object.assign({ snap: null, owed: false, ids: {} }, store.get() || {});
+  const patch = (p) => { const s = Object.assign(stateOf(), p); store.set(s); return s; };
+  const say = (line) => { S.line = line; UI.dirty('tasks'); };
+
+  /* ---- site requests (through Act.run: one state-changing request at a time, with the other parts) ---- */
+  const rq = (url, body) => {
+    const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), 15000);
+    const init = body ? { method: 'POST', credentials: 'include', signal: ctl.signal, headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-Requested-With': 'XMLHttpRequest' }, body } : { credentials: 'include', cache: 'no-store', signal: ctl.signal };
+    return fetch(url + (body ? '' : '?_=' + Date.now()), init)
+      .then(async (r) => { let j = null; try { j = await r.json(); } catch (_) { /* not json: a login page, an error page */ } return { http: r.status, json: j, ok: !!(j && j.ok), msg: String((j && (j.msg || j.message || j.error)) || ''), net: false }; })
+      .catch((e) => ({ http: 0, json: null, ok: false, msg: String((e && e.message) || e), net: true }))
+      .finally(() => clearTimeout(timer));
+  };
+  const api = (action, p) => Act.run(() => rq(ACT, new URLSearchParams(Object.assign({ action }, p || {})).toString()), GAP);
+  async function status() {
+    const r = await rq(STAT), set = r.json && r.json.settings;
+    return { ok: !!(r.ok && set), settings: set || null, targets: r.json && Array.isArray(r.json.targets) ? r.json.targets : [], msg: r.msg, http: r.http, net: r.net };
+  }
+  const capOut = (v) => { const n = Number(v); if (!Number.isFinite(n)) return 0; return n < 0 ? UNLIMITED : Math.max(0, Math.floor(n)); };
+
+  /* ---- may Auto-Farm be used right now? '' = yes, else why not. Read live, so the switch and the level take effect at once ---- */
+  function locked() {
+    if ((cfg.tasks.farm || {}).auto === false) return 'Auto-Farm is switched off';
+    const lv = Me.level();
+    if (lv > 0 && lv < LEVEL_LOCK) return `Auto-Farm is locked below level ${LEVEL_LOCK} (you are level ${lv})`;
+    return '';
+  }
+  const wantAuto = () => !locked();
+  function mode() {                                                       // what the next run will use: { kind: 'auto' | 'hand', why }
+    const lk = locked(); if (lk) return { kind: 'hand', why: lk };
+    const pr = S.probe; if (pr && !pr.ok && !pr.transient) return { kind: 'hand', why: 'Auto-Farm refused: ' + pr.why };
+    return { kind: 'auto', why: '' };
+  }
+  function nudge() {                                                      // the switch was flipped: a running run notices, an idle one re-plans now
+    S.probe = null; S.probeAt = 0;
+    if (S.busy) S.recheck = true; else setTimeout(() => { service().catch(() => {}); }, 300);
+    UI.dirty('tasks');
+  }
+  /* ---- is it usable at all? Asks the API (only when it is not locked or switched off) ---- */
+  async function probe(force) {
+    const lk = locked(); if (lk) { S.probe = { ok: false, why: lk, locked: true }; S.probeAt = 0; return S.probe; }       // never remembered: reaching 400 is noticed at once
+    if (!force && S.probe && !S.probe.locked && Date.now() - S.probeAt < PROBE_TTL) return S.probe;
+    const s = await status();
+    let res;
+    if (s.ok) res = { ok: true, via: 'status', blind: false };
+    else if (s.net) return S.probe || { ok: false, why: 'network error — will retry', transient: true };          // not remembered
+    else {
+      // The status page may be refused below level 400 while the action API still answers: ask it something harmless ("off").
+      const t = await api('toggle', { enabled: 0 });
+      res = t.ok ? { ok: true, via: 'actions', blind: true } : { ok: false, why: t.msg || s.msg || `HTTP ${s.http || t.http}`, blind: true };
+    }
+    if (!res.ok) res.why = `Auto-Farm refused: ${res.why}`;
+    S.probe = res; S.probeAt = Date.now(); UI.dirty('tasks');
+    return res;
+  }
+
+  /* ---- monster ids: the Auto-Farm API wants the monster TYPE id, which only the site's own panel shows ---- */
+  const singular = (t) => (t.endsWith('men') ? t.slice(0, -3) + 'man' : t.endsWith('ies') && t.length > 4 ? t.slice(0, -3) + 'y' : t.endsWith('ves') && t.length > 4 ? t.slice(0, -3) + 'f' : t.endsWith('s') && t.length > 3 && !t.endsWith('ss') ? t.slice(0, -1) : t);
+  const keyOf = (n) => { const w = String(n || '').toLowerCase().replace(/\s+/g, ' ').trim().replace(/^(?:the|a|an)\s+/, '').split(' ').filter(Boolean); if (w.length) w[w.length - 1] = singular(w[w.length - 1]); return w.join(' '); };
+  const idOk = (v) => /^\d+$/.test(String(v || '').trim()) && Number(v) > 0;
+  function learn(doc) {                                                   // every page that shows the panel teaches the cache
+    if (!doc) return 0; const ids = Object.assign({}, stateOf().ids); let n = 0;
+    const put = (id, label) => { id = String(id || '').trim(); label = String(label || '').replace(/\s+/g, ' ').trim(); const k = keyOf(label); if (idOk(id) && k && ids[k] !== id) { ids[k] = id; n++; } };
+    doc.querySelectorAll('#afAddMonster option, .afTMonster option').forEach((o) => put(o.value, o.textContent));
+    doc.querySelectorAll('#afMultiGrid .af-ms-check').forEach((c) => put(c.value, (c.closest('label') || {}).innerText));
+    doc.querySelectorAll('.monster-card').forEach((c) => {                // opportunistic: a card that carries its type id itself
+      const nm = c.dataset.name; if (!nm) return;
+      for (const k of Object.keys(c.dataset)) if (/^(monster)?(type|template|mob)id$/i.test(k) && idOk(c.dataset[k])) put(c.dataset[k], nm);
+    });
+    if (n) patch({ ids });
+    return n;
+  }
+  function typed() {                                                      // "name = id" lines from Tasks → Auto-farm (for accounts that never see the panel)
+    const out = {}; for (const line of String((cfg.tasks.farm || {}).ids || '').split(/\r?\n/)) { const m = line.match(/^\s*(.+?)\s*[=:]\s*(\d+)\s*$/); if (m) out[keyOf(m[1])] = m[2]; } return out;
+  }
+  function lookup(name) {
+    const k = keyOf(name), all = Object.assign({}, stateOf().ids, typed());
+    if (all[k]) return all[k];
+    const toks = new Set(k.split(' ')); let best = null, bs = 0;
+    for (const [c, id] of Object.entries(all)) { const ct = new Set(c.split(' ')), inter = [...toks].filter((t) => ct.has(t)).length, sc = inter / Math.max(toks.size, ct.size); if (sc > bs) { bs = sc; best = id; } }
+    return bs >= 0.75 ? best : null;
+  }
+
+  /* ---- wave pages ---- */
+  function waveUrls() {
+    const seen = new Set(), out = [];
+    const add = (u) => { try { const x = new URL(u, BASE), k = x.pathname + x.search; if (!seen.has(k)) { seen.add(k); out.push(k); } } catch (_) { /* not a url */ } };
+    String((cfg.tasks.farm || {}).waves || '').split(/[\s,]+/).filter(Boolean).forEach(add);                     // event waves etc. you added
+    for (const d of Roster.list) { if (d.kind !== 'wave') continue; const l = bossLoc(d.low); if (l) add(`/active_wave.php?gate=${l.gate}&wave=${l.wave}`); }
+    [[3, 3], [3, 5], [3, 8], [5, 9]].forEach(([g, w]) => add(`/active_wave.php?gate=${g}&wave=${w}`));
+    return out;
+  }
+  const wavePage = (u, mode) => Lane.run(async () => {
+    try {
+      const doc = parseHtml(await netText(u, { force: true, ttl: 0, key: `ma:farm:${mode}:${u}` }, mode)), st = Guard.pageState(doc);
+      if (st !== 'ok') { Guard.fault(st, 'farm ' + u); return null; }
+      return doc;
+    } catch (_) { return null; }
+  });
+  const stackOf = (c) => { const b = c.querySelector('.stack-badge'), m = b && /x\s*([\d,]+)/i.exec(b.textContent || ''), n = m ? parseInt(m[1].replace(/,/g, ''), 10) : 1; return n > 0 ? n : 1; };
+  const cardsOf = (doc) => Array.from(doc.querySelectorAll('.monster-card')).map((c) => ({
+    id: Scan.cardId(c), name: String(c.dataset.name || (c.querySelector('.monster-name,.name,h2,h3') || {}).textContent || '').trim(), dead: c.dataset.dead === '1', joined: c.dataset.joined === '1',
+    dmg: parseNum(c.dataset.userdmg, 0), expire: parseNum(c.dataset.expire, 0), boss: c.dataset.boss === '1', w: stackOf(c),
+  })).filter((c) => c.id && c.name);
+  /* ---- loot detection (the Dragon Realm way) ---- */
+  const deadView = (doc) => /show\s*alive/i.test(String((doc.getElementById('toggleDeadBtn') || {}).textContent || '')) || /dead\s*monsters/i.test(String((doc.querySelector('.monster-section-title') || {}).textContent || '')) || !!doc.querySelector('.monster-card[data-dead="1"]');
+  async function graveyard(u) {          // the dead view of a wave page, verified: the cookie swap can silently hand back the alive view. null = page unavailable, false = not verified
+    for (let i = 0; i < 2; i++) { const doc = await wavePage(u, 'all'); if (!doc) return null; if (deadView(doc)) return doc; await sleep(400); }
+    return false;
+  }
+  async function survey(match, wantLive) {   // every wave page: { live: cards of mobs still up, dead: lootable corpses you damaged, verified }
+    const live = [], dead = [], seen = new Set(), now = Math.floor(Date.now() / 1000); let verified = true;
+    for (const u of waveUrls()) {
+      if (wantLive) { const a = await wavePage(u, 'alive'); if (a) for (const c of cardsOf(a)) { if (c.dead || c.boss || !match(c.name) || seen.has(c.id)) continue; seen.add(c.id); live.push(c); } await sleep(120); }
+      const g = await graveyard(u);
+      if (g === false) verified = false;
+      else if (g) for (const c of cardsOf(g)) { if (!c.dead || c.boss || !match(c.name) || seen.has(c.id) || !c.joined || c.dmg <= 0 || (c.expire > 0 && c.expire < now)) continue; seen.add(c.id); dead.push(c); }
+      await sleep(120);
+    }
+    return { live, dead, verified };
+  }
+  async function lootOne(id) {
+    const res = await Act.run(() => post('/loot.php', { monster_id: String(id) }), cfg.minActionGapMs), j = res && res.json;
+    const ok = !!((j && j.status === 'success') || (!j && /success|looted|claimed/i.test((res && res.text) || '')));
+    if (ok) S.looted.add(String(id));
+    await sleep(cfg.autoLoot.claimGapMs ?? 250);
+    return ok;
+  }
+  async function alive(force) {                                           // name key -> { name, count, boss, url } over every known wave (cached a minute); also teaches the id cache
+    if (!force && Date.now() - S.waves.at < 60000) return S.waves.alive;
+    const m = new Map();
+    for (const u of waveUrls()) {
+      const doc = await wavePage(u, 'alive'); if (!doc) continue; learn(doc);
+      for (const c of cardsOf(doc)) { if (c.dead) continue; const k = keyOf(c.name), e = m.get(k) || { name: c.name, count: 0, boss: false, url: u }; e.count++; e.boss = e.boss || c.boss; m.set(k, e); }
+      await sleep(120);
+    }
+    S.waves = { at: Date.now(), alive: m }; return m;
+  }
+  // can this mob be done? { ok, id } (Auto-Farm), { ok, manual, why } (attack path: no id needed) or { ok:false, why } (a boss, or the network is down)
+  async function canFarm(name) {
+    const low = String(name || '').toLowerCase().trim(); if (!low) return { ok: false, why: 'no monster name' };
+    if (Roster.get(low)) return { ok: false, why: 'a boss — the Monsters task fights it' };
+    const pr = await probe();
+    if (!pr.ok && pr.transient) return { ok: false, why: pr.why };
+    let seen = (S.waves.alive || new Map()).get(keyOf(name));
+    if (!seen) { const m = await alive(true); seen = m.get(keyOf(name)); }
+    if (seen && seen.boss) return { ok: false, why: 'a boss — only basic wave mobs are done here' };
+    if (!pr.ok) return { ok: true, manual: true, locked: !!pr.locked, why: pr.why, seen: !!seen };                  // locked / off / refused: the normal attack path
+    const id = lookup(name);
+    if (!id) return { ok: true, manual: true, why: `no Auto-Farm id for "${name}" yet (open a wave page on an account that shows the panel, or add "${name} = <id>" in Tasks → Auto-farm)`, seen: !!seen };
+    return { ok: true, id, seen: !!seen };
+  }
+
+  /* ---- planner: 10% rule ---- */
+  function plan(list) {
+    const rem = new Map(), info = new Map();
+    for (const d of list) {
+      const n = Math.max(0, Math.floor(Number(d.need) || 0)); if (!n) continue;
+      rem.set(d.name, Math.max(rem.get(d.name) || 0, n));                // two owners wanting the same mob share the kills (the bigger need wins)
+      const o = info.get(d.name) || { id: d.id, minDamage: 0 }; o.minDamage = Math.max(o.minDamage, Number(d.minDamage) || 0); o.id = o.id || d.id; info.set(d.name, o);
+    }
+    const batches = []; let guard = 0;
+    while ([...rem.values()].some((v) => v > 0) && guard++ < 500) {
+      const avail = [...rem.keys()].filter((k) => rem.get(k) > 0), stack = new Map(avail.map((k) => [k, Math.min(MAX_STACK, rem.get(k))]));
+      const floor = Math.max(...stack.values()) * SIMILAR, names = avail.filter((k) => stack.get(k) >= floor);
+      const cycles = Math.max(1, Math.min(...names.map((k) => Math.floor(rem.get(k) / stack.get(k)))));
+      const targets = names.map((k) => ({ name: k, id: info.get(k).id, minDamage: info.get(k).minDamage, stack: stack.get(k), kills: stack.get(k) * cycles }));
+      batches.push({ cycles, targets, total: targets.reduce((a, t) => a + t.kills, 0), cycleTotal: targets.reduce((a, t) => a + t.stack, 0) });
+      for (const t of targets) rem.set(t.name, Math.max(0, rem.get(t.name) - t.kills));
+    }
+    return batches;
+  }
+
+  /* ---- the site's own panel (when it shows one): target rows + loot inputs. A row whose monster is not in the page's list (an event mob) is still read. ---- */
+  function panelOf(doc) {
+    if (!doc || !doc.querySelector('.af-row[data-target-id], #afAddMonster, #autoFarmBody')) return null;
+    const num = (el, d) => { const n = parseInt(String((el && el.value) || ''), 10); return Number.isFinite(n) ? n : d; };
+    const rows = Array.from(doc.querySelectorAll('.af-row[data-target-id]')).map((row) => {
+      const sel = row.querySelector('.afTMonster'), opt = sel && ((sel.options && sel.selectedIndex >= 0 && sel.options[sel.selectedIndex]) || sel.querySelector('option[selected]'));
+      const id = String((sel && sel.value) || (opt && opt.value) || row.getAttribute('data-monster-id') || '').trim();
+      const name = String((opt && opt.textContent) || row.getAttribute('data-monster-name') || '').replace(/\s+/g, ' ').trim();
+      const q = (s) => row.querySelector(s);
+      return { targetId: row.getAttribute('data-target-id'), monsterId: idOk(id) ? id : '', name, enabled: String((q('.afTEnabled') || {}).value ?? '1') !== '0', mode: num(q('.afTMode'), 1), minDamage: num(q('.afTMin'), 0), stack: Math.max(1, num(q('.afTStack'), 1)) };
+    });
+    const g = (id) => { const e = doc.getElementById(id); return e ? e.value : null; };
+    return { rows, autoLoot: g('afAutoLootToLevel'), expLeft: g('afPrcExpLeft'), hasList: !!doc.querySelector('#afAddMonster') };
+  }
+
+  /* ---- snapshot / restore of the player's own set-up ---- */
+  const KEYS = ['TOTAL_MONSTERS_TO_KILL', 'AUTO_LOOT_TO_LEVEL', 'PRC_EXP_LEFT', 'STAM_POT_PRIORITY_ITEM_ID', 'HP_POTIONS_MAX_TO_USE', 'STAM_POT_SMALL_ITEM_MAX_TO_USE', 'STAM_POT_HALF_ITEM_ID_MAX_TO_USE', 'STAM_POT_FULL_ITEM_ID_MAX_TO_USE', 'STAM_POT_ADV_ITEM_MAX_TO_USE'];
+  async function capture() {
+    const s = await status(); let panel = null;
+    for (const u of waveUrls().slice(0, 4)) { const doc = await wavePage(u, 'alive'); learn(doc); panel = panelOf(doc); if (panel) break; }
+    const norm = (t) => ({ targetId: t.targetId || t.TARGET_ID || '', monsterId: String(t.monsterId ?? t.MONSTER_ID ?? ''), name: String(t.monsterName ?? t.MONSTER_NAME ?? '').trim(), enabled: Number(t.enabled ?? t.IS_ENABLED ?? 1) !== 0 && (t.enabled ?? t.IS_ENABLED) !== false, mode: Number(t.mode ?? t.DAMAGE_OR_CAP ?? 1), minDamage: Number(t.minDamage ?? t.MIN_DAMAGE ?? 0), stack: Math.max(1, Number(t.maxStack ?? t.MAX_STACK_PER_HIT ?? t.stack ?? 1)) });
+    const targets = panel && panel.rows.length ? panel.rows : (s.ok ? s.targets.map(norm) : []);
+    const settings = {}; if (s.ok) for (const k of KEYS) if (s.settings[k] != null) settings[k] = s.settings[k];
+    if (panel) { if (panel.autoLoot != null) settings.AUTO_LOOT_TO_LEVEL = Number(panel.autoLoot); if (panel.expLeft != null) settings.PRC_EXP_LEFT = Number(panel.expLeft); }
+    const running = s.ok && Number(s.settings.IS_ENABLED) === 1 && Number(s.settings.FINISHED) !== 1;
+    return { at: Date.now(), enabled: running || AF.paused(), settings, targets, seen: !!panel || (s.ok && s.targets.length > 0), blind: !s.ok };
+  }
+  async function putTarget(t) {
+    const body = (id) => ({ MONSTER_ID: id, DAMAGE_OR_CAP: t.mode, MIN_DAMAGE: t.minDamage, IS_ENABLED: t.enabled ? 1 : 0, MAX_STACK_PER_HIT: t.stack });
+    let r = t.monsterId ? await api('add_target', body(t.monsterId)) : { ok: false, msg: 'no id captured' };
+    if (!r.ok && t.name) {                                                // the captured id was refused (event over / changed): look the mob up again by name
+      let alt = lookup(t.name); if (!alt) { await alive(true); alt = lookup(t.name); }
+      if (alt && String(alt) !== String(t.monsterId)) r = await api('add_target', body(alt));
+    }
+    if (!r.ok && t.monsterId) { await sleep(800); r = await api('add_target', body(t.monsterId)); }   // one more go with the id it had: a single refusal is often a hiccup
+    return r;
+  }
+  async function restore(why) {
+    const st = stateOf(), snap = st.snap; if (!snap) { patch({ owed: false }); return { ok: true, put: 0, left: [] }; }
+    const s = await status(); if (s.ok && Number(s.settings.FINISHED) === 1) await api('reset');
+    await api('toggle', { enabled: 0 });
+    await api('clear_targets');
+    if (Object.keys(snap.settings || {}).length) {                         // ONE call with everything: the endpoint resets any field that is left out
+      const set = Object.assign({}, snap.settings);
+      for (const k of ['TOTAL_MONSTERS_TO_KILL', 'HP_POTIONS_MAX_TO_USE', 'STAM_POT_SMALL_ITEM_MAX_TO_USE', 'STAM_POT_HALF_ITEM_ID_MAX_TO_USE', 'STAM_POT_FULL_ITEM_ID_MAX_TO_USE', 'STAM_POT_ADV_ITEM_MAX_TO_USE']) if (set[k] != null) set[k] = capOut(set[k]);
+      await api('save_settings', set);
+    }
+    const put = [], left = [];
+    for (const t of snap.targets || []) { const r = await putTarget(t); (r.ok ? put : left).push(t.name || t.monsterId || '?'); await sleep(100); }
+    if (snap.enabled && put.length) { await api('toggle', { enabled: 1 }); AF.clearPaused(); }
+    else if (snap.enabled && !(snap.targets || []).length) AF.clearPaused();
+    if (left.length) { patch({ owed: false, snap: Object.assign({}, snap, { left }) }); log(`⚠️ auto-farm: put back ${put.length} of ${put.length + left.length} of your targets (${why || 'restore'}) — could not re-add: ${left.map(esc).join(', ')} (an ended event?). Your saved set-up is kept; Tasks → Auto-farm → Restore tries again`, 'warn'); }
+    else { patch({ owed: false }); if (put.length) log(`↩ auto-farm: your ${put.length} target${put.length === 1 ? '' : 's'} and settings are back${snap.enabled ? ' (running again)' : ''}`, 'ok'); }
+    return { ok: !left.length, put: put.length, left };
+  }
+
+  /* ---- one run of one batch ---- */
+  function settingsFor(batch, killed) {
+    const set = { TOTAL_MONSTERS_TO_KILL: killed + batch.total + EXTRA, AUTO_LOOT_TO_LEVEL: 0, PRC_EXP_LEFT: 80 };   // auto-loot off: the corpses are looted here (quest credit comes from the loot)
+    const big = (on) => (on ? UNLIMITED : 0), item = cfg.stam.item, st = cfg.stam.enabled;
+    Object.assign(set, { HP_POTIONS_MAX_TO_USE: big(cfg.hp.enabled), STAM_POT_SMALL_ITEM_MAX_TO_USE: 0, STAM_POT_ADV_ITEM_MAX_TO_USE: 0,
+      STAM_POT_HALF_ITEM_ID_MAX_TO_USE: big(st && /large/i.test(item)), STAM_POT_FULL_ITEM_ID_MAX_TO_USE: big(st && /full/i.test(item)) });
+    return set;
+  }
+  async function corpses(batch) {                                         // dead mobs of this batch that you damaged enough, still lootable (a stack counts as its size)
+    const want = new Map(batch.targets.map((t) => [keyOf(t.name), t])), list = [], per = {}; let total = 0;
+    const sv = await survey((n) => want.has(keyOf(n)), false);
+    for (const c of sv.dead) { const t = want.get(keyOf(c.name)); if (!t || c.dmg < t.minDamage || S.looted.has(String(c.id))) continue; list.push({ id: c.id, name: t.name, w: c.w }); per[t.name] = (per[t.name] || 0) + c.w; total += c.w; }
+    return { list, per, total, verified: sv.verified };
+  }
+  async function lootAll(batch) {
+    const c = await corpses(batch); let n = 0;
+    for (const r of c.list) { if (S.stop) break; if (await lootOne(r.id)) n += r.w; }
+    return { n, of: c.total };
+  }
+  async function waitFor(batch) {
+    const stallMs = Math.max(2, Number((cfg.tasks.farm || {}).stallMin) || 10) * 60000; let last = -1, moved = Date.now(), offSince = 0;
+    for (;;) {
+      if (S.stop || !Tab.isMain()) return 'stopped';
+      if (!wantAuto()) return 'switched';                                  // the switch went off (or the level says no): this run ends, the next one uses the attack path
+      S.recheck = false;
+      await sleep(S.probe && S.probe.blind ? BLIND_POLL : POLL);
+      const s = await status(); let killed;
+      if (s.ok) {
+        const set = s.settings; killed = Number(set.TOTAL_MONSTERS_TO_KILLED || 0);
+        if (Number(set.FINISHED || 0) === 1) return 'finished';
+        if (Number(set.IS_ENABLED || 0) === 0) { offSince = offSince || Date.now(); if (Date.now() - offSince > 20000) return 'disabled'; } else offSince = 0;
+      } else if (s.net) continue;
+      else { killed = (await corpses(batch)).total; if (killed >= batch.total) return 'finished'; }       // no status page (below level 400): count the corpses
+      S.kills = killed; say(`${killed}/${batch.total} kills · ${batch.targets.map((t) => t.name).join(', ')}`);
+      if (killed !== last) { last = killed; moved = Date.now(); } else if (Date.now() - moved > stallMs) return 'stalled';
+    }
+  }
+  async function runBatch(batch) {
+    const names = batch.targets.map((t) => t.name).join(' + ');
+    say(`saving your auto-farm set-up…`);
+    if (!stateOf().owed) { const snap = await capture(); patch({ snap, owed: true }); }       // owed BEFORE anything is changed: a reload from here on restores it
+    let s = await status();
+    if (s.ok) {
+      const on = Number(s.settings.IS_ENABLED) === 1 && Number(s.settings.FINISHED) !== 1;
+      if (on && !cfg.autoFarmControl) throw new Error('your own Auto-Farm is running and "Pause server auto-farm" is off in Settings');
+      if (Number(s.settings.FINISHED) === 1 || Number(s.settings.TOTAL_MONSTERS_TO_KILLED || 0) > 0 || on) { await api('toggle', { enabled: 0 }); await api('reset'); }
+    } else await api('toggle', { enabled: 0 });
+    const clr = await api('clear_targets'); if (!clr.ok) throw new Error('could not clear the target list: ' + (clr.msg || 'no reply'));
+    const sv = await api('save_settings', settingsFor(batch, 0)); if (!sv.ok) throw new Error('could not save the farm settings: ' + (sv.msg || 'no reply'));
+    let added = 0;
+    for (const t of batch.targets) {
+      say(`adding ${t.name}…`);
+      const r = await api('add_target', { MONSTER_ID: t.id, DAMAGE_OR_CAP: 1, MIN_DAMAGE: t.minDamage, IS_ENABLED: 1, MAX_STACK_PER_HIT: t.stack });
+      if (r.ok) added++; else log(`⚠️ auto-farm refused ${esc(t.name)}: ${esc(r.msg || 'no reason')}`, 'warn');
+    }
+    if (!added) throw new Error('the site refused every target');
+    const on = await api('toggle', { enabled: 1 }); if (!on.ok) throw new Error('could not start: ' + (on.msg || 'no reply'));
+    S.runs++; log(`🌾 auto-farm started: ${batch.targets.map((t) => `${esc(t.name)} ×${t.kills} (≥${fmtNum(t.minDamage)})`).join(' · ')}${batch.cycles > 1 ? ` — ${batch.cycles} cycles` : ''}`, 'info');
+    const how = await waitFor(batch);
+    await api('toggle', { enabled: 0 }); await api('reset');                  // the site refuses loot claims while its Auto-Farm is on
+    if (how === 'stopped') return how;
+    const lt = await lootAll(batch);
+    if (how === 'switched') log('🌾 Auto-Farm was switched off — carrying on with the normal attack path', 'info');
+    log(`🌾 auto-farm ${how}: ${lt.n} of ${lt.of} corpse${lt.of === 1 ? '' : 's'} looted (${names})`, how === 'finished' ? 'ok' : 'warn');
+    return how;
+  }
+
+  /* ---- by hand: the normal attack path on basic wave mobs (Auto-Farm locked or refused) ---- */
+  const HUNT_BUDGET = 8 * 60000;
+  async function huntJoin(id) {
+    const u = uid(); if (!u) return { ok: false, reason: 'auth' };
+    const r = await Act.run(() => postForm('/user_join_battle.php', { monster_id: String(id), user_id: u }), cfg.minActionGapMs);
+    if (r.text && /invalid monster|already dead/i.test(r.text)) return { ok: false, reason: 'dead' };
+    if (r.text && AF_MSG.test(r.text)) return (await AF.pauseIfNeeded()) ? huntJoin(id) : { ok: false, reason: 'autofarm' };
+    return { ok: true };
+  }
+  async function huntHit(mob, minDamage, low) {                             // one swing at `mob` → { ok, total } | { ok:false, reason, ... }
+    if (!Me.stamKnown()) { try { await syncMe(); } catch (_) { /* */ } }
+    let cur = mob.dmg, tier = pickTier(low, Math.max(0, minDamage - cur), cfg.maxTier, Me.stam()), afTry = 0, rejoin = 0;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      if (S.stop) return { ok: false, reason: 'stopped' };
+      if (Me.stam() < SKILLS[tier].cost) { if (!(await Potions.refillStamina())) return { ok: false, reason: 'stam' }; tier = pickTier(low, Math.max(0, minDamage - cur), cfg.maxTier, Me.stam()); }
+      const r = await Act.run(() => postForm('/damage.php', { monster_id: String(mob.id), skill_id: SKILLS[tier].id, stamina_cost: SKILLS[tier].cost }), cfg.minActionGapMs), j = r.json || {};
+      if (j.status === 'success' || j.totaldmgdealt !== undefined) {
+        const raw = parseNum(j.damage, 0), total = j.totaldmgdealt !== undefined && Number.isFinite(parseNum(j.totaldmgdealt, NaN)) ? parseNum(j.totaldmgdealt) : cur + raw, perHit = total > cur ? total - cur : raw;
+        DmgProfile.record(low, tier, perHit); Me.fromAttack(j); return { ok: true, total, perHit, tier };
+      }
+      const msg = String(j.message || j.error || (r.status === 0 ? r.text : '') || JSON.stringify(j)), cr = classifyReject(msg);
+      if (cr.reason === 'autofarm') { if (afTry++ < 2 && (await AF.pauseIfNeeded())) { attempt--; continue; } return { ok: false, reason: 'autofarm' }; }
+      if (/removed due to inactivity|rejoin the battle/i.test(msg) && rejoin++ < 2) { await huntJoin(mob.id); attempt--; continue; }
+      if (cr.reason === 'stam') { try { await syncMe(); } catch (_) { /* */ } if (Me.stam() < SKILLS[tier].cost && !(await Potions.refillStamina())) return { ok: false, reason: 'stam' }; tier = pickTier(low, Math.max(0, minDamage - cur), cfg.maxTier, Me.stam()); continue; }
+      if (cr.reason === 'cooldown') { await sleep(cr.backoffMs || 1200); continue; }
+      if (cr.reason === 'player-dead') { if (!(await Potions.heal('hunt'))) return { ok: false, reason: 'hp' }; await sleep(700); continue; }
+      if (cr.reason === 'dead') return { ok: false, reason: 'dead' };
+      if (r.status === 0) { await sleep(500); continue; }
+      return { ok: false, reason: cr.reason, detail: msg };
+    }
+    return { ok: false, reason: 'unknown' };
+  }
+  async function hunt(d) {                                                  // d = { name, need, minDamage } → { looted, why, wait }
+    const key = keyOf(d.name), minD = Math.max(0, Number(d.minDamage) || 0), t0 = Date.now(), out = { looted: 0, why: '', wait: 0 }, low = String(d.name).toLowerCase().trim(), skip = new Set(), autoAtStart = wantAuto(); let fails = 0;
+    const regen = () => { let secs = 60; try { secs = Core.me.secondsToTick(); } catch (_) { /* */ } return Math.max(60, secs + 5) * 1000; };
+    while (!S.stop && Tab.isMain() && Date.now() - t0 < HUNT_BUDGET) {
+      if (S.recheck || wantAuto() !== autoAtStart) { S.recheck = false; out.switched = true; break; }          // the switch was flipped or level 400 was reached: the service re-plans
+      const sv = await survey((n) => keyOf(n) === key, true), live = sv.live, dead = sv.dead.filter((c) => c.dmg >= minD && !S.looted.has(String(c.id))).sort((a, b) => a.w - b.w);
+      if (dead.length) {                                                     // 1. loot first: that is what the quest counts
+        let did = 0;
+        for (const c of dead) { if (S.stop) break; const left = d.need - out.looted; if (left <= 0) break; if (c.w > left * 1.5) continue; if (await lootOne(c.id)) { out.looted += c.w; did++; } }
+        say(`${out.looted} looted · ${d.name}`); if (did) continue;
+      }
+      const pending = live.filter((c) => c.joined && c.dmg >= minD).reduce((n, c) => n + c.w, 0), ready = live.filter((c) => c.dmg < minD && !skip.has(c.id) && c.w <= Math.max(1, d.need - out.looted) * 1.5).sort((a, b) => b.dmg - a.dmg);
+      const stillNeeded = Math.max(0, d.need - out.looted - pending);
+      if (d.need - out.looted <= 0) break;                                   // everything asked for is looted
+      if (!stillNeeded) { say(`${out.looted}/${d.need} looted · waiting for ${pending} ${d.name} to die`); await sleep(8000); continue; }   // enough are damaged: they just have to die
+      const mob = ready[0];
+      if (!mob) { out.why = `no live ${d.name} on the waves right now${pending ? ` (${pending} damaged, waiting for them to die)` : ''}`; out.wait = 4 * 60000; if (!pending) break; await sleep(8000); continue; }
+      if (!mob.joined) { const j = await huntJoin(mob.id); if (!j.ok) { if (j.reason === 'autofarm') { out.why = 'your own Auto-Farm is on (allow “Pause server auto-farm” in Settings)'; out.wait = 10 * 60000; break; } skip.add(mob.id); continue; } }
+      say(`${out.looted}/${d.need} · ${d.name} #${mob.id} ${fmtNum(mob.dmg)}/${fmtNum(minD)}`);
+      let stop = false;
+      while (mob.dmg < minD && !stop) {
+        if (S.recheck || wantAuto() !== autoAtStart) break;                  // switched mid-mob: the loop above notices and hands over
+        const h = await huntHit(mob, minD, low);
+        if (h.ok) { mob.dmg = Math.max(mob.dmg + 1, h.total); fails = 0; say(`${out.looted}/${d.need} · ${d.name} #${mob.id} ${fmtNum(mob.dmg)}/${fmtNum(minD)}`); continue; }
+        if (h.reason === 'dead') { skip.add(mob.id); break; }
+        if (h.reason === 'stam') { out.why = 'out of stamina and no stamina potion — resumes when it ticks back'; out.wait = regen(); stop = true; break; }
+        if (h.reason === 'hp') { out.why = 'you are dead and have no HP potion'; out.wait = 10 * 60000; stop = true; break; }
+        if (h.reason === 'autofarm') { out.why = 'your own Auto-Farm is on (allow “Pause server auto-farm” in Settings)'; out.wait = 10 * 60000; stop = true; break; }
+        if (h.reason === 'stopped') { stop = true; break; }
+        if (++fails >= 3) { out.why = `the attack was refused: ${h.detail || h.reason}`; out.wait = 10 * 60000; stop = true; break; }
+        await sleep(800);
+      }
+      if (stop) break;
+    }
+    return out;
+  }
+
+  /* ---- demands: tasks say what they need, the service batches it ---- */
+  function want(owner, items) { S.demands.set(owner, { at: Date.now(), items: (items || []).filter((i) => i && i.need > 0) }); S.skipped.delete(owner); }
+  function drop(owner) { S.demands.delete(owner); }
+  function collect() {
+    const out = []; for (const [o, d] of S.demands) { if (Date.now() - d.at > DEMAND_TTL) { S.demands.delete(o); continue; } d.items.forEach((i) => out.push(Object.assign({ owner: o }, i))); } return out;
+  }
+  async function service() {
+    if (S.busy || !Tab.isMain() || Guard.isFaulted()) return;
+    const list = collect(); if (!list.length) { if (S.line) say(''); return; }
+    const pr = await probe(); if (!pr.ok && pr.transient) { say(pr.why); return; }
+    const items = []; for (const d of list) { const c = await canFarm(d.name); if (c.ok) items.push(Object.assign({}, d, { id: c.id, manual: !!c.manual, why: c.why })); else { S.skipped.set(d.owner, `${d.name}: ${c.why}`); Diag.skip('auto-farm-target', `${d.name}: ${c.why}`); } }
+    if (!items.length) return;
+    const manual = items.some((i) => i.manual), batch = manual ? null : plan(items)[0]; if (!manual && !batch) return;
+    S.busy = true; S.stop = false; S.manual = manual; const paused = Run.wanted() && !Run.paused(); if (paused) Run.pause('farm');
+    const owners = [...new Set(list.map((d) => d.owner))]; let waitFor = 0;
+    try {
+      if (manual) {
+        const d = items.find((i) => i.manual); say(`hunting ${d.name}…`); log(`🗡 attack path (${esc(d.why || 'Auto-Farm not usable')}): ${esc(d.name)} ×${d.need} (≥${fmtNum(d.minDamage)})`, 'info');
+        const r = await hunt(d); S.runs++; waitFor = r.wait || 0;
+        log(`🗡 hunt: ${r.looted} ${esc(d.name)} looted${r.switched ? ' — switching to Auto-Farm' : ''}${r.why ? ' — ' + esc(r.why) : ''}`, r.looted ? 'ok' : 'warn'); if (r.why) S.skipped.set(d.owner, `${d.name}: ${r.why}`);
+      } else await runBatch(batch);
+    }
+    catch (e) { log(`⚠️ auto-farm: ${esc(e.message)}`, 'warn'); Diag.skip('auto-farm-failed', e.message); }
+    finally {
+      if (!manual) { try { await restore('run over'); } catch (e) { log(`⚠️ auto-farm restore: ${esc(e.message)} — Tasks → Auto-farm → Restore tries again`, 'warn'); } }
+      S.busy = false; S.manual = false; say(''); if (manual) { try { await AF.resumeIfWePaused('hunt over'); } catch (_) { /* */ } } if (paused) Run.resume('farm');
+      owners.forEach((o) => { S.demands.delete(o); try { Tasks.poke(o, waitFor); } catch (_) { /* tasks not up yet */ } });     // the owners re-read their numbers and ask again if something is left
+    }
+  }
+  async function recover() {                                                // a reload in the middle of a run: the snapshot is owed
+    if (S.busy || !stateOf().owed) return;
+    try { await restore('recovered after reload'); } catch (e) { log(`⚠️ auto-farm recovery: ${esc(e.message)}`, 'warn'); }
+  }
+  setInterval(() => { service().catch((e) => log('⚠️ auto-farm: ' + esc(e.message), 'warn')); }, 15000);
+
+  return {
+    busy: () => S.busy, manual: () => S.busy && S.manual, locked, mode, nudge, wantAuto, line: () => S.line, stop: () => { S.stop = true; }, want, drop, canFarm, plan, probe, recover, learn, panelOf, keyOf, restoreNow: () => restore('you asked'),
+    info: () => ({ probe: S.probe, ids: Object.keys(stateOf().ids).length, owed: stateOf().owed, snap: stateOf().snap, runs: S.runs, skipped: Object.fromEntries(S.skipped), demands: collect().length }),
+    forget: () => patch({ snap: null, owed: false }), service, _test: { capture, restore, rq, api, status, lookup, settingsFor },
+  };
+})());
+
+/* ===================================================================================================================
+ * PART 5b — TASKS: the automator as a task master. Every task is { id, name, icon, desc, every, tick, enabled } and shows up in the Tasks tab with
+ * its own switch. Monsters (the boss engine) is the first task; below are the ones that ask the shared Farm (5a) for kills.
+ *
+ *   Adventure Guild   reads the quest board (the board is the only truth, nothing is remembered) and does all three kinds of quest:
+ *                       KILL     asks Farm for the kills still needed (basic wave mobs; Farm picks Auto-Farm or the attack path by itself)
+ *                       COLLECT  donates the quest's item until the quest can be handed in
+ *                       SKILL    casts your class skill on a wave-3/5 mob (mana potions are drunk when needed) until the count is done
+ *                     finishes done quests, accepts the next one it can do.
+ *   Battle Pass       the hunt on /battle_pass.php (Lizardman Flamecaster / Shadowclaw by default) the same way.
+ *   Merchant          buys the weekly-restock gold items (and Damon's weekly offers) once per server week (resets Sunday 00:00 server time).
+ *   PvP               placeholders (Solo, Team): your PvP module registers itself with  Automator.tasks.define({ id: 'pvp.solo', ... }).
+ *   (Cube Suite       will register here later the same way.)
+ * Tasks only run in the main tab, one tick at a time per task; a tick that cannot finish says why in the task's status line.
+ * NOTHING POLLS ON A TIMER: a tick returns when it next has something to do (a quest cooldown that ends, the weekly reset, a stamina tick, a
+ * farm run that finishes pokes its owner) and the task sleeps until then. "every" is only the fallback when a tick says nothing.
+ * ================================================================================================================ */
+const Guild = (() => {
+  const URL_GUILD = '/adventurers_guild.php', SKILL_QUEST_USES = 20;
+  const parseIntSafe = (v) => { const n = parseInt(v, 10); return Number.isFinite(n) ? n : 0; };
+  function parseAbbrevNumber(raw) {
+    const text = String(raw || '').trim().toLowerCase().replace(/,/g, '');
+    const match = text.match(/^(\d+(?:\.\d+)?)([kmb])?$/i);
+    if (!match) return 0;
+    let value = parseFloat(match[1]);
+    const suffix = (match[2] || '').toLowerCase();
+    if (suffix === 'k') value *= 1e3;
+    if (suffix === 'm') value *= 1e6;
+    if (suffix === 'b') value *= 1e9;
+    return Math.round(value);
+  }
+  function isCollectionQuest(text) {
+    const source = String(text || '').toLowerCase();
+    return /\b(collect|gather|bring|donate|turn in|turn-in|submit)\b/i.test(source);
+  }
+  function cleanMonsterName(raw) {
+    let text = String(raw || '').replace(/\s+/g, ' ').trim();
+    if (!text) return '';
+    text = text.replace(/^['"“”‘’]+|['"“”‘’]+$/g, '');
+    text = text.replace(/^(?:a|an|the)\s+(?=[A-Z])/i, '');
+    text = text.replace(/\s*\([^)]*\)\s*$/g, '').trim();
+    text = text.replace(
+      /\s+(?:has|have|had|is|are|was|were|now|begins?|began|begun|emerges?|emerged|appears?|appeared|returns?|returned|haunts?|lurks?|roams?|prowls?|stalks?|guards?|waits?|dwells?|terrorizes?|harasses?|ambushes?|devours?|assails?|threatens?|menaces?|plagues?|torments?|ravages?|wanders?|bides?)\b.*$/i,
+      ''
+    );
+    text = text.replace(/[·•].*$/g, '');
+    text = text.replace(/[.,;:!?]+$/g, '').trim();
+    return text;
+  }
+  function looksLikeMonsterName(name) {
+    const text = String(name || '').replace(/\s+/g, ' ').trim();
+    if (!text || text.length > 80) return false;
+    if (/^(?:monster|monsters|creature|creatures|enemy|enemies|target|targets|mob|mobs)$/i.test(text)) return false;
+    return !/\b(?:has|have|had|is|are|was|were|now|begins?|appears?|returns?|while|with|for|to)\b/i.test(text);
+  }
+  function extractMonsterFromObjective(requirements) {
+    const text = String(requirements || '').replace(/\s+/g, ' ').trim();
+    if (!text) return '';
+    let m = text.match(
+      /\bmonster:\s*(.+?)(?=\s*(?:[·•]|$|\bmin(?:imum)?\b|\bat\s*least\b|\bdmg\b|\bdamage\b))/i
+    );
+    if (m) {
+      const name = cleanMonsterName(m[1]);
+      return looksLikeMonsterName(name) ? name : '';
+    }
+    m = text.match(
+      /\b(?:kill|slay|defeat|hunt|eliminate|destroy|vanquish)\b\s+\d[\d,]*\s+(?:x\s+)?(.+?)(?=\s*(?:[·•]|$|\bmin(?:imum)?\b|\bat\s*least\b|\bdmg\b|\bdamage\b|\band\b|\bwhile\b|\bwith\b|\bfor\b|\bto\b))/i
+    );
+    if (m) {
+      const name = cleanMonsterName(m[1]);
+      return looksLikeMonsterName(name) ? name : '';
+    }
+    return '';
+  }
+  function extractMonsterFromActiveDescription(description) {
+    const text = String(description || '').replace(/\s+/g, ' ').trim();
+    if (!text) return '';
+    const patterns = [
+      /^\s*(?:huge\s+)?(?:numbers|swarms|hordes|packs|groups|waves|legions|throngs)\s+of\s+(.+?)(?=\s+(?:are|is|have|has|had|was|were|begins?|began|begun|emerges?|emerged|appears?|appeared|returns?|returned|pouring|pour|spilling|spills|overwhelming|overwhelm|threatening|threatens)\b|[.,;]|$)/i,
+      /^(.+?)(?=,\s*(?:has|have|had|is|are)\b)/i,
+      /^(.+?)(?=\s+(?:has|have|had|is|are)\b)/i,
+      /^(.+?)(?=\s+(?:now\s+)?(?:haunts?|lurks?|roams?|prowls?|stalks?|guards?|waits?|dwells?|terrorizes?|harasses?|ambushes?|devours?|assails?|threatens?|menaces?|plagues?|torments?|ravages?|wanders?|bides?|pouring|pour|spilling|spills|overwhelming|overwhelm)\b)/i,
+      /^(.+?)(?=\s+(?:begins?|began|begun|emerges?|emerged|appears?|appeared|returns?|returned|claimed|claims)\b)/i,
+      /^(.+?)(?=,|\.)/i
+    ];
+    for (const re of patterns) {
+      const m = text.match(re);
+      if (!m) continue;
+      const name = cleanMonsterName(m[1]);
+      if (looksLikeMonsterName(name)) return name;
+    }
+    return '';
+  }
+  function isSkillUsageQuest(text = '') {
+    const t = String(text).toLowerCase().replace(/\s+/g, ' ').trim();
+    return /\buse\s+\d+\s+skills?\b/i.test(t);
+  }
+  function extractCombatQuestData({ requirements = '', description = '', isActive = false } = {}) {
+    const reqText = String(requirements || '').replace(/\s+/g, ' ').trim();
+    const descText = String(description || '').replace(/\s+/g, ' ').trim();
+    const combined = `${reqText} ${descText}`.trim();
+    const reqLower = reqText.toLowerCase();
+    const skillUseMatch = combined.match(/\buse\s+(\d[\d,]*)\s+skills?\b/i);
+    if (isSkillUsageQuest(combined) || skillUseMatch) {
+      return {
+        monsterName: '',
+        amountNeeded: skillUseMatch
+        ? parseInt(skillUseMatch[1].replace(/,/g, ''), 10) || SKILL_QUEST_USES
+        : SKILL_QUEST_USES,
+        minimumDamage: 0,
+        isCollectionQuest: false,
+        unsupported: false,
+        skillUsageQuest: true
+      };
+    }
+    // The game always renders a structured "Objective" line verbatim as
+    // either "Kill Nx monster(s) · Monster: X · min Y dmg" or
+    // "Gather Nx item(s) · Item: X". That line is unambiguous and should
+    // always win over the free-text description, whose narrative verbs
+    // ("bring down", "retrieve", "defeated", "deliver", etc.) can otherwise
+    // false-trigger either classification in either direction — e.g. a kill
+    // quest saying "Bring down the beast" or a gather quest saying
+    // "Retrieve a sample from a defeated Orc". Only fall back to loose
+    // keyword scanning if neither structured pattern is present at all.
+    const hasExplicitKillObjective =
+          /\bkill\s+\d[\d,]*\s*(?:monster\(s\)|monsters?)\b/i.test(reqText) ||
+          /\bmonster:\s*/i.test(reqText);
+    const hasExplicitGatherObjective =
+          /\bgather\s+\d[\d,]*x?\s*(?:item\(s\)|items?)\b/i.test(reqText) ||
+          /\bitem:\s*/i.test(reqText);
+    const isExplicitlyCollection = hasExplicitGatherObjective && !hasExplicitKillObjective;
+    const isExplicitlyKill = hasExplicitKillObjective && !hasExplicitGatherObjective;
+    if (isExplicitlyCollection || (!isExplicitlyKill && !hasExplicitGatherObjective && !hasExplicitKillObjective && isCollectionQuest(reqLower))) {
+      return {
+        monsterName: '',
+        amountNeeded: 0,
+        minimumDamage: 0,
+        isCollectionQuest: true,
+        unsupported: false
+      };
+    }
+    let monsterName = '';
+    let amountNeeded = 0;
+    let minimumDamage = 0;
+    let m = reqText.match(/\b(?:kill|slay|defeat|hunt|eliminate|destroy|vanquish)\b\s+(\d[\d,]*)/i);
+    if (m) {
+      amountNeeded = parseInt(m[1].replace(/,/g, ''), 10) || 0;
+    } else {
+      m = reqText.match(/\b(\d[\d,]*)\s*(?:monster\(s\)|monsters?|monster)\b/i);
+      if (m) amountNeeded = parseInt(m[1].replace(/,/g, ''), 10) || 0;
+    }
+    m =
+      reqText.match(/\b(?:min(?:imum)?|at\s*least)\b[^0-9]{0,12}(\d[\d,]*(?:\.\d+)?(?:\s*[kmb])?)/i) ||
+      reqText.match(/\b(\d[\d,]*(?:\.\d+)?(?:\s*[kmb])?)\s*(?:dmg|damage)\b/i) ||
+      reqText.match(/\b(?:dmg|damage)\b[^0-9]{0,12}(\d[\d,]*(?:\.\d+)?(?:\s*[kmb])?)/i);
+    if (m) minimumDamage = parseAbbrevNumber(m[1]);
+    if (isActive) {
+      monsterName = extractMonsterFromObjective(reqText) || extractMonsterFromObjective(descText) || extractMonsterFromActiveDescription(descText);
+    } else {
+      monsterName = extractMonsterFromObjective(reqText);
+    }
+    return {
+      monsterName: String(monsterName || '').trim(),
+      amountNeeded,
+      minimumDamage,
+      isCollectionQuest: false,
+      unsupported: false,
+      skillUsageQuest: false
+    };
+  }
+  const txt = (el) => String((el && el.textContent) || '').replace(/\s+/g, ' ').trim();
+  const argsOf = (el, fn) => { const m = String((el && el.getAttribute && el.getAttribute('onclick')) || '').match(new RegExp(fn + '\\(([^)]*)\\)')); return m ? m[1].split(',').map((s) => s.trim().replace(/^['"]|['"]$/g, '')).filter(Boolean) : []; };
+  function readRow(row) {
+    const q = (s) => row.querySelector(s);
+    const name = txt(q('.quest-main-title')) || String(row.getAttribute('data-name') || '').trim(); if (!name) return null;
+    const desc = txt(q('.quest-main-desc')), req = [...new Set([desc, txt(q('.quest-req-text')), txt(q('.quest-requirements'))].filter(Boolean))].join(' · ');
+    const pm = txt(q('.quest-progress')).match(/(\d+)\s*\/\s*(\d+)/), prog = pm && +pm[2] > 0 ? { current: +pm[1], total: +pm[2] } : null;
+    const accept = q('[onclick*="acceptQuest("], .quest-accept-btn'), finish = q('[onclick*="finishQuest("], .quest-finish-btn'), donate = q('[onclick*="donateGatherItem("], .quest-donate-btn'), giveUp = q('[onclick*="giveUpQuest("], .quest-giveup-btn');
+    const cool = parseIntSafe((q('[data-cooldown-ts]') || { getAttribute: () => '0' }).getAttribute('data-cooldown-ts'));
+    const dArgs = argsOf(donate, 'donateGatherItem');
+    const active = !!(finish || donate || giveUp || prog), meta = extractCombatQuestData({ requirements: req, description: desc, isActive: active });
+    const kill = !!(meta.monsterName && meta.amountNeeded > 0 && meta.minimumDamage > 0 && !meta.isCollectionQuest && !meta.skillUsageQuest);
+    const kind = meta.skillUsageQuest ? 'skill' : (meta.isCollectionQuest || donate) ? 'collect' : kill ? 'kill' : 'other';
+    return { name, desc, req, progress: prog, cooldown: cool > 0, cooldownTs: cool, active, available: !!accept && !active, acceptId: parseIntSafe(argsOf(accept, 'acceptQuest')[0]), finishId: parseIntSafe(argsOf(finish, 'finishQuest')[0]),
+      donateQ: parseIntSafe(dArgs[0]), donateItem: parseIntSafe(dArgs[1]), kind, kill, meta };
+  }
+  const parseBoard = (doc) => Array.from(doc.querySelectorAll('section.quests-section .quest-row, section.section.quests-section .quest-row')).map(readRow).filter(Boolean);
+  const setInfo = (p) => Tasks.info('guild', p);
+  const MIN = 60000, DONE_RE = /item donated|donated (?:item|successfully)|already donated|quest accepted|accepted quest|quest completed|quest finished|already completed|already active/i;
+  const ok200 = (j, text) => !!(j && (j.status === 'success' || j.status === 'ok' || j.ok === true || j.success === true)) || DONE_RE.test(String((j && (j.message || j.msg)) || text || ''));
+  const msgOf = (r) => String((r && r.json && (r.json.message || r.json.msg || r.json.error)) || (r && r.text && !/^\s*</.test(r.text) ? r.text : '') || '').replace(/\s+/g, ' ').trim().slice(0, 160);
+  const nowMs = () => { try { const n = Core.me.serverNow(); if (n > 1e12) return n; } catch (_) { /* no server clock yet */ } return Date.now(); };
+  const left = (r) => (r.progress ? Math.max(0, r.progress.total - r.progress.current) : Math.max(0, (r.meta.amountNeeded || 0)));
+  const kinds = () => cfg.tasks.guild;
+
+  /* ---- COLLECT: a plain request, the same one the Adventure Guild script sends: POST /adventurers_donate_gather.php { quest_id, item_id }. Each request
+   * donates ONE item. The two ids are read off the quest row (its donateGatherItem(quest, item) call); nothing is clicked. The board is the truth: once the
+   * quest is full it shows Finish. A "you must have N of this item…" reply means you are short: that is a wait, not a failure. ---- */
+  const SHORT_RE = /you must have|of this item to donate one|at least|not enough/i;
+  async function donate(a) {
+    if (!a.donateQ || !a.donateItem) return { n: 0, wait: 15 * MIN, why: 'the quest row has no donate ids (donateGatherItem)' };
+    let n = 0;
+    for (let i = 0, cap = Math.min(Math.max(1, left(a)), 300); i < cap; i++) {
+      const r = await Act.run(() => post('/adventurers_donate_gather.php', { quest_id: String(a.donateQ), item_id: String(a.donateItem) }), 150), m = msgOf(r);
+      if (ok200(r && r.json, r && r.text)) { n++; await sleep(150); continue; }
+      if (SHORT_RE.test(m)) return { n, wait: 15 * MIN, why: `not enough items to donate yet${m ? ' (' + m + ')' : ''}` };
+      if (n) break;                                                    // the quest is full: the board shows the Finish button next
+      return { n, wait: 10 * MIN, why: m || 'the donation was refused' };
+    }
+    return { n };
+  }
+
+  /* ---- SKILL: cast the class skill N times on a wave-3/5 mob (the wave the site's own skill quest uses) ---- */
+  const SKILL_WAVE = '/active_wave.php?gate=3&wave=5';
+  async function skillTarget(skip) {
+    const doc = parseHtml(await Lane.run(() => netText(SKILL_WAVE, { force: true, ttl: 0, key: 'ma:skillwave' }, 'alive'))), st = Guard.pageState(doc);
+    if (st !== 'ok') { Guard.fault(st, 'skill quest wave'); return null; }
+    for (const c of doc.querySelectorAll('.monster-card')) {
+      if (!Scan.cardAlive(c)) continue; const id = Scan.cardId(c); if (!id || skip.has(String(id)) || c.dataset.boss === '1') continue;
+      const name = String(c.dataset.name || '').trim(); if (!name || Roster.get(name.toLowerCase())) continue;
+      return { kind: 'wave', monsterId: String(id), name, low: name.toLowerCase() };
+    }
+    return null;
+  }
+  async function castSkills(a) {
+    let cls = effectiveClass(); if (!cls) { try { await detectClass(); } catch (_) { /* */ } cls = effectiveClass(); }
+    const cs = cls ? CLASS_SKILLS[cls] : null;
+    if (!cs) return { n: 0, wait: 30 * MIN, why: 'no class detected — pick a class (the site\'s Classes page) or set Class in Settings' };
+    const total = a.progress ? a.progress.total : (a.meta.amountNeeded || SKILL_QUEST_USES);
+    let need = Math.min(60, Math.max(0, left(a) || total)), n = 0, mob = null, bad = 0, afTried = false; const skip = new Set();
+    while (n < need) {
+      if (!Tab.isMain() || Guard.isFaulted()) return { n, wait: 5 * MIN, why: 'paused' };
+      if (!Me.mpKnown) await Me.refresh(0);
+      if (Me.mpKnown && Me.mp < cs.cost) { await Potions.refillMana('skill quest', cs.cost); if (Me.mp < cs.cost) return { n, wait: 10 * MIN, why: `not enough mana for ${cs.label} (${cs.cost}) and no mana potion to drink` }; }
+      if (!mob) { mob = await skillTarget(skip); if (!mob) return { n, wait: 10 * MIN, why: 'no living basic mob on wave 3/5 to cast on right now' }; if (!(await SideMob.join(mob, true))) { skip.add(mob.monsterId); mob = null; if (++bad >= 4) return { n, wait: 10 * MIN, why: 'could not join any mob on wave 3/5' }; continue; } }
+      const r = await Act.run(() => postForm('/damage.php', { monster_id: mob.monsterId, skill_id: cs.id, stamina_cost: 1 }), cfg.minActionGapMs), j = r.json || {}, m = String(j.message || j.error || '');
+      if (j.status === 'success' || j.totaldmgdealt !== undefined) {
+        n++; bad = 0; const mana = j.mana !== undefined ? j.mana : j.mp; Me.mp = mana !== undefined && mana !== null ? parseNum(mana) : Math.max(0, Me.mp - cs.cost);
+        try { Core.me.fromAttack(j); } catch (_) { /* */ }
+        continue;
+      }
+      const c = classifyReject(m || JSON.stringify(j));
+      if (c.reason === 'autofarm') { if (afTried || !(await AF.pauseIfNeeded())) return { n, wait: 10 * MIN, why: 'your own Auto-Farm is on (allow “Pause server auto-farm” in Settings to let it step aside)' }; afTried = true; continue; }
+      if (SideMob.isRejoin(m)) { await SideMob.join(mob, true); if (++bad >= 4) return { n, wait: 10 * MIN, why: m }; continue; }
+      if (c.reason === 'stam') { let secs = 60; try { secs = Core.me.secondsToTick(); } catch (_) { /* */ } return { n, wait: Math.max(60, secs + 5) * 1000, why: 'out of stamina — resumes when it ticks back' }; }
+      if (c.reason === 'mp') { await Potions.refillMana('skill quest', cs.cost); if (++bad >= 4) return { n, wait: 10 * MIN, why: 'mana keeps running out' }; continue; }
+      if (c.reason === 'dead' || SideMob.isShieldMsg(m)) { skip.add(mob.monsterId); mob = null; continue; }
+      if (c.reason === 'player-dead') return { n, wait: 10 * MIN, why: 'you are dead' };
+      if (++bad >= 4) return { n, wait: 10 * MIN, why: m || 'the skill cast was refused' };
+      await sleep(c.backoffMs || 800);
+    }
+    return { n };
+  }
+
+  async function tick() {
+    const G = kinds(); if (!G.enabled) return;
+    const doc = parseHtml(await netText(URL_GUILD, { force: true, ttl: 0, key: 'ma:guild' })), st = Guard.pageState(doc);
+    if (st !== 'ok') { Guard.fault(st, 'guild'); setInfo({ state: 'err', line: 'not signed in' }); return 5 * MIN; }
+    const rows = parseBoard(doc);
+    if (!rows.length) { setInfo({ state: 'warn', line: 'no quest board on the guild page (not in the guild yet, or the page changed)' }); Farm.drop('guild'); return 30 * MIN; }
+    const fin = rows.find((r) => r.finishId);
+    if (fin) {                                                           // 1. a quest that is done: turn it in
+      const r = await Act.run(() => post('/adventurers_finish_quest.php', { quest_id: String(fin.finishId) }), 250), good = ok200(r && r.json, r && r.text);
+      log(good ? `🏁 quest finished: ${esc(fin.name)}` : `⚠️ could not finish ${esc(fin.name)}: ${esc(msgOf(r) || 'no reply')}`, good ? 'ok' : 'warn');
+      setInfo({ state: good ? 'ok' : 'warn', line: good ? `finished “${fin.name}”` : 'finish was refused — retrying' }); return good ? 3000 : MIN;
+    }
+    let next = Infinity; const notes = [], wants = [], later = (ms) => { next = Math.min(next, ms); };
+    let working = false, did = 0;
+    for (const a of rows.filter((r) => r.active)) {                      // 2. every quest in progress, whatever its kind
+      if (a.kind === 'collect') {
+        if (G.collect === false) { notes.push(`“${a.name}”: collection quests are switched off`); later(60 * MIN); continue; }
+        const r = await donate(a); did += r.n;
+        if (r.n) { setInfo({ state: 'run', line: `“${a.name}”: donated ${r.n} — checking the board` }); return 2500; }
+        if (r.why) { notes.push(`“${a.name}”: ${r.why}`); later(r.wait); }
+      } else if (a.kind === 'skill') {
+        if (G.skill === false) { notes.push(`“${a.name}”: skill quests are switched off`); later(60 * MIN); continue; }
+        setInfo({ state: 'run', line: `“${a.name}” ${a.progress ? a.progress.current + '/' + a.progress.total : ''} — casting` });
+        const r = await castSkills(a); did += r.n;
+        if (r.n) log(`✨ skill quest “${esc(a.name)}”: ${r.n} cast${r.n === 1 ? '' : 's'}`, 'ok');
+        if (r.why) { notes.push(`“${a.name}”: ${r.why}`); later(r.wait); } else return 2500;       // all casts went through: look at the board again
+      } else if (a.kind === 'kill') {
+        if (G.kill === false) { notes.push(`“${a.name}”: kill quests are switched off`); later(60 * MIN); continue; }
+        const mob = a.meta.monsterName, c = await Farm.canFarm(mob);
+        if (!c.ok) { notes.push(`“${a.name}”: ${mob} — ${c.why}`); Diag.skip('guild-not-farmable', `${mob}: ${c.why}`); later(c.locked ? 30 * MIN : 20 * MIN); continue; }
+        const have = a.progress ? a.progress.current : 0, total = a.progress ? a.progress.total : a.meta.amountNeeded;
+        wants.push({ name: mob, need: Math.max(0, total - have), minDamage: a.meta.minimumDamage });
+        notes.push(`“${a.name}” ${have}/${total} — ${mob} ≥ ${fmtNum(a.meta.minimumDamage)}${Farm.busy() ? ' · farming now' : ' · queued'}`); working = true; later(20 * MIN);   // the farm run pokes this task when it is over
+      } else { notes.push(`“${a.name}” is not something the automator can do — by hand`); Diag.skip('guild-unsupported', a.name); later(60 * MIN); }
+    }
+    if (wants.length) Farm.want('guild', wants); else Farm.drop('guild');
+    const worked = working || did > 0;
+    if (!rows.some((r) => r.active) && G.accept) {                       // 3. no quest in progress (the guild holds one at a time): take the next one that can be done
+      let noClass = false; if (G.skill !== false && rows.some((x) => x.available && x.kind === 'skill') && !effectiveClass()) { try { await detectClass(); } catch (_) { /* */ } noClass = !effectiveClass(); }
+      const cand = rows.filter((x) => x.available && ((x.kind === 'skill' && G.skill !== false && !noClass) || (x.kind === 'kill' && G.kill !== false) || (x.kind === 'collect' && G.collect !== false)))
+        .sort((x, y) => ({ skill: 0, kill: 1, collect: 2 }[x.kind] - { skill: 0, kill: 1, collect: 2 }[y.kind]));
+      for (const r of cand) {
+        if (r.kind === 'kill') { const c = await Farm.canFarm(r.meta.monsterName); if (!c.ok) { Diag.skip('guild-skip-available', `${r.name}: ${c.why}`); continue; } }
+        const res = await Act.run(() => post('/adventurers_accept_quest.php', { quest_id: String(r.acceptId) }), 250), good = ok200(res && res.json, res && res.text);
+        log(good ? `📜 quest accepted: ${esc(r.name)} (${r.kind}${r.kind === 'kill' ? `: ${r.meta.amountNeeded} × ${esc(r.meta.monsterName)} ≥ ${fmtNum(r.meta.minimumDamage)}` : ''})` : `⚠️ could not accept ${esc(r.name)}: ${esc(msgOf(res) || 'no reply')}`, good ? 'ok' : 'warn');
+        if (good) { setInfo({ state: 'ok', line: `accepted “${r.name}”` }); return 3000; }
+        notes.push(`could not accept “${r.name}”: ${msgOf(res) || 'no reply'}`); later(30 * MIN); break;
+      }
+    }
+    if (!rows.some((r) => r.active) && G.accept && rows.some((r) => r.available && r.kind === 'skill') && !effectiveClass()) notes.push('a skill quest is waiting but no class is picked (the site\'s Classes page)');
+    const cds = rows.filter((r) => r.cooldownTs > 0).map((r) => r.cooldownTs * 1000 - nowMs() + 3000).filter((ms) => ms > 0);
+    if (cds.length && !worked) later(Math.min(...cds));                  // the next quest comes off cooldown then
+    const idle = !notes.length;
+    if (idle) { const cd = rows.filter((r) => r.cooldown).length; later(60 * MIN); notes.push(cd ? `nothing to do — ${cd} quest${cd === 1 ? '' : 's'} on cooldown${cds.length ? ', next one in ' + fmtDur(Math.min(...cds)) : ''}` : 'nothing to do — no quest on the board that can be done'); }
+    setInfo({ state: idle ? 'idle' : worked ? 'run' : 'warn', line: notes.join(' · ') });
+    return next === Infinity ? undefined : next;
+  }
+  return { tick, parseBoard, readRow };
+})();
+
+const Battle = (() => {
+  const setInfo = (p) => Tasks.info('bp', p);
+  const num = (s) => parseNum(String(s || '').replace(/,/g, ''), 0);
+  function parseQuest(el) {                                              // one .card .quest of the pass page
+    const title = String((el.querySelector('strong') || {}).textContent || '').replace(/\s+/g, ' ').trim().toLowerCase(), text = String(el.textContent || '').replace(/\s+/g, ' ').trim();
+    const pm = text.match(/(\d+)\s*\/\s*(\d+)/), prog = pm && +pm[2] > 0 ? { current: +pm[1], total: +pm[2] } : null;
+    const isStam = /\bstamina\b/i.test(title) || /target:\s*stamina:/i.test(text), isHunt = /\b(lizard|hunt)\b/i.test(title) || /damage min:/i.test(text) || /target:\s*count:/i.test(text);
+    if (isStam && !isHunt) { const m = text.match(/Target:\s*Stamina:\s*(\d[\d,]*)\s*•\s*Points:\s*(\d+)/i); return { type: 'stamina', current: prog ? prog.current : 0, total: m ? num(m[1]) : prog ? prog.total : 0, minimumDamage: 0 }; }
+    if (isHunt) { const m = text.match(/Target:\s*Count:\s*(\d[\d,]*)\s*•\s*Damage Min:\s*([\d,]+)\s*•\s*Points:\s*(\d+)/i); return { type: 'hunt', current: prog ? prog.current : 0, total: m ? num(m[1]) : prog ? prog.total : 0, minimumDamage: m ? num(m[2]) : 300000 }; }
+    return null;
+  }
+  async function tick() {
+    if (!cfg.tasks.bp.enabled) return;
+    const doc = parseHtml(await netText('/battle_pass.php', { force: true, ttl: 0, key: 'ma:bp' })), st = Guard.pageState(doc);
+    if (st !== 'ok') { Guard.fault(st, 'battle pass'); setInfo({ state: 'err', line: 'not signed in' }); return 5 * 60000; }
+    let hunt = null, stam = null;
+    doc.querySelectorAll('.card .quest').forEach((q) => { const p = parseQuest(q); if (p && p.type === 'hunt') hunt = p; if (p && p.type === 'stamina') stam = p; });
+    const sx = stam ? ` · stamina ${stam.current}/${stam.total}` : '';
+    if (!hunt) { Farm.drop('bp'); setInfo({ state: 'idle', line: 'no hunt on the pass page' + sx }); return 60 * 60000; }
+    if (hunt.current >= hunt.total) { Farm.drop('bp'); setInfo({ state: 'ok', line: `hunt done ${hunt.current}/${hunt.total}` + sx }); return 60 * 60000; }
+    const names = String(cfg.tasks.bp.targets || '').split(/[,\n]/).map((s) => s.trim()).filter(Boolean); let pick = null, why = '', lockedNow = false;
+    for (const n of names) { const c = await Farm.canFarm(n); if (c.ok) { pick = n; break; } why = `${n}: ${c.why}`; if (c.locked) { lockedNow = true; break; } }
+    if (!pick) { Farm.drop('bp'); setInfo({ state: 'warn', line: `hunt ${hunt.current}/${hunt.total} — ${why || 'no target names set'}` + sx }); Diag.skip('bp-not-farmable', why); return lockedNow ? 30 * 60000 : 20 * 60000; }
+    Farm.want('bp', [{ name: pick, need: hunt.total - hunt.current, minDamage: hunt.minimumDamage }]);
+    setInfo({ state: 'run', line: `hunt ${hunt.current}/${hunt.total} — ${pick} ≥ ${fmtNum(hunt.minimumDamage)}${Farm.busy() ? ' · farming now' : ' · queued'}` + sx, have: hunt.current, total: hunt.total });
+    return 20 * 60000;                                                   // the farm run pokes this task when it is over
+  }
+  return { tick, parseQuest };
+})();
+
+const Merchant = (() => {
+  const ONE_TIME_GOLD = new Set(['26', '40', '41']);                      // limited gold items that never restock (same list as the UI Cleanup merchant)
+  const store = Core.store(ID + '-merchant', { def: { week: 0, done: false, at: 0, spent: 0, bought: 0 } });
+  const setInfo = (p) => Tasks.info('merchant', p);
+  const weekStart = () => { try { const n = Core.clock.next('sun', '00:00'); if (n > 0) return n - 7 * 86400000; } catch (_) { /* no server clock yet */ } return 0; };
+  const left = (it) => (it.limit > 0 ? Math.max(0, it.limit - it.bought) : Infinity);
+  const weekly = (it) => it.currency === 'gold' && it.limit > 1 && (it.source === 'damon' || !ONE_TIME_GOLD.has(it.id));
+  function scrape(doc) {
+    const items = [];
+    doc.querySelectorAll('.card[data-merch-id]').forEach((c) => { const d = c.dataset;
+      items.push({ source: 'merch', id: String(d.merchId), currency: String(d.currency || 'gold').toLowerCase() === 'gems' ? 'gems' : 'gold', name: ((c.querySelector('.name') || {}).textContent || 'Item').trim(), price: parseInt(d.price, 10) || 0, limit: parseInt(d.maxq, 10) || 0, bought: parseInt(d.bought, 10) || 0 }); });
+    return items;
+  }
+  const goldOf = (doc) => { const el = doc.getElementById('goldBalance'), n = el ? parseNum(el.textContent, -1) : -1; if (n >= 0) return n; try { return Number(Core.me.get().gold) || 0; } catch (_) { return 0; } };
+  async function damon() {
+    try {
+      const r = await fetch('/olympus_damon_buy.php?action=state', { headers: { Accept: 'application/json' }, credentials: 'include' }), j = await r.json();
+      if (!j || j.status !== 'success' || !Array.isArray(j.offers)) return [];
+      return j.offers.map((o) => { const limit = Number(o.weekly_limit) || 0; return { source: 'damon', id: String(o.key || ''), currency: 'gold', name: String(o.name || 'Item'), price: Number(o.price) || 0, limit, bought: limit > 0 && o.remaining !== undefined ? Math.max(0, limit - Number(o.remaining || 0)) : Number(o.bought) || 0 }; });
+    } catch (_) { return []; }
+  }
+  async function buy(it, qty) {
+    const r = await Act.run(() => (it.source === 'damon' ? post('/olympus_damon_buy.php', { offer: it.id, qty: String(qty) }) : post('/merchant_buy.php', { merch_id: it.id, qty: String(qty) })), 150), j = r && r.json;
+    return { ok: !!(j && String(j.status || '').trim() === 'success'), msg: String((j && j.message) || '').trim() };
+  }
+  const untilReset = () => { try { const n = Core.clock.next('sun', '00:00'); if (n > Date.now()) return n - Date.now() + 60000; } catch (_) { /* no server clock yet */ } return 6 * 3600000; };   // asleep until the weekly reset
+  async function tick() {
+    const t = cfg.tasks.merchant; if (!t.enabled) return;
+    const wk = weekStart(), s = store.get() || {};
+    if (wk && s.week === wk && s.done) { setInfo({ state: 'ok', line: `this week's restock is bought (${fmtNum(s.spent || 0)} gold) · next reset ${(() => { try { return new Date(Core.clock.next('sun', '00:00')).toLocaleString(); } catch (_) { return 'Sunday'; } })()} server time` }); return untilReset(); }
+    const doc = parseHtml(await netText('/merchant.php', { force: true, ttl: 0, key: 'ma:merchant' })), st = Guard.pageState(doc);
+    if (st !== 'ok') { Guard.fault(st, 'merchant'); setInfo({ state: 'err', line: 'not signed in' }); return 5 * 60000; }
+    let items = scrape(doc); if (t.damon !== false) items = [...(await damon()), ...items];
+    let gold = goldOf(doc); const keep = Math.max(0, Number(t.keepGold) || 0);
+    const cands = items.filter((i) => weekly(i) && left(i) > 0 && i.price > 0).sort((a, b) => left(a) * a.price - left(b) * b.price);
+    if (!cands.length) { store.set({ week: wk, done: true, at: Date.now(), spent: s.week === wk ? s.spent || 0 : 0, bought: s.week === wk ? s.bought || 0 : 0 }); setInfo({ state: 'ok', line: 'nothing left to buy this week' }); return untilReset(); }
+    let spent = 0, n = 0, short = false;
+    for (const it of cands) {
+      const qty = Math.min(left(it), Math.floor(Math.max(0, gold - keep) / it.price), 99999);
+      if (qty < 1) { short = true; continue; }
+      setInfo({ state: 'run', line: `buying ${qty} × ${it.name}…` });
+      const r = await buy(it, qty);
+      if (r.ok) { gold -= qty * it.price; spent += qty * it.price; n++; if (qty < left(it)) short = true; log(`🛒 merchant: ${qty} × ${esc(it.name)} for ${fmtNum(qty * it.price)} gold`, 'ok'); }
+      else { log(`⚠️ merchant: ${esc(it.name)} — ${esc(r.msg || 'failed')}`, 'warn'); if (/not enough/i.test(r.msg)) short = true; }
+      await sleep(150);
+    }
+    const prev = s.week === wk ? s : {};
+    store.set({ week: wk, done: !short, at: Date.now(), spent: (prev.spent || 0) + spent, bought: (prev.bought || 0) + n });
+    setInfo({ state: short ? 'warn' : 'ok', line: short ? `bought ${n} item${n === 1 ? '' : 's'} (${fmtNum(spent)} gold) — not enough gold for the rest${keep ? ' (keeping ' + fmtNum(keep) + ')' : ''}, will look again` : `bought ${n} weekly item${n === 1 ? '' : 's'} for ${fmtNum(spent)} gold` });
+    return short ? 30 * 60000 : untilReset();
+  }
+  return { tick, scrape, weekly, left, state: () => store.get() || {}, reset: () => store.set({ week: 0, done: false, at: 0, spent: 0, bought: 0 }) };
+})();
+
+/* ---- the registry + scheduler ---- */
+Object.assign(Tasks, (() => {
+  const defs = new Map(), state = new Map(), due = new Map(), busy = new Set(), t0 = Date.now();
+  const mins = (n, d) => Math.max(1, Number(n) || d) * 60000;
+  function define(d) { if (!d || !d.id) return; defs.set(d.id, Object.assign({ icon: '🧩', name: d.id, desc: '', every: 600000, enabled: () => false, group: '' }, d)); UI.dirty('tasks'); return d; }
+  function info(id, p) { if (p === undefined) return state.get(id) || { state: 'idle', line: '', at: 0 }; state.set(id, Object.assign({}, state.get(id), p, { at: Date.now() })); UI.dirty('tasks'); }
+  const poked = new Map();
+  function poke(id, inMs) { due.set(id, Date.now() + (inMs || 0)); poked.set(id, Date.now()); }
+  async function beat() {
+    if (!Tab.isMain() || Guard.isFaulted() || Date.now() - t0 < 15000) return;
+    const now = Date.now();
+    for (const d of defs.values()) {
+      if (!d.tick || busy.has(d.id) || !d.enabled() || now < (due.get(d.id) || 0)) continue;
+      busy.add(d.id); due.set(d.id, now + (typeof d.every === 'function' ? d.every() : d.every)); info(d.id, { state: 'run' });
+      Promise.resolve().then(() => d.tick())
+        .then((wait) => { if (Number.isFinite(wait) && wait > 0 && !((poked.get(d.id) || 0) >= now)) due.set(d.id, Date.now() + Math.min(Math.max(wait, 5000), 6 * 3600000)); })     // the tick said when it next has something to do (unless something poked it meanwhile)
+        .catch((e) => { log(`⚠️ ${d.name}: ${esc(e.message)}`, 'warn'); info(d.id, { state: 'err', line: String(e.message) }); due.set(d.id, Date.now() + 5 * 60000); })
+        .finally(() => busy.delete(d.id));
+    }
+  }
+  setInterval(() => { beat().catch(() => {}); }, 1000);
+  define({ id: 'monsters', name: 'Monsters', icon: '👹', desc: 'Wave bosses, Generals and dungeon bosses, with their gear / pets / cap (set up in Bosses)', enabled: () => false, special: true });
+  define({ id: 'guild', name: 'Adventure Guild', icon: '📜', desc: 'Kill quests: finish, accept, auto-farm the kills', every: () => mins(cfg.tasks.guild.everyMin, 5), enabled: () => !!cfg.tasks.guild.enabled, tick: Guild.tick });
+  define({ id: 'bp', name: 'Battle Pass', icon: '🎫', desc: 'The hunt of the pass, auto-farmed', every: () => mins(cfg.tasks.bp.everyMin, 10), enabled: () => !!cfg.tasks.bp.enabled, tick: Battle.tick });
+  define({ id: 'merchant', name: 'Merchant', icon: '🛒', desc: 'Buys the weekly restock once per server week', every: () => mins(cfg.tasks.merchant.everyMin, 30), enabled: () => !!cfg.tasks.merchant.enabled, tick: Merchant.tick });
+  define({ id: 'pvp.solo', name: 'PvP · Solo', icon: '⚔️', group: 'pvp', desc: 'placeholder — plug your PvP module in', placeholder: true, enabled: () => !!cfg.tasks.pvp.solo.enabled });
+  define({ id: 'pvp.team', name: 'PvP · Team', icon: '🛡️', group: 'pvp', desc: 'placeholder — plug your PvP module in', placeholder: true, enabled: () => !!cfg.tasks.pvp.team.enabled });
+  return { define, info, poke, nextDue: (id) => due.get(id) || 0, list: () => [...defs.values()], get: (id) => defs.get(id), busy: (id) => busy.has(id) };
+})());
+
+/* ===================================================================================================================
  * PART 5 — PANEL (one Core.float button + panel)
  *   Overview   what it is doing now: vitals, bosses being farmed, session numbers (collapsible groups)
  *   Bosses     loot scan strip, Waves | Dungeons switch; waves grouped by area (Generals / Ocean / Olympus), one row per wave with its bosses as
@@ -3151,13 +4075,13 @@ Object.assign(LootScan, (() => {
  * ================================================================================================================ */
 const Panel = (() => {
   const { h, btn } = Core.ui;
-  const TABS = [['home', 'Overview', '🏠'], ['bosses', 'Bosses', '👹'], ['loot', 'Loot', '🪦'], ['settings', 'Settings', '⚙️'], ['activity', 'Activity', '📜']];
-  const DIRTY_TAB = { status: 'home', log: 'activity', diag: 'activity', loot: 'loot', relics: 'bosses' };   // 'scan' repaints only the strip
-  const uiStore = Core.store(ID + '-ui', { def: { tab: 'home', open: {}, filter: '', bsec: 'waves' } });
-  const ui = Object.assign({ tab: 'home', open: {}, filter: '', bsec: 'waves' }, uiStore.get() || {}); if (!ui.open || typeof ui.open !== 'object') ui.open = {};
+  const TABS = [['tasks', 'Tasks', '✅'], ['home', 'Overview', '🏠'], ['bosses', 'Bosses', '👹'], ['loot', 'Loot', '🪦'], ['settings', 'Settings', '⚙️'], ['activity', 'Activity', '📜']];
+  const DIRTY_TAB = { status: 'home', tasks: 'tasks', log: 'activity', diag: 'activity', loot: 'loot', relics: 'bosses' };   // 'scan' repaints only the strip
+  const uiStore = Core.store(ID + '-ui', { def: { tab: 'tasks', open: {}, filter: '', bsec: 'waves' } });
+  const ui = Object.assign({ tab: 'tasks', open: {}, filter: '', bsec: 'waves' }, uiStore.get() || {}); if (!ui.open || typeof ui.open !== 'object') ui.open = {};
   const saveUi = () => uiStore.set(ui);
   if (ui.tab === 'supplies') ui.tab = 'settings';                  // the Supplies tab is part of Settings now
-  let root = null, tab = TABS.some((t) => t[0] === ui.tab) ? ui.tab : 'home', shown = false, drawT = 0;
+  let root = null, tab = TABS.some((t) => t[0] === ui.tab) ? ui.tab : 'tasks', shown = false, drawT = 0;
   const phaseSel = {};                                              // boss entry -> which phase the boss page is on
   /* Select mode (Bosses tab): tap bosses to tick them, pick gear / crystal / pet / cap once, apply to all. Not saved: it is a one-off action. */
   const BK = { on: false, sel: new Set(), ph: null, pick: {}, cap: '', n: 3e9, msg: '', from: '' };
@@ -3549,13 +4473,62 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   const dotOf = (st) => (!Tab.isMain() ? 'follower' : /FIGHT|RUN|DUEL|SCAN|GRAVE|SWITCH|PLAN/.test(st) ? 'running' : /WAIT|STAMINA/.test(st) ? 'waiting' : /PAUSE/.test(st) ? 'follower' : '');
   function footer() {
     const st = Status.get(), cur = Engine.current(), run = Run.wanted() && !Run.paused();
-    const wk = Work.get('build') || Work.get('scan'), sub = wk ? (wk.step ? `${wk.label} · ${wk.step}${wk.total > 1 ? ` (${Math.min(wk.done + 1, wk.total)}/${wk.total})` : ''}` : wk.label) : cur ? '🎯 ' + cur.name : (Tab.isMain() ? (cfg.targets.length ? 'no target right now' : 'no bosses selected') : 'this tab is following');
+    const wk = Work.get('build') || Work.get('scan'), sub = Farm.busy() ? '🌾 auto-farm · ' + (Farm.line() || 'running') : wk ? (wk.step ? `${wk.label} · ${wk.step}${wk.total > 1 ? ` (${Math.min(wk.done + 1, wk.total)}/${wk.total})` : ''}` : wk.label) : cur ? '🎯 ' + cur.name : (Tab.isMain() ? (cfg.targets.length ? 'no target right now' : 'no bosses selected') : 'this tab is following');
     return h('div', { class: 'ma-foot' },
       h('div', { class: 'ma-foot-st' }, h('b', {}, h('i', { class: 'ma-dot ' + dotOf(st) }), STATE_TXT[st] || st), h('span', { title: sub }, sub), wk && wk.total > 1 ? h('div', { class: 'ma-bar' }, h('i', { style: { width: Math.max(6, pctOf({ done: wk.done + 0.5, total: wk.total })).toFixed(1) + '%' } })) : null),
       run ? btn('⏹ Stop', 'danger', () => { Run.stop('stopped from the panel'); draw(); }) : btn('▶ Start', 'success', () => { Run.start(); draw(); }));
   }
   const go = (t) => { tab = t; ui.tab = t; saveUi(); draw(); };
   const tabsBar = () => h('div', { class: 'ma-tabs' }, TABS.map(([id, label, ico]) => h('button', { type: 'button', class: 'ma-tab' + (id === tab ? ' on' : ''), onclick: () => go(id) }, ico + ' ' + label)));
+
+  /* =================================================== TASKS =================================================== */
+  const SDOT = { ok: '✅ ', run: '▶ ', warn: '⚠️ ', err: '⛔ ', idle: '' };
+  const tStatus = (id) => { const i = Tasks.info(id); return i.line ? h('div', { class: 'ma-note' }, (SDOT[i.state] || '') + i.line + (i.at ? ' · ' + ago(i.at) : '')) : null; };
+  const nextNote = (id) => { const d = Tasks.nextDue(id) - Date.now(); return Tasks.busy(id) ? null : h('div', { class: 'ma-note' }, d > 1500 ? '⏱ next look in ' + fmtDur(d) + ' — it wakes itself when something is due' : '⏱ looking at it now'); };
+  const area = (value, rows, ph, set) => h('textarea', { class: 'ma-in', rows, placeholder: ph, style: { width: '100%', resize: 'vertical' }, onclick: stop, onchange: (e) => { set(e.target.value); saveCfg(); } }, value || '');
+  function tTasks() {
+    const out = [], T = cfg.tasks, F = Farm.info(), cur = Engine.current();
+    if (!Tab.isMain()) out.push(h('div', { class: 'ma-alert info' }, 'Another tab is the main one and runs the tasks. This tab only shows them.', h('div', {}, btn('Take over this tab', 'soft', () => { Tab.takeOver(); }))));
+    out.push(caption('Tasks — switch on what the automator should keep doing'));
+    // Monsters
+    out.push(card('👹', 'Monsters', 'Wave bosses, Generals and dungeon bosses with their gear, pets and cap', Run.wanted(), (v) => { if (v) Run.start(); else Run.stop('stopped from Tasks'); },
+      [h('div', { class: 'ma-note' }, cur ? '🎯 fighting ' + cur.name : (cfg.targets.length ? `${cfg.targets.length} boss${cfg.targets.length === 1 ? '' : 'es'} ticked — ${STATE_TXT[Status.get()] || Status.get()}` : 'no bosses ticked yet')), btn('Choose bosses ›', 'soft', () => go('bosses'))]));
+    // PvP (placeholders: your module registers itself with Automator.tasks.define)
+    out.push(h('div', { class: 'ma-card' },
+      h('div', { class: 'ma-card-h' }, h('span', { class: 'ma-ico' }, '⚔️'), h('div', { class: 'ma-card-t' }, h('b', {}, 'PvP'), h('small', {}, 'Solo and Team — your PvP module plugs in here'))),
+      h('div', { class: 'ma-card-b' }, ['pvp.solo', 'pvp.team'].map((id) => { const d = Tasks.get(id), k = id.split('.')[1];
+        return h('div', {}, srow(d.icon, d.name.replace('PvP · ', ''), d.placeholder ? 'placeholder: nothing runs yet' : d.desc, sw(() => T.pvp[k].enabled, (v) => { T.pvp[k].enabled = v; }), []), d.placeholder ? null : tStatus(id)); }))));
+    // Adventure Guild
+    out.push(card('📜', 'Adventure Guild', 'Finishes quests, takes the next one: kills (auto-farm), collections (donates) and skill quests (casts)', T.guild.enabled, (v) => { T.guild.enabled = v; if (v) Tasks.poke('guild'); else Farm.drop('guild'); },
+      [tStatus('guild'), T.guild.enabled ? nextNote('guild') : null,
+        h('div', { class: 'ma-two' }, opt('Accept new quests', sw(() => T.guild.accept, (v) => { T.guild.accept = v; })), opt('Kill quests', sw(() => T.guild.kill !== false, (v) => { T.guild.kill = v; }), 'Auto-Farm from level 400, the normal attack path below — chosen automatically')),
+        h('div', { class: 'ma-two' }, opt('Collection quests', sw(() => T.guild.collect !== false, (v) => { T.guild.collect = v; }), 'donates the quest item'), opt('Skill quests', sw(() => T.guild.skill !== false, (v) => { T.guild.skill = v; }), 'casts your class skill')),
+        T.guild.enabled ? btn('Check now', 'soft', () => { Tasks.poke('guild'); draw(); }) : null]));
+    // Battle Pass
+    out.push(card('🎫', 'Battle Pass', 'The hunt of the pass, auto-farmed (the stamina goal fills by itself)', T.bp.enabled, (v) => { T.bp.enabled = v; if (v) Tasks.poke('bp'); else Farm.drop('bp'); },
+      [tStatus('bp'), opt('Hunt targets', area(T.bp.targets, 2, 'Lizardman Flamecaster, Lizardman Shadowclaw', (v) => { T.bp.targets = v; }), 'the first one Auto-Farm can do is used', 'row'), T.bp.enabled ? nextNote('bp') : null, T.bp.enabled ? btn('Check now', 'soft', () => { Tasks.poke('bp'); draw(); }) : null]));
+    // Merchant
+    const ms = Merchant.state();
+    out.push(card('🛒', 'Merchant', 'Buys the weekly restock (gold items + Damon) once per server week — resets Sunday 00:00 server time', T.merchant.enabled, (v) => { T.merchant.enabled = v; if (v) Tasks.poke('merchant'); },
+      [tStatus('merchant'), h('div', { class: 'ma-two' }, opt('Keep this much gold', num(() => T.merchant.keepGold, (v) => { T.merchant.keepGold = v; }, { min: 0, w: 96, fmt: fmtNum })), opt('Include Damon', sw(() => T.merchant.damon !== false, (v) => { T.merchant.damon = v; }))), T.merchant.enabled ? nextNote('merchant') : null,
+        T.merchant.enabled ? btn(ms.done ? 'Check again' : 'Buy now', 'soft', () => { Merchant.reset(); Tasks.poke('merchant'); draw(); }) : null]));
+    // Auto-farm (shared)
+    const pr = F.probe, md = Farm.mode(), pbadge = pill(md.kind === 'auto' ? 'Auto-Farm' : 'attack path', md.kind === 'auto' ? 'ok' : 'warn');
+    out.push(h('div', { class: 'ma-card' },
+      h('div', { class: 'ma-card-h' }, h('span', { class: 'ma-ico' }, '🌾'), h('div', { class: 'ma-card-t' }, h('b', {}, 'Auto-farm ', pbadge), h('small', {}, 'Shared by the tasks above — basic wave mobs only; Auto-Farm or the normal attack path, picked for you'))),
+      h('div', { class: 'ma-card-b' },
+        opt('Use Auto-Farm', sw(() => T.farm.auto !== false, (v) => { T.farm.auto = v; Farm.nudge(); draw(); }), 'on: Auto-Farm whenever the game allows it (level 400+), the normal attack path below; off: always the attack path'),
+        h('div', { class: 'ma-note' }, Farm.busy() ? '🌾 ' + (Farm.line() || 'running') : md.kind === 'hand' ? md.why + ' — using the normal attack path' : `idle · ${F.ids} monster id${F.ids === 1 ? '' : 's'} known · ${F.runs} run${F.runs === 1 ? '' : 's'} this session${F.demands ? ' · ' + F.demands + ' request' + (F.demands === 1 ? '' : 's') + ' waiting' : ''}`),
+        ...Object.values(F.skipped).map((s) => h('div', { class: 'ma-note' }, '⚠️ ' + s)),
+        F.snap && F.snap.left && F.snap.left.length ? h('div', { class: 'ma-note' }, '⚠️ could not put back: ' + F.snap.left.join(', ')) : null,
+        fold('farm-more', false, 'More', () => [
+          opt('Stop a stalled run after', num(() => T.farm.stallMin, (v) => { T.farm.stallMin = v; }, { min: 2, max: 120, w: 56, unit: 'min', parse: (s) => parseInt(s, 10) }), 'no new kill for this long (out of stamina)'),
+          opt('Extra wave pages', area(T.farm.waves, 2, '/active_wave.php?event=13&gate=…&wave=…', (v) => { T.farm.waves = v; }), 'event waves etc., one per line — searched for ids and corpses', 'row'),
+          opt('Monster ids', area(T.farm.ids, 3, 'Lizardman Flamecaster = 123', (v) => { T.farm.ids = v; }), 'only needed where the site shows no Auto-Farm panel: “name = id”, one per line', 'row'),
+          h('div', { class: 'ma-actions' }, btn('Re-check', 'soft', () => { Farm.probe(true).then(() => draw()); }), btn('Restore my auto-farm now', 'soft', () => { Farm.restoreNow().then(() => draw()).catch((e) => log('⚠️ ' + esc(e.message), 'warn')); }), btn('Forget saved set-up', 'soft', () => { Farm.forget(); draw(); })),
+        ]))));
+    return out;
+  }
 
   /* =================================================== OVERVIEW =================================================== */
   const meter = (label, cur, max, cls, known, txt) => {
@@ -4052,7 +5025,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     return out;
   }
 
-  const BUILD = { home: tHome, bosses: tBosses, loot: tLoot, settings: tSettings, activity: tActivity };
+  const BUILD = { tasks: tTasks, home: tHome, bosses: tBosses, loot: tLoot, settings: tSettings, activity: tActivity };
   function scroller(el) { for (let n = el && el.parentElement; n; n = n.parentElement) { const o = getComputedStyle(n).overflowY; if ((o === 'auto' || o === 'scroll') && n.scrollHeight > n.clientHeight) return n; } return null; }
   /* A redraw builds the tab off-screen first. For the automatic ones (a timer, a status change) the page is only touched when the result
    * differs from what is showing: most ticks change nothing, so nothing is replaced, no image reloads, no scroll jump, no lost focus. */
@@ -4076,7 +5049,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   if (typeof Core.on === 'function') Core.on('caps:changed', (d) => { if (shown && d && (d.added || []).some((n) => n.startsWith('preset.'))) schedule(300); });   // a preset addon loaded late
   UI.hook((what) => { if (!shown) return; if (what === 'scan') { if (tab === 'bosses') paintScan(); return; } if (what === 'log' && tab === 'activity' && paintLog()) return; if (what === undefined || what === 'status' || DIRTY_TAB[what] === tab) schedule(); });
   let beat = 0;
-  setInterval(() => { if (!shown || !root || !root.isConnected || document.hidden) return; if (++beat % 3 === 0 && (tab === 'home') && !typing()) draw(true); }, 1000);   // overview: vitals + timers refresh every 3 s
+  setInterval(() => { if (!shown || !root || !root.isConnected || document.hidden) return; if (++beat % 3 === 0 && (tab === 'home' || tab === 'tasks') && !typing()) draw(true); }, 1000);   // overview: vitals + timers refresh every 3 s
 
   function register() {
     Core.float.add({ id: ID, title: 'Automator', icon: '🤖', order: 40, width: 560,
@@ -4103,7 +5076,7 @@ Tab.join().catch((e) => log('❌ tab leadership: ' + e.message, 'err'));
 
 return {
   version: VERSION, cfg: () => cfg, draw: Panel.draw, board: Board.all, status: Status.get,
-  start: Run.start, stop: Run.stop, scanNow: Engine.scanNow, register: Kernel.register, loot: LootData.all, lootScan: LootScan,
+  start: Run.start, stop: Run.stop, scanNow: Engine.scanNow, register: Kernel.register, tasks: Tasks, farm: Farm, loot: LootData.all, lootScan: LootScan,
 };
 
   },
