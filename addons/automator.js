@@ -23,7 +23,7 @@
  * default cap of a boss is its highest loot requirement, and bosses the roster did not know yet are added. Export .txt writes it all out.
  */
 Core.module({
-  id: 'automator', name: 'Automator', icon: '🤖', version: '1.11.3',
+  id: 'automator', name: 'Automator', icon: '🤖', version: '1.11.4',
   // Offered to other addons through Core capabilities (guides/CAPABILITIES.md):
   //   automator.status() -> the status string     automator.start() / automator.stop()     automator.scan() -> scan the bosses now
   provides: (api) => api && api.start ? {
@@ -34,7 +34,7 @@ Core.module({
   } : {},
   init(Core) {
 'use strict';
-const ID = 'automator', VERSION = '1.11.3';
+const ID = 'automator', VERSION = '1.11.4';
 if (window.__automatorLoaded) { console.warn('[automator] already loaded', window.__automatorLoaded); return null; }
 window.__automatorLoaded = VERSION;
 
@@ -422,7 +422,7 @@ const UI = (() => { let fn = null; return { dirty(what) { if (fn) fn(what); }, h
 // What is being worked on right now, by key ('scan' = boss scan / graveyard / start-up): { label, done, total }. Shown in the Overview and Graveyard.
 const Work = (() => {
   const m = new Map(), ping = () => UI.dirty('status');
-  return { set(k, label, done, total, step) { m.set(k, { label, done: done || 0, total: total || 0, step: step || '' }); ping(k); }, clear(k) { if (m.delete(k)) ping(k); }, get: (k) => m.get(k) || null };
+  return { set(k, label, done, total, step, ph) { m.set(k, { label, done: done || 0, total: total || 0, step: step || '', phase: ph ? ph.phase : 0, phases: ph ? ph.phases : 0 }); ping(k); }, clear(k) { if (m.delete(k)) ping(k); }, get: (k) => m.get(k) || null };
 })();
 const pctOf = (w) => (w && w.total > 0 ? Math.min(100, w.done / w.total * 100) : 0);
 
@@ -441,27 +441,36 @@ const Status = (() => {
 /* What the build switch is doing right now: Status SWITCHING + Work 'build' = { title, step label, done of total }, so the footer and the Overview
  * show "Switching build for X · Crystals · step 3 of 3" with a bar. start() with no steps shows nothing (everything was already on). */
 const Prog = (() => {
-  let steps = [], title = '', prev = '', mine = 'SWITCHING';
+  let steps = [], title = '', prev = '', mine = 'SWITCHING', nextG = 0;       // steps = [{ t: text, g: phase id }]
   const WAIT = 'Gear · working out the swaps';                      // between the engine's pet steps and its gear steps: the gear plan is not known yet
-  const show = (i) => Work.set('build', title, i, steps.length, steps[i] || '');
-  // a step is found by its exact text, else by its text up to " · " ("Crystals" finds "Crystals · picking the best")
-  const find = (label) => { const i = steps.indexOf(label); return i >= 0 ? i : steps.findIndex((x) => x.startsWith(label + ' · ')); };
+  const show = (i) => {
+    const st = steps[i]; if (!st) return;
+    const mine = steps.filter((x) => x.g === st.g), order = [...new Set(steps.map((x) => x.g))];
+    Work.set('build', title, mine.indexOf(st), mine.length, st.t, order.length > 1 ? { phase: order.indexOf(st.g) + 1, phases: order.length } : null);
+  };
+  // a step is found by its exact text, else by its text up to \" · \" (\"Crystals\" finds \"Crystals · picking the best\")
+  const find = (label) => { const i = steps.findIndex((x) => x.t === label); return i >= 0 ? i : steps.findIndex((x) => x.t.startsWith(label + ' · ')); };
   return {
-    start(t, list, status) { if (!list || !list.length) { steps = []; return; } steps = list.slice(); title = t; mine = status || 'SWITCHING'; prev = Status.get(); Status.set(mine); show(0); },
+    // grouped: every item of the list is a phase of its own (pets, gear, crystals, sigils); otherwise the list is one run of steps
+    start(t, list, status, grouped) { if (!list || !list.length) { steps = []; return; } nextG = 0; steps = list.map((x) => ({ t: x, g: grouped ? nextG++ : 0 })); if (!grouped) nextG = 1; title = t; mine = status || 'SWITCHING'; prev = Status.get(); Status.set(mine); show(0); },
     at(label) { if (!steps.length) return; const i = find(label); if (i >= 0) show(i); },
-    // swaps one step for the finer steps it is made of (each crystal / sigil move); go(i) shows one of them. sub() returns the index of the first, or -1
-    sub(label, list) { if (!steps.length || !list || !list.length) return -1; const i = find(label); if (i < 0) return -1; steps.splice(i, 1, ...list); show(i); return i; },
+    // swaps one step for the finer steps it is made of (each crystal / sigil move), inside the same phase; newTail: the last of them opens a phase of its own.
+    // go(i) shows one of them. sub() returns the index of the first, or -1
+    sub(label, list, newTail) {
+      if (!steps.length || !list || !list.length) return -1; const i = find(label); if (i < 0) return -1; const g = steps[i].g, tail = newTail ? nextG++ : g;
+      steps.splice(i, 1, ...list.map((x, k) => ({ t: x, g: k === list.length - 1 ? tail : g }))); show(i); return i;
+    },
     go(i) { if (steps.length && i >= 0 && i < steps.length) show(i); },
-    text(i, t) { if (steps.length && t && i >= 0 && i < steps.length) { steps[i] = t; show(i); } },   // the step at i says more about what it is doing now
-    note(label, text) { const i = find(label); if (i < 0) return; steps[i] = text; show(i); },        // a step keeps its place but says more about what it is doing
+    text(i, t) { if (steps.length && t && i >= 0 && i < steps.length) { steps[i].t = t; show(i); } },   // the step at i says more about what it is doing now
+    note(label, text) { const i = find(label); if (i < 0) return; steps[i].t = text; show(i); },        // a step keeps its place but says more about what it is doing
     drop(label) { const i = find(label); if (i < 0 || steps.length < 2) return; steps.splice(i, 1); show(Math.min(i, steps.length - 1)); },
-    // the callback for the engine's onStep: the step called `label` becomes the engine's exact pet actions, then its exact gear actions
+    // the callback for the engine's onStep: the step called `label` becomes the engine's exact pet actions, then (its own phase) its exact gear actions
     exact(label) {
       let sb = -1; const f = (e) => {
         f.ran = true;
         if (e.plan) {
           const list = e.plan.map((x) => (e.stage === 'pets' ? 'Pets · ' : 'Gear · ') + x.charAt(0).toUpperCase() + x.slice(1));
-          if (e.stage === 'pets') sb = Prog.sub(label, [...list, WAIT]); else { sb = Prog.sub(WAIT, list); if (!list.length) Prog.drop(WAIT); }
+          if (e.stage === 'pets') sb = Prog.sub(label, [...list, WAIT], true); else { sb = Prog.sub(WAIT, list); if (!list.length) Prog.drop(WAIT); }
         } else if (sb >= 0) Prog.go(sb + e.i);
       };
       return f;
@@ -1643,7 +1652,7 @@ const Presets = (() => {
       const todo = []; if (Object.keys(W).length && !Origin.get()) todo.push(REM);
       for (const kind of seq) { const want = W[kind]; if (!want || (kind === 'crystal' && want === '__best') || applied[kind] === memoOf(kind, want, t)) continue; todo.push(stepOf(kind, want)); if (kind === BEST && sig) todo.push(SIG); }
       if (W.crystal === '__best' && (todo.length || applied.crystal !== '__best@' + buildEpoch)) todo.push(CRY);
-      Prog.start('Switching build for ' + bossName(low), todo);
+      Prog.start('Switching build for ' + bossName(low), todo, undefined, true);
       if (Object.keys(W).length) { Prog.at(REM); await Origin.ensure(t); }   // before anything moves: what is on now is what gets put back
       for (const kind of seq) {
         const want = W[kind];
@@ -1732,7 +1741,7 @@ const Presets = (() => {
       }
       let backWhat = ''; try { if (o.sel && o.probe) { const live = liveSel || await Origin.read(o.probe); if (live) backWhat = Plan.describe(Plan.sigFromSel(live, null), Plan.sigFromSel(o.sel, null)); } } catch (_) { /* no detail */ }   // what will change, for the status text
       const CRYR = 'Crystals · back on their gear', SIGR = 'Sigils · back on their pets';
-      Prog.start('Putting your build back', [...(o.sel ? ['Gear + pets'] : []), ...(o.crystals ? [CRYR] : []), ...((o.moves || []).length ? [SIGR] : [])]);
+      Prog.start('Putting your build back', [...(o.sel ? ['Gear + pets'] : []), ...(o.crystals ? [CRYR] : []), ...((o.moves || []).length ? [SIGR] : [])], undefined, true);
       log(`↩ putting your build back${why ? ' (' + esc(why) + ')' : ''}…`, 'info');
       if (o.sel && Core.has && Core.has('build.apply')) {
         Prog.at('Gear + pets'); const lab = 'Gear + pets' + (backWhat ? ' · ' + backWhat : ''), ex = Prog.exact(lab); if (backWhat) Prog.note('Gear + pets', lab);
@@ -4533,12 +4542,12 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   const dotOf = (st) => (!Tab.isMain() ? 'follower' : /FIGHT|RUN|DUEL|SCAN|GRAVE|SWITCH|PLAN|FARM/.test(st) ? 'running' : /WAIT|STAMINA/.test(st) ? 'waiting' : /PAUSE/.test(st) ? 'follower' : '');
   // what the automator is doing apart from the bosses: the farm (and who it farms for), a task mid-tick, or the tasks that are switched on
   const SHORT = { guild: 'Quests', bp: 'BP', merchant: 'Merchant' }, tShort = (d) => SHORT[d.id] || d.name, taskTag = (d) => `${d.icon} ${tShort(d)}`;
-  const taskDone = (d) => { const i = Tasks.info(d.id) || {}; return i.state === 'ok' || i.state === 'idle'; };            // this task has nothing to do for now
+  const taskDone = (d) => { const i = Tasks.info(d.id) || {}; return i.at > 0 && (i.state === 'ok' || i.state === 'idle'); };            // this task has nothing to do for now
   const enabledTasks = () => Tasks.list().filter((d) => d.id !== 'monsters' && !d.placeholder && d.enabled && d.enabled());
   function otherWork() {
     const tk = Tasks.list().find((d) => d.id !== 'monsters' && Tasks.busy(d.id));
     if (Farm.busy()) { const o = (Farm.owners ? Farm.owners() : []).map((id) => Tasks.get(id)).filter(Boolean).map(taskTag); return { icon: '🌾', name: o.length ? o.join(' + ') : 'Auto-farming', sub: Farm.line() || 'running' }; }
-    if (tk) return { icon: tk.icon, name: tShort(tk), sub: Tasks.info(tk.id).line || 'working' };
+    if (tk) { const ln = Tasks.info(tk.id).line || 'working'; return /^reading/i.test(ln) ? { icon: '🔎', name: 'Scanning · ' + tShort(tk), sub: ln } : { icon: tk.icon, name: tShort(tk), sub: ln }; }
     return null;
   }
   function idleLine() {                                                  // nothing is working this second
@@ -4546,7 +4555,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   }
   function footer() {
     const st = Status.get(), cur = Engine.current(), run = Run.wanted();
-    const wk = Work.get('build') || Work.get('scan'), tk = Tasks.list().find((d) => d.id !== 'monsters' && Tasks.busy(d.id)), sub = Farm.busy() ? '🌾 ' + ((Farm.owners ? Farm.owners() : []).map((id) => Tasks.get(id)).filter(Boolean).map(taskTag).join(' + ') || 'auto-farm') + ' · ' + (Farm.line() || 'running') : tk ? `${taskTag(tk)} · ${Tasks.info(tk.id).line || 'working'}` : wk ? (wk.step ? `${wk.label} · ${wk.step}${wk.total > 1 ? ` (${Math.min(wk.done + 1, wk.total)}/${wk.total})` : ''}` : wk.label) : cur ? '🎯 ' + cur.name : (Tab.isMain() ? (cfg.targets.length ? (idleLine() ? `no boss up · ${idleLine()}` : 'no target right now') : (idleLine() || 'no bosses selected')) : 'this tab is following');
+    const wk = Work.get('build') || Work.get('scan'), tk = Tasks.list().find((d) => d.id !== 'monsters' && Tasks.busy(d.id)), sub = Farm.busy() ? '🌾 ' + ((Farm.owners ? Farm.owners() : []).map((id) => Tasks.get(id)).filter(Boolean).map(taskTag).join(' + ') || 'auto-farm') + ' · ' + (Farm.line() || 'running') : tk ? (/^reading/i.test(Tasks.info(tk.id).line || '') ? `🔎 Scanning · ${tShort(tk)}` : `${taskTag(tk)} · ${Tasks.info(tk.id).line || 'working'}`) : wk ? (wk.step ? `${wk.label} · ${wk.step}${wk.total > 1 ? ` (${Math.min(wk.done + 1, wk.total)}/${wk.total})` : ''}${wk.phases > 1 ? ` · part ${wk.phase} of ${wk.phases}` : ''}` : wk.label) : cur ? '🎯 ' + cur.name : (Tab.isMain() ? (cfg.targets.length ? (idleLine() ? `no boss up · ${idleLine()}` : 'no target right now') : (idleLine() || 'no bosses selected')) : 'this tab is following');
     return h('div', { class: 'ma-foot' },
       h('div', { class: 'ma-foot-st' }, h('b', {}, h('i', { class: 'ma-dot ' + dotOf(st) }), STATE_TXT[st] || st), h('span', { title: sub }, sub), wk && wk.total > 1 ? h('div', { class: 'ma-bar' }, h('i', { style: { width: Math.max(6, pctOf({ done: wk.done + 0.5, total: wk.total })).toFixed(1) + '%' } })) : null),
       run ? btn('⏹ Stop', 'danger', () => { Run.stop('stopped from the panel'); draw(); }) : btn('▶ Start', 'success', () => { Run.start(); draw(); }));
@@ -4599,14 +4608,14 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     if (cur) {
       const ev = Board.get(cur.low) || {}, cap = bossCap(cur.low), dmg = Math.max(0, Math.max(ev.userDmg || 0, Board.dealt(cur)) - Board.base(cur.low)), bw = Work.get('build'), pct = bw && bw.total ? pctOf({ done: bw.done + 0.5, total: bw.total }) : cap > 0 ? Math.min(100, dmg / cap * 100) : 0;
       out.push(h('div', { class: 'ma-hero' }, h('div', { class: 'ma-hero-top' }, avatar(cur.name, ev.icon, { size: 'lg', boss: true }),
-        h('div', { class: 'ma-hero-t' }, h('div', { class: 'ma-state' }, h('i', { class: 'ma-dot ' + dotOf(st) }), STATE_TXT[st] || st), h('div', { class: 'ma-hero-name' }, cur.name), h('div', { class: 'ma-hero-sub' }, bw ? `🎒 ${bw.step || bw.label}${bw.total > 1 ? ` · step ${Math.min(bw.done + 1, bw.total)} of ${bw.total}` : ''}` : `${fmtNum(dmg)} of ${fmtNum(cap)} damage · ${pct.toFixed(0)}%`))),
+        h('div', { class: 'ma-hero-t' }, h('div', { class: 'ma-state' }, h('i', { class: 'ma-dot ' + dotOf(st) }), STATE_TXT[st] || st), h('div', { class: 'ma-hero-name' }, cur.name), h('div', { class: 'ma-hero-sub' }, bw ? `🎒 ${bw.step || bw.label}${bw.total > 1 ? ` · step ${Math.min(bw.done + 1, bw.total)} of ${bw.total}` : ''}${bw.phases > 1 ? ` · part ${bw.phase} of ${bw.phases}` : ''}` : `${fmtNum(dmg)} of ${fmtNum(cap)} damage · ${pct.toFixed(0)}%`))),
         h('div', { class: 'ma-bar' + (!bw && pct >= 100 ? ' done' : '') }, h('i', { style: { width: pct.toFixed(1) + '%' } }))));
     } else {
       const l = Diag.last(), why = l.reason ? `${l.reason}${l.detail ? ' — ' + l.detail : ''}` : '', wk = Work.get('build') || Work.get('scan'), ow = wk ? null : otherWork(), idle = !wk && !ow ? idleLine() : '';
       out.push(h('div', { class: 'ma-hero' }, h('div', { class: 'ma-hero-top' }, h('span', { class: 'ma-ico', style: { width: '50px', height: '50px', fontSize: '24px', borderRadius: '13px' } }, wk ? (st === 'GRAVEYARD' ? '🪦' : st === 'SWITCHING' ? '🎒' : st === 'PLANNING' ? '🧭' : '🔎') : ow ? ow.icon : Run.wanted() ? '⏳' : '💤'),
         h('div', { class: 'ma-hero-t' }, h('div', { class: 'ma-state' }, h('i', { class: 'ma-dot ' + dotOf(st) }), STATE_TXT[st] || st),
           h('div', { class: 'ma-hero-name' }, wk ? wk.label : ow ? ow.name : idle && Run.wanted() ? idle : !cfg.targets.length && !idle ? 'No bosses selected' : Run.wanted() ? 'No target right now' : 'Ready when you are'),
-          h('div', { class: 'ma-hero-sub' }, wk ? (wk.total ? `${wk.step ? wk.step + ' · ' : ''}Step ${Math.min(wk.done + 1, wk.total)} of ${wk.total}` : 'One moment…') : ow ? ow.sub + (cfg.targets.length && nextIn != null ? ` · no boss up (next look in ${fmtDur(nextIn)})` : '') : idle && Run.wanted() ? 'No boss up right now' + (nextIn != null ? ' · next check in ' + fmtDur(nextIn) : '') + (why ? ' · last skip: ' + why : '') : !cfg.targets.length ? 'Pick what to farm in the Bosses tab.' : Run.wanted() && nextIn != null ? 'Next check in ' + fmtDur(nextIn) + (why ? ' · last skip: ' + why : '') : (why ? 'Last skip: ' + why : 'Press Start to begin.')))),
+          h('div', { class: 'ma-hero-sub' }, wk ? (wk.total ? `${wk.step ? wk.step + ' · ' : ''}Step ${Math.min(wk.done + 1, wk.total)} of ${wk.total}${wk.phases > 1 ? ` · part ${wk.phase} of ${wk.phases}` : ''}` : 'One moment…') : ow ? ow.sub + (cfg.targets.length && nextIn != null ? ` · no boss up (next look in ${fmtDur(nextIn)})` : '') : idle && Run.wanted() ? 'No boss up right now' + (nextIn != null ? ' · next check in ' + fmtDur(nextIn) : '') + (why ? ' · last skip: ' + why : '') : !cfg.targets.length ? 'Pick what to farm in the Bosses tab.' : Run.wanted() && nextIn != null ? 'Next check in ' + fmtDur(nextIn) + (why ? ' · last skip: ' + why : '') : (why ? 'Last skip: ' + why : 'Press Start to begin.')))),
         wk && wk.total ? h('div', { class: 'ma-bar' }, h('i', { style: { width: pctOf({ done: wk.done + (wk.step ? 0.5 : 0), total: wk.total }).toFixed(1) + '%' } })) : null));
     }
 
