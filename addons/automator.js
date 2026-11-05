@@ -3821,7 +3821,8 @@ const Guild = (() => {
     const active = !!(finish || donate || giveUp || prog), meta = extractCombatQuestData({ requirements: req, description: desc, isActive: active });
     const kill = !!(meta.monsterName && meta.amountNeeded > 0 && meta.minimumDamage > 0 && !meta.isCollectionQuest && !meta.skillUsageQuest);
     const kind = meta.skillUsageQuest ? 'skill' : (meta.isCollectionQuest || donate) ? 'collect' : kill ? 'kill' : 'other';
-    return { name, desc, req, progress: prog, cooldown: cool > 0, cooldownTs: cool, active, available: !!accept && !active, acceptId: parseIntSafe(argsOf(accept, 'acceptQuest')[0]), finishId: parseIntSafe(argsOf(finish, 'finishQuest')[0]),
+    const cdOn = cool * 1000 > nowMs();                                   // a timestamp that has passed is no cooldown (the attribute can linger)
+    return { name, desc, req, progress: prog, cooldown: cdOn, cooldownTs: cool, active, available: !!accept && !active && !cdOn, acceptId: parseIntSafe(argsOf(accept, 'acceptQuest')[0]), finishId: parseIntSafe(argsOf(finish, 'finishQuest')[0]),
       donateQ: parseIntSafe(dArgs[0]), donateItem: parseIntSafe(dArgs[1]), kind, kill, meta };
   }
   const parseBoard = (doc) => Array.from(doc.querySelectorAll('section.quests-section .quest-row, section.section.quests-section .quest-row')).map(readRow).filter(Boolean);
@@ -3841,7 +3842,7 @@ const Guild = (() => {
     if (!a.donateQ || !a.donateItem) return { n: 0, wait: 15 * MIN, why: 'the quest row has no donate ids (donateGatherItem)' };
     let n = 0;
     for (let i = 0, cap = Math.min(Math.max(1, left(a)), 300); i < cap; i++) {
-      if (!Run.tasksOn() || Guard.isFaulted()) break;                          // Stop (or a halt) mid-donation stops the next one stops the next one
+      if (!Run.tasksOn() || Guard.isFaulted()) break;                          // Stop (or a halt) mid-donation stops the next one
       const r = await Act.run(() => post('/adventurers_donate_gather.php', { quest_id: String(a.donateQ), item_id: String(a.donateItem) }), 150), m = msgOf(r);
       if (ok200(r && r.json, r && r.text)) { n++; await sleep(150); continue; }
       if (SHORT_RE.test(m)) return { n, wait: 15 * MIN, why: `not enough items to donate yet${m ? ' (' + m + ')' : ''}` };
