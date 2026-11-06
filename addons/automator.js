@@ -175,8 +175,15 @@ const Log = (() => {
     return 'info';
   };
   function flush() { timer = 0; if (!dirty) return; dirty = false; try { logStore.set(rows); } catch (_) { /* */ } }
-  function add(msg, kind) {
-    rows.push({ t: ts(), k: kindOf(msg, kind), m: String(msg) });
+  const RANK = { info: 0, ok: 1, dmg: 1, skill: 1, warn: 2, err: 3 };
+  function add(msg, kind, grp) {
+    const k = kindOf(msg, kind), last = rows[rows.length - 1], now = Date.now();
+    if (grp && last && last.g === grp && now - (last.at || 0) < 45000) {                    // a follow-up of the line above: one row, "first · then · then" (the icon and "auto-farm:" are not repeated)
+      const more = String(msg).replace(/^[^\p{L}\p{N}<]+/u, '').replace(/^auto-farm:\s*/i, '');
+      rows[rows.length - 1] = Object.assign({}, last, { m: last.m + ' · ' + more, k: (RANK[k] || 0) > (RANK[last.k] || 0) ? k : last.k });   // a new object: the open panel redraws instead of appending
+      dirty = true; if (!timer) timer = setTimeout(flush, 2500); UI.dirty('log'); return;
+    }
+    rows.push({ t: ts(), at: now, g: grp || '', k, m: String(msg) });
     if (rows.length > 300) rows.splice(0, rows.length - 300);
     dirty = true; if (!timer) timer = setTimeout(flush, 2500);
     UI.dirty('log');
@@ -187,7 +194,7 @@ const Log = (() => {
   window.addEventListener('beforeunload', flush);
   return { add, clear, all, flush };
 })();
-const log = (m, k) => Log.add(m, k);
+const log = (m, k, g) => Log.add(m, k, g);   // g = a group name: lines of one group that follow each other within 45 s become ONE row
 
 /* ---- diagnostics: every skipped tick says why ------------------------------------------------------------------- */
 const Diag = (() => {
@@ -1031,7 +1038,6 @@ const Scan = (() => {
       pages.set(`${loc.gate}/${loc.wave}`, loc);
     }
     const total = pages.size + dd.length; let n = 0;
-    if (force && total) log(`🔎 scanning ${total} place${total === 1 ? '' : 's'} for your bosses…`, 'info');
     let failed = 0;
     try {
       for (const loc of pages.values()) {
@@ -1676,10 +1682,10 @@ const Presets = (() => {
         try { r = await withTimeout(Core.call('preset.' + kind + '.apply', String(want), opts), 120000, { ok: false, message: 'timed out' }); }
         catch (e) { r = { ok: false, message: (e && e.code === 'NO_CAP') ? 'the addon that offered it is gone' : ((e && e.message) || String(e)) }; }
         if (kind === BEST && !ex.ran) Prog.note(lab, 'Gear + pets · ' + (r && r.ok !== false ? 'already the best' : 'failed'));
-        if (kind === BEST && r && r.timing) log(`⏱ ${esc(bossName(low))}: ${timingText(r.timing)}`, 'info');
+        if (kind === BEST && r && r.timing) log(`⏱ ${esc(bossName(low))}: ${timingText(r.timing)}`, 'info', 'build');
         if (kind === BEST && sig && !(r && r.ok !== false && r.changed)) Prog.drop(SIG);          // no new pets, so no sigils to move: not a step that is waited for
         if (r && r.ok !== false) {
-          applied[kind] = memo; log(`✅ ${kind === BEST ? 'best gear + pets' : kind + ' preset'} ${r.changed === false ? 'already on' : 'applied'}`, 'ok'); try { await syncMe(); } catch (_) { /* */ } Me.statsAt = 0;
+          applied[kind] = memo; log(`✅ ${kind === BEST ? 'best gear + pets' : kind + ' preset'} ${r.changed === false ? 'already on' : 'applied'}`, 'ok', 'build'); try { await syncMe(); } catch (_) { /* */ } Me.statsAt = 0;
           if (kind === 'gear' || (kind === BEST && r.changed)) buildEpoch++;
           if (r.changed !== false) changedAny = true;
           if (kind === 'crystal') await Origin.markCrystals();
@@ -1689,7 +1695,7 @@ const Presets = (() => {
               Prog.at(SIG);
               const c = await BuildKit.sigils.carry(teamBefore);
               Origin.addMoves(c.undo);
-              if (c.moved) log(`✨ ${c.moved} sigil${c.moved === 1 ? '' : 's'} moved to the new pets`, 'ok');
+              if (c.moved) log(`✨ ${c.moved} sigil${c.moved === 1 ? '' : 's'} moved to the new pets`, 'ok', 'build');
               if (!c.ok) log(`⚠️ sigils: ${esc(c.message)}`, 'warn');
             }
           }
@@ -1700,12 +1706,11 @@ const Presets = (() => {
         const memo = '__best@' + buildEpoch, key = 'crystal:' + memo;
         if (applied.crystal !== memo && Date.now() - (failedAt[key] || 0) >= 300000) {
           Prog.at(CRY);
-          log(`💎 best crystals on the gear for ${esc(bossName(low))}…`, 'info');
           const r = await withTimeout(BuildKit.crystals.best(), 180000, { ok: false, message: 'timed out' });
           Origin.addPlaced(r && r.placed);
           if (r && r.ok !== false) { await Origin.markCrystals(r.layout); }
           if (r && r.ok !== false && !r.changed) Prog.note(CRY, 'Crystals · already the best');
-          if (r && r.ok !== false) { applied.crystal = memo; log(r.changed ? `✅ crystals placed (${r.moves} step${r.moves === 1 ? '' : 's'})` : '✅ crystals already the best', 'ok'); }
+          if (r && r.ok !== false) { applied.crystal = memo; log(r.changed ? `✅ crystals placed (${r.moves} step${r.moves === 1 ? '' : 's'})` : '✅ crystals already the best', 'ok', 'build'); }
           else { failedAt[key] = Date.now(); log(`⚠️ best crystals: ${esc((r && r.message) || 'unknown')}`, 'warn'); }
         }
       }
@@ -3514,7 +3519,7 @@ Object.assign(Farm, (() => {
     if (snap.enabled && put.length) { await api('toggle', { enabled: 1 }); AF.clearPaused(); }
     else if (snap.enabled && !(snap.targets || []).length) AF.clearPaused();
     if (left.length) { patch({ owed: false, snap: Object.assign({}, snap, { left }) }); log(`⚠️ auto-farm: put back ${put.length} of ${put.length + left.length} of your targets (${why || 'restore'}) — could not re-add: ${left.map(esc).join(', ')} (an ended event?). Your saved set-up is kept; it is tried again on the next run and after a reload`, 'warn'); }
-    else { patch({ owed: false }); if (put.length) log(`↩ auto-farm: your ${put.length} target${put.length === 1 ? '' : 's'} and settings are back${snap.enabled ? ' (running again)' : ''}`, 'ok'); }
+    else { patch({ owed: false }); if (put.length) log(`↩ auto-farm: your ${put.length} target${put.length === 1 ? '' : 's'} and settings are back${snap.enabled ? ' (running again)' : ''}`, 'ok', 'farm-run'); }
     return { ok: !left.length, put: put.length, left };
   }
 
@@ -3720,7 +3725,7 @@ Object.assign(Farm, (() => {
       }
       if (left > 0) out.push(Object.assign({}, i, { need: left }));
     }
-    if (looted) log(`🌾 auto-farm: ${looted} earlier kill${looted === 1 ? '' : 's'} looted for the active quest`, 'ok');
+    if (looted) log(`🌾 auto-farm: ${looted} earlier kill${looted === 1 ? '' : 's'} looted for the active quest`, 'ok', 'farm-run');
     return out;
   }
   const acctTxt = () => { const a = S.acct; if (!a || !a.seen) return 'no matching corpses in the graveyard'; const p = [`${a.seen} matching corpse${a.seen === 1 ? '' : 's'}`]; if (a.looted) p.push(`${a.looted} looted`); if (a.low) p.push(`${a.low} under the minimum damage`); if (a.big) p.push(`${a.big} the wrong size`); if (a.expiring) p.push(`${a.expiring} about to expire`); if (a.refused) p.push(`${a.refused} refused by the site`); return p.join(', '); };
@@ -3756,7 +3761,7 @@ Object.assign(Farm, (() => {
         if (!left) left = pool;
         const batch = left.length === pool.length && left.every((x, i) => x.need === pool[i].need) ? first : left.length ? plan(left)[0] : null;
         if (batch) { log(`🌾 auto-farm: killing ${batch.targets.map((t) => esc(t.name)).join(' + ')} — graveyard check: ${acctTxt()}`, 'info'); const how = await runBatch(batch); if (how === 'finished') S.sess.done += pool.filter((i) => batch.targets.some((t) => keyOf(t.name) === keyOf(i.name))).length; }
-        else { S.sess.done += pool.length; log('🌾 auto-farm: nothing left to kill — the earlier kills cover it', 'ok'); }
+        else { S.sess.done += pool.length; log('🌾 auto-farm: nothing left to kill — the earlier kills cover it', 'ok', 'farm-run'); }
       }
     }
     catch (e) { log(`⚠️ auto-farm: ${esc(e.message)}`, 'warn'); Diag.skip('auto-farm-failed', e.message); waitFor = Math.max(waitFor, 5 * 60000); }       // not again in 20 seconds
@@ -4597,8 +4602,9 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
 /* activity */
 .ma-log{display:flex;flex-direction:column;gap:4px;max-height:460px;overflow-y:auto;padding-right:2px}
 .ma-log::-webkit-scrollbar{width:6px}.ma-log::-webkit-scrollbar-thumb{background:#2b3859;border-radius:4px}
-.ma-ll{padding:5px 10px;border-radius:12px;border-left:3px solid #2b3859;background:#0d1322;font:11.5px/1.4 Arial,sans-serif;color:#c9d4f5;overflow-wrap:anywhere}
-.ma-ll b{color:#6e7a8c;font-weight:400;margin-right:7px;font-variant-numeric:tabular-nums}
+.ma-ll{display:grid;grid-template-columns:max-content minmax(0,1fr);column-gap:8px;align-items:baseline;padding:5px 10px;border-radius:12px;border-left:3px solid #2b3859;background:#0d1322;font:11.5px/1.4 Arial,sans-serif;color:#c9d4f5}
+.ma-ll b{color:#6e7a8c;font-weight:400;font-variant-numeric:tabular-nums;white-space:nowrap}
+.ma-ll span{min-width:0;overflow-wrap:anywhere}   /* a long line wraps inside its own column: it never runs back under the time */
 .ma-ll.ok{border-left-color:#33b57f;color:#8ee6a8}.ma-ll.warn{border-left-color:#e3b341;color:#ffd978}.ma-ll.err{border-left-color:#e5484d;color:#ff9a9a}
 .ma-ll.dmg{border-left-color:#e3b341;color:#ffe3a3}.ma-ll.skill{border-left-color:#a371f7;color:#d9c4ff}.ma-ll.info{border-left-color:#6ea8ff;color:#c9e6ff}
 .ma-ctl{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
@@ -4842,7 +4848,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
 
     // the other tasks: one collapsible each, only for the ones that are switched on
     const tcfg = cfg.tasks, KIND = { kill: ['⚔️', 'kill'], collect: ['📦', 'collect'], skill: ['✨', 'skill'] };
-    const stPill = (i) => pill({ run: 'working', ok: 'ok', warn: 'check', err: 'error', idle: 'idle' }[i.state] || 'idle', { run: 'blue', ok: 'ok', warn: 'warn', err: 'warn' }[i.state]);
+    const stPill = (i) => pill({ run: 'working', warn: 'check', err: 'error' }[i.state] || 'idle', { run: 'blue', warn: 'warn', err: 'err' }[i.state] || 'ok');   // "ok" and "idle" both mean nothing to do now: one word
     const barRow = (ico, name, cur2, tot, sub, pl) => h('div', { class: 'ma-q' }, h('span', { class: 'ma-ico' }, ico), h('div', { class: 'ma-q-n' }, h('b', {}, name), tot > 0 ? h('div', { class: 'ma-bar' + (cur2 >= tot ? ' done' : '') }, h('i', { style: { width: Math.min(100, cur2 / tot * 100).toFixed(1) + '%' } })) : null, sub ? h('small', {}, sub) : null), pl || null);
     if (tcfg.guild.enabled) {
       const gi = Tasks.info('guild'), board = Array.isArray(gi.board) ? gi.board : [], act = board.filter((q) => q.active || q.done);
@@ -4863,10 +4869,10 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     }
     if (tcfg.guild.enabled || tcfg.bp.enabled) {
       const F = Farm.info(), md = Farm.mode();
-      out.push(fold('ov:farm', true, ['🌾 Auto-Farm', h('small', {}, Farm.busy() ? (Farm.line() || 'running') : '')], () => [
+      out.push(fold('ov:farm', true, ['🌾 Auto-Farm', h('small', {}, Farm.busy() ? (Farm.line() || 'running') : md.kind === 'auto' ? '' : 'attack path')], () => [
         h('div', { class: 'ma-note' }, Farm.busy() ? '🌾 ' + (Farm.line() || 'running') : md.kind === 'hand' ? md.why + ' — using the normal attack path' : `idle · ${F.ids} monster id${F.ids === 1 ? '' : 's'} known · ${F.runs} run${F.runs === 1 ? '' : 's'} this session${F.demands ? ' · ' + F.demands + ' request' + (F.demands === 1 ? '' : 's') + ' waiting' : ''}`),
         ...Object.values(F.skipped).map((x) => note('⚠️ ' + x)),
-        F.snap && F.snap.left && F.snap.left.length ? note('⚠️ could not put back: ' + F.snap.left.join(', ')) : null], { aside: pill(md.kind === 'auto' ? 'Auto-Farm' : 'attack path', md.kind === 'auto' ? 'ok' : 'warn') }));
+        F.snap && F.snap.left && F.snap.left.length ? note('⚠️ could not put back: ' + F.snap.left.join(', ')) : null], { aside: stPill({ state: Farm.busy() ? 'run' : F.snap && F.snap.left && F.snap.left.length ? 'warn' : 'idle' }) }));
     }
 
     // numbers
@@ -5282,7 +5288,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
         ' · ', h('button', { type: 'button', class: 'ma-link', onclick: () => { SideMob.forget(); draw(); } }, `forget ${SideMob.shielded()} shielded mob${SideMob.shielded() === 1 ? '' : 's'}`))];
   }
 
-  const logRow = (r) => h('div', { class: 'ma-ll ' + r.k }, h('b', {}, r.t), r.m.replace(/<[^>]+>/g, ''));
+  const logRow = (r) => h('div', { class: 'ma-ll ' + r.k }, h('b', { title: r.at ? new Date(r.at).toLocaleString() + ' (your browser clock)' : 'your browser clock' }, r.t), h('span', {}, r.m.replace(/<[^>]+>/g, '')));
   let lastRow = null;                                                // newest log line already on screen
   function paintLog() {                                              // a new log line only appends a row: no rebuild of the panel or the list
     const box = root && root.querySelector('.ma-log'), f = cfg.logFilter || 'all', all = Log.all(), i = all.indexOf(lastRow);
@@ -5301,7 +5307,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     if (f === 'skips') {
       const counts = Object.entries(Diag.counts).sort((a, b) => b[1] - a[1]);
       out.push(counts.length ? h('div', { class: 'ma-chips', style: { marginBottom: '10px' } }, counts.map(([k, n]) => pill(`${k} · ${n}`, 'warn'))) : null);
-      out.push(Diag.events.length ? h('div', { class: 'ma-log' }, Diag.events.slice(-60).map((e) => h('div', { class: 'ma-ll warn' }, h('b', {}, e.t), e.reason + (e.detail ? ' — ' + e.detail : '')))) : h('div', { class: 'ma-empty' }, 'No skips recorded.'));
+      out.push(Diag.events.length ? h('div', { class: 'ma-log' }, Diag.events.slice(-60).map((e) => h('div', { class: 'ma-ll warn' }, h('b', {}, e.t), h('span', {}, e.reason + (e.detail ? ' — ' + e.detail : ''))))) : h('div', { class: 'ma-empty' }, 'No skips recorded.'));
       out.push(h('div', { class: 'ma-actions', style: { marginTop: '10px' } }, btn('Clear', 'soft', () => { Diag.clear(); draw(); })));
     } else {
       const rows = all.filter((r) => f === 'all' || r.k === f).slice(-200);
