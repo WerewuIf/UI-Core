@@ -839,7 +839,8 @@ const Board = (() => {
   function load() { const s = boardStore.get(); b = s && typeof s === 'object' ? s : {}; }
   function save() { saveT = 0; if (!dirty) return; dirty = false; if (Tab.isMain()) boardStore.set(b); }
   function touch() { dirty = true; if (!saveT) saveT = setTimeout(save, 2000); UI.dirty('status'); }
-  function put(low, obj) { b[low] = obj; touch(); return obj; }
+  // a boss's picture is only on its card while it is up: whatever puts a record without one (dead, not on this scan, a card without an <img>) keeps the last one it had
+  function put(low, obj) { const old = b[low]; if (obj && !obj.icon && old && old.icon) obj = Object.assign({}, obj, { icon: old.icon }); b[low] = obj; touch(); return obj; }
   function patch(low, p) { b[low] = Object.assign({}, b[low] || {}, p); touch(); return b[low]; }
   // damage we have confirmed on this exact monster life (monster ids are unique per life: no carry-over)
   const dealt = (t) => { const e = b[t.low]; if (!e) return t.userDmg || 0; if (t.kind === 'dungeon-swarm' || (e.swarm && t.monsterId)) { const s = (e.swarm || []).find((x) => String(x.monsterId) === String(t.monsterId) && String(x.instanceId) === String(t.instanceId)); return Math.max(t.userDmg || 0, s ? s.userDmg || 0 : 0); } return String(e.monsterId) === String(t.monsterId) ? Math.max(t.userDmg || 0, e.userDmg || 0) : (t.userDmg || 0); };
@@ -4688,7 +4689,8 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   let tSet = null, tSrc = null, tN = -1;                              // the selected bosses as a Set (the list is changed in place and replaced, so check both)
   const targetSet = () => { if (tSrc !== cfg.targets || tN !== cfg.targets.length) { tSrc = cfg.targets; tN = cfg.targets.length; tSet = new Set(cfg.targets); } return tSet; };
   const isOn = (def) => { const t = targetSet(); return Roster.members(def).some((m) => t.has(m.low)); };
-  const iconOfBoss = (low) => { const e = Board.get(low); return e && e.icon; };
+  // own picture, else another phase's (a phase 1 that was never seen up, because the boss is always in phase 2 by the time it is looked at, has none of its own)
+  const iconOfBoss = (low) => { const e = Board.get(low); if (e && e.icon) return e.icon; const d = Roster.get(low); for (const m of d ? Roster.members(d) : []) { const x = Board.get(m.low); if (x && x.icon) return x.icon; } return undefined; };
   function bossState(low) {
     const def = Roster.get(low), e = Board.get(low), cap = bossCap(low); if (!def) return ['?', 'err'];
     if (cap <= 0) return ['skipped', ''];
