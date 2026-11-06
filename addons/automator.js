@@ -23,7 +23,7 @@
  * default cap of a boss is its highest loot requirement, and bosses the roster did not know yet are added. Export .txt writes it all out.
  */
 Core.module({
-  id: 'automator', name: 'Automator', icon: '🤖', version: '1.12.3',
+  id: 'automator', name: 'Automator', icon: '🤖', version: '1.12.4',
   // Offered to other addons through Core capabilities (guides/CAPABILITIES.md):
   //   automator.status() -> the status string     automator.start() / automator.stop()     automator.scan() -> scan the bosses now
   provides: (api) => api && api.start ? {
@@ -34,7 +34,7 @@ Core.module({
   } : {},
   init(Core) {
 'use strict';
-const ID = 'automator', VERSION = '1.12.3';
+const ID = 'automator', VERSION = '1.12.4';
 if (window.__automatorLoaded) { console.warn('[automator] already loaded', window.__automatorLoaded); return null; }
 window.__automatorLoaded = VERSION;
 
@@ -3240,9 +3240,9 @@ Object.assign(LootScan, (() => {
  * ================================================================================================================ */
 Object.assign(Farm, (() => {
   const ACT = '/auto_farm_actions.php', STAT = '/auto_farm_status.php';
-  const LEVEL_LOCK = 400, MAX_STACK = 250, SIMILAR = 0.9, GAP = 180, POLL = 5000, BLIND_POLL = 20000, EXTRA = 1, UNLIMITED = 999999, DEMAND_TTL = 20 * 60000, PROBE_TTL = 10 * 60000, HELD_MARGIN = 3 * 60;       // HELD_MARGIN (s): a kill-ahead corpse that would expire within this long no longer counts as held (the chain of quests uses them within a few minutes, so keep it short: a wide margin re-kills mobs that are about to be looted)
+  const LEVEL_LOCK = 400, MAX_STACK = 250, SIMILAR = 0.9, GAP = 180, POLL = 5000, BLIND_POLL = 20000, EXTRA = 1, UNLIMITED = 999999, DEMAND_TTL = 20 * 60000, PROBE_TTL = 10 * 60000, HELD_MARGIN = 3 * 60, WHERE_TTL = 20 * 60000;       // HELD_MARGIN (s): a kill-ahead corpse that would expire within this long no longer counts as held (the chain of quests uses them within a few minutes, so keep it short: a wide margin re-kills mobs that are about to be looted)
   const store = Core.store(ID + '-farm', { def: { snap: null, owed: false, ids: {} } });
-  const S = { busy: false, hold: false, retryAt: 0, sess: null, qtxt: '', stop: false, recheck: false, looted: new Set(), line: '', last: '', probe: null, probeAt: 0, demands: new Map(), skipped: new Map(), runs: 0, kills: 0, waves: { at: 0, alive: new Map() } };
+  const S = { where: new Map(), known: new Map(), fullDeadAt: 0, acctFull: false, busy: false, hold: false, retryAt: 0, sess: null, qtxt: '', stop: false, recheck: false, looted: new Set(), line: '', last: '', probe: null, probeAt: 0, demands: new Map(), skipped: new Map(), runs: 0, kills: 0, waves: { at: 0, alive: new Map() } };
   const stateOf = () => Object.assign({ snap: null, owed: false, ids: {} }, store.get() || {});
   const patch = (p) => { const s = Object.assign(stateOf(), p); store.set(s); return s; };
   const say = (line) => { S.line = line; UI.dirty('tasks'); };
@@ -3365,16 +3365,29 @@ Object.assign(Farm, (() => {
     for (let i = 0; i < 2; i++) { const doc = await wavePage(u, 'all'); if (!doc) return null; if (deadView(doc)) return doc; await sleep(400); }
     return false;
   }
-  async function survey(match, wantLive) {   // every wave page: { live: cards of mobs still up, dead: lootable corpses you damaged, verified }
-    const live = [], dead = [], seen = new Set(), now = Math.floor(Date.now() / 1000); let verified = true;
-    for (const u of waveUrls()) {
-      if (wantLive) { const a = await wavePage(u, 'alive'); if (a) for (const c of cardsOf(a)) { if (c.dead || c.boss || !match(c.name) || seen.has(c.id)) continue; seen.add(c.id); live.push(c); } await sleep(120); }
+  function note(u, cards) {                                                  // every page read teaches: this mob is on this page; this is its name; boss or not
+    const now = Date.now();
+    for (const c of cards) { const k = keyOf(c.name); if (!k) continue; const prev = S.known.get(k); S.known.set(k, { name: (prev && prev.name) || c.name, boss: !!(c.boss || (prev && prev.boss)) });
+      if (!c.boss) { let w = S.where.get(k); if (!w) S.where.set(k, w = new Map()); w.set(u, now); } }
+  }
+  async function survey(match, wantLive, keys) {   // every wave page: { live: cards of mobs still up, dead: lootable corpses you damaged, verified, full }
+    // `keys` (names, dead view only): once a full sweep is recent, only the pages where those mobs have been seen are read — not the whole graveyard for every quest
+    const live = [], dead = [], seen = new Set(), now = Math.floor(Date.now() / 1000), all = waveUrls(); let verified = true, urls = all, failed = false;
+    if (keys && !wantLive && Date.now() - S.fullDeadAt < WHERE_TTL) {
+      const sub = new Set(); let ok = true;
+      for (const k of keys) { const w = S.where.get(k); if (!w || !w.size) { ok = false; break; } for (const u of w.keys()) sub.add(u); }
+      if (ok) urls = all.filter((u) => sub.has(u));
+    }
+    const full = urls.length === all.length;
+    for (const u of urls) {
+      if (wantLive) { const a = await wavePage(u, 'alive'); if (a) { const ca = cardsOf(a); note(u, ca); for (const c of ca) { if (c.dead || c.boss || !match(c.name) || seen.has(c.id)) continue; seen.add(c.id); live.push(c); } } await sleep(120); }
       const g = await graveyard(u);
-      if (g === false) verified = false;
-      else if (g) for (const c of cardsOf(g)) { if (!c.dead || c.boss || !match(c.name) || seen.has(c.id) || !c.joined || c.dmg <= 0 || (c.expire > 0 && c.expire < now)) continue; seen.add(c.id); dead.push(c); }
+      if (g === false) verified = false; else if (g === null) failed = true;
+      else if (g) { const cg = cardsOf(g); note(u, cg); for (const c of cg) { if (!c.dead || c.boss || !match(c.name) || seen.has(c.id) || !c.joined || c.dmg <= 0 || (c.expire > 0 && c.expire < now)) continue; seen.add(c.id); dead.push(c); } }
       await sleep(120);
     }
-    return { live, dead, verified };
+    if (full && verified && !failed) S.fullDeadAt = Date.now();               // only a verified dead-view sweep of EVERY page counts as the full picture
+    return { live, dead, verified, full };
   }
   async function lootOne(id) {
     const res = await Act.run(() => post('/loot.php', { monster_id: String(id) }), cfg.minActionGapMs), j = res && res.json;
@@ -3388,6 +3401,7 @@ Object.assign(Farm, (() => {
     const m = new Map();
     for (const u of waveUrls()) {
       const doc = await wavePage(u, 'alive'); if (!doc) continue; learn(doc);
+      note(u, cardsOf(doc));
       for (const c of cardsOf(doc)) { if (c.dead) continue; const k = keyOf(c.name), e = m.get(k) || { name: c.name, count: 0, boss: false, url: u }; e.count++; e.boss = e.boss || c.boss; m.set(k, e); }
       await sleep(120);
     }
@@ -3401,8 +3415,8 @@ Object.assign(Farm, (() => {
     const pr = await probe();
     if (!pr.ok && pr.transient) return { ok: false, why: pr.why };
     const near = (m) => m.get(nk) || fuzzyGet(m, nk);
-    let seen = near(S.waves.alive || new Map());
-    if (!seen) { const m = await alive(); seen = near(m); }                // the cached view (a minute): not one full wave sweep per quest per look
+    let seen = near(S.waves.alive || new Map()) || near(S.known);                       // (a mob seen before keeps its name and boss flag: no sweep of every page because it is dead right now)
+    if (!seen) { const m = await alive(); seen = near(m) || near(S.known); }                // the cached view (a minute): not one full wave sweep per quest per look
     if (seen && seen.boss) return { ok: false, why: 'a boss — only basic wave mobs are done here' };
     if (seen && keyOf(seen.name) !== nk && !fuzzyNote.has(nk)) { fuzzyNote.add(nk); log(`🌾 auto-farm: “${esc(name)}” read as “${esc(seen.name)}” (spelling) — check it is the right mob`, 'info'); }
     if (!pr.ok) return { ok: true, manual: true, locked: !!pr.locked, why: pr.why, seen: !!seen, canon: seen ? seen.name : '' };                  // locked / off / refused: the normal attack path
@@ -3664,20 +3678,27 @@ Object.assign(Farm, (() => {
   }
   /* earlier kills are still in the graveyard: loot them first for a quest that is active now (the quest counts them), and take the ones held for a
      quest that is not active yet off what has to be killed (otherwise every look at the board would pre-kill the same mobs again) */
-  async function account(items) {
+  async function account(items) {                                            // loot / count what is held: the pages these mobs are known on first, the whole graveyard only if something is still owed
+    S.acctFull = false; const carry = { st: null, taken: new Set() };
+    const first = await accountPass(items, carry);
+    if (!first || !first.length || S.acctFull || !S.acct) return first;
+    return accountPass(first, carry);                                            // narrow pass left something owed: look at every page before believing it is not there
+  }
+  async function accountPass(items, carry) {
     S.acct = null;                                                              // (the "why did it start" line reads this: never a stale check)
     const keys = new Set(items.map((i) => keyOf(i.name)));
-    let sv; try { sv = await survey((n) => keys.has(keyOf(n)), false); } catch (_) { return items; }
+    let sv; try { sv = await survey((n) => keys.has(keyOf(n)), false, keys); } catch (_) { return items; }
+    S.acctFull = !!sv.full;
     if (!sv.verified && !sv.dead.length) return items.every((i) => i.defer) ? null : items;     // the dead view could not be read: a kill-ahead must not guess (it would kill the same mobs twice)
     const dead = sv.dead.filter((c) => !S.looted.has(String(c.id))).sort((a, b) => a.w - b.w), out = []; let looted = 0;
-    const st = S.acct = { seen: 0, looted: 0, low: 0, big: 0, expiring: 0, refused: 0 }, soon = Math.floor(Date.now() / 1000) + HELD_MARGIN;
+    const st = S.acct = carry.st || (carry.st = { seen: 0, looted: 0, low: 0, big: 0, expiring: 0, refused: 0 }), soon = Math.floor(Date.now() / 1000) + HELD_MARGIN;
     for (const i of items) {
       const k = keyOf(i.name), minD = Math.max(0, Number(i.minDamage) || 0); let left = Math.max(0, Math.floor(Number(i.need) || 0));
       for (const c of dead) {
-        if (left <= 0) break; if (keyOf(c.name) !== k || c.taken) continue;
+        if (left <= 0) break; if (keyOf(c.name) !== k || c.taken || carry.taken.has(String(c.id))) continue;
         st.seen++;
         if (c.dmg < minD) { st.low++; continue; }
-        if (i.defer) { if (c.w > left * 1.5) { st.big++; continue; } if (c.expire > 0 && c.expire < soon) { st.expiring++; continue; } c.taken = true; left -= c.w; continue; }          // held: counts, stays unlooted
+        if (i.defer) { if (c.w > left * 1.5) { st.big++; continue; } if (c.expire > 0 && c.expire < soon) { st.expiring++; continue; } c.taken = true; carry.taken.add(String(c.id)); left -= c.w; continue; }          // held: counts, stays unlooted
         if (S.stop || c.w > left * 1.5) { st.big++; continue; }
         if (await lootOne(c.id)) { c.taken = true; left -= c.w; looted += c.w; st.looted += c.w; } else st.refused++;
       }
