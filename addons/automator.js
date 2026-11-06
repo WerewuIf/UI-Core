@@ -4261,7 +4261,7 @@ const Merchant = (() => {
       items.push({ source: 'merch', id: String(d.merchId), currency: String(d.currency || 'gold').toLowerCase() === 'gems' ? 'gems' : 'gold', name: ((c.querySelector('.name') || {}).textContent || 'Item').trim(), price: parseInt(d.price, 10) || 0, limit: parseInt(d.maxq, 10) || 0, bought: parseInt(d.bought, 10) || 0 }); });
     return items;
   }
-  const shopOf = (items) => items.filter(weekly).map((i) => ({ name: i.name, bought: i.bought, limit: i.limit, price: i.price })).sort((a, b) => (b.limit - b.bought > 0) - (a.limit - a.bought > 0) || a.name.localeCompare(b.name));   // what the Overview lists
+  const shopOf = (items) => items.filter(weekly).map((i) => ({ src: i.source, name: i.name, bought: i.bought, limit: i.limit, price: i.price }));   // what the Overview counts: per shop, items and units
   const goldOf = (doc) => { const el = doc.getElementById('goldBalance'), n = el ? parseNum(el.textContent, -1) : -1; if (n >= 0) return n; try { return Number(Core.me.get().gold) || 0; } catch (_) { return 0; } };
   async function damon() {
     try {
@@ -4279,7 +4279,7 @@ const Merchant = (() => {
     const t = cfg.tasks.merchant; if (!t.enabled) return;
     setInfo({ state: 'run', line: 'reading the merchant…' });
     const wk = weekStart(), s = store.get() || {};
-    if (wk && s.week === wk && s.done) { setInfo({ state: 'ok', line: `this week's restock is bought (${fmtNum(s.spent || 0)} gold) · next reset ${(() => { try { return new Date(Core.clock.next('sun', '00:00')).toLocaleString(); } catch (_) { return 'Sunday'; } })()} server time` }); return untilReset(); }
+    if (wk && s.week === wk && s.done && Array.isArray(s.shop)) { setInfo({ state: 'ok', line: `this week's restock is bought (${fmtNum(s.spent || 0)} gold) · next reset ${(() => { try { return new Date(Core.clock.next('sun', '00:00')).toLocaleString(); } catch (_) { return 'Sunday'; } })()} server time` }); return untilReset(); }
     const doc = parseHtml(await netText('/merchant.php', { force: true, ttl: 0, key: 'ma:merchant' })), st = Guard.pageState(doc);
     if (st !== 'ok') { Guard.fault(st, 'merchant'); setInfo({ state: 'err', line: 'not signed in' }); return 5 * 60000; }
     let items = [...(await damon()), ...scrape(doc)];
@@ -4885,10 +4885,12 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
         bi.total ? barRow('🎫', 'Hunt', bi.have || 0, bi.total, `${fmtNum(bi.have || 0)} / ${fmtNum(bi.total)}`, null) : null, tStatus('bp'), nextNote('bp')], { aside: stPill(bi) }));
     }
     if (tcfg.merchant.enabled) {
-      const mi = Tasks.info('merchant'), mst = Merchant.state(), shop = Array.isArray(mst.shop) ? mst.shop : [], open = shop.filter((x) => x.limit > x.bought).length;
-      out.push(fold('ov:merchant', !mst.done, ['🛒 Merchant', h('small', {}, mst.done ? 'bought this week' : shop.length ? `${open} of ${shop.length} left to buy${mst.gold != null ? ' · ' + fmtNum(mst.gold) + ' gold' : ''}` : '')], () => [
-        ...shop.slice(0, 12).map((x) => barRow('🛒', x.name, x.bought, x.limit, `${fmtNum(x.bought)} / ${fmtNum(x.limit)} · ${fmtNum(x.price)} gold each`, pill(x.limit > x.bought ? fmtNum(x.limit - x.bought) + ' left' : 'bought', x.limit > x.bought ? 'warn' : 'ok'))),
-        shop.length > 12 ? note(`+ ${shop.length - 12} more`) : null,
+      const mi = Tasks.info('merchant'), mst = Merchant.state(), shop = Array.isArray(mst.shop) ? mst.shop : [];
+      const tally = (src) => { const xs = shop.filter((x) => x.src === src), units = xs.reduce((n, x) => n + x.limit, 0), got = xs.reduce((n, x) => n + Math.min(x.bought, x.limit), 0), full = xs.filter((x) => x.bought >= x.limit).length, cost = xs.reduce((n, x) => n + Math.max(0, x.limit - x.bought) * x.price, 0); return { n: xs.length, units, got, full, cost }; };
+      const shopRow = (ico, name, t) => !t.n ? null : barRow(ico, name, t.got, t.units, `${t.full}/${t.n} items bought · ${fmtNum(t.got)} / ${fmtNum(t.units)} units${t.cost ? ' · ' + fmtNum(t.cost) + ' gold to finish' : ''}`, pill(t.got >= t.units ? 'bought' : fmtNum(t.units - t.got) + ' left', t.got >= t.units ? 'ok' : 'warn'));
+      const wm = tally('merch'), dm = tally('damon');
+      out.push(fold('ov:merchant', true, ['🛒 Merchant', h('small', {}, mst.done ? 'bought this week' : wm.n + dm.n ? `${wm.got + dm.got} / ${wm.units + dm.units} units${mst.gold != null ? ' · ' + fmtNum(mst.gold) + ' gold' : ''}` : '')], () => [
+        shopRow('🛒', 'Weekly Merchant', wm), shopRow('🏛️', "Damon's shop", dm),
         mst.spent || mst.bought ? note(`This week: ${fmtNum(mst.bought || 0)} purchase${mst.bought === 1 ? '' : 's'} for ${fmtNum(mst.spent || 0)} gold.`) : null, tStatus('merchant'), nextNote('merchant')], { aside: stPill(mi) }));
     }
     if (tcfg.guild.enabled || tcfg.bp.enabled) {
