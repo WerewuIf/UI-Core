@@ -3331,7 +3331,9 @@ Object.assign(Farm, (() => {
     return d[a.length][b.length]; };
   // typo fallback: the SAME number of words, exactly ONE word different (6+ letters, no digits, one slip — two for a 10+ letter word), and only ONE known name that close.
   // Never across numerals or short words (Golem 1 / Golem 2, Guard I / Guard II) and never when two names are that close: a wrong monster is worse than "not found".
-  const fuzzyKey = (k, keys) => { const kt = k.split(' '); let hit = '', n = 0;
+  // one name is the other with leading words added ("Flamecasters" on the quest, "Lizardman Flamecaster" on the wave): same mob when the shared tail is 5+ letters and only ONE known name fits
+  const tailOf = (k, keys) => { let hit = '', n = 0; for (const c of keys) { if (c === k) return c; if ((c.endsWith(' ' + k) && k.length >= 5) || (k.endsWith(' ' + c) && c.length >= 5)) { hit = c; n++; } } return n === 1 ? hit : ''; };
+  const fuzzyKey = (k, keys) => { keys = Array.from(keys); const tail = tailOf(k, keys); if (tail) return tail; const kt = k.split(' '); let hit = '', n = 0;
     for (const c of keys) { if (c === k) return c; const ct = c.split(' '); if (ct.length !== kt.length) continue;
       const diff = []; for (let i = 0; i < kt.length; i++) if (kt[i] !== ct[i]) diff.push(i); if (diff.length !== 1) continue;
       const a = kt[diff[0]], b = ct[diff[0]]; if (a.length < 6 || b.length < 6 || /\d/.test(a + b)) continue;
@@ -3442,7 +3444,7 @@ Object.assign(Farm, (() => {
     if (seen && keyOf(seen.name) !== nk && !fuzzyNote.has(nk)) { fuzzyNote.add(nk); log(`🌾 auto-farm: “${esc(name)}” read as “${esc(seen.name)}” (spelling) — check it is the right mob`, 'info'); }
     if (!pr.ok) return { ok: true, manual: true, locked: !!pr.locked, why: pr.why, seen: !!seen, canon: seen ? seen.name : '' };                  // locked / off / refused: the normal attack path
     const id = lookup(seen ? seen.name : name);
-    if (!id) return { ok: true, manual: true, why: `no Auto-Farm id for "${name}" yet (it is learned from a wave page that shows the site's Auto-Farm panel)`, seen: !!seen, canon: seen ? seen.name : '' };
+    if (!id) return { ok: true, manual: true, why: `no Auto-Farm id for "${seen ? seen.name : name}" yet (it is learned from a wave page that shows the site's Auto-Farm panel)`, seen: !!seen, canon: seen ? seen.name : '' };
     return { ok: true, id, seen: !!seen, canon: seen ? seen.name : '' };
   }
 
@@ -3647,7 +3649,7 @@ Object.assign(Farm, (() => {
     return { ok: false, reason: 'unknown' };
   }
   async function hunt(d) {                                                  // d = { name, need, minDamage } → { looted, why, wait }
-    const key = keyOf(d.name), minD = Math.max(0, Number(d.minDamage) || 0), t0 = Date.now(), out = { looted: 0, why: '', wait: 0 }, low = String(d.name).toLowerCase().trim(), skip = new Set(), autoAtStart = wantAuto(), defer = !!d.defer; let fails = 0, held = 0;       // defer: kill ahead for a quest that is not active yet — the corpses are counted, not looted
+    const key = canonKey(d.name), minD = Math.max(0, Number(d.minDamage) || 0), t0 = Date.now(), out = { looted: 0, why: '', wait: 0 }, low = String(d.name).toLowerCase().trim(), skip = new Set(), autoAtStart = wantAuto(), defer = !!d.defer; let fails = 0, held = 0;       // defer: kill ahead for a quest that is not active yet — the corpses are counted, not looted
     const got = () => (defer ? held : out.looted);
     const regen = () => { let secs = 60; try { secs = Core.me.secondsToTick(); } catch (_) { /* */ } return Math.max(60, secs + 5) * 1000; };
     while (!S.stop && Tab.isMain() && Date.now() - t0 < HUNT_BUDGET) {
@@ -3687,8 +3689,11 @@ Object.assign(Farm, (() => {
   }
 
   /* ---- demands: tasks say what they need, the service batches it ---- */
+  // a quest's monster name as the waves spell it (known mobs only; no unique match = the name as given)
+  const canonKey = (name) => { const k = keyOf(name); return S.known.has(k) ? k : fuzzyKey(k, S.known.keys()) || k; };
+  const canonName = (name) => { const e = S.known.get(canonKey(name)); return e && !e.boss ? e.name : name; };
   function want(owner, items) {
-    S.demands.set(owner, { at: Date.now(), items: (items || []).filter((i) => i && i.need > 0) }); S.skipped.delete(owner);
+    S.demands.set(owner, { at: Date.now(), items: (items || []).filter((i) => i && i.need > 0).map((i) => Object.assign({}, i, { name: canonName(i.name) })) }); S.skipped.delete(owner);
     if ((items || []).some((i) => i && i.need > 0 && !i.defer)) {                          // a quest that is active NOW: do not wait for the 15 s timer
       S.lastActive = Date.now();
       if (!S.busy && !S.kick) S.kick = setTimeout(() => { S.kick = 0; service().catch((e) => log('⚠️ auto-farm: ' + esc(e.message), 'warn')); }, 600);
@@ -4049,10 +4054,10 @@ const Guild = (() => {
     }
     return null;
   }
-  async function castSkills(a) {                                          // the farm is held back while casts go out (a server Auto-Farm run would refuse them)
-    Farm.hold(true); try { return await castSkillsRun(a); } finally { Farm.hold(false); }
+  async function castSkills(a, onCast) {                                  // the farm is held back while casts go out (a server Auto-Farm run would refuse them)
+    Farm.hold(true); try { return await castSkillsRun(a, onCast); } finally { Farm.hold(false); }
   }
-  async function castSkillsRun(a) {
+  async function castSkillsRun(a, onCast) {
     let cls = effectiveClass(); if (!cls) { try { await detectClass(); } catch (_) { /* */ } cls = effectiveClass(); }
     const cs = cls ? CLASS_SKILLS[cls] : null;
     if (!cs) return { n: 0, wait: 30 * MIN, why: 'no class detected — pick a class (the site\'s Classes page) or set Class in Settings' };
@@ -4068,6 +4073,7 @@ const Guild = (() => {
       if (j.status === 'success' || j.totaldmgdealt !== undefined) {
         n++; bad = 0; const mana = j.mana !== undefined ? j.mana : j.mp; Me.mp = mana !== undefined && mana !== null ? parseNum(mana) : Math.max(0, Me.mp - cs.cost);
         try { Core.me.fromAttack(j); } catch (_) { /* */ }
+        if (onCast) onCast(Math.min(total, (a.progress ? a.progress.current : 0) + n), total);          // the quest's own counter, live
         continue;
       }
       const c = classifyReject(m || JSON.stringify(j));
@@ -4148,8 +4154,12 @@ const Guild = (() => {
       } else if (a.kind === 'skill') {
         if (G.skill === false) { notes.push(`“${a.name}”: skill quests are switched off`); later(60 * MIN); continue; }
         setInfo({ state: 'run', line: `“${a.name}” ${a.progress ? a.progress.current + '/' + a.progress.total : ''} — casting` });
-        const r = await castSkills(a); did += r.n;
-        if (r.n) log(`✨ skill quest “${esc(a.name)}”: ${r.n} cast${r.n === 1 ? '' : 's'}`, 'ok');
+        const upTo = (cur, tot) => {                                       // each cast moves the status line AND the quest's row in the overview (the board is only re-read after the run)
+          const gi = Tasks.info('guild'), board = Array.isArray(gi.board) ? gi.board.map((q) => (q.name === a.name ? Object.assign({}, q, { cur, total: tot }) : q)) : gi.board;
+          setInfo({ state: 'run', line: `“${a.name}” ${cur}/${tot} — casting`, board });
+        };
+        const r = await castSkills(a, upTo); did += r.n; const was = a.progress ? a.progress.current : 0, tot = a.progress ? a.progress.total : 0;
+        if (r.n) log(`✨ skill quest “${esc(a.name)}”: ${r.n} cast${r.n === 1 ? '' : 's'}${tot ? ` · ${Math.min(tot, was + r.n)}/${tot}` : ''}`, 'ok');
         if (r.why) { notes.push(`“${a.name}”: ${r.why}`); later(r.wait); } else return 2500;       // all casts went through: look at the board again
       } else if (a.kind === 'kill') {
         const mob = a.meta.monsterName, c = await Farm.canFarm(mob);
@@ -4198,6 +4208,7 @@ const Guild = (() => {
 })();
 
 const Battle = (() => {
+  let bpDoneLogged = false;                                             // the "hunt complete" line is logged once per completion, not every hourly look
   const setInfo = (p) => Tasks.info('bp', p);
   const num = (s) => parseNum(String(s || '').replace(/,/g, ''), 0);
   function parseQuest(el) {                                              // one .card .quest of the pass page
@@ -4217,7 +4228,8 @@ const Battle = (() => {
     doc.querySelectorAll('.card .quest').forEach((q) => { const p = parseQuest(q); if (p && p.type === 'hunt') hunt = p; if (p && p.type === 'stamina') stam = p; });
     const sx = stam ? ` · stamina ${stam.current}/${stam.total}` : '';
     if (!hunt) { Farm.drop('bp'); setInfo({ state: 'idle', line: 'no hunt on the pass page' + sx, have: null, total: 0 }); return 60 * 60000; }
-    if (hunt.current >= hunt.total) { Farm.drop('bp'); setInfo({ state: 'ok', line: `hunt done ${hunt.current}/${hunt.total}` + sx, have: hunt.current, total: hunt.total }); return 60 * 60000; }
+    if (hunt.current >= hunt.total) { Farm.drop('bp'); if (!bpDoneLogged) { bpDoneLogged = true; log(`🎫 Battle Pass hunt complete · ${fmtNum(hunt.current)}/${fmtNum(hunt.total)}`, 'ok'); } setInfo({ state: 'ok', line: `hunt done ${hunt.current}/${hunt.total}` + sx, have: hunt.current, total: hunt.total }); return 60 * 60000; }
+    bpDoneLogged = false;                                                  // a new hunt (or progress not complete yet): the next completion is logged again
     const names = ['Lizardman Flamecaster', 'Lizardman Shadowclaw']; let pick = null, any = null, why = '', lockedNow = false;     // the first one Auto-Farm can do; else the first the attack path can
     for (const n of names) { const c = await Farm.canFarm(n); if (c.ok && !c.manual) { pick = n; break; } if (c.ok) { any = any || n; if (c.locked) lockedNow = true; } else why = `${n}: ${c.why}`; }
     pick = pick || any;
@@ -5290,7 +5302,8 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
         ' · ', h('button', { type: 'button', class: 'ma-link', onclick: () => { SideMob.forget(); draw(); } }, `forget ${SideMob.shielded()} shielded mob${SideMob.shielded() === 1 ? '' : 's'}`))];
   }
 
-  const logRow = (r) => h('div', { class: 'ma-ll ' + r.k }, h('b', { title: r.at ? new Date(r.at).toLocaleString() + ' (your browser clock)' : 'your browser clock' }, r.t), h('span', {}, r.m.replace(/<[^>]+>/g, '')));
+  const unesc = (t) => String(t).replace(/&quot;/g, '"').replace(/&#0?39;|&apos;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');   // log lines were escaped for html but are shown as text
+  const logRow = (r) => h('div', { class: 'ma-ll ' + r.k }, h('b', { title: r.at ? new Date(r.at).toLocaleString() + ' (your browser clock)' : 'your browser clock' }, r.t), h('span', {}, unesc(r.m.replace(/<[^>]+>/g, ''))));
   let lastRow = null;                                                // newest log line already on screen
   function paintLog() {                                              // a new log line only appends a row: no rebuild of the panel or the list
     const box = root && root.querySelector('.ma-log'), f = cfg.logFilter || 'all', all = Log.all(), i = all.indexOf(lastRow);
