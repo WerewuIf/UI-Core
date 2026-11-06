@@ -101,7 +101,7 @@ const DEFAULT_CFG = {
   autoLoot: { enabled: false, mode: 'toLevel', claimGapMs: 250 },
   parts: { bosses: true, dungeons: true, duels: true, loot: true },
   tasks: {                             // the Tasks tab: one switch per task (Monsters is the boss run itself)
-    guild:    { enabled: false, everyMin: 60, collect: true, skill: true },   // everyMin = the longest wait only: a task wakes itself when something is due
+    guild:    { enabled: false, everyMin: 60, collect: true, collectFarm: true, skill: true },   // everyMin = the longest wait only: a task wakes itself when something is due
     bp:       { enabled: false, everyMin: 60 },
     merchant: { enabled: false, everyMin: 60 },
     pvp:      { solo: { enabled: false }, team: { enabled: false } },   // placeholders until the PvP module registers itself
@@ -3770,9 +3770,45 @@ Object.assign(Farm, (() => {
     if (S.busy || !stateOf().owed) return;
     try { await restore('recovered after reload'); } catch (e) { log(`⚠️ auto-farm recovery: ${esc(e.message)}`, 'warn'); }
   }
+  /* ---- which basic mob drops an item: the "Possible Loot" panel of each mob's battle page (Drop % + DMG req, the same chips as the boss loot scan),
+   * read once per mob and kept a week. The Adventure Guild uses it for collection quests it is short on. Nothing is guessed: no known source = no farming. ---- */
+  const dropStore = Core.store(ID + '-drops', { def: { mobs: {}, sweptAt: 0 } }), DROP_TTL = 7 * 86400000, SWEEP_GAP = 6 * 3600000;
+  function lootOf(doc) {
+    const cl = (v) => String(v == null ? '' : v).replace(/\s+/g, ' ').trim(), num = (v) => { const m = cl(v).replace(/,/g, '').match(/\d+(?:\.\d+)?/); return m ? Number(m[0]) : null; };
+    const panel = Array.from(doc.querySelectorAll('.panel')).find((p) => /possible loot/i.test((p.querySelector('strong') || {}).textContent || '')); if (!panel) return [];
+    return Array.from(panel.querySelectorAll('.loot-card')).map((c) => { const chips = Array.from(c.querySelectorAll('.chip')).map((x) => cl(x.textContent)); return { name: cl((c.querySelector('.loot-name') || {}).textContent), dropPct: num(chips.find((t) => /drop:/i.test(t))), dmgReq: num(chips.find((t) => /dmg req:/i.test(t))) }; }).filter((l) => l.name);
+  }
+  const sourcesIn = (mobs, item) => {
+    const k = String(item).trim().toLowerCase(), out = [];
+    for (const m of Object.values(mobs)) for (const l of m.loot || []) if (l.name.toLowerCase() === k) out.push({ name: m.name, dropPct: l.dropPct, dmgReq: l.dmgReq || 0 });
+    return out.sort((a, b) => (b.dropPct || 0) - (a.dropPct || 0) || a.dmgReq - b.dmgReq);
+  };
+  async function dropSources(item) {                                        // [{ name, dropPct, dmgReq }], best first; [] = no known source
+    const saved = dropStore.get() || {}, mobs = Object.assign({}, saved.mobs), hit = sourcesIn(mobs, item), now = Date.now();
+    if (hit.length || now - (saved.sweptAt || 0) < SWEEP_GAP) return hit;   // (a sweep that found nothing is not repeated for 6 h)
+    const fresh = new Map();                                                // one alive card per basic mob that has no recent table
+    for (const u of waveUrls()) {
+      const doc = await wavePage(u, 'alive'); if (!doc) continue;
+      for (const c of cardsOf(doc)) { const k = keyOf(c.name); if (c.dead || c.boss || fresh.has(k) || (mobs[k] && now - mobs[k].at < DROP_TTL)) continue; fresh.set(k, c); }
+      await sleep(120);
+    }
+    if (fresh.size) log(`📚 reading the drop tables of ${fresh.size} mob${fresh.size === 1 ? '' : 's'} (for a collection quest)…`, 'info');
+    for (const [k, c] of [...fresh].slice(0, 60)) {
+      if (!Run.tasksOn() || Guard.isFaulted()) break;
+      try {
+        const doc = parseHtml(await Act.run(() => netText(`/battle.php?id=${encodeURIComponent(c.id)}`, { force: true, ttl: 0, key: 'ma:drops:' + k }), cfg.minActionGapMs)), ps = Guard.pageState(doc);
+        if (ps !== 'ok') { Guard.fault(ps, 'drop tables'); break; }
+        if (!Guard.chromeOk(doc)) continue;
+        mobs[k] = { name: c.name, at: Date.now(), loot: lootOf(doc) };
+      } catch (_) { /* that mob is read next time */ }
+    }
+    dropStore.set({ mobs, sweptAt: Date.now() }); return sourcesIn(mobs, item);
+  }
+
   setInterval(() => { service().catch((e) => log('⚠️ auto-farm: ' + esc(e.message), 'warn')); }, 15000);
 
   return {
+    dropSources, _lootOf: lootOf,
     busy: () => S.busy, hold: (v) => { S.hold = !!v; }, owners: () => S.owners || [], manual: () => S.busy && S.manual, locked, mode, nudge, wantAuto, line: () => S.line, stop: () => { S.stop = true; }, want, drop, canFarm, plan, probe, recover, learn, panelOf, keyOf, restoreNow: () => restore('you asked'),
     info: () => ({ probe: S.probe, ids: Object.keys(stateOf().ids).length, owed: stateOf().owed, snap: stateOf().snap, runs: S.runs, skipped: Object.fromEntries(S.skipped), demands: collect().length }),
     forget: () => patch({ snap: null, owed: false }), service, _test: { capture, restore, rq, api, status, lookup, settingsFor },
@@ -3988,7 +4024,7 @@ const Guild = (() => {
       if (!Run.tasksOn() || Guard.isFaulted()) break;                          // Stop (or a halt) mid-donation stops the next one
       const r = await Act.run(() => post('/adventurers_donate_gather.php', { quest_id: String(a.donateQ), item_id: String(a.donateItem) }), 150), m = msgOf(r);
       if (ok200(r && r.json, r && r.text)) { n++; await sleep(150); continue; }
-      if (SHORT_RE.test(m)) return { n, wait: 15 * MIN, why: `not enough items to donate yet${m ? ' (' + m + ')' : ''}` };
+      if (SHORT_RE.test(m)) return { n, wait: 15 * MIN, short: true, msg: m, why: `not enough items to donate yet${m ? ' (' + m + ')' : ''}` };
       if (n) break;                                                    // the quest is full: the board shows the Finish button next
       return { n, wait: 10 * MIN, why: m || 'the donation was refused' };
     }
@@ -4041,6 +4077,44 @@ const Guild = (() => {
     return { n };
   }
 
+  /* ---- COLLECT, short on items: the quest row names its item ("Gather Nx item(s) · Item: X"); what you hold is on the inventory page (Materials, which also holds the relics, plus Consumables; gear is skipped); the mobs that drop it come from their battle pages (Farm.dropSources). Farm kills the best source, the guild donates what
+   * dropped. Nothing is guessed (no known source = no farming), and a quest whose farming gains nothing for NO_GAIN_RUNS runs is left alone. ---- */
+  const NO_GAIN_RUNS = 3, noGain = new Map();
+  const itemOf = (r) => { const m = /\bitem:\s*(.+?)(?=\s*(?:[·•]|\breward\b|\bprogress\b|$))/i.exec(r.req || ''); return m ? m[1].trim() : ''; };
+  const totalOf = (r) => { const m = /\bgather\s+(\d[\d,]*)/i.exec(r.req || ''); return m ? parseInt(m[1].replace(/,/g, ''), 10) || 0 : 0; };
+  async function owned(item) {                                              // how many you hold; null = the inventory page could not be read
+    let doc; try { doc = parseHtml(await netText('/inventory.php', { force: true, ttl: 0, key: 'ma:inv-collect' })); } catch (_) { return null; }
+    if (Guard.pageState(doc) !== 'ok' || !doc.querySelector('.slot-box')) return null;
+    const k = item.trim().toLowerCase(); let n = 0;
+    doc.querySelectorAll('.slot-box').forEach((b) => { const sec = b.closest('[data-section-key]'); if (sec && /equip/i.test(sec.getAttribute('data-section-key'))) return;   // gear is not a quest item (materials, relics, consumables are)
+      const nm = String(((b.querySelector('.info-btn') || { dataset: {} }).dataset.name) || '').trim().toLowerCase(), m = /\bx\s*(\d[\d,]*)/i.exec(b.textContent || ''); if (nm === k && m) n += parseInt(m[1].replace(/,/g, ''), 10) || 0; });
+    return n;
+  }
+  async function farmable(item) {                                           // the best known source Farm can do: { src } or { why }
+    const src = await Farm.dropSources(item); if (!src.length) return { why: 'no basic mob is known to drop it (nothing is guessed)' };
+    for (const s of src) { if (!(s.dropPct > 0)) continue; const c = await Farm.canFarm(s.name); if (c.ok) return { src: s }; }
+    return { why: `it drops from ${src.map((s) => s.name).join(', ')} — none of those can be farmed here` };
+  }
+  async function farmItems(a, msg) {                                        // { note, wait, want? }
+    const item = itemOf(a); if (!item) return { note: 'not enough items, and the quest row names no item to look up', wait: 15 * MIN };
+    const have = await owned(item); if (have == null) return { note: `not enough ${item} — the inventory page could not be read`, wait: 10 * MIN };
+    const need = Math.max(0, left(a) || totalOf(a)), short = need - have;
+    if (short <= 0) return { note: `have ${have} ${item} but the site still refuses${msg ? ' (' + msg + ')' : ''}`, wait: 15 * MIN };
+    const f = await farmable(item); if (!f.src) return { note: `${item} ${have}/${need} — ${f.why}`, wait: 30 * MIN };
+    const g = noGain.get(a.name) || { have, runs: 0, at: Date.now() };
+    if (have > g.have) { g.have = have; g.runs = 0; g.at = Date.now(); } else if (Date.now() - g.at > 10 * MIN) { g.runs++; g.at = Date.now(); }
+    noGain.set(a.name, g);
+    if (g.runs >= NO_GAIN_RUNS) return { note: `${item} ${have}/${need} — ${NO_GAIN_RUNS} farm runs of ${f.src.name} gained nothing, left alone (check the drop)`, wait: 60 * MIN };
+    const kills = Math.min(300, Math.ceil(short / (f.src.dropPct / 100)));                // drops are deterministic: exactly what the drop % implies
+    return { note: `${item} ${have}/${need} — ${f.src.name} (${f.src.dropPct}% drop, ≈${kills} kills)${FARM_MARK}`, wait: 20 * MIN, want: { name: f.src.name, need: kills, minDamage: f.src.dmgReq || 0 } };
+  }
+  async function collectOk(r) {                                             // accept a collection quest only when it can be filled: held, or a source is farmable
+    const item = itemOf(r), total = totalOf(r); if (!item || !total || kinds().collectFarm === false) return true;
+    const have = await owned(item); if (have == null || have >= total) return true;
+    const f = await farmable(item); if (!f.src) Diag.skip('guild-collect-unfillable', `${r.name}: ${item} — ${f.why}`);
+    return !!f.src;
+  }
+
   async function tick() {
     const G = kinds(); if (!G.enabled) return;
     setInfo({ state: 'run', line: 'reading the quest board…' });
@@ -4063,7 +4137,8 @@ const Guild = (() => {
         if (G.collect === false) { notes.push(`“${a.name}”: collection quests are switched off`); later(60 * MIN); continue; }
         const r = await donate(a); did += r.n;
         if (r.n) { setInfo({ state: 'run', line: `“${a.name}”: donated ${r.n} — checking the board` }); return 2500; }
-        if (r.why) { notes.push(`“${a.name}”: ${r.why}`); later(r.wait); }
+        if (r.short && G.collectFarm !== false) { setInfo({ state: 'run', line: `“${a.name}” — short on items, looking for a source…` }); const f = await farmItems(a, r.msg); notes.push(`“${a.name}”: ${f.note}`); later(f.wait); if (f.want) { wants.push(f.want); working = true; } }
+        else if (r.why) { notes.push(`“${a.name}”: ${r.why}`); later(r.wait); }
       } else if (a.kind === 'skill') {
         if (G.skill === false) { notes.push(`“${a.name}”: skill quests are switched off`); later(60 * MIN); continue; }
         setInfo({ state: 'run', line: `“${a.name}” ${a.progress ? a.progress.current + '/' + a.progress.total : ''} — casting` });
@@ -4097,6 +4172,7 @@ const Guild = (() => {
         .sort((x, y) => ({ skill: 0, kill: 1, collect: 2 }[x.kind] - { skill: 0, kill: 1, collect: 2 }[y.kind]));
       for (const r of cand) {
         if (r.kind === 'kill') { const c = await Farm.canFarm(r.meta.monsterName); if (!c.ok) { Diag.skip('guild-skip-available', `${r.name}: ${c.why}`); continue; } }
+        if (r.kind === 'collect' && !(await collectOk(r))) continue;
         setInfo({ state: 'run', line: `accepting “${r.name}”…` });
         const res = await Act.run(() => post('/adventurers_accept_quest.php', { quest_id: String(r.acceptId) }), 250), good = ok200(res && res.json, res && res.text);
         log(good ? `📜 quest accepted: ${esc(r.name)} (${r.kind}${r.kind === 'kill' ? `: ${r.meta.amountNeeded} × ${esc(r.meta.monsterName)} ≥ ${fmtNum(r.meta.minimumDamage)}` : ''})` : `⚠️ could not accept ${esc(r.name)}: ${esc(msgOf(res) || 'no reply')}`, good ? 'ok' : 'warn');
@@ -4653,14 +4729,20 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     if (tk) { const ln = String(Tasks.info(tk.id).line || 'working').split(FARM_MARK).join(''); return /^reading/i.test(ln) ? { icon: '🔎', name: 'Scanning · ' + tShort(tk), sub: ln } : { icon: tk.icon, name: tShort(tk), sub: ln }; }
     return null;
   }
-  function idleLine() {                                                  // nothing is working this second
-    const on = enabledTasks(); return on.length ? on.map((d) => (taskDone(d) ? '✅ ' : d.icon + ' ') + tShort(d)).join(' · ') : '';
+  function idleLine() {                                                  // nothing is working this second: "Idle" when every enabled task has nothing to do, else each task's own mark
+    const on = enabledTasks(); return !on.length ? '' : on.every(taskDone) ? 'Idle' : on.map((d) => (taskDone(d) ? '✅ ' : d.icon + ' ') + tShort(d)).join(' · ');
+  }
+  // headline state + dot. The boss engine only knows WAITING; the tasks (Quests / BP / Merchant) and the farm run beside it, so while the bosses wait
+  // the headline shows what is really happening: scanning a task's page, running a task, or the farm
+  function stateView(st) {
+    const ow = Tab.isMain() && (st === 'WAITING' || st === 'RUNNING') ? otherWork() : null;
+    return ow ? { txt: ow.icon === '🌾' ? STATE_TXT.FARMING : ow.icon === '🔎' ? '🔎 Scanning' : '⚙️ Running a task', dot: 'running' } : { txt: STATE_TXT[st] || st, dot: dotOf(st) };
   }
   function footer() {
     const st = Status.get(), cur = Engine.current(), run = Run.wanted();
-    const wk = Work.get('build') || Work.get('scan'), tk = Tasks.list().find((d) => d.id !== 'monsters' && Tasks.busy(d.id)), sub = Farm.busy() ? '🌾 ' + ((Farm.owners ? Farm.owners() : []).map((id) => Tasks.get(id)).filter(Boolean).map(taskTag).join(' + ') || 'auto-farm') + ' · ' + (Farm.line() || 'running') : tk ? (/^reading/i.test(Tasks.info(tk.id).line || '') ? `🔎 Scanning · ${tShort(tk)}` : `${taskTag(tk)} · ${Tasks.info(tk.id).line || 'working'}`) : wk ? (wk.step ? `${wk.label} · ${wk.step}${wk.total > 1 ? ` (${Math.min(wk.done + 1, wk.total)}/${wk.total})` : ''}${wk.phases > 1 ? ` · part ${wk.phase} of ${wk.phases}` : ''}` : wk.label) : cur ? '🎯 ' + cur.name : (Tab.isMain() ? (cfg.targets.length ? (idleLine() ? `no boss up · ${idleLine()}` : 'no target right now') : (idleLine() || 'no bosses selected')) : 'this tab is following');
+    const wk = Work.get('build') || Work.get('scan'), tk = Tasks.list().find((d) => d.id !== 'monsters' && Tasks.busy(d.id)), sub = Farm.busy() ? '🌾 ' + ((Farm.owners ? Farm.owners() : []).map((id) => Tasks.get(id)).filter(Boolean).map(taskTag).join(' + ') || 'auto-farm') + ' · ' + (Farm.line() || 'running') : tk ? (/^reading/i.test(Tasks.info(tk.id).line || '') ? `🔎 Scanning · ${tShort(tk)}` : `${taskTag(tk)} · ${Tasks.info(tk.id).line || 'working'}`) : wk ? (wk.step ? `${wk.label} · ${wk.step}${wk.total > 1 ? ` (${Math.min(wk.done + 1, wk.total)}/${wk.total})` : ''}${wk.phases > 1 ? ` · part ${wk.phase} of ${wk.phases}` : ''}` : wk.label) : cur ? '🎯 ' + cur.name : (Tab.isMain() ? (cfg.targets.length ? (idleLine() === 'Idle' ? 'Idle · no tasks right now' : idleLine() ? `no tasks right now · ${idleLine()}` : 'no tasks right now') : (idleLine() || 'no bosses selected')) : 'this tab is following');
     return h('div', { class: 'ma-foot' },
-      h('div', { class: 'ma-foot-st' }, h('b', {}, h('i', { class: 'ma-dot ' + dotOf(st) }), STATE_TXT[st] || st), h('span', { title: sub }, sub), wk && wk.total > 1 ? h('div', { class: 'ma-bar' }, h('i', { style: { width: Math.max(6, pctOf({ done: wk.done + 0.5, total: wk.total })).toFixed(1) + '%' } })) : null),
+      h('div', { class: 'ma-foot-st' }, h('b', {}, h('i', { class: 'ma-dot ' + stateView(st).dot }), stateView(st).txt), h('span', { title: sub }, sub), wk && wk.total > 1 ? h('div', { class: 'ma-bar' }, h('i', { style: { width: Math.max(6, pctOf({ done: wk.done + 0.5, total: wk.total })).toFixed(1) + '%' } })) : null),
       run ? btn('⏹ Stop', 'danger', () => { Run.stop('stopped from the panel'); draw(); }) : btn('▶ Start', 'success', () => { Run.start(); draw(); }));
   }
   const go = (t) => { tab = t; ui.tab = t; saveUi(); draw(); };
@@ -4716,11 +4798,11 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
         h('div', { class: 'ma-hero-t' }, h('div', { class: 'ma-state' }, h('i', { class: 'ma-dot ' + dotOf(st) }), STATE_TXT[st] || st), h('div', { class: 'ma-hero-name' }, cur.name), h('div', { class: 'ma-hero-sub' }, bw ? `🎒 ${bw.step || bw.label}${bw.total > 1 ? ` · step ${Math.min(bw.done + 1, bw.total)} of ${bw.total}` : ''}${bw.phases > 1 ? ` · part ${bw.phase} of ${bw.phases}` : ''}` : `${fmtNum(dmg)} of ${fmtNum(cap)} damage · ${pct.toFixed(0)}%`))),
         h('div', { class: 'ma-bar' + (!bw && pct >= 100 ? ' done' : '') }, h('i', { style: { width: pct.toFixed(1) + '%' } }))));
     } else {
-      const l = Diag.last(), why = l.reason ? `${l.reason}${l.detail ? ' — ' + l.detail : ''}` : '', wk = Work.get('build') || Work.get('scan'), ow = wk ? null : otherWork(), idle = !wk && !ow ? idleLine() : '';
+      const l = Diag.last(), why = l.reason && l.reason !== 'no-target' ? `${l.reason}${l.detail ? ' — ' + l.detail : ''}` : '', wk = Work.get('build') || Work.get('scan'), ow = wk ? null : otherWork(), idle = !wk && !ow ? idleLine() : '';
       out.push(h('div', { class: 'ma-hero' }, h('div', { class: 'ma-hero-top' }, h('span', { class: 'ma-ico', style: { width: '50px', height: '50px', fontSize: '24px', borderRadius: '13px' } }, wk ? (st === 'GRAVEYARD' ? '🪦' : st === 'SWITCHING' ? '🎒' : st === 'PLANNING' ? '🧭' : '🔎') : ow ? ow.icon : Run.wanted() ? '⏳' : '💤'),
-        h('div', { class: 'ma-hero-t' }, h('div', { class: 'ma-state' }, h('i', { class: 'ma-dot ' + dotOf(st) }), STATE_TXT[st] || st),
-          h('div', { class: 'ma-hero-name' }, wk ? wk.label : ow ? ow.name : idle && Run.wanted() ? idle : !cfg.targets.length && !idle ? 'No bosses selected' : Run.wanted() ? 'No target right now' : 'Ready when you are'),
-          h('div', { class: 'ma-hero-sub' }, wk ? (wk.total ? `${wk.step ? wk.step + ' · ' : ''}Step ${Math.min(wk.done + 1, wk.total)} of ${wk.total}${wk.phases > 1 ? ` · part ${wk.phase} of ${wk.phases}` : ''}` : 'One moment…') : ow ? ow.sub + (cfg.targets.length && nextIn != null ? ` · no boss up (next look in ${fmtDur(nextIn)})` : '') : idle && Run.wanted() ? 'No boss up right now' + (nextIn != null ? ' · next check in ' + fmtDur(nextIn) : '') + (why ? ' · last skip: ' + why : '') : !cfg.targets.length ? 'Pick what to farm in the Bosses tab.' : Run.wanted() && nextIn != null ? 'Next check in ' + fmtDur(nextIn) + (why ? ' · last skip: ' + why : '') : (why ? 'Last skip: ' + why : 'Press Start to begin.')))),
+        h('div', { class: 'ma-hero-t' }, h('div', { class: 'ma-state' }, h('i', { class: 'ma-dot ' + stateView(st).dot }), stateView(st).txt),
+          h('div', { class: 'ma-hero-name' }, wk ? wk.label : ow ? ow.name : idle && Run.wanted() ? idle : !cfg.targets.length && !idle ? 'No bosses selected' : Run.wanted() ? 'No tasks right now' : 'Ready when you are'),
+          h('div', { class: 'ma-hero-sub' }, wk ? (wk.total ? `${wk.step ? wk.step + ' · ' : ''}Step ${Math.min(wk.done + 1, wk.total)} of ${wk.total}${wk.phases > 1 ? ` · part ${wk.phase} of ${wk.phases}` : ''}` : 'One moment…') : ow ? ow.sub + (cfg.targets.length && nextIn != null ? ` · no boss up (next look in ${fmtDur(nextIn)})` : '') : idle && Run.wanted() ? 'No tasks right now' + (nextIn != null ? ' · next check in ' + fmtDur(nextIn) : '') + (why ? ' · last skip: ' + why : '') : !cfg.targets.length ? 'Pick what to farm in the Bosses tab.' : Run.wanted() && nextIn != null ? 'Next check in ' + fmtDur(nextIn) + (why ? ' · last skip: ' + why : '') : (why ? 'Last skip: ' + why : 'Press Start to begin.')))),
         wk && wk.total ? h('div', { class: 'ma-bar' }, h('i', { style: { width: pctOf({ done: wk.done + (wk.step ? 0.5 : 0), total: wk.total }).toFixed(1) + '%' } })) : null));
     }
 
@@ -5187,6 +5269,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
       group(
         srow('🌾', 'Use Auto-Farm', afDesc(), sw(() => cfg.tasks.farm.auto !== false, (v) => { cfg.tasks.farm.auto = v; Farm.nudge(); })),
         srow('📦', 'Collection quests', 'Adventure Guild: donates the quest item', sw(() => cfg.tasks.guild.collect !== false, (v) => { cfg.tasks.guild.collect = v; })),
+        srow('🌾', 'Farm missing items', 'Short on a collection quest\'s item: find the mob that drops it and farm it (nothing is guessed)', sw(() => cfg.tasks.guild.collectFarm !== false, (v) => { cfg.tasks.guild.collectFarm = v; })),
         srow('✨', 'Skill quests', 'Adventure Guild: casts your class skill', sw(() => cfg.tasks.guild.skill !== false, (v) => { cfg.tasks.guild.skill = v; }))),
       caption('Advanced'),
       fold('adv', false, ['⏱ Timing', h('small', {}, 'pauses between requests')], () => [h('div', { class: 'ma-sr-o tm' },
@@ -5250,7 +5333,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   const typing = () => root && root.contains(document.activeElement) && /^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement.tagName);
   function schedule(ms) { if (drawT) return; drawT = setTimeout(() => { drawT = 0; if (typing() || document.hidden) schedule(1500); else draw(true); }, ms || 400); }
   if (typeof Core.on === 'function') Core.on('caps:changed', (d) => { if (shown && d && (d.added || []).some((n) => n.startsWith('preset.'))) schedule(300); });   // a preset addon loaded late
-  UI.hook((what) => { if (!shown) return; if (what === 'scan') { if (tab === 'bosses') paintScan(); return; } if (what === 'log' && tab === 'activity' && paintLog()) return; if (what === undefined || what === 'status' || DIRTY_TAB[what] === tab) schedule(); });
+  UI.hook((what) => { if (!shown) return; if (what === 'scan') { if (tab === 'bosses') paintScan(); return; } if (what === 'log' && tab === 'activity' && paintLog()) return; if (what === undefined || what === 'status' || what === 'tasks' || DIRTY_TAB[what] === tab) schedule(); });
   let beat = 0;
   setInterval(() => { if (!shown || !root || !root.isConnected || document.hidden) return; if (++beat % 3 === 0 && (tab === 'home' || tab === 'tasks') && !typing()) draw(true); }, 1000);   // overview: vitals + timers refresh every 3 s
 
