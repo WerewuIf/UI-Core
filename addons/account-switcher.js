@@ -8,7 +8,7 @@
  *   (or by ticking "I'm signed in as this account" when adding one).
  * - The Add dialog detects the player you are signed in as right now (Core.player.info: name, level, profile picture),
  *   fills in the alias, and keeps whatever you typed if you cancel (in memory only, until the page reloads).
- * - The site's login form is described in CFG below. Change it there if the site changes its form.
+ * - The login and logout pages are read at switch time (their forms, csrf_token included); CFG below only lists where they live.
  *
  * SECURITY: passwords are stored in plain text in this browser's localStorage, the same storage the game's own
  * scripts can read (the old userscript used Tampermonkey storage, which the page cannot read). Use it only on
@@ -19,12 +19,14 @@ const ID = 'account-switcher';
 const { h, btn } = Core.ui;
 
 const CFG = {
-  logoutUrl: '/signout.php',
-  loginUrl: '/signin.php',                 // serves the form AND accepts the POST
-  fields: { username: 'email', password: 'password', submit: 'submit' },
+  // Where the pages live. The page's own "log out" link is tried first; these are the fallbacks, in order.
+  logoutUrls: ['/game_logout.php', '/logout.php', '/signout.php'],
+  loginUrls: ['/game_login.php', '/signin.php'],   // the form page; the form says where it posts (its action)
+  fields: { username: 'email', password: 'password', submit: 'submit' },   // only used when the form itself does not tell
   submitValue: 'Sign In',
+  logoutLink: 'a[href*="logout" i], a[href*="signout" i], a[href*="log-out" i]',
   passwordSelectors: ['input[name="password"]', 'input[type="password"]'],   // still on the page after login = failed
-  errorSelectors: ['.error', '.alert', '.alert-danger', '.login-error', '#error', '[class*="error"]'],
+  errorSelectors: ['.error', '.alert', '.alert-danger', '.login-error', '.auth-error', '.form-error', '[role="alert"]', '#error', '[class*="error"]', '[class*="alert"]'],
 };
 
 // Fixed key on purpose (not 'core:<pid>:…'): the saved list has to survive switching players.
@@ -169,18 +171,52 @@ function askDelete(acc) {
 }
 
 /* ------------------------------------------------------------- switching --- */
-// Sign out, then POST the login form with background requests. A login that comes back still showing a
-// password field failed; the site's own error text (if any) is passed on.
+// Sign out, then sign in, both the way the site's own pages do it: open the page, take the form it serves (its hidden
+// csrf_token included), and submit THAT. A login that comes back still showing a password field failed; the site's own
+// error text (if any) is passed on.
+const GET_INIT = { credentials: 'include', cache: 'no-store', redirect: 'follow' };
+async function pageOf(url, init) {
+  const res = await fetch(url, Object.assign({}, GET_INIT, init));
+  return { ok: res.ok, status: res.status, url: res.url || String(url), doc: new DOMParser().parseFromString(await res.text(), 'text/html') };
+}
+const hasPassword = (root) => CFG.passwordSelectors.some((q) => root.querySelector(q));
+const forms = (doc) => Array.from(doc.querySelectorAll('form'));
+const loginFormOf = (doc) => forms(doc).find(hasPassword);
+// the "Log out?" page: a form with a token and the "log out of all devices" box (or a log-out button), and no password
+const logoutFormOf = (doc) => forms(doc).find((f) => !hasPassword(f) && f.querySelector('input[name="csrf_token"]') && (f.querySelector('[name="logout_all_devices"]') || /log\s*out|sign\s*out/i.test(f.textContent || '')));
+// POST what the form would send (hidden fields and all), with `set` laid over it. No action = the page it came from.
+function submitForm(page, form, set) {
+  const fd = new FormData(form); Object.entries(set || {}).forEach(([k, v]) => fd.set(k, v));
+  return pageOf(new URL(form.getAttribute('action') || '', page.url).href, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams(fd).toString() });
+}
+async function signOut() {
+  const link = document.querySelector(CFG.logoutLink) || Array.from(document.querySelectorAll('a[href]')).find((a) => /^\s*(?:\S*\s)?(?:log\s?out|sign\s?out)\s*$/i.test(a.textContent || '')), mine = link && link.getAttribute('href');
+  const urls = [...new Set([mine && !/^(javascript:|#)/i.test(mine) ? mine : '', ...CFG.logoutUrls].filter(Boolean))];
+  for (const u of urls) {
+    let page; try { page = await pageOf(new URL(u, location.href)); } catch (_) { continue; }
+    if (!page.ok) continue;
+    const f = logoutFormOf(page.doc);
+    if (f) { await submitForm(page, f, {}).catch(() => { /* the login step tells if it did not work */ }); return; }   // "log out of all devices" is left unticked: only this browser
+    if (loginFormOf(page.doc)) return;                       // already signed out (or an old-style link that signed out and landed on the login page)
+  }
+}
 async function signInAs(acc) {
-  await fetch(new URL(CFG.logoutUrl, location.origin), { credentials: 'include' }).catch(() => { /* a redirect fetch dislikes: fine */ });
-  const params = { [CFG.fields.username]: acc.username, [CFG.fields.password]: acc.password };
-  if (CFG.fields.submit) params[CFG.fields.submit] = CFG.submitValue;
-  const res = await Core.net.post(CFG.loginUrl, params);
+  await signOut();
+  let page, form;
+  for (const u of CFG.loginUrls) {
+    try { page = await pageOf(new URL(u, location.origin)); } catch (_) { page = null; continue; }
+    form = page.ok && loginFormOf(page.doc); if (form) break;
+  }
+  if (!form) throw new Error('Could not open the login page, so you may still be signed in. Try again.');
+  const pw = CFG.passwordSelectors.map((q) => form.querySelector(q)).find(Boolean);
+  const userIn = form.querySelector('input[type="email"], input[name="email"], input[name="username"], input[type="text"]');
+  const set = { [(userIn && userIn.name) || CFG.fields.username]: acc.username, [(pw && pw.name) || CFG.fields.password]: acc.password };
+  const sub = form.querySelector('[type="submit"][name]'); if (sub) set[sub.name] = sub.getAttribute('value') || CFG.submitValue;
+  const res = await submitForm(page, form, set);
   if (!res.ok) throw new Error('Login request failed (HTTP ' + res.status + ').');
-  const doc = new DOMParser().parseFromString(res.text, 'text/html');
-  if (CFG.passwordSelectors.some((s) => doc.querySelector(s))) {
-    const err = CFG.errorSelectors.map((s) => doc.querySelector(s)).find(Boolean);
-    throw new Error((err && err.textContent.trim()) || 'Login failed. Check the saved username and password.');
+  if (hasPassword(res.doc)) {
+    const err = CFG.errorSelectors.map((q) => res.doc.querySelector(q)).find(Boolean);
+    throw new Error((err && err.textContent.trim().replace(/\s+/g, ' ').slice(0, 160)) || 'Login failed. Check the saved username and password.');
   }
 }
 
