@@ -23,7 +23,7 @@
  * default cap of a boss is its highest loot requirement, and bosses the roster did not know yet are added. Export .txt writes it all out.
  */
 Core.module({
-  id: 'automator', name: 'Automator', icon: '🤖', version: '1.12.4',
+  id: 'automator', name: 'Automator', icon: '🤖', version: '1.12.6',
   // Offered to other addons through Core capabilities (guides/CAPABILITIES.md):
   //   automator.status() -> the status string     automator.start() / automator.stop()     automator.scan() -> scan the bosses now
   provides: (api) => api && api.start ? {
@@ -34,7 +34,8 @@ Core.module({
   } : {},
   init(Core) {
 'use strict';
-const ID = 'automator', VERSION = '1.12.4';
+const ID = 'automator', VERSION = '1.12.6';
+const FARM_MARK = '\u2063farm\u2063';          // a task line is written when the task looks; this marks where the farm's state goes, filled in live when the line is drawn (a line saying "queued" while the farm is already checking the graveyard was stale)
 if (window.__automatorLoaded) { console.warn('[automator] already loaded', window.__automatorLoaded); return null; }
 window.__automatorLoaded = VERSION;
 
@@ -3242,10 +3243,23 @@ Object.assign(Farm, (() => {
   const ACT = '/auto_farm_actions.php', STAT = '/auto_farm_status.php';
   const LEVEL_LOCK = 400, MAX_STACK = 250, SIMILAR = 0.9, GAP = 180, POLL = 5000, BLIND_POLL = 20000, EXTRA = 1, UNLIMITED = 999999, DEMAND_TTL = 20 * 60000, PROBE_TTL = 10 * 60000, HELD_MARGIN = 3 * 60, WHERE_TTL = 20 * 60000;       // HELD_MARGIN (s): a kill-ahead corpse that would expire within this long no longer counts as held (the chain of quests uses them within a few minutes, so keep it short: a wide margin re-kills mobs that are about to be looted)
   const store = Core.store(ID + '-farm', { def: { snap: null, owed: false, ids: {} } });
-  const S = { where: new Map(), known: new Map(), fullDeadAt: 0, acctFull: false, busy: false, hold: false, retryAt: 0, sess: null, qtxt: '', stop: false, recheck: false, looted: new Set(), line: '', last: '', probe: null, probeAt: 0, demands: new Map(), skipped: new Map(), runs: 0, kills: 0, waves: { at: 0, alive: new Map() } };
+  const idxStore = Core.store(ID + '-farm-index', { def: { fullAt: 0, where: {}, known: {} } });   // which page each mob lives on: survives a reload, so the first quest check after one is not a sweep of every page
+  const S = { where: new Map(), known: new Map(), fullDeadAt: 0, idxDirty: false, acctFull: false, busy: false, hold: false, retryAt: 0, sess: null, qtxt: '', stop: false, recheck: false, looted: new Set(), line: '', last: '', probe: null, probeAt: 0, demands: new Map(), skipped: new Map(), runs: 0, kills: 0, waves: { at: 0, alive: new Map() } };
   const stateOf = () => Object.assign({ snap: null, owed: false, ids: {} }, store.get() || {});
   const patch = (p) => { const s = Object.assign(stateOf(), p); store.set(s); return s; };
   const say = (line) => { S.line = line; UI.dirty('tasks'); };
+  (function loadIdx() {                                                      // the page index learned before the last reload (a full sweep older than WHERE_TTL still forces a fresh one, see survey)
+    try {
+      const d = idxStore.get() || {}, now = Date.now();
+      for (const [k, v] of Object.entries(d.known || {})) if (k && v && v.name) S.known.set(k, { name: String(v.name), boss: !!v.boss });
+      for (const [k, urls] of Object.entries(d.where || {})) if (k && Array.isArray(urls) && urls.length) S.where.set(k, new Map(urls.map((u) => [String(u), now])));
+      const at = Number(d.fullAt) || 0; S.fullDeadAt = at > 0 && at <= now ? at : 0;
+    } catch (_) { /* nothing saved yet */ }
+  })();
+  function flushIdx() {
+    if (!S.idxDirty) return; S.idxDirty = false;
+    try { idxStore.set({ fullAt: S.fullDeadAt, known: Object.fromEntries(S.known), where: Object.fromEntries([...S.where].map(([k, w]) => [k, [...w.keys()]])) }); } catch (_) { S.idxDirty = true; }
+  }
 
   /* ---- site requests (through Act.run: one state-changing request at a time, with the other parts) ---- */
   const rq = (url, body) => {
@@ -3367,8 +3381,8 @@ Object.assign(Farm, (() => {
   }
   function note(u, cards) {                                                  // every page read teaches: this mob is on this page; this is its name; boss or not
     const now = Date.now();
-    for (const c of cards) { const k = keyOf(c.name); if (!k) continue; const prev = S.known.get(k); S.known.set(k, { name: (prev && prev.name) || c.name, boss: !!(c.boss || (prev && prev.boss)) });
-      if (!c.boss) { let w = S.where.get(k); if (!w) S.where.set(k, w = new Map()); w.set(u, now); } }
+    for (const c of cards) { const k = keyOf(c.name); if (!k) continue; const prev = S.known.get(k), boss = !!(c.boss || (prev && prev.boss)); if (!prev || prev.boss !== boss) S.idxDirty = true; S.known.set(k, { name: (prev && prev.name) || c.name, boss });
+      if (!c.boss) { let w = S.where.get(k); if (!w) S.where.set(k, w = new Map()); if (!w.has(u)) S.idxDirty = true; w.set(u, now); } }
   }
   async function survey(match, wantLive, keys) {   // every wave page: { live: cards of mobs still up, dead: lootable corpses you damaged, verified, full }
     // `keys` (names, dead view only): once a full sweep is recent, only the pages where those mobs have been seen are read — not the whole graveyard for every quest
@@ -3386,7 +3400,8 @@ Object.assign(Farm, (() => {
       else if (g) { const cg = cardsOf(g); note(u, cg); for (const c of cg) { if (!c.dead || c.boss || !match(c.name) || seen.has(c.id) || !c.joined || c.dmg <= 0 || (c.expire > 0 && c.expire < now)) continue; seen.add(c.id); dead.push(c); } }
       await sleep(120);
     }
-    if (full && verified && !failed) S.fullDeadAt = Date.now();               // only a verified dead-view sweep of EVERY page counts as the full picture
+    if (full && verified && !failed) { S.fullDeadAt = Date.now(); S.idxDirty = true; }   // only a verified dead-view sweep of EVERY page counts as the full picture
+    flushIdx();
     return { live, dead, verified, full };
   }
   async function lootOne(id) {
@@ -3514,14 +3529,15 @@ Object.assign(Farm, (() => {
   async function corpses(batch, all) {                                         // dead mobs of this batch that you damaged enough, still lootable (a stack counts as its size)
     const want = new Map(batch.targets.map((t) => [keyOf(t.name), t])), list = [], per = {}; let total = 0;
     const sv = await survey((n) => want.has(keyOf(n)), false);
-    for (const c of sv.dead) { const t = want.get(keyOf(c.name)); if (!t || (t.defer && !all) || c.dmg < t.minDamage || S.looted.has(String(c.id))) continue; list.push({ id: c.id, name: t.name, w: c.w }); per[t.name] = (per[t.name] || 0) + c.w; total += c.w; }
+    for (const c of sv.dead) { const t = want.get(keyOf(c.name)); if (!t || (t.defer && !all) || c.dmg < t.minDamage || S.looted.has(String(c.id))) continue; list.push({ id: c.id, name: t.name, w: c.w, defer: !!t.defer }); per[t.name] = (per[t.name] || 0) + c.w; total += c.w; }
     return { list, per, total, verified: sv.verified };
   }
-  async function lootAll(batch) {
-    let c = await corpses(batch); if (!c.verified) { await sleep(1500); c = await corpses(batch); }   // the dead view could not be confirmed: look once more before believing "nothing there"
+  async function lootAll(batch) {                                              // ONE sweep of the graveyard: it serves the loot below and the kill-ahead count after it (returned as `all`)
+    let all = await corpses(batch, true); if (!all.verified) { await sleep(1500); all = await corpses(batch, true); }   // the dead view could not be confirmed: look once more before believing "nothing there"
+    const al = all.list.filter((r) => !r.defer), c = { list: al, total: al.reduce((n, r) => n + r.w, 0), verified: all.verified };   // (corpses held for a quest that is not active yet are never looted)
     const room = new Map(batch.targets.map((t) => [t.name, t.defer ? 0 : t.kills])); let n = 0;      // only as many as the quest asked for: extras stay for the next quest that wants that mob
     for (const r of c.list.slice().sort((a, b) => a.w - b.w)) { if (S.stop) break; const l = room.get(r.name) || 0; if (l <= 0 || r.w > l * 1.5) continue; if (await lootOne(r.id)) { n += r.w; room.set(r.name, l - r.w); } }
-    return { n, of: c.total, verified: c.verified };
+    return { n, of: c.total, verified: c.verified, all };
   }
   async function waitFor(batch) {
     const stallMs = 10 * 60000; let last = -1, moved = Date.now(), offSince = 0;
@@ -3577,7 +3593,7 @@ Object.assign(Farm, (() => {
     const heldT = batch.targets.filter((t) => t.defer), held = heldT.map((t) => t.name);
     if (!lt.verified) { log('⚠️ auto-farm: the graveyard could not be confirmed — nothing was looted this time; the quest check loots them at its next look', 'warn'); Diag.skip('graveyard-unverified', names); }
     let ahead = null;                                                          // a pre-kill is never looted, so the loot count says nothing about it: count what is actually dead
-    if (heldT.length) { try { ahead = await corpses(batch, true); } catch (_) { /* counted below as unknown */ } }
+    if (heldT.length) ahead = lt.all;                                          // (the sweep lootAll just made: not a second read of every page)
     const actT = batch.targets.filter((t) => !t.defer), actTxt = actT.length ? `${lt.n} of ${lt.of} corpse${lt.of === 1 ? '' : 's'} looted (${actT.map((t) => esc(t.name)).join(' + ')})` : '';
     let aheadTxt = '', aheadOk = true;
     if (heldT.length) {
@@ -4059,7 +4075,7 @@ const Guild = (() => {
         if (!c.ok) { notes.push(`“${a.name}”: ${mob} — ${c.why}`); Diag.skip('guild-not-farmable', `${mob}: ${c.why}`); later(c.locked ? 30 * MIN : 20 * MIN); continue; }
         const have = a.progress ? a.progress.current : 0, total = a.progress ? a.progress.total : a.meta.amountNeeded;
         wants.push({ name: mob, need: Math.max(0, total - have), minDamage: a.meta.minimumDamage });
-        notes.push(`“${a.name}” ${have}/${total} — ${mob} ≥ ${fmtNum(a.meta.minimumDamage)}${Farm.busy() ? ' · farming now' : ' · queued'}`); working = true; later(20 * MIN);   // the farm run pokes this task when it is over
+        notes.push(`“${a.name}” ${have}/${total} — ${mob} ≥ ${fmtNum(a.meta.minimumDamage)}${FARM_MARK}`); working = true; later(20 * MIN);   // the farm run pokes this task when it is over
       } else { notes.push(`“${a.name}” is not something the automator can do — by hand`); Diag.skip('guild-unsupported', a.name); later(60 * MIN); }
     }
     const queuedQ = new Set();                                           // kill quests that cannot be taken yet: farm their mobs now, loot them once the quest is active
@@ -4125,7 +4141,7 @@ const Battle = (() => {
     pick = pick || any;
     if (!pick) { Farm.drop('bp'); setInfo({ state: 'warn', line: `hunt ${hunt.current}/${hunt.total} — ${why || 'no target names set'}` + sx, have: hunt.current, total: hunt.total }); Diag.skip('bp-not-farmable', why); return lockedNow ? 30 * 60000 : 20 * 60000; }
     Farm.want('bp', [{ name: pick, need: hunt.total - hunt.current, minDamage: hunt.minimumDamage }]);
-    setInfo({ state: 'run', line: `hunt ${hunt.current}/${hunt.total} — ${pick} ≥ ${fmtNum(hunt.minimumDamage)}${Farm.busy() ? ' · farming now' : ' · queued'}` + sx, have: hunt.current, total: hunt.total });
+    setInfo({ state: 'run', line: `hunt ${hunt.current}/${hunt.total} — ${pick} ≥ ${fmtNum(hunt.minimumDamage)}${FARM_MARK}` + sx, have: hunt.current, total: hunt.total });
     return 20 * 60000;                                                   // the farm run pokes this task when it is over
   }
   return { tick, parseQuest };
@@ -4634,7 +4650,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   function otherWork() {
     const tk = Tasks.list().find((d) => d.id !== 'monsters' && Tasks.busy(d.id));
     if (Farm.busy()) { const o = (Farm.owners ? Farm.owners() : []).map((id) => Tasks.get(id)).filter(Boolean).map(taskTag); return { icon: '🌾', name: o.length ? o.join(' + ') : 'Auto-farming', sub: Farm.line() || 'running' }; }
-    if (tk) { const ln = Tasks.info(tk.id).line || 'working'; return /^reading/i.test(ln) ? { icon: '🔎', name: 'Scanning · ' + tShort(tk), sub: ln } : { icon: tk.icon, name: tShort(tk), sub: ln }; }
+    if (tk) { const ln = String(Tasks.info(tk.id).line || 'working').split(FARM_MARK).join(''); return /^reading/i.test(ln) ? { icon: '🔎', name: 'Scanning · ' + tShort(tk), sub: ln } : { icon: tk.icon, name: tShort(tk), sub: ln }; }
     return null;
   }
   function idleLine() {                                                  // nothing is working this second
@@ -4652,8 +4668,10 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
 
   /* =================================================== TASKS =================================================== */
   const SDOT = { ok: '✅ ', run: '▶ ', warn: '⚠️ ', err: '⛔ ', idle: '' };
-  const tStatus = (id) => { const i = Tasks.info(id); return i.line ? h('div', { class: 'ma-note' }, (SDOT[i.state] || '') + i.line + (i.at ? ' · ' + ago(i.at) : '')) : null; };
-  const nextNote = (id) => { const d = Tasks.nextDue(id) - Date.now(); return Tasks.busy(id) ? null : !Run.tasksOn() ? h('div', { class: 'ma-note' }, Run.wanted() ? '⏸ halted (signed out) — it carries on when you are back' : '⏹ stopped — press ▶ Start to run tasks') : h('div', { class: 'ma-note' }, d > 1500 ? '⏱ next look in ' + fmtDur(d) + ' — it wakes itself when something is due' : '⏱ looking at it now'); };
+  const farmWorksFor = (id) => { try { if (!Farm.busy()) return false; const o = Farm.owners ? Farm.owners() : []; return o.includes(id) || (!o.length && !!Farm.line()); } catch (_) { return false; } };   // (no owner yet = the kill-ahead check, which is for the quests waiting on the board)
+  const liveLine = (id, ln) => String(ln).split(FARM_MARK).join(farmWorksFor(id) ? ' · 🌾 ' + (Farm.line() || 'farming now') : ' · queued');
+  const tStatus = (id) => { const i = Tasks.info(id); return i.line ? h('div', { class: 'ma-note' }, (SDOT[i.state] || '') + liveLine(id, i.line) + (i.at ? ' · ' + ago(i.at) : '')) : null; };
+  const nextNote = (id) => { const d = Tasks.nextDue(id) - Date.now(); return Tasks.busy(id) ? null : farmWorksFor(id) ? h('div', { class: 'ma-note' }, '🌾 auto-farm is on it — this looks again when its run is over') : !Run.tasksOn() ? h('div', { class: 'ma-note' }, Run.wanted() ? '⏸ halted (signed out) — it carries on when you are back' : '⏹ stopped — press ▶ Start to run tasks') : h('div', { class: 'ma-note' }, d > 1500 ? '⏱ next look in ' + fmtDur(d) + ' — it wakes itself when something is due' : '⏱ looking at it now'); };
   function tTasks() {
     const out = [], T = cfg.tasks, cur = Engine.current();
     if (!Tab.isMain()) out.push(h('div', { class: 'ma-alert info' }, 'Another tab is the main one and runs the tasks. This tab only shows them.', h('div', {}, btn('Take over this tab', 'soft', () => { Tab.takeOver(); }))));
