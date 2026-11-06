@@ -23,7 +23,7 @@
  * default cap of a boss is its highest loot requirement, and bosses the roster did not know yet are added. Export .txt writes it all out.
  */
 Core.module({
-  id: 'automator', name: 'Automator', icon: '🤖', version: '1.12.1',
+  id: 'automator', name: 'Automator', icon: '🤖', version: '1.12.3',
   // Offered to other addons through Core capabilities (guides/CAPABILITIES.md):
   //   automator.status() -> the status string     automator.start() / automator.stop()     automator.scan() -> scan the bosses now
   provides: (api) => api && api.start ? {
@@ -34,7 +34,7 @@ Core.module({
   } : {},
   init(Core) {
 'use strict';
-const ID = 'automator', VERSION = '1.12.1';
+const ID = 'automator', VERSION = '1.12.3';
 if (window.__automatorLoaded) { console.warn('[automator] already loaded', window.__automatorLoaded); return null; }
 window.__automatorLoaded = VERSION;
 
@@ -3240,7 +3240,7 @@ Object.assign(LootScan, (() => {
  * ================================================================================================================ */
 Object.assign(Farm, (() => {
   const ACT = '/auto_farm_actions.php', STAT = '/auto_farm_status.php';
-  const LEVEL_LOCK = 400, MAX_STACK = 250, SIMILAR = 0.9, GAP = 180, POLL = 5000, BLIND_POLL = 20000, EXTRA = 1, UNLIMITED = 999999, DEMAND_TTL = 20 * 60000, PROBE_TTL = 10 * 60000, HELD_MARGIN = 10 * 60;       // HELD_MARGIN (s): a kill-ahead corpse that expires sooner than this is no use to the quest that waits
+  const LEVEL_LOCK = 400, MAX_STACK = 250, SIMILAR = 0.9, GAP = 180, POLL = 5000, BLIND_POLL = 20000, EXTRA = 1, UNLIMITED = 999999, DEMAND_TTL = 20 * 60000, PROBE_TTL = 10 * 60000, HELD_MARGIN = 3 * 60;       // HELD_MARGIN (s): a kill-ahead corpse that would expire within this long no longer counts as held (the chain of quests uses them within a few minutes, so keep it short: a wide margin re-kills mobs that are about to be looted)
   const store = Core.store(ID + '-farm', { def: { snap: null, owed: false, ids: {} } });
   const S = { busy: false, hold: false, retryAt: 0, sess: null, qtxt: '', stop: false, recheck: false, looted: new Set(), line: '', last: '', probe: null, probeAt: 0, demands: new Map(), skipped: new Map(), runs: 0, kills: 0, waves: { at: 0, alive: new Map() } };
   const stateOf = () => Object.assign({ snap: null, owed: false, ids: {} }, store.get() || {});
@@ -3560,9 +3560,21 @@ Object.assign(Farm, (() => {
     if (how === 'stopped') return how;
     const lt = await lootAll(batch);
     if (how === 'switched') log('🌾 Auto-Farm was switched off — carrying on with the normal attack path', 'info');
-    const held = batch.targets.filter((t) => t.defer).map((t) => t.name);
+    const heldT = batch.targets.filter((t) => t.defer), held = heldT.map((t) => t.name);
     if (!lt.verified) { log('⚠️ auto-farm: the graveyard could not be confirmed — nothing was looted this time; the quest check loots them at its next look', 'warn'); Diag.skip('graveyard-unverified', names); }
-    log(`🌾 auto-farm ${how}: ${lt.n} of ${lt.of} corpse${lt.of === 1 ? '' : 's'} looted (${names})${held.length ? ` — pre-kill: ${held.map(esc).join(', ')} left unlooted until the quest is accepted` : ''}`, how === 'finished' ? 'ok' : 'warn');
+    let ahead = null;                                                          // a pre-kill is never looted, so the loot count says nothing about it: count what is actually dead
+    if (heldT.length) { try { ahead = await corpses(batch, true); } catch (_) { /* counted below as unknown */ } }
+    const actT = batch.targets.filter((t) => !t.defer), actTxt = actT.length ? `${lt.n} of ${lt.of} corpse${lt.of === 1 ? '' : 's'} looted (${actT.map((t) => esc(t.name)).join(' + ')})` : '';
+    let aheadTxt = '', aheadOk = true;
+    if (heldT.length) {
+      const want = heldT.reduce((n, t) => n + t.kills, 0);
+      if (ahead && ahead.verified) {
+        const got = heldT.reduce((n, t) => n + Math.min(t.kills, ahead.per[t.name] || 0), 0), short = heldT.filter((t) => (ahead.per[t.name] || 0) < t.kills).map((t) => `${esc(t.name)} ${ahead.per[t.name] || 0}/${t.kills}`);
+        aheadOk = !short.length;
+        aheadTxt = `killed ahead ${got}/${want} (${held.map(esc).join(' + ')}), kept unlooted until the quest is accepted${short.length ? ` — SHORT: ${short.join(', ')}` : ''}`;
+      } else { aheadOk = false; aheadTxt = `killed ahead: could not be counted (${held.map(esc).join(' + ')}) — the next check counts them again before anything is killed twice`; }
+    }
+    log(`🌾 auto-farm ${how}: ${[actTxt, aheadTxt].filter(Boolean).join(' · ')}`, how === 'finished' && aheadOk ? 'ok' : 'warn');
     return how;
   }
 
@@ -3639,7 +3651,13 @@ Object.assign(Farm, (() => {
   }
 
   /* ---- demands: tasks say what they need, the service batches it ---- */
-  function want(owner, items) { S.demands.set(owner, { at: Date.now(), items: (items || []).filter((i) => i && i.need > 0) }); S.skipped.delete(owner); }
+  function want(owner, items) {
+    S.demands.set(owner, { at: Date.now(), items: (items || []).filter((i) => i && i.need > 0) }); S.skipped.delete(owner);
+    if ((items || []).some((i) => i && i.need > 0 && !i.defer)) {                          // a quest that is active NOW: do not wait for the 15 s timer
+      S.lastActive = Date.now();
+      if (!S.busy && !S.kick) S.kick = setTimeout(() => { S.kick = 0; service().catch((e) => log('⚠️ auto-farm: ' + esc(e.message), 'warn')); }, 600);
+    }
+  }
   function drop(owner) { S.demands.delete(owner); }
   function collect() {
     const out = []; for (const [o, d] of S.demands) { if (Date.now() - d.at > DEMAND_TTL) { S.demands.delete(o); continue; } d.items.forEach((i) => out.push(Object.assign({ owner: o }, i))); } return out;
@@ -3647,23 +3665,28 @@ Object.assign(Farm, (() => {
   /* earlier kills are still in the graveyard: loot them first for a quest that is active now (the quest counts them), and take the ones held for a
      quest that is not active yet off what has to be killed (otherwise every look at the board would pre-kill the same mobs again) */
   async function account(items) {
+    S.acct = null;                                                              // (the "why did it start" line reads this: never a stale check)
     const keys = new Set(items.map((i) => keyOf(i.name)));
     let sv; try { sv = await survey((n) => keys.has(keyOf(n)), false); } catch (_) { return items; }
     if (!sv.verified && !sv.dead.length) return items.every((i) => i.defer) ? null : items;     // the dead view could not be read: a kill-ahead must not guess (it would kill the same mobs twice)
     const dead = sv.dead.filter((c) => !S.looted.has(String(c.id))).sort((a, b) => a.w - b.w), out = []; let looted = 0;
+    const st = S.acct = { seen: 0, looted: 0, low: 0, big: 0, expiring: 0, refused: 0 }, soon = Math.floor(Date.now() / 1000) + HELD_MARGIN;
     for (const i of items) {
       const k = keyOf(i.name), minD = Math.max(0, Number(i.minDamage) || 0); let left = Math.max(0, Math.floor(Number(i.need) || 0));
       for (const c of dead) {
-        if (left <= 0) break; if (keyOf(c.name) !== k || c.dmg < minD || c.taken) continue;
-        if (i.defer) { if (c.w > left * 1.5 || (c.expire > 0 && c.expire < Math.floor(Date.now() / 1000) + HELD_MARGIN)) continue; c.taken = true; left -= c.w; continue; }          // held: counts, stays unlooted
-        if (S.stop || c.w > left * 1.5) continue;
-        if (await lootOne(c.id)) { c.taken = true; left -= c.w; looted += c.w; }
+        if (left <= 0) break; if (keyOf(c.name) !== k || c.taken) continue;
+        st.seen++;
+        if (c.dmg < minD) { st.low++; continue; }
+        if (i.defer) { if (c.w > left * 1.5) { st.big++; continue; } if (c.expire > 0 && c.expire < soon) { st.expiring++; continue; } c.taken = true; left -= c.w; continue; }          // held: counts, stays unlooted
+        if (S.stop || c.w > left * 1.5) { st.big++; continue; }
+        if (await lootOne(c.id)) { c.taken = true; left -= c.w; looted += c.w; st.looted += c.w; } else st.refused++;
       }
       if (left > 0) out.push(Object.assign({}, i, { need: left }));
     }
     if (looted) log(`🌾 auto-farm: ${looted} earlier kill${looted === 1 ? '' : 's'} looted for the active quest`, 'ok');
     return out;
   }
+  const acctTxt = () => { const a = S.acct; if (!a || !a.seen) return 'no matching corpses in the graveyard'; const p = [`${a.seen} matching corpse${a.seen === 1 ? '' : 's'}`]; if (a.looted) p.push(`${a.looted} looted`); if (a.low) p.push(`${a.low} under the minimum damage`); if (a.big) p.push(`${a.big} the wrong size`); if (a.expiring) p.push(`${a.expiring} about to expire`); if (a.refused) p.push(`${a.refused} refused by the site`); return p.join(', '); };
   async function service() {
     if (S.busy || S.hold || Date.now() < S.retryAt || !Tab.isMain() || Guard.isFaulted() || !Run.tasksOn()) return;   // stopped / halted: nothing starts, queued demands wait; a skill quest casting needs the server farm off
     const list = collect(); if (!list.length) { if (S.line) say(''); if (S.sess && Date.now() - S.sess.at > 15 * 60000) S.sess = null; return; }
@@ -3674,7 +3697,9 @@ Object.assign(Farm, (() => {
     const act = items.filter((i) => !i.defer);
     let pool = act.length ? act : items;                                                // the active quest first; kill-ahead only when nothing active is waiting
     if (!pool.length) return;
+    if (act.length) S.lastActive = Date.now();
     const ahead = !act.length;
+    if (ahead && Date.now() - (S.lastActive || 0) < 45000) return;                    // a quest was active a moment ago: the guild is between "handed in" and "accepted" — the next one is about to need these corpses, not a new run
     if (ahead) {                                                                        // kill-ahead: corpses already held count, so the same mobs are not killed twice
       S.busy = true; let left; try { say('checking the graveyard for earlier kills…'); left = await account(pool); } finally { S.busy = false; say(''); }
       if (!left) { S.retryAt = Date.now() + 2 * 60000; Diag.skip('graveyard-unverified', 'kill-ahead waits: the dead view could not be read'); return; }
@@ -3693,7 +3718,7 @@ Object.assign(Farm, (() => {
         let left = pool; if (!ahead) { say('checking the graveyard for earlier kills…'); left = await account(pool); }      // an active quest: loot what was killed ahead first
         if (!left) left = pool;
         const batch = left.length === pool.length && left.every((x, i) => x.need === pool[i].need) ? first : left.length ? plan(left)[0] : null;
-        if (batch) { const how = await runBatch(batch); if (how === 'finished') S.sess.done += pool.filter((i) => batch.targets.some((t) => keyOf(t.name) === keyOf(i.name))).length; }
+        if (batch) { log(`🌾 auto-farm: killing ${batch.targets.map((t) => esc(t.name)).join(' + ')} — graveyard check: ${acctTxt()}`, 'info'); const how = await runBatch(batch); if (how === 'finished') S.sess.done += pool.filter((i) => batch.targets.some((t) => keyOf(t.name) === keyOf(i.name))).length; }
         else { S.sess.done += pool.length; log('🌾 auto-farm: nothing left to kill — the earlier kills cover it', 'ok'); }
       }
     }
@@ -4156,7 +4181,7 @@ Object.assign(Tasks, (() => {
       if (!d.tick || busy.has(d.id) || !d.enabled() || now < (due.get(d.id) || 0)) continue;
       busy.add(d.id); due.set(d.id, now + (typeof d.every === 'function' ? d.every() : d.every)); info(d.id, { state: 'run' });
       Promise.resolve().then(() => d.tick())
-        .then((wait) => { if (Number.isFinite(wait) && wait > 0 && !((poked.get(d.id) || 0) >= now)) due.set(d.id, Date.now() + Math.min(Math.max(wait, 5000), 6 * 3600000)); })     // the tick said when it next has something to do (unless something poked it meanwhile)
+        .then((wait) => { if (Number.isFinite(wait) && wait > 0 && !((poked.get(d.id) || 0) >= now)) due.set(d.id, Date.now() + Math.min(Math.max(wait, 2000), 6 * 3600000)); })     // the tick said when it next has something to do (unless something poked it meanwhile)
         .catch((e) => { log(`⚠️ ${d.name}: ${esc(e.message)}`, 'warn'); info(d.id, { state: 'err', line: String(e.message) }); due.set(d.id, Date.now() + 5 * 60000); })
         .finally(() => busy.delete(d.id));
     }
