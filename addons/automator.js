@@ -4184,8 +4184,14 @@ const Guild = (() => {
     const worked = working || did > 0;
     if (!rows.some((r) => r.active)) {                       // 3. no quest in progress (the guild holds one at a time): take the next one that can be done
       let noClass = false; if (G.skill !== false && rows.some((x) => x.available && x.kind === 'skill') && !effectiveClass()) { try { await detectClass(); } catch (_) { /* */ } noClass = !effectiveClass(); }
+      // skill quests come first (quick, no farming) — unless they could not be cast: with mana potions off, a quest of 20 casts needs the MP for all of them,
+      // and the guild holds ONE quest at a time, so one that cannot be finished would block the kill / collect quests behind it. Then it goes last.
+      const cs = effectiveClass() ? CLASS_SKILLS[effectiveClass()] : null; if (!Me.mpKnown) { try { await Me.refresh(0); } catch (_) { /* */ } }
+      const castable = (r) => cfg.mana.enabled || !cs || (Me.mpKnown && Me.mp >= cs.cost * Math.max(1, left(r) || SKILL_QUEST_USES));
+      const rank = (r) => (r.kind === 'skill' ? (castable(r) ? 0 : 3) : { kill: 1, collect: 2 }[r.kind]);
       const cand = rows.filter((x) => x.available && ((x.kind === 'skill' && G.skill !== false && !noClass) || x.kind === 'kill' || (x.kind === 'collect' && G.collect !== false)))
-        .sort((x, y) => ({ skill: 0, kill: 1, collect: 2 }[x.kind] - { skill: 0, kill: 1, collect: 2 }[y.kind]));
+        .sort((x, y) => rank(x) - rank(y));
+      if (cand.length > 1 && cand.some((r) => r.kind === 'skill' && rank(r) === 3)) notes.push('skill quests go last: mana potions are off and MP is too low for all the casts');
       for (const r of cand) {
         if (r.kind === 'kill') { const c = await Farm.canFarm(r.meta.monsterName); if (!c.ok) { Diag.skip('guild-skip-available', `${r.name}: ${c.why}`); continue; } }
         if (r.kind === 'collect' && !(await collectOk(r))) continue;
@@ -4246,6 +4252,7 @@ const Merchant = (() => {
   const store = Core.store(ID + '-merchant', { def: { week: 0, done: false, at: 0, spent: 0, bought: 0 } });
   const setInfo = (p) => Tasks.info('merchant', p);
   const weekStart = () => { try { const n = Core.clock.next('sun', '00:00'); if (n > 0) return n - 7 * 86400000; } catch (_) { /* no server clock yet */ } return 0; };
+  const save = (o) => store.set(Object.assign({}, store.get(), o));       // merge: the shop list below survives every save
   const left = (it) => (it.limit > 0 ? Math.max(0, it.limit - it.bought) : Infinity);
   const weekly = (it) => it.currency === 'gold' && it.limit > 1 && (it.source === 'damon' || !ONE_TIME_GOLD.has(it.id));
   function scrape(doc) {
@@ -4254,6 +4261,7 @@ const Merchant = (() => {
       items.push({ source: 'merch', id: String(d.merchId), currency: String(d.currency || 'gold').toLowerCase() === 'gems' ? 'gems' : 'gold', name: ((c.querySelector('.name') || {}).textContent || 'Item').trim(), price: parseInt(d.price, 10) || 0, limit: parseInt(d.maxq, 10) || 0, bought: parseInt(d.bought, 10) || 0 }); });
     return items;
   }
+  const shopOf = (items) => items.filter(weekly).map((i) => ({ name: i.name, bought: i.bought, limit: i.limit, price: i.price })).sort((a, b) => (b.limit - b.bought > 0) - (a.limit - a.bought > 0) || a.name.localeCompare(b.name));   // what the Overview lists
   const goldOf = (doc) => { const el = doc.getElementById('goldBalance'), n = el ? parseNum(el.textContent, -1) : -1; if (n >= 0) return n; try { return Number(Core.me.get().gold) || 0; } catch (_) { return 0; } };
   async function damon() {
     try {
@@ -4275,9 +4283,9 @@ const Merchant = (() => {
     const doc = parseHtml(await netText('/merchant.php', { force: true, ttl: 0, key: 'ma:merchant' })), st = Guard.pageState(doc);
     if (st !== 'ok') { Guard.fault(st, 'merchant'); setInfo({ state: 'err', line: 'not signed in' }); return 5 * 60000; }
     let items = [...(await damon()), ...scrape(doc)];
-    let gold = goldOf(doc); const keep = 0;
+    let gold = goldOf(doc); const keep = 0; save({ shop: shopOf(items), gold });
     const cands = items.filter((i) => weekly(i) && left(i) > 0 && i.price > 0).sort((a, b) => left(a) * a.price - left(b) * b.price);
-    if (!cands.length) { store.set({ week: wk, done: true, at: Date.now(), spent: s.week === wk ? s.spent || 0 : 0, bought: s.week === wk ? s.bought || 0 : 0 }); setInfo({ state: 'ok', line: 'nothing left to buy this week' }); return untilReset(); }
+    if (!cands.length) { save({ week: wk, done: true, at: Date.now(), spent: s.week === wk ? s.spent || 0 : 0, bought: s.week === wk ? s.bought || 0 : 0 }); setInfo({ state: 'ok', line: 'nothing left to buy this week' }); return untilReset(); }
     let spent = 0, n = 0, short = false, failed = 0;
     for (const it of cands) {
       const qty = Math.min(left(it), Math.floor(Math.max(0, gold - keep) / it.price), 99999);
@@ -4285,12 +4293,12 @@ const Merchant = (() => {
       if (!Run.tasksOn() || Guard.isFaulted()) { setInfo({ state: 'idle', line: 'stopped or halted — carries on later' }); return 15000; }       // Stop (or a halt) mid-shop stops the next purchase
       setInfo({ state: 'run', line: `buying ${qty} × ${it.name}…` });
       const r = await buy(it, qty);
-      if (r.ok) { gold -= qty * it.price; spent += qty * it.price; n++; if (qty < left(it)) short = true; log(`🛒 merchant: ${qty} × ${esc(it.name)} for ${fmtNum(qty * it.price)} gold`, 'ok'); }
+      if (r.ok) { gold -= qty * it.price; spent += qty * it.price; n++; it.bought += qty; if (qty < left(it)) short = true; log(`🛒 merchant: ${qty} × ${esc(it.name)} for ${fmtNum(qty * it.price)} gold`, 'ok'); }
       else { log(`⚠️ merchant: ${esc(it.name)} — ${esc(r.msg || 'failed')}`, 'warn'); if (/not enough/i.test(r.msg)) short = true; else failed++; }
       await sleep(150);
     }
     const prev = s.week === wk ? s : {};
-    store.set({ week: wk, done: !short && !failed, at: Date.now(), spent: (prev.spent || 0) + spent, bought: (prev.bought || 0) + n });
+    save({ week: wk, done: !short && !failed, at: Date.now(), spent: (prev.spent || 0) + spent, bought: (prev.bought || 0) + n, shop: shopOf(items), gold });
     setInfo({ state: short || failed ? 'warn' : 'ok', line: failed && !short ? `bought ${n} item${n === 1 ? '' : 's'} (${fmtNum(spent)} gold) — ${failed} purchase${failed === 1 ? '' : 's'} failed, will look again` : short ? `bought ${n} item${n === 1 ? '' : 's'} (${fmtNum(spent)} gold) — not enough gold for the rest${keep ? ' (keeping ' + fmtNum(keep) + ')' : ''}, will look again` : `bought ${n} weekly item${n === 1 ? '' : 's'} for ${fmtNum(spent)} gold` });
     return short || failed ? 30 * 60000 : untilReset();
   }
@@ -4877,9 +4885,11 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
         bi.total ? barRow('🎫', 'Hunt', bi.have || 0, bi.total, `${fmtNum(bi.have || 0)} / ${fmtNum(bi.total)}`, null) : null, tStatus('bp'), nextNote('bp')], { aside: stPill(bi) }));
     }
     if (tcfg.merchant.enabled) {
-      const mi = Tasks.info('merchant'), mst = Merchant.state();
-      out.push(fold('ov:merchant', false, ['🛒 Merchant', h('small', {}, mst.done ? 'bought this week' : '')], () => [
-        mst.done ? note(`Bought ${fmtNum(mst.bought || 0)} item${mst.bought === 1 ? '' : 's'} for ${fmtNum(mst.spent || 0)} gold this week.`) : null, tStatus('merchant'), nextNote('merchant')], { aside: stPill(mi) }));
+      const mi = Tasks.info('merchant'), mst = Merchant.state(), shop = Array.isArray(mst.shop) ? mst.shop : [], open = shop.filter((x) => x.limit > x.bought).length;
+      out.push(fold('ov:merchant', !mst.done, ['🛒 Merchant', h('small', {}, mst.done ? 'bought this week' : shop.length ? `${open} of ${shop.length} left to buy${mst.gold != null ? ' · ' + fmtNum(mst.gold) + ' gold' : ''}` : '')], () => [
+        ...shop.slice(0, 12).map((x) => barRow('🛒', x.name, x.bought, x.limit, `${fmtNum(x.bought)} / ${fmtNum(x.limit)} · ${fmtNum(x.price)} gold each`, pill(x.limit > x.bought ? fmtNum(x.limit - x.bought) + ' left' : 'bought', x.limit > x.bought ? 'warn' : 'ok'))),
+        shop.length > 12 ? note(`+ ${shop.length - 12} more`) : null,
+        mst.spent || mst.bought ? note(`This week: ${fmtNum(mst.bought || 0)} purchase${mst.bought === 1 ? '' : 's'} for ${fmtNum(mst.spent || 0)} gold.`) : null, tStatus('merchant'), nextNote('merchant')], { aside: stPill(mi) }));
     }
     if (tcfg.guild.enabled || tcfg.bp.enabled) {
       const F = Farm.info(), md = Farm.mode();
