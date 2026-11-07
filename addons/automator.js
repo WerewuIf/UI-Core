@@ -8,7 +8,8 @@
  *                      auto-farm coordination, preset bridge (gear / crystal / pet, found through Core capabilities)
  *   PART 1b BUILD KIT  crystals + sigils that follow the Build Engine's gear / pets, and the way back (swappable: without it Auto still
  *                      picks gear + pets, it just leaves crystals and sigils alone)
- *   PART 2  DUNGEONS   Castle bosses (+ Khaal phases), Shadowbridge Gribble swarm. NOT the cube: Cube Suite owns it.
+ *   PART 2  DUNGEONS   Castle bosses (+ Khaal phases), Shadowbridge Gribble swarm. NOT the cube: Cube Suite owns it
+ *                      (the Bosses > Dungeons tab shows the Cube's live nodes next to Castle / Shadowbridge, read-only).
  *                      Swappable: turn the part off (or delete it) and the wave bosses keep working.
  *   PART 3  DUELS      Phase duels, shared by wave and dungeon bosses
  *   PART 4  LOOT       graveyard scan + EXP-aware auto-loot
@@ -24,7 +25,7 @@
  * default cap of a boss is its highest loot requirement, and bosses the roster did not know yet are added. Export .txt writes it all out.
  */
 Core.module({
-  id: 'automator', name: 'Automator', icon: '🤖', version: '1.13.3',
+  id: 'automator', name: 'Automator', icon: '🤖', version: '1.13.7',
   // Offered to other addons through Core capabilities (guides/CAPABILITIES.md):
   //   automator.status() -> the status string     automator.start() / automator.stop()     automator.scan() -> scan the bosses now
   provides: (api) => api && api.start ? {
@@ -35,7 +36,7 @@ Core.module({
   } : {},
   init(Core) {
 'use strict';
-const ID = 'automator', VERSION = '1.13.3';
+const ID = 'automator', VERSION = '1.13.7';
 const FARM_MARK = '\u2063farm\u2063';          // a task line is written when the task looks; this marks where the farm's state goes, filled in live when the line is drawn (a line saying "queued" while the farm is already checking the graveyard was stale)
 if (window.__automatorLoaded) { console.warn('[automator] already loaded', window.__automatorLoaded); return null; }
 window.__automatorLoaded = VERSION;
@@ -4390,8 +4391,8 @@ const CubeFast = (() => {
   const GONE_EVERY = 60000;                                                             // run phase: how often the list is read to see that the Cube is still open
   let goneAt = 0, goneN = 0, hopWarnAt = 0;                                             // (memory only) last still-open read, misses in a row, last "would not start" warning
   const WATCH_MIN = 60;                                                                 // the watch ends this long after the slot if no new Cube ever shows up (not a setting: a Fast Run itself has no time limit)
-  const st = Core.store(ID + '-cubefast', { def: { slot: 0, phase: 'idle', base: [], inst: '', bg: null, at: 0, warned: false, known: 0 } });   // known: the highest Cube id seen or run so far (survives the weekly reset)
-  const fresh = (slot, known) => ({ slot, phase: 'idle', base: [], inst: '', bg: null, at: 0, warned: false, known: known || 0 });
+  const st = Core.store(ID + '-cubefast', { def: { slot: 0, phase: 'idle', base: [], inst: '', bg: null, mst: null, at: 0, warned: false, known: 0 } });   // known: the highest Cube id seen or run so far (survives the weekly reset)
+  const fresh = (slot, known) => ({ slot, phase: 'idle', base: [], inst: '', bg: null, mst: null, at: 0, warned: false, known: known || 0 });
   const top = (ids) => (ids || []).reduce((m, x) => Math.max(m, Number(x) || 0), 0);
   const live = (s) => !!s && (s.phase === 'watch' || s.phase === 'run');
   const put = (n) => { if (JSON.stringify(n) !== JSON.stringify(st.get())) st.set(n); return n; };
@@ -4415,7 +4416,7 @@ const CubeFast = (() => {
     put({ ...s, phase: 'done' }); release();
     if (s.phase === 'run') {
       if (o && o.resetMode) await cube('cube.mode.set', 'normal');                      // the Cube ended without being cleared: Cube Suite would stay on Fast Run for the next Cube
-      await cube('cube.follow', null); if (s.bg === false) await cube('cube.background.set', false);
+      await cube('cube.follow', null); if (s.bg === false) await cube('cube.background.set', false); if (s.mst === false) await cube('cube.master.set', false);
     }
     if (why) log('⏰ cube fast run: ' + why, kind || 'info');
   }
@@ -4463,9 +4464,9 @@ const CubeFast = (() => {
       if (!(await Core.when('cube.fastrun.start', { timeout: 3000 }))) { put({ ...s, phase: 'done', known }); release(); log('⚠️ cube fast run: Cube Suite is not loaded — nothing to drive, skipping this week', 'warn'); return; }
       if (look) hold();
       const cs = await cube('cube.status'), ft = (cs && cs.fastTargets) || {};
-      s = put({ ...s, phase: 'watch', base, known, bg: cs.ok ? !!cs.background : null });
+      s = put({ ...s, phase: 'watch', base, known, bg: cs.ok ? !!cs.background : null, mst: cs.ok ? !!cs.master : null });
       log(`⏰ cube fast run: ${found ? `a new Cube is already open (newer than #${seen}) — taking it` : `watching for the new Cube (${s.base.length ? 'already open, ignored: #' + s.base.join(', #') : 'none open yet'})`} — everything else paused`, 'info');
-      if (!(ft.node7MatchNo > 0 || ft.node8MatchNo > 0)) log('⚠️ cube fast run: Cube Suite has no match number set for Node 7 / 8 — Fast Run will have nothing assigned to join', 'warn');
+      if (!(ft.node7MatchNo > 0 || ft.node8MatchNo > 0)) log('⚠️ cube fast run: Cube Suite has no match number set for Node 7 / 8 (Settings → Cube) — Fast Run will have nothing assigned to join', 'warn');
       restoreBuild('cube fast run');
       if (!found) return;                                                               // on time: the next beat looks for the Cube. Late: it is there already, hop now
     }
@@ -4641,6 +4642,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
 .ma-grid.solo{padding:4px 0 0}
 .ma-bb{position:relative;display:flex;align-items:center;gap:8px;min-width:0;padding:6px 9px 6px 7px;border-radius:14px;background:#0f1628;border:1px solid rgba(255,255,255,.06);cursor:pointer;transition:.15s}
 .ma-bb:hover{background:#141d38}
+.ma-bb.ro{cursor:default}.ma-bb.ro:hover{background:#0f1628}.ma-bb.ro.on:hover{background:rgba(75,115,224,.11)}
 .ma-bb.on{background:rgba(75,115,224,.11);border-color:rgba(110,168,255,.38)}
 .ma-bb.open{border-color:#6ea8ff;box-shadow:0 0 0 2px rgba(110,168,255,.16)}
 .ma-bb-n{flex:1;min-width:0}
@@ -4806,9 +4808,17 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   const stop = (e) => e.stopPropagation();
   // Cube Suite is a service reached through capabilities. Not loaded on this page = nothing to call: say so (it used to fail silently and the switch jumped back).
   const cubeMissing = '⚠️ Cube Suite is not loaded on this page: open Core ⚙️ and check it is ON and not SKIPPED. If it says SKIPPED here, the cube-suite entry in addons.json still has a "match" for the Cube page only';
+  const cubeSt = () => { try { const f = Core.cap('cube.status'); return f ? f() : null; } catch (_) { return null; } };
+  const CUBE_PILL = { cleared: 'ok', joined: 'blue', avail: 'warn', cd: 'warn', locked: 'cap', mon: '' };   // Cube Suite's pill kinds -> ours
+  const cubeNodes = (label, list) => (list && list.length ? opt(label, h('span', { style: { display: 'flex', flexWrap: 'wrap', gap: '4px' } }, list.map(([k, t]) => pill(t, CUBE_PILL[k])))) : null);
+  const cubeLine = () => {
+    const c = cubeSt(); if (!c) return cubeMissing;
+    if (!Core.has('cube.settings.set')) return 'Needs Cube Suite 3.5.6+ (reload so the new version loads)';
+    return [c.instanceId ? 'Cube #' + c.instanceId : 'no active Cube', c.running ? (c.cleared ? 'all cleared' : 'running') : 'not running', c.background ? 'every page' : 'Cube page only'].join(' · ');
+  };
   const cubeSet = (name, v) => {
-    if (!Core.has(name)) { log('⚠️ ' + (Core.has('cube.status') ? 'Cube Suite is too old for ' + name + ' — reload so 3.5.4+ loads' : 'Cube Suite is not loaded on this page (Core ⚙️ → Cube Suite; no "match" in addons.json)'), 'warn'); return; }
-    Promise.resolve(Core.call(name, v)).then(() => draw()).catch((e) => log('⚠️ Cube Suite: ' + esc((e && e.message) || e), 'warn'));
+    if (!Core.has(name)) { log('⚠️ ' + (Core.has('cube.status') ? 'Cube Suite is too old for ' + name + ' — reload so 3.5.6+ loads' : 'Cube Suite is not loaded on this page (Core ⚙️ → Cube Suite; no "match" in addons.json)'), 'warn'); return Promise.resolve(); }
+    return Promise.resolve(Core.call(name, v)).then(() => draw()).catch((e) => log('⚠️ Cube Suite: ' + esc((e && e.message) || e), 'warn'));
   };
   const sw = (get, set, o = {}) => h('label', { class: 'ma-sw' + (o.sm ? ' sm' : ''), onclick: stop },
     h('input', { type: 'checkbox', checked: get() ? true : null, onclick: stop, onchange: (e) => { set(e.target.checked); saveCfg(); if (o.redraw !== false) draw(); } }), h('span', { class: 'ma-sl' }));
@@ -5334,8 +5344,40 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   }
   const shownDefs = (sec) => {                                        // the bosses the list shows right now (this section, after the filter)
     const f = (ui.filter || '').trim().toLowerCase();
-    return Roster.list.filter((d) => Roster.canon(d) === d && (sec === 'dungeons' ? d.kind !== 'wave' : d.kind === 'wave') && (!f || Roster.members(d).some((m) => m.name.toLowerCase().includes(f))));
+    return Roster.list.filter((d) => Roster.canon(d) === d && (sec === 'dungeons' ? d.kind !== 'wave' && Kernel.isOn('dungeons') : d.kind === 'wave') && (!f || Roster.members(d).some((m) => m.name.toLowerCase().includes(f))));
   };
+  /* ---- the Cube in the Dungeons list: same fold + row + bubble look as Castle / Shadowbridge, but the Cube is Cube Suite's, so it is read-only here
+     (live state of every node, one switch for "run on every page", the mode). Nothing to tick: Cube Suite owns the fighting. ---- */
+  const cubeNodeGroups = (c = cubeSt()) => { const n = ((c || {}).nodes) || {}; return [['PvP', 'fast run', n.pvp], ['SA', 'army', n.sa], ['PvE', 'rooms', n.pve]].filter((g) => g[2] && g[2].length); };
+  const cubeNodeCount = () => cubeNodeGroups().reduce((n, g) => n + g[2].length, 0);
+  const CUBE_WORD = { cleared: 'cleared', joined: 'joined', avail: 'available', cd: 'cooldown', locked: 'locked', mon: 'waiting' };   // only used when a pill has no " · state" part
+  function cubeFold(f, force) {
+    const c = cubeSt(); if (!c) return null;                         // Cube Suite is not loaded on this page: the Settings tab explains it, no empty folder here
+    const hit = (g, t) => !f || ['cube', 'crucible', g[0], t].join(' ').toLowerCase().includes(f);
+    const groups = cubeNodeGroups(c).map((g) => [g[0], g[1], g[2].filter(([, t]) => hit(g, t))]).filter((g) => g[2].length);
+    if (f && !groups.length && !'cube crucible'.includes(f)) return null;
+    const all = cubeNodeGroups(c).reduce((a, g) => a.concat(g[2]), []).filter(([k]) => k !== 'locked'), done = all.filter(([k]) => k === 'cleared').length;   // locked / off / not-assigned nodes can never be cleared: leave them out of the goal
+    const live = ([k]) => k === 'joined' || k === 'avail';
+    const node = ([k, t]) => {                                       // "Gate Prism · active" -> name | state
+      const parts = String(t).split(' \u00b7 '), nm = parts[0], st = parts.slice(1).join(' \u00b7 '), kind = CUBE_PILL[k] || '';
+      return h('div', { class: 'ma-bb ro' + (live([k]) ? ' on' : ''), title: t },
+        avatar(nm, null, { dot: kind }),
+        h('div', { class: 'ma-bb-n' }, h('b', {}, nm), h('small', {}, h('span', { class: kind ? 'st-' + kind : '' }, st || CUBE_WORD[k] || ''))));
+    };
+    const rowOfNodes = (g) => h('div', { class: 'ma-wv' },
+      h('div', { class: 'ma-wv-l' + (g[2].some(live) ? ' on' : '') }, h('b', {}, g[0]), h('small', { title: g[1] }, g[1])),
+      h('div', { class: 'ma-grid' }, g[2].map(node)));
+    const head = ['\u{1F9CA} Cube', h('small', {}, c.instanceId ? '#' + c.instanceId + ' \u00b7 ' + (c.mode === 'fast' ? 'fast run' : 'normal') : 'crucible')];
+    const aside = [h('span', { class: 'ma-pill' + (c.cleared ? ' ok' : done ? ' blue' : '') }, done + '/' + all.length),
+      Core.has('cube.background.set') ? sw(() => !!c.background, (v) => { cubeSet('cube.background.set', v).then(() => v && cubeSet('cube.master.set', true)); }, { sm: true, redraw: false }) : null].filter(Boolean);
+    return fold('grp:cube', !!(c.running || c.background), head, () => {
+      const body = [note(cubeLine())];
+      if (Core.has('cube.mode.set')) body.push(opt('Mode', seg([['normal', 'Normal'], ['fast', 'Fast Run']], c.mode || 'normal', (v) => { cubeSet('cube.mode.set', v); })));
+      if (!c.instanceId) body.push(h('div', { class: 'ma-empty' }, 'No active Cube: its nodes show up here as soon as one is open.'));
+      else if (!groups.length) body.push(h('div', { class: 'ma-empty' }, 'Cube Suite has not reported its nodes yet (it does on its next loop).'));
+      return body.concat(groups.map(rowOfNodes));
+    }, { force, aside });
+  }
   function bossSections(sec) {
     const f = (ui.filter || '').trim().toLowerCase(), force = !!f;
     const match = (d) => !f || Roster.members(d).some((m) => m.name.toLowerCase().includes(f));
@@ -5346,8 +5388,9 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     const showAll = () => h('button', { class: 'ma-link', type: 'button', title: 'The other Shadowbridge mob types are not loaded until you show them', onclick: (e) => { stop(e); cfg.shadowAll = !cfg.shadowAll; setShadowExtras(cfg.shadowAll); saveCfg(); draw(); } }, cfg.shadowAll ? 'Hide others' : 'Show all mobs');
     const mk = (g, body) => fold('grp:' + g.id, g.defs.some(lit), [g.ico + ' ' + g.title, g.sub ? h('small', {}, g.sub) : null], body, { force, aside: [counts(g.defs), ...bulk(g.defs), ...(g.id === 'shadow' ? [showAll()] : [])] });
     let out;
-    if (sec === 'dungeons') out = dungeonGroups(canon.filter((d) => d.kind !== 'wave')).map((g) => mk(g, () => { const rows = []; for (let i = 0; i < g.defs.length; i += 2) rows.push(rowOf('', g.defs.slice(i, i + 2), null)); return rows; }));
+    if (sec === 'dungeons') out = (Kernel.isOn('dungeons') ? dungeonGroups(canon.filter((d) => d.kind !== 'wave')) : []).map((g) => mk(g, () => { const rows = []; for (let i = 0; i < g.defs.length; i += 2) rows.push(rowOf('', g.defs.slice(i, i + 2), null)); return rows; }));
     else out = waveGroups(canon.filter((d) => d.kind === 'wave')).map((g) => mk(g, () => g.waves.map((wv) => rowOf(wv.label, wv.defs, wv))));
+    if (sec === 'dungeons') { const cf = cubeFold(f, force); if (cf) out.push(cf); }
     if (!out.length) out = [h('div', { class: 'ma-empty' }, f ? `No ${sec === 'dungeons' ? 'dungeon' : 'wave'} boss matches “${ui.filter}”.` : 'No bosses known yet.')];
     return out;
   }
@@ -5377,12 +5420,12 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   function tBosses() {
     Relics.refresh(); const out = [];
     if (LootScan.available) { scanBox = h('div', {}, ...scanBar()); out.push(scanBox); } else scanBox = null;
-    const canon = Roster.list.filter((d) => Roster.canon(d) === d), dunOn = Kernel.isOn('dungeons');
+    const canon = Roster.list.filter((d) => Roster.canon(d) === d), dunOn = Kernel.isOn('dungeons'), cubeOk = !!cubeSt(), dunTab = dunOn || cubeOk;
     const sets = { waves: canon.filter((d) => d.kind === 'wave'), dungeons: dunOn ? canon.filter((d) => d.kind !== 'wave') : [] };
-    const sec = dunOn && ui.bsec === 'dungeons' ? 'dungeons' : 'waves';
-    const badge = (id) => { const f = (ui.filter || '').trim().toLowerCase(), defs = sets[id]; return f ? String(defs.filter((d) => Roster.members(d).some((m) => m.name.toLowerCase().includes(f))).length) : `${defs.filter(isOn).length}/${defs.length}`; };
+    const sec = dunTab && ui.bsec === 'dungeons' ? 'dungeons' : 'waves';
+    const badge = (id) => { if (id === 'dungeons' && !dunOn) return String(cubeNodeCount()); const f = (ui.filter || '').trim().toLowerCase(), defs = sets[id]; return f ? String(defs.filter((d) => Roster.members(d).some((m) => m.name.toLowerCase().includes(f))).length) : `${defs.filter(isOn).length}/${defs.length}`; };
     const badges = {};
-    out.push(h('div', { class: 'ma-sec' }, [['waves', '🌊 Waves'], ...(dunOn ? [['dungeons', '🏰 Dungeons']] : [])].map(([id, label]) => h('button', { type: 'button', class: id === sec ? 'on' : '', onclick: () => { ui.bsec = id; saveUi(); draw(); } }, label, (badges[id] = h('i', {}, badge(id)))))));
+    out.push(h('div', { class: 'ma-sec' }, [['waves', '🌊 Waves'], ...(dunTab ? [['dungeons', '🏰 Dungeons']] : [])].map(([id, label]) => h('button', { type: 'button', class: id === sec ? 'on' : '', onclick: () => { ui.bsec = id; saveUi(); draw(); } }, label, (badges[id] = h('i', {}, badge(id)))))));
     const kinds = Presets.pickKinds(), box = h('div', {}), fill = () => { box.replaceChildren(...bossSections(sec)); Object.keys(badges).forEach((id) => { badges[id].textContent = badge(id); }); };
     out.push(h('div', { class: 'ma-tool' }, h('input', { class: 'ma-search', placeholder: '🔎 Filter bosses…', value: ui.filter || '', oninput: (e) => { ui.filter = e.target.value; saveUi(); fill(); } }),
       kinds.length || Presets.available('best') ? h('button', { type: 'button', class: 'ma-tbtn' + (ui.open.loadout || BK.on ? ' on' : ''), title: 'How bosses get their gear, pets, crystals and sigils — and apply a setup to several bosses', onclick: () => { ui.open.loadout = !(ui.open.loadout || BK.on); if (!ui.open.loadout && BK.on) endBulk(); saveUi(); draw(); } }, '🎒 Loadout' + (Presets.available('best') ? (cfg.autoBuild.enabled ? ' · Auto' : ' · Saved') : '')) : null));
@@ -5461,8 +5504,17 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
         srow('✨', 'Skill quests', 'Adventure Guild: casts your class skill', sw(() => cfg.tasks.guild.skill !== false, (v) => { cfg.tasks.guild.skill = v; }))),
       caption('Cube'),
       group(
-        srow('🧊', 'Cube Suite automation', Core.has('cube.master.set') ? 'On: Cube Suite joins and fights. Off: it only watches' : (Core.has('cube.status') ? 'Needs Cube Suite 3.5.4+ (reload so the new version loads)' : cubeMissing), sw(() => { try { const f = Core.cap('cube.status'); return !!(f && f().master); } catch (_) { return false; } }, (v) => cubeSet('cube.master.set', v))),
-        srow('🧊', 'Run Cube Suite on every page', Core.has('cube.status') ? 'Not only on the Cube page. Off: it only runs while a Cube page is open (a scheduled fast run turns it on by itself)' : cubeMissing, sw(() => { try { const f = Core.cap('cube.status'); return !!(f && f().background); } catch (_) { return false; } }, (v) => cubeSet('cube.background.set', v))),
+        srow('🧊', 'Cube Suite', cubeLine(),
+          sw(() => { const c = cubeSt(); return !!(c && c.background); }, (v) => cubeSet('cube.background.set', v).then(() => v && cubeSet('cube.master.set', true))),
+          Core.has('cube.settings.set') ? [
+            note('Switch on: runs and fights on every page. Off: only while a Cube page is open (the panel there has its own Automation switch).'),
+            opt('Mode', seg([['normal', 'Normal'], ['fast', 'Fast Run']], (cubeSt() || {}).mode || 'normal', (v) => { cubeSet('cube.mode.set', v); })),
+            cubeNodes('PvP', ((cubeSt() || {}).nodes || {}).pvp),
+            cubeNodes('SA', ((cubeSt() || {}).nodes || {}).sa),
+            cubeNodes('PvE', ((cubeSt() || {}).nodes || {}).pve),
+            opt(['Node 7 match', h('small', {}, 'Fast Run · 0 = none')], num(() => (cubeSt() || { fastTargets: {} }).fastTargets.node7MatchNo || 0, (n) => { cubeSet('cube.settings.set', { node7MatchNo: n }); }, { w: 56, min: 0, max: 20, parse: parseFloat })),
+            opt(['Node 8 match', h('small', {}, 'Fast Run · 0 = none')], num(() => (cubeSt() || { fastTargets: {} }).fastTargets.node8MatchNo || 0, (n) => { cubeSet('cube.settings.set', { node8MatchNo: n }); }, { w: 56, min: 0, max: 20, parse: parseFloat })),
+            opt('Leader / Vice', sw(() => !!(cubeSt() || {}).leader, (v) => { cubeSet('cube.settings.set', { isLeader: v }); }, { sm: true, redraw: false }))] : null),
         srow('⏰', 'Scheduled fast run', cfg.cubeFast.enabled ? CubeFast.line() : 'Pauses everything else, watches for the new Cube, jumps in on Fast Run', sw(() => cfg.cubeFast.enabled, (v) => { cfg.cubeFast.enabled = v; }), cfg.cubeFast.enabled ? [
           opt('Day', dropdown([['sun', 'Sunday'], ['mon', 'Monday'], ['tue', 'Tuesday'], ['wed', 'Wednesday'], ['thu', 'Thursday'], ['fri', 'Friday'], ['sat', 'Saturday']], cfg.cubeFast.day, (v) => { cfg.cubeFast.day = v; })),
           opt(['Server time', h('small', {}, 'UTC' + (() => { try { return Core.clock.parts().offset; } catch (_) { return '+05:30'; } })() + ' · e.g. 11:00 PM')], num(() => toMin(cfg.cubeFast.time), (n) => { cfg.cubeFast.time = hhmm(n); },
@@ -5534,7 +5586,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   if (typeof Core.on === 'function') Core.on('caps:changed', (d) => { if (shown && d && (d.added || []).some((n) => n.startsWith('preset.'))) schedule(300); });   // a preset addon loaded late
   UI.hook((what) => { if (!shown) return; if (what === 'scan') { if (tab === 'bosses') paintScan(); return; } if (what === 'log' && tab === 'activity' && paintLog()) return; if (what === undefined || what === 'status' || what === 'tasks' || DIRTY_TAB[what] === tab) schedule(); });
   let beat = 0;
-  setInterval(() => { if (!shown || !root || !root.isConnected || document.hidden) return; if (++beat % 3 === 0 && (tab === 'home' || tab === 'tasks') && !typing()) draw(true); }, 1000);   // overview: vitals + timers refresh every 3 s
+  setInterval(() => { if (!shown || !root || !root.isConnected || document.hidden) return; if (++beat % 3 === 0 && (tab === 'home' || tab === 'tasks' || tab === 'settings' || (tab === 'bosses' && ui.bsec === 'dungeons' && cubeSt())) && !typing()) draw(true); }, 1000);   // overview: vitals + timers refresh every 3 s
 
   function register() {
     Core.float.add({ id: ID, title: 'Automator', icon: '🤖', order: 40, width: 560,
