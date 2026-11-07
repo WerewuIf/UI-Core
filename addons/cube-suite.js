@@ -37,14 +37,17 @@
  * The panel is drawn on the Cube page only. Elsewhere the engine runs headless, and only when "background" is on (default OFF, so merely opening
  * any page never starts PvP / PvE by itself). One tab runs the engine (Core.tab 'cube-suite'); commands are shared state + a wake event, so
  * it does not matter which tab the command came from. */
-/* v3.5.4: new capability cube.master.set(bool) so the Automator can switch Cube Suite's automation on / off (status().master already reported it, nothing could set it).
+/* v3.5.6: status().nodes = the node pills as data ({ pvp, sa, pve }: [[kind, text], ...]), published by the engine tab, so another tab or the Automator can show the nodes.
+ * v3.5.5: cube.settings.set({ node7MatchNo, node8MatchNo, isLeader }); status() also reports `leader`; the Cube page takes the engine over from a headless tab (the panel lives there).
+ * v3.5.4: new capability cube.master.set(bool) so the Automator can switch Cube Suite's automation on / off (status().master already reported it, nothing could set it).
  * NOTE: addons.json must NOT give cube-suite a "match": this is a service that runs on any page. With a match Core skips it everywhere else and no cube.* capability exists there. */
 Core.module({
-  id: 'cube-suite', name: 'Cube Suite', icon: '🧊', version: '3.5.4',
+  id: 'cube-suite', name: 'Cube Suite', icon: '🧊', version: '3.5.6',
   provides: (api) => api && api.status ? {
     'cube.status':         { fn: api.status,    doc: 'what Cube Suite is doing (shared across tabs)', returns: '{ ok, mode, master, background, follow, running, instanceId, cleared, fastTargets }' },
     'cube.mode.set':       { fn: api.setMode,   doc: "switch Fast Run / Normal", args: "'fast' | 'normal'" },
     'cube.master.set':     { fn: api.setMaster, doc: 'Automation switch of the Cube Suite panel: on = it joins / fights, off = it only watches', args: 'boolean' },
+    'cube.settings.set':   { fn: api.setSettings, doc: 'Fast Run assignments, same as the panel fields', args: '{ node7MatchNo?: 0-20, node8MatchNo?: 0-20, isLeader?: boolean }' },
     'cube.background.set': { fn: api.setBackground, doc: 'run the engine on any page, not only the Cube page', args: 'boolean' },
     'cube.follow':         { fn: api.follow,    doc: 'pin the engine to one Cube instance (null = unpin)', args: 'instanceId | null' },
     'cube.fastrun.start':  { fn: api.startFastRun, doc: 'follow that Cube, Fast Run on, automation on, background on', args: '{ instanceId }' },
@@ -464,6 +467,7 @@ Core.module({
   let dsMainGeneration = 0;   // bumps on every promotion / demotion so a stale guild-check loop can tell it was superseded
   function dsOnMainTab() {
     dsTabIsMain = true;
+    dsStatusSig = ''; dsPublishStatus();                              // say right away whether this engine tab has the panel (see dsTakeFromHeadless)
     const gen = ++dsMainGeneration;
     dsHideTabBlocker();
     masterEnabled            = dsLoadMasterEnabled();
@@ -483,8 +487,18 @@ Core.module({
     })();
   }
 
+  // The panel lives on the Cube page. If the tab holding the engine is headless (another page, background on), take it over: that tab queues and
+  // gets the engine back when this one closes. Another Cube page holding it (ui true) is left alone: that is what "Use this tab" is for.
+  function dsTakeFromHeadless(tries = 0) {
+    if (!onCubePage || dsTabIsMain) return;
+    let st = {}; try { st = JSON.parse(localStorage.getItem(STATUS_KEY)) || {}; } catch { /* none yet */ }
+    if (Date.now() - (st.at || 0) < 5 * 60_000 && st.ui === false) { void Core.tab.takeOver(TAB_NAME); return; }
+    if (tries < 5) setTimeout(() => dsTakeFromHeadless(tries + 1), 2000);   // the holder may not have announced itself yet
+  }
+
   function dsOnIdleTab() {
     dsTabIsMain = false;
+    dsTakeFromHeadless();
     dsMainGeneration++;
     dsDisarmScheduleWakeups();
     if (runLoopTimer) { clearTimeout(runLoopTimer); runLoopTimer = 0; }
@@ -546,12 +560,18 @@ Core.module({
   const dsBackgroundOn = () => { try { return localStorage.getItem(BACKGROUND_KEY) === '1'; } catch { return false; } };
   const dsMayRun = () => onCubePage || dsBackgroundOn();            // the Cube page always may; any other page only with background on
   let dsStatusSig = '', dsStatusAt = 0;
+  const dsPills = (html) => Array.from(html.matchAll(/<span class="ds-pill ds-pill-(\w+)">([^<]*)<\/span>/g), (m) => [m[1], m[2].replace(/ 🔒.*$/, '')]);   // [[kind, text]]; the cooldown clock is dropped so the status does not change every loop
+  function dsNodeSummary() {
+    const iid = currentInstanceId;
+    try { return { pvp: dsPills(dsPvpPillsHtml(iid, dsIsFastMode(), pvpLoadFastRunState())), sa: dsPills(dsSaPillsHtml(iid)), pve: dsPills(dsPvePillsHtml()) }; }
+    catch (_) { return null; }                                       // the nodes are a bonus: never lose the rest of the status over them
+  }
   function dsPublishStatus() {                                       // every loop calls this, and a write wakes every other tab: only write on a change, else every 15 s (status() treats 5 min as live)
     try {
-      const instanceId = currentInstanceId || '', cleared = !!currentInstanceId && dsIsDungeonFullyCleared(), sig = instanceId + '|' + cleared, now = Date.now();
+      const instanceId = currentInstanceId || '', cleared = !!currentInstanceId && dsIsDungeonFullyCleared(), nodes = instanceId ? dsNodeSummary() : null, sig = instanceId + '|' + cleared + '|' + onCubePage + '|' + JSON.stringify(nodes), now = Date.now();
       if (sig === dsStatusSig && now - dsStatusAt < 15_000) return;
       dsStatusSig = sig; dsStatusAt = now;
-      dsSafeSetItem(STATUS_KEY, JSON.stringify({ at: now, instanceId, cleared }));
+      dsSafeSetItem(STATUS_KEY, JSON.stringify({ at: now, instanceId, cleared, ui: onCubePage, nodes }));
     } catch { /* status is best effort */ }
   }
   function dsLoadMode()  { return localStorage.getItem(SHARED_MODE_KEY) === 'fast' ? 'fast' : 'normal'; }
@@ -5228,6 +5248,119 @@ Core.module({
     }).join('');
   }
 
+  /* The node pills as HTML. The panel shows them; the engine tab also publishes them as data (status().nodes), so the Automator shows the same nodes. */
+  function dsPvpPillsHtml(iid, fastMode, pvpState) {
+
+      const nodePills = iid ? PVP_NODE_PRIORITY.map(nodeId => {
+        if (fastMode) {
+          const isLocked = pvpLockedNodesLogged.has(nodeId);
+          if (isLocked) return `<span class="ds-pill ds-pill-locked">N${nodeId} · locked</span>`;
+
+          const matchNo = nodeId === 7 ? pvpState.node7MatchNo : pvpState.node8MatchNo;
+          const res     = pvpGetMatchResult(pvpState, nodeId, matchNo);
+          if (res.cleared) return `<span class="ds-pill ds-pill-cleared">N${nodeId} · cleared</span>`;
+          if (res.joined)  return `<span class="ds-pill ds-pill-joined">N${nodeId} · joined</span>`;
+          if (!matchNo)     return `<span class="ds-pill ds-pill-locked">N${nodeId} · not assigned</span>`;
+          const stats = pvpNodeStats[nodeId];
+          if (!stats)              return `<span class="ds-pill ds-pill-mon">N${nodeId} · waiting</span>`;
+          if (stats.allCleared)    return `<span class="ds-pill ds-pill-cleared">N${nodeId} · cleared</span>`;
+          if (stats.liveWithoutUs) return `<span class="ds-pill ds-pill-cd">N${nodeId} · live w/o us — reassign</span>`;
+          if (stats.hasSelf)       return `<span class="ds-pill ds-pill-joined">N${nodeId} · joined</span>`;
+          if (stats.onCooldown) {
+            const cd = pvpGetLiveCooldownStr(nodeId);
+            return `<span class="ds-pill ds-pill-cd">N${nodeId} · cooldown${cd ? ` 🔒 ${cd}` : ''}</span>`;
+          }
+          if (stats.hasOpen)       return `<span class="ds-pill ds-pill-avail">N${nodeId} · available</span>`;
+          return `<span class="ds-pill ds-pill-mon">N${nodeId} · waiting</span>`;
+        }
+        const isLocked = pvpLockedNodesLogged.has(nodeId);
+        if (isLocked) return `<span class="ds-pill ds-pill-locked">N${nodeId} · locked</span>`;
+        const stats = pvpNodeStats[nodeId];
+        if (!stats)           return `<span class="ds-pill ds-pill-mon">N${nodeId} · waiting</span>`;
+        if (stats.locked)     return `<span class="ds-pill ds-pill-locked">N${nodeId} · locked</span>`;
+        if (stats.allCleared) return `<span class="ds-pill ds-pill-cleared">N${nodeId} · cleared</span>`;
+        if (stats.hasSelf)    return `<span class="ds-pill ds-pill-joined">N${nodeId} · joined</span>`;
+        if (stats.onCooldown) {
+          const cd = pvpGetLiveCooldownStr(nodeId);
+          return `<span class="ds-pill ds-pill-cd">N${nodeId} · cooldown${cd ? ` 🔒 ${cd}` : ''}</span>`;
+        }
+        if (stats.hasOpen)    return `<span class="ds-pill ds-pill-avail">N${nodeId} · available</span>`;
+        return `<span class="ds-pill ds-pill-mon">N${nodeId} · no matches</span>`;
+      }).join('') : '';
+
+      const tStats = pvpNodeStats[PVP_TYRANT_NODE_ID];
+      let tyrantPill;
+      if (!pvpTyrantEnabled)            tyrantPill = `<span class="ds-pill ds-pill-locked">N9 · Tyrant off</span>`;
+      else if (!tStats || tStats.hidden) tyrantPill = `<span class="ds-pill ds-pill-mon">N9 · Tyrant waiting</span>`;
+      else if (tStats.locked)           tyrantPill = `<span class="ds-pill ds-pill-locked">N9 · Tyrant locked</span>`;
+      else if (tStats.allCleared)       tyrantPill = `<span class="ds-pill ds-pill-cleared">N9 · Tyrant cleared</span>`;
+      else if (tStats.hasSelf)          tyrantPill = `<span class="ds-pill ds-pill-joined">N9 · Tyrant joined</span>`;
+      else if (tStats.onCooldown) {
+        const cd = pvpGetLiveCooldownStr(PVP_TYRANT_NODE_ID);
+        tyrantPill = `<span class="ds-pill ds-pill-cd">N9 · Tyrant cooldown${cd ? ` 🔒 ${cd}` : ''}</span>`;
+      }
+      else if (tStats.hasOpen)          tyrantPill = `<span class="ds-pill ds-pill-avail">N9 · Tyrant available</span>`;
+      else                              tyrantPill = `<span class="ds-pill ds-pill-mon">N9 · Tyrant no matches</span>`;
+
+    return nodePills + tyrantPill;
+  }
+
+  function dsSaPillsHtml(iid) {
+    if (!iid) return '';
+    {
+        const partKeys = saLoadParticipated(iid).keys;
+        const perNode  = {};
+        for (const k of partKeys) { const [nid] = k.split(':'); perNode[nid] = (perNode[nid] || 0) + 1; }
+
+        return SA_TARGET_NODES.map(nodeId => {
+          const isLocked = saLockedNodesLogged.has(nodeId);
+          if (isLocked) return `<span class="ds-pill ds-pill-locked">N${nodeId} · locked</span>`;
+          const stats  = saNodeStats[nodeId];
+          const fought = perNode[String(nodeId)] || 0;
+          if (!stats)
+            return masterEnabled
+              ? `<span class="ds-pill ds-pill-mon">N${nodeId} · scanning…</span>`
+            : `<span class="ds-pill ds-pill-mon">N${nodeId} · monitoring</span>`;
+          if (stats.scanning)
+            return `<span class="ds-pill ds-pill-mon">N${nodeId} · scanning…</span>`;
+          if (stats.allCleared) {
+            const countTag = stats.total > 0 ? ` · ${fought}/${stats.total} done` : '';
+            return `<span class="ds-pill ds-pill-cleared">N${nodeId}${countTag}</span>`;
+          }
+          if (stats.activeFightNo > 0) {
+            const label = partKeys.includes(`${nodeId}:${stats.activeFightNo}`) ? 'joined' : 'in fight';
+            return `<span class="ds-pill ds-pill-joined">N${nodeId} · ${label}</span>`;
+          }
+          if (stats.hasAvailable)
+            return `<span class="ds-pill ds-pill-avail">N${nodeId} · available</span>`;
+          if (stats.justFought) {
+            if (stats.total > 0 && fought >= stats.total)
+              return `<span class="ds-pill ds-pill-cleared">N${nodeId} · all done</span>`;
+            return `<span class="ds-pill ds-pill-joined">N${nodeId} · fought</span>`;
+          }
+          return fought > 0
+            ? `<span class="ds-pill ds-pill-mon">N${nodeId} · ${fought} done</span>`
+          : `<span class="ds-pill ds-pill-mon">N${nodeId} · waiting</span>`;
+        }).join('');
+    }
+  }
+
+  function dsPvePillsHtml() {
+    return PVE_TARGET_NODES.map(id => {
+        const r = pveNodeStats[id];
+        const label = PVE_NODE_LABELS[id] || `N${id}`;
+
+        if (!r)              return `<span class="ds-pill ds-pill-mon">${label} · waiting</span>`;
+        if (r.locked)        return `<span class="ds-pill ds-pill-locked">${label} · locked</span>`;
+        if (r.attacking)     return `<span class="ds-pill ds-pill-joined">${label} · attacking</span>`;
+        if (r.scanning)      return `<span class="ds-pill ds-pill-mon">${label} · scanning</span>`;
+        if (r.allClear)      return `<span class="ds-pill ds-pill-cleared">${label} · clear</span>`;
+        if (r.schedWait)     return `<span class="ds-pill ds-pill-mon">${label} · waits ${r.schedWait}</span>`;   // FIX (d)
+        if (r.noActionable)  return `<span class="ds-pill ds-pill-mon">${label} · capped</span>`;
+        return `<span class="ds-pill ds-pill-avail">${label} · active</span>`;
+    }).join('');
+  }
+
   function refreshUI() {
     if (!uiBox || !uiBox.isConnected) return;
     const fastMode = dsIsFastMode();
@@ -5282,61 +5415,7 @@ Core.module({
       : `Fast Run${monTag} — ${role} — ${parts.length ? parts.join(' · ') : 'not assigned'}`;
     }
     const pvpPillsEl = uiBox.querySelector('#ds-pvp-pills');
-    if (pvpPillsEl) {
-
-      const nodePills = iid ? PVP_NODE_PRIORITY.map(nodeId => {
-        if (fastMode) {
-          const isLocked = pvpLockedNodesLogged.has(nodeId);
-          if (isLocked) return `<span class="ds-pill ds-pill-locked">N${nodeId} · locked</span>`;
-
-          const matchNo = nodeId === 7 ? pvpState.node7MatchNo : pvpState.node8MatchNo;
-          const res     = pvpGetMatchResult(pvpState, nodeId, matchNo);
-          if (res.cleared) return `<span class="ds-pill ds-pill-cleared">N${nodeId} · cleared</span>`;
-          if (res.joined)  return `<span class="ds-pill ds-pill-joined">N${nodeId} · joined</span>`;
-          if (!matchNo)     return `<span class="ds-pill ds-pill-locked">N${nodeId} · not assigned</span>`;
-          const stats = pvpNodeStats[nodeId];
-          if (!stats)              return `<span class="ds-pill ds-pill-mon">N${nodeId} · waiting</span>`;
-          if (stats.allCleared)    return `<span class="ds-pill ds-pill-cleared">N${nodeId} · cleared</span>`;
-          if (stats.liveWithoutUs) return `<span class="ds-pill ds-pill-cd">N${nodeId} · live w/o us — reassign</span>`;
-          if (stats.hasSelf)       return `<span class="ds-pill ds-pill-joined">N${nodeId} · joined</span>`;
-          if (stats.onCooldown) {
-            const cd = pvpGetLiveCooldownStr(nodeId);
-            return `<span class="ds-pill ds-pill-cd">N${nodeId} · cooldown${cd ? ` 🔒 ${cd}` : ''}</span>`;
-          }
-          if (stats.hasOpen)       return `<span class="ds-pill ds-pill-avail">N${nodeId} · available</span>`;
-          return `<span class="ds-pill ds-pill-mon">N${nodeId} · waiting</span>`;
-        }
-        const isLocked = pvpLockedNodesLogged.has(nodeId);
-        if (isLocked) return `<span class="ds-pill ds-pill-locked">N${nodeId} · locked</span>`;
-        const stats = pvpNodeStats[nodeId];
-        if (!stats)           return `<span class="ds-pill ds-pill-mon">N${nodeId} · waiting</span>`;
-        if (stats.locked)     return `<span class="ds-pill ds-pill-locked">N${nodeId} · locked</span>`;
-        if (stats.allCleared) return `<span class="ds-pill ds-pill-cleared">N${nodeId} · cleared</span>`;
-        if (stats.hasSelf)    return `<span class="ds-pill ds-pill-joined">N${nodeId} · joined</span>`;
-        if (stats.onCooldown) {
-          const cd = pvpGetLiveCooldownStr(nodeId);
-          return `<span class="ds-pill ds-pill-cd">N${nodeId} · cooldown${cd ? ` 🔒 ${cd}` : ''}</span>`;
-        }
-        if (stats.hasOpen)    return `<span class="ds-pill ds-pill-avail">N${nodeId} · available</span>`;
-        return `<span class="ds-pill ds-pill-mon">N${nodeId} · no matches</span>`;
-      }).join('') : '';
-
-      const tStats = pvpNodeStats[PVP_TYRANT_NODE_ID];
-      let tyrantPill;
-      if (!pvpTyrantEnabled)            tyrantPill = `<span class="ds-pill ds-pill-locked">N9 · Tyrant off</span>`;
-      else if (!tStats || tStats.hidden) tyrantPill = `<span class="ds-pill ds-pill-mon">N9 · Tyrant waiting</span>`;
-      else if (tStats.locked)           tyrantPill = `<span class="ds-pill ds-pill-locked">N9 · Tyrant locked</span>`;
-      else if (tStats.allCleared)       tyrantPill = `<span class="ds-pill ds-pill-cleared">N9 · Tyrant cleared</span>`;
-      else if (tStats.hasSelf)          tyrantPill = `<span class="ds-pill ds-pill-joined">N9 · Tyrant joined</span>`;
-      else if (tStats.onCooldown) {
-        const cd = pvpGetLiveCooldownStr(PVP_TYRANT_NODE_ID);
-        tyrantPill = `<span class="ds-pill ds-pill-cd">N9 · Tyrant cooldown${cd ? ` 🔒 ${cd}` : ''}</span>`;
-      }
-      else if (tStats.hasOpen)          tyrantPill = `<span class="ds-pill ds-pill-avail">N9 · Tyrant available</span>`;
-      else                              tyrantPill = `<span class="ds-pill ds-pill-mon">N9 · Tyrant no matches</span>`;
-
-      pvpPillsEl.innerHTML = nodePills + tyrantPill;   // no more standalone cdPill
-    }
+    if (pvpPillsEl) pvpPillsEl.innerHTML = dsPvpPillsHtml(iid, fastMode, pvpState);
     for (const nodeId of [7, 8]) {
       const input   = uiBox.querySelector(`.ds-input[data-node="${nodeId}"]`);
       const matchNo = nodeId === 7 ? pvpState.node7MatchNo : pvpState.node8MatchNo;
@@ -5367,46 +5446,7 @@ Core.module({
     : `${saMode} — no active instance`;
 
     const saPillsEl = uiBox.querySelector('#ds-sa-pills');
-    if (saPillsEl) {
-      if (iid) {
-        const partKeys = saLoadParticipated(iid).keys;
-        const perNode  = {};
-        for (const k of partKeys) { const [nid] = k.split(':'); perNode[nid] = (perNode[nid] || 0) + 1; }
-
-        saPillsEl.innerHTML = SA_TARGET_NODES.map(nodeId => {
-          const isLocked = saLockedNodesLogged.has(nodeId);
-          if (isLocked) return `<span class="ds-pill ds-pill-locked">N${nodeId} · locked</span>`;
-          const stats  = saNodeStats[nodeId];
-          const fought = perNode[String(nodeId)] || 0;
-          if (!stats)
-            return masterEnabled
-              ? `<span class="ds-pill ds-pill-mon">N${nodeId} · scanning…</span>`
-            : `<span class="ds-pill ds-pill-mon">N${nodeId} · monitoring</span>`;
-          if (stats.scanning)
-            return `<span class="ds-pill ds-pill-mon">N${nodeId} · scanning…</span>`;
-          if (stats.allCleared) {
-            const countTag = stats.total > 0 ? ` · ${fought}/${stats.total} done` : '';
-            return `<span class="ds-pill ds-pill-cleared">N${nodeId}${countTag}</span>`;
-          }
-          if (stats.activeFightNo > 0) {
-            const label = partKeys.includes(`${nodeId}:${stats.activeFightNo}`) ? 'joined' : 'in fight';
-            return `<span class="ds-pill ds-pill-joined">N${nodeId} · ${label}</span>`;
-          }
-          if (stats.hasAvailable)
-            return `<span class="ds-pill ds-pill-avail">N${nodeId} · available</span>`;
-          if (stats.justFought) {
-            if (stats.total > 0 && fought >= stats.total)
-              return `<span class="ds-pill ds-pill-cleared">N${nodeId} · all done</span>`;
-            return `<span class="ds-pill ds-pill-joined">N${nodeId} · fought</span>`;
-          }
-          return fought > 0
-            ? `<span class="ds-pill ds-pill-mon">N${nodeId} · ${fought} done</span>`
-          : `<span class="ds-pill ds-pill-mon">N${nodeId} · waiting</span>`;
-        }).join('');
-      } else {
-        saPillsEl.innerHTML = '';
-      }
-    }
+    if (saPillsEl) saPillsEl.innerHTML = dsSaPillsHtml(iid);
     const saNoteEl = uiBox.querySelector('#ds-sa-note');
     if (saNoteEl) {
       saNoteEl.textContent = fastMode
@@ -5436,21 +5476,7 @@ Core.module({
     }
 
     const pvePillsEl = uiBox.querySelector('#ds-pve-pills');
-    if (pvePillsEl) {
-      pvePillsEl.innerHTML = PVE_TARGET_NODES.map(id => {
-        const r = pveNodeStats[id];
-        const label = PVE_NODE_LABELS[id] || `N${id}`;
-
-        if (!r)              return `<span class="ds-pill ds-pill-mon">${label} · waiting</span>`;
-        if (r.locked)        return `<span class="ds-pill ds-pill-locked">${label} · locked</span>`;
-        if (r.attacking)     return `<span class="ds-pill ds-pill-joined">${label} · attacking</span>`;
-        if (r.scanning)      return `<span class="ds-pill ds-pill-mon">${label} · scanning</span>`;
-        if (r.allClear)      return `<span class="ds-pill ds-pill-cleared">${label} · clear</span>`;
-        if (r.schedWait)     return `<span class="ds-pill ds-pill-mon">${label} · waits ${r.schedWait}</span>`;   // FIX (d)
-        if (r.noActionable)  return `<span class="ds-pill ds-pill-mon">${label} · capped</span>`;
-        return `<span class="ds-pill ds-pill-avail">${label} · active</span>`;
-      }).join('');
-    }
+    if (pvePillsEl) pvePillsEl.innerHTML = dsPvePillsHtml();
     const pveModeSel = uiBox.querySelector('#ds-pve-mode');
     if (pveModeSel && !pveModeSel.matches(':focus')) {
       pveModeSel.value = pveProfile.damageMode;
@@ -5532,10 +5558,17 @@ Core.module({
       let f = {}; try { f = pvpLoadFastRunState() || {}; } catch { /* none yet */ }
       return { ok: true, mode: dsLoadMode(), master: dsLoadMasterEnabled(), background: dsBackgroundOn(), follow: dsLoadFollow(),
         running: live, instanceId: live ? String(st.instanceId || '') : '', cleared: live && !!st.cleared,
-        fastTargets: { node7MatchNo: Number(f.node7MatchNo) || 0, node8MatchNo: Number(f.node8MatchNo) || 0 } };
+        fastTargets: { node7MatchNo: Number(f.node7MatchNo) || 0, node8MatchNo: Number(f.node8MatchNo) || 0 }, leader: !!f.isLeader, nodes: live ? st.nodes || null : null };
     },
     setMode(m) { dsSaveMode(m === 'fast' ? 'fast' : 'normal'); dsWake(); return api.status(); },
     setMaster(on) { dsSaveMasterEnabled(!!on); masterEnabled = !!on; dsWake(); try { refreshUI(); } catch (_) { /* panel not on this page */ } return api.status(); },
+    setSettings(o) {
+      o = o || {}; const s = pvpLoadFastRunState(), n = (x) => Math.min(20, Math.max(0, parseInt(x, 10) || 0));
+      if (o.node7MatchNo != null) s.node7MatchNo = n(o.node7MatchNo);
+      if (o.node8MatchNo != null) s.node8MatchNo = n(o.node8MatchNo);
+      if (o.isLeader != null) s.isLeader = !!o.isLeader;
+      pvpSaveFastRunState(s); try { refreshUI(); } catch (_) { /* panel not on this page */ } dsWake(); return api.status();
+    },
     setBackground(on) { dsSafeSetItem(BACKGROUND_KEY, on ? '1' : '0'); dsSyncTabJoin(); dsWake(); return api.status(); },
     follow(id) { dsSaveFollow(id); dsWake(); return api.status(); },
     startFastRun(o) {
