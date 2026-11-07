@@ -25,7 +25,7 @@
  * default cap of a boss is its highest loot requirement, and bosses the roster did not know yet are added. Export .txt writes it all out.
  */
 Core.module({
-  id: 'automator', name: 'Automator', icon: '🤖', version: '1.13.7',
+  id: 'automator', name: 'Automator', icon: '🤖', version: '1.13.8',
   // Offered to other addons through Core capabilities (guides/CAPABILITIES.md):
   //   automator.status() -> the status string     automator.start() / automator.stop()     automator.scan() -> scan the bosses now
   provides: (api) => api && api.start ? {
@@ -36,7 +36,7 @@ Core.module({
   } : {},
   init(Core) {
 'use strict';
-const ID = 'automator', VERSION = '1.13.7';
+const ID = 'automator', VERSION = '1.13.8';
 const FARM_MARK = '\u2063farm\u2063';          // a task line is written when the task looks; this marks where the farm's state goes, filled in live when the line is drawn (a line saying "queued" while the farm is already checking the graveyard was stale)
 if (window.__automatorLoaded) { console.warn('[automator] already loaded', window.__automatorLoaded); return null; }
 window.__automatorLoaded = VERSION;
@@ -4810,7 +4810,6 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   const cubeMissing = '⚠️ Cube Suite is not loaded on this page: open Core ⚙️ and check it is ON and not SKIPPED. If it says SKIPPED here, the cube-suite entry in addons.json still has a "match" for the Cube page only';
   const cubeSt = () => { try { const f = Core.cap('cube.status'); return f ? f() : null; } catch (_) { return null; } };
   const CUBE_PILL = { cleared: 'ok', joined: 'blue', avail: 'warn', cd: 'warn', locked: 'cap', mon: '' };   // Cube Suite's pill kinds -> ours
-  const cubeNodes = (label, list) => (list && list.length ? opt(label, h('span', { style: { display: 'flex', flexWrap: 'wrap', gap: '4px' } }, list.map(([k, t]) => pill(t, CUBE_PILL[k])))) : null);
   const cubeLine = () => {
     const c = cubeSt(); if (!c) return cubeMissing;
     if (!Core.has('cube.settings.set')) return 'Needs Cube Suite 3.5.6+ (reload so the new version loads)';
@@ -5504,23 +5503,16 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
         srow('✨', 'Skill quests', 'Adventure Guild: casts your class skill', sw(() => cfg.tasks.guild.skill !== false, (v) => { cfg.tasks.guild.skill = v; }))),
       caption('Cube'),
       group(
-        srow('🧊', 'Cube Suite', cubeLine(),
-          sw(() => { const c = cubeSt(); return !!(c && c.background); }, (v) => cubeSet('cube.background.set', v).then(() => v && cubeSet('cube.master.set', true))),
-          Core.has('cube.settings.set') ? [
-            note('Switch on: runs and fights on every page. Off: only while a Cube page is open (the panel there has its own Automation switch).'),
-            opt('Mode', seg([['normal', 'Normal'], ['fast', 'Fast Run']], (cubeSt() || {}).mode || 'normal', (v) => { cubeSet('cube.mode.set', v); })),
-            cubeNodes('PvP', ((cubeSt() || {}).nodes || {}).pvp),
-            cubeNodes('SA', ((cubeSt() || {}).nodes || {}).sa),
-            cubeNodes('PvE', ((cubeSt() || {}).nodes || {}).pve),
-            opt(['Node 7 match', h('small', {}, 'Fast Run · 0 = none')], num(() => (cubeSt() || { fastTargets: {} }).fastTargets.node7MatchNo || 0, (n) => { cubeSet('cube.settings.set', { node7MatchNo: n }); }, { w: 56, min: 0, max: 20, parse: parseFloat })),
-            opt(['Node 8 match', h('small', {}, 'Fast Run · 0 = none')], num(() => (cubeSt() || { fastTargets: {} }).fastTargets.node8MatchNo || 0, (n) => { cubeSet('cube.settings.set', { node8MatchNo: n }); }, { w: 56, min: 0, max: 20, parse: parseFloat })),
-            opt('Leader / Vice', sw(() => !!(cubeSt() || {}).leader, (v) => { cubeSet('cube.settings.set', { isLeader: v }); }, { sm: true, redraw: false }))] : null),
         srow('⏰', 'Scheduled fast run', cfg.cubeFast.enabled ? CubeFast.line() : 'Pauses everything else, watches for the new Cube, jumps in on Fast Run', sw(() => cfg.cubeFast.enabled, (v) => { cfg.cubeFast.enabled = v; }), cfg.cubeFast.enabled ? [
           opt('Day', dropdown([['sun', 'Sunday'], ['mon', 'Monday'], ['tue', 'Tuesday'], ['wed', 'Wednesday'], ['thu', 'Thursday'], ['fri', 'Friday'], ['sat', 'Saturday']], cfg.cubeFast.day, (v) => { cfg.cubeFast.day = v; })),
           opt(['Server time', h('small', {}, 'UTC' + (() => { try { return Core.clock.parts().offset; } catch (_) { return '+05:30'; } })() + ' · e.g. 11:00 PM')], num(() => toMin(cfg.cubeFast.time), (n) => { cfg.cubeFast.time = hhmm(n); },
             { w: 84, min: 0, fmt: fmtClock, parse: (t) => { const c = parseClock(t); return c == null ? null : toMin(c); } })),
           opt('Start watching', num(() => cfg.cubeFast.leadMin, (n) => { cfg.cubeFast.leadMin = n; }, { unit: 'min before', min: 1, max: 60, parse: parseFloat })),
-          opt('Check every', num(() => cfg.cubeFast.pollSec, (n) => { cfg.cubeFast.pollSec = n; }, { unit: 's', min: 2, max: 60, parse: parseFloat }))] : null)),
+          opt('Check every', num(() => cfg.cubeFast.pollSec, (n) => { cfg.cubeFast.pollSec = n; }, { unit: 's', min: 2, max: 60, parse: parseFloat }))] : null),
+        srow('⚔️', 'PvP matches', Core.has('cube.settings.set') ? 'Fast Run: the match you join on Node 7 and Node 8 (0 = none)' : cubeLine(), null, Core.has('cube.settings.set') ? [   // the same values as the Cube panel's fields; cubeLine() = the "not loaded / too old" hint
+          opt('Node 7 match', num(() => (cubeSt() || { fastTargets: {} }).fastTargets.node7MatchNo || 0, (n) => { cubeSet('cube.settings.set', { node7MatchNo: n }); }, { w: 56, min: 0, max: 20, parse: parseFloat })),
+          opt('Node 8 match', num(() => (cubeSt() || { fastTargets: {} }).fastTargets.node8MatchNo || 0, (n) => { cubeSet('cube.settings.set', { node8MatchNo: n }); }, { w: 56, min: 0, max: 20, parse: parseFloat })),
+          opt('Leader / Vice', sw(() => !!(cubeSt() || {}).leader, (v) => { cubeSet('cube.settings.set', { isLeader: v }); }, { sm: true, redraw: false }))] : null)),
       caption('Advanced'),
       fold('adv', false, ['⏱ Timing', h('small', {}, 'pauses between requests')], () => [h('div', { class: 'ma-sr-o tm' },
         opt(['Scan every', h('small', {}, 'Waves, dungeons, and loot')], num(() => cfg.fightScanMs / 60000, (n) => { cfg.fightScanMs = Math.round(n * 60000); }, { unit: 'min', min: 0.1, parse: parseFloat })),
