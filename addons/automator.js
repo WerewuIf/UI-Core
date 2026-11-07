@@ -25,7 +25,7 @@
  * default cap of a boss is its highest loot requirement, and bosses the roster did not know yet are added. Export .txt writes it all out.
  */
 Core.module({
-  id: 'automator', name: 'Automator', icon: '🤖', version: '1.13.8',
+  id: 'automator', name: 'Automator', icon: '🤖', version: '1.13.10',
   // Offered to other addons through Core capabilities (guides/CAPABILITIES.md):
   //   automator.status() -> the status string     automator.start() / automator.stop()     automator.scan() -> scan the bosses now
   provides: (api) => api && api.start ? {
@@ -36,7 +36,7 @@ Core.module({
   } : {},
   init(Core) {
 'use strict';
-const ID = 'automator', VERSION = '1.13.8';
+const ID = 'automator', VERSION = '1.13.10';
 const FARM_MARK = '\u2063farm\u2063';          // a task line is written when the task looks; this marks where the farm's state goes, filled in live when the line is drawn (a line saying "queued" while the farm is already checking the graveyard was stale)
 if (window.__automatorLoaded) { console.warn('[automator] already loaded', window.__automatorLoaded); return null; }
 window.__automatorLoaded = VERSION;
@@ -5347,9 +5347,18 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   };
   /* ---- the Cube in the Dungeons list: same fold + row + bubble look as Castle / Shadowbridge, but the Cube is Cube Suite's, so it is read-only here
      (live state of every node, one switch for "run on every page", the mode). Nothing to tick: Cube Suite owns the fighting. ---- */
-  const cubeNodeGroups = (c = cubeSt()) => { const n = ((c || {}).nodes) || {}; return [['PvP', 'fast run', n.pvp], ['SA', 'army', n.sa], ['PvE', 'rooms', n.pve]].filter((g) => g[2] && g[2].length); };
+  // The Cube's node layout is fixed (Cube Suite: PVP_NODE_PRIORITY + the Tyrant N9, SA_TARGET_NODES, PVE_TARGET_NODES), so every node is listed all the time, like the Gribbles:
+  // with nothing running a node reads "idle". The live pills of cube.status() are laid over it by name; a pill with a name not listed here (a node added later) is appended.
+  const CUBE_NODES = [['PvP', 'fast run', 'pvp', ['N7', 'N8', 'N9']], ['SA', 'army', 'sa', ['N5', 'N6', 'N11']], ['PvE', 'rooms', 'pve', ['Gate Prism', 'Ash Lane', 'Crown Lens', 'Zenith Lock']]];
+  const cubePillName = (t) => String(t).split(' · ')[0];
+  const cubeNodeGroups = (c = cubeSt()) => CUBE_NODES.map(([g, sub, key, names]) => {
+    const live = Array.isArray(((c || {}).nodes || {})[key]) ? c.nodes[key] : [];
+    const rows = names.map((nm) => live.find(([, t]) => cubePillName(t) === nm) || ['idle', nm + ' · idle']);
+    live.forEach((p) => { if (!names.includes(cubePillName(p[1]))) rows.push(p); });
+    return [g, sub, rows];
+  });
   const cubeNodeCount = () => cubeNodeGroups().reduce((n, g) => n + g[2].length, 0);
-  const CUBE_WORD = { cleared: 'cleared', joined: 'joined', avail: 'available', cd: 'cooldown', locked: 'locked', mon: 'waiting' };   // only used when a pill has no " · state" part
+  const CUBE_WORD = { cleared: 'cleared', joined: 'joined', avail: 'available', cd: 'cooldown', locked: 'locked', mon: 'waiting', idle: 'idle' };   // only used when a pill has no " · state" part
   function cubeFold(f, force) {
     const c = cubeSt(); if (!c) return null;                         // Cube Suite is not loaded on this page: the Settings tab explains it, no empty folder here
     const hit = (g, t) => !f || ['cube', 'crucible', g[0], t].join(' ').toLowerCase().includes(f);
@@ -5366,14 +5375,14 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     const rowOfNodes = (g) => h('div', { class: 'ma-wv' },
       h('div', { class: 'ma-wv-l' + (g[2].some(live) ? ' on' : '') }, h('b', {}, g[0]), h('small', { title: g[1] }, g[1])),
       h('div', { class: 'ma-grid' }, g[2].map(node)));
-    const head = ['\u{1F9CA} Cube', h('small', {}, c.instanceId ? '#' + c.instanceId + ' \u00b7 ' + (c.mode === 'fast' ? 'fast run' : 'normal') : 'crucible')];
+    const head = ['\u{1F9CA} Cube', h('small', {}, c.instanceId ? '#' + c.instanceId + ' \u00b7 ' + (c.mode === 'fast' ? 'fast run' : 'normal') : 'no active Cube')];
     const aside = [h('span', { class: 'ma-pill' + (c.cleared ? ' ok' : done ? ' blue' : '') }, done + '/' + all.length),
       Core.has('cube.background.set') ? sw(() => !!c.background, (v) => { cubeSet('cube.background.set', v).then(() => v && cubeSet('cube.master.set', true)); }, { sm: true, redraw: false }) : null].filter(Boolean);
     return fold('grp:cube', !!(c.running || c.background), head, () => {
       const body = [note(cubeLine())];
       if (Core.has('cube.mode.set')) body.push(opt('Mode', seg([['normal', 'Normal'], ['fast', 'Fast Run']], c.mode || 'normal', (v) => { cubeSet('cube.mode.set', v); })));
-      if (!c.instanceId) body.push(h('div', { class: 'ma-empty' }, 'No active Cube: its nodes show up here as soon as one is open.'));
-      else if (!groups.length) body.push(h('div', { class: 'ma-empty' }, 'Cube Suite has not reported its nodes yet (it does on its next loop).'));
+      if (!c.instanceId) body.push(note('No active Cube: the nodes read idle until one is open and Cube Suite is scanning it.'));
+      else if (!c.nodes) body.push(note('Cube Suite has not reported live node states yet (it does on its next loop).'));
       return body.concat(groups.map(rowOfNodes));
     }, { force, aside });
   }
@@ -5509,10 +5518,12 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
             { w: 84, min: 0, fmt: fmtClock, parse: (t) => { const c = parseClock(t); return c == null ? null : toMin(c); } })),
           opt('Start watching', num(() => cfg.cubeFast.leadMin, (n) => { cfg.cubeFast.leadMin = n; }, { unit: 'min before', min: 1, max: 60, parse: parseFloat })),
           opt('Check every', num(() => cfg.cubeFast.pollSec, (n) => { cfg.cubeFast.pollSec = n; }, { unit: 's', min: 2, max: 60, parse: parseFloat }))] : null),
-        srow('⚔️', 'PvP matches', Core.has('cube.settings.set') ? 'Fast Run: the match you join on Node 7 and Node 8 (0 = none)' : cubeLine(), null, Core.has('cube.settings.set') ? [   // the same values as the Cube panel's fields; cubeLine() = the "not loaded / too old" hint
+        srow('⚔️', 'PvP matches', !Core.has('cube.mode.set') ? cubeLine() : (cubeSt() || {}).mode === 'fast' ? 'Fast Run: the match you join on Node 7 and Node 8 (0 = none)' : 'Normal: joins PvP matches as they open',   // the same Normal / Fast Run switch as the Cube fold; the match numbers only mean something in Fast Run, so they only show there
+          Core.has('cube.mode.set') ? seg([['normal', 'Normal'], ['fast', 'Fast Run']], (cubeSt() || {}).mode || 'normal', (v) => { cubeSet('cube.mode.set', v); }) : null,
+          Core.has('cube.settings.set') && (cubeSt() || {}).mode === 'fast' ? [
           opt('Node 7 match', num(() => (cubeSt() || { fastTargets: {} }).fastTargets.node7MatchNo || 0, (n) => { cubeSet('cube.settings.set', { node7MatchNo: n }); }, { w: 56, min: 0, max: 20, parse: parseFloat })),
           opt('Node 8 match', num(() => (cubeSt() || { fastTargets: {} }).fastTargets.node8MatchNo || 0, (n) => { cubeSet('cube.settings.set', { node8MatchNo: n }); }, { w: 56, min: 0, max: 20, parse: parseFloat })),
-          opt('Leader / Vice', sw(() => !!(cubeSt() || {}).leader, (v) => { cubeSet('cube.settings.set', { isLeader: v }); }, { sm: true, redraw: false }))] : null)),
+          opt('Leader / Vice', sw(() => !!(cubeSt() || {}).leader, (v) => { cubeSet('cube.settings.set', { isLeader: v }); }, { sm: true, redraw: false }))] : Core.has('cube.mode.set') && (cubeSt() || {}).mode === 'fast' ? [note(cubeLine())] : null)),
       caption('Advanced'),
       fold('adv', false, ['⏱ Timing', h('small', {}, 'pauses between requests')], () => [h('div', { class: 'ma-sr-o tm' },
         opt(['Scan every', h('small', {}, 'Waves, dungeons, and loot')], num(() => cfg.fightScanMs / 60000, (n) => { cfg.fightScanMs = Math.round(n * 60000); }, { unit: 'min', min: 0.1, parse: parseFloat })),
