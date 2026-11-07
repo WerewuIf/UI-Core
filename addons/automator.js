@@ -24,7 +24,7 @@
  * default cap of a boss is its highest loot requirement, and bosses the roster did not know yet are added. Export .txt writes it all out.
  */
 Core.module({
-  id: 'automator', name: 'Automator', icon: '🤖', version: '1.13.2',
+  id: 'automator', name: 'Automator', icon: '🤖', version: '1.13.3',
   // Offered to other addons through Core capabilities (guides/CAPABILITIES.md):
   //   automator.status() -> the status string     automator.start() / automator.stop()     automator.scan() -> scan the bosses now
   provides: (api) => api && api.start ? {
@@ -35,7 +35,7 @@ Core.module({
   } : {},
   init(Core) {
 'use strict';
-const ID = 'automator', VERSION = '1.13.2';
+const ID = 'automator', VERSION = '1.13.3';
 const FARM_MARK = '\u2063farm\u2063';          // a task line is written when the task looks; this marks where the farm's state goes, filled in live when the line is drawn (a line saying "queued" while the farm is already checking the graveyard was stale)
 if (window.__automatorLoaded) { console.warn('[automator] already loaded', window.__automatorLoaded); return null; }
 window.__automatorLoaded = VERSION;
@@ -1724,8 +1724,28 @@ const Presets = (() => {
   }
   // Put back what was there before: gear + pets, then the crystals onto the same pieces of gear, then every moved sigil to its pet.
   const restore = (why) => exclusive(() => restoreNow(why));
+  // Mythic awakening RENAMES a pet ("Moon Panda" became "Yuelun, the Moonveil Devourer"), but the remembered build holds names: the build engine then
+  // reports "main pet ... was not found among your pets" although you own it. Old name (lower case) -> the name it has now. One line per pet.
+  const PET_RENAMES = {
+    'moon panda': 'Yuelun, the Moonveil Devourer',
+    'orryphos the eternal dragon': 'Orryphos the Eternal Echo Dragon',
+  };
+  function renamePets(sel) {
+    let n = 0; if (!sel || typeof sel !== 'object') return n;
+    for (const k of ['mains', 'link1', 'link2']) {
+      if (!Array.isArray(sel[k])) continue;
+      sel[k] = sel[k].map((x) => { const to = typeof x === 'string' ? PET_RENAMES[x.trim().toLowerCase()] : null; if (to) { n++; return to; } return x; });
+    }
+    return n;
+  }
   async function restoreNow(why) {
     const o = Origin.get(); if (!o) return { ok: false, message: 'nothing remembered to put back' };
+    { const k = renamePets(o.sel) + renamePets(o.left); if (k) { o.failN = 0; o.failSig = ''; o.paused = false; originStore.set(o); log(`🐾 ${k} remembered pet name${k === 1 ? '' : 's'} updated to the new names (a Mythic awakening renames a pet)`, 'info'); } }
+    // The same failure 3 times in a row: stop retrying on a timer, but KEEP the remembered build. The Restore button ('you asked') still tries.
+    if ((o.failN || 0) >= 3 && why !== 'you asked') {
+      if (!o.paused) { o.paused = true; originStore.set(o); log('⏸️ putting your build back failed 3 times the same way — automatic retries are paused (the build is still remembered; use Restore to try again)', 'warn'); }
+      return { ok: false, message: 'paused after 3 identical failures' };
+    }
     ensuring = true;
     const notes = []; let liveSel = null, force = why === 'you asked';
     try {
@@ -1781,7 +1801,9 @@ const Presets = (() => {
       Object.keys(applied).forEach((k) => delete applied[k]); buildEpoch++;
       if (notes.length) {
         try { await Origin.markLeft(o.probe); await Origin.markCrystals(); } catch (_) { /* */ }   // what is on now is what WE left (part of the way back): the retry compares against that, not against the old state
-        log(`⚠️ not everything went back: ${esc(notes.join(' · '))} — it is still remembered, try again`, 'warn'); return { ok: false, message: notes.join('; ') };
+        const o2 = Origin.get(), sig = notes.join('|'); let tries = 1;
+        if (o2) { tries = o2.failSig === sig ? (o2.failN || 0) + 1 : 1; o2.failSig = sig; o2.failN = tries; if (tries < 3) o2.paused = false; originStore.set(o2); }
+        log(`⚠️ not everything went back: ${esc(notes.join(' · '))} — it is still remembered${tries >= 3 ? '; automatic retries stop here, use Restore to try again' : ' (try ' + tries + '/3)'}`, 'warn'); return { ok: false, message: notes.join('; ') };
       }
       Origin.clear(); try { await syncMe(); } catch (_) { /* */ } Me.statsAt = 0;
       return { ok: true, message: 'your build is back' };
@@ -4782,6 +4804,12 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     return h('span', { class: 'ma-av-wrap' + (o.size ? ' ' + o.size : '') }, inner, o.boss ? h('span', { class: 'ma-crown', title: 'Boss' }, '♛') : null, o.dot ? h('i', { class: 'ma-dot s-' + o.dot }) : null);
   }
   const stop = (e) => e.stopPropagation();
+  // Cube Suite is a service reached through capabilities. Not loaded on this page = nothing to call: say so (it used to fail silently and the switch jumped back).
+  const cubeMissing = '⚠️ Cube Suite is not loaded on this page: open Core ⚙️ and check it is ON and not SKIPPED. If it says SKIPPED here, the cube-suite entry in addons.json still has a "match" for the Cube page only';
+  const cubeSet = (name, v) => {
+    if (!Core.has(name)) { log('⚠️ ' + (Core.has('cube.status') ? 'Cube Suite is too old for ' + name + ' — reload so 3.5.4+ loads' : 'Cube Suite is not loaded on this page (Core ⚙️ → Cube Suite; no "match" in addons.json)'), 'warn'); return; }
+    Promise.resolve(Core.call(name, v)).then(() => draw()).catch((e) => log('⚠️ Cube Suite: ' + esc((e && e.message) || e), 'warn'));
+  };
   const sw = (get, set, o = {}) => h('label', { class: 'ma-sw' + (o.sm ? ' sm' : ''), onclick: stop },
     h('input', { type: 'checkbox', checked: get() ? true : null, onclick: stop, onchange: (e) => { set(e.target.checked); saveCfg(); if (o.redraw !== false) draw(); } }), h('span', { class: 'ma-sl' }));
   const seg = (opts, cur, set, o = {}) => h('div', { class: 'ma-seg' + (o.full ? ' full' : '') }, opts.map(([v, label, tip]) =>
@@ -5433,7 +5461,8 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
         srow('✨', 'Skill quests', 'Adventure Guild: casts your class skill', sw(() => cfg.tasks.guild.skill !== false, (v) => { cfg.tasks.guild.skill = v; }))),
       caption('Cube'),
       group(
-        srow('🧊', 'Run Cube Suite on every page', 'Not only on the Cube page. Off: it only runs while a Cube page is open (a scheduled fast run turns it on by itself)', sw(() => { try { const f = Core.cap('cube.status'); return !!(f && f().background); } catch (_) { return false; } }, (v) => { Core.call('cube.background.set', v).catch(() => { /* Cube Suite is not loaded */ }); })),
+        srow('🧊', 'Cube Suite automation', Core.has('cube.master.set') ? 'On: Cube Suite joins and fights. Off: it only watches' : (Core.has('cube.status') ? 'Needs Cube Suite 3.5.4+ (reload so the new version loads)' : cubeMissing), sw(() => { try { const f = Core.cap('cube.status'); return !!(f && f().master); } catch (_) { return false; } }, (v) => cubeSet('cube.master.set', v))),
+        srow('🧊', 'Run Cube Suite on every page', Core.has('cube.status') ? 'Not only on the Cube page. Off: it only runs while a Cube page is open (a scheduled fast run turns it on by itself)' : cubeMissing, sw(() => { try { const f = Core.cap('cube.status'); return !!(f && f().background); } catch (_) { return false; } }, (v) => cubeSet('cube.background.set', v))),
         srow('⏰', 'Scheduled fast run', cfg.cubeFast.enabled ? CubeFast.line() : 'Pauses everything else, watches for the new Cube, jumps in on Fast Run', sw(() => cfg.cubeFast.enabled, (v) => { cfg.cubeFast.enabled = v; }), cfg.cubeFast.enabled ? [
           opt('Day', dropdown([['sun', 'Sunday'], ['mon', 'Monday'], ['tue', 'Tuesday'], ['wed', 'Wednesday'], ['thu', 'Thursday'], ['fri', 'Friday'], ['sat', 'Saturday']], cfg.cubeFast.day, (v) => { cfg.cubeFast.day = v; })),
           opt(['Server time', h('small', {}, 'UTC' + (() => { try { return Core.clock.parts().offset; } catch (_) { return '+05:30'; } })() + ' · e.g. 11:00 PM')], num(() => toMin(cfg.cubeFast.time), (n) => { cfg.cubeFast.time = hhmm(n); },
