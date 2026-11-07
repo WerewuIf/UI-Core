@@ -63,8 +63,7 @@
       "name": "Cube Suite",
       "version": "3.4.1",
       "url": "addons/cube-suite.js",
-      "button": false,
-      "match": "^/guild_dungeon_cube\\.php\\?.*instance_id="
+      "button": false
     },
     {
       "id": "automator",
