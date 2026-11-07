@@ -37,11 +37,14 @@
  * The panel is drawn on the Cube page only. Elsewhere the engine runs headless, and only when "background" is on (default OFF, so merely opening
  * any page never starts PvP / PvE by itself). One tab runs the engine (Core.tab 'cube-suite'); commands are shared state + a wake event, so
  * it does not matter which tab the command came from. */
+/* v3.5.4: new capability cube.master.set(bool) so the Automator can switch Cube Suite's automation on / off (status().master already reported it, nothing could set it).
+ * NOTE: addons.json must NOT give cube-suite a "match": this is a service that runs on any page. With a match Core skips it everywhere else and no cube.* capability exists there. */
 Core.module({
-  id: 'cube-suite', name: 'Cube Suite', icon: '🧊', version: '3.5.3',
+  id: 'cube-suite', name: 'Cube Suite', icon: '🧊', version: '3.5.4',
   provides: (api) => api && api.status ? {
     'cube.status':         { fn: api.status,    doc: 'what Cube Suite is doing (shared across tabs)', returns: '{ ok, mode, master, background, follow, running, instanceId, cleared, fastTargets }' },
     'cube.mode.set':       { fn: api.setMode,   doc: "switch Fast Run / Normal", args: "'fast' | 'normal'" },
+    'cube.master.set':     { fn: api.setMaster, doc: 'Automation switch of the Cube Suite panel: on = it joins / fights, off = it only watches', args: 'boolean' },
     'cube.background.set': { fn: api.setBackground, doc: 'run the engine on any page, not only the Cube page', args: 'boolean' },
     'cube.follow':         { fn: api.follow,    doc: 'pin the engine to one Cube instance (null = unpin)', args: 'instanceId | null' },
     'cube.fastrun.start':  { fn: api.startFastRun, doc: 'follow that Cube, Fast Run on, automation on, background on', args: '{ instanceId }' },
@@ -5532,6 +5535,7 @@ Core.module({
         fastTargets: { node7MatchNo: Number(f.node7MatchNo) || 0, node8MatchNo: Number(f.node8MatchNo) || 0 } };
     },
     setMode(m) { dsSaveMode(m === 'fast' ? 'fast' : 'normal'); dsWake(); return api.status(); },
+    setMaster(on) { dsSaveMasterEnabled(!!on); masterEnabled = !!on; dsWake(); try { refreshUI(); } catch (_) { /* panel not on this page */ } return api.status(); },
     setBackground(on) { dsSafeSetItem(BACKGROUND_KEY, on ? '1' : '0'); dsSyncTabJoin(); dsWake(); return api.status(); },
     follow(id) { dsSaveFollow(id); dsWake(); return api.status(); },
     startFastRun(o) {
