@@ -15,6 +15,7 @@
  *   PART 4b LOOT SCAN  reads every boss's loot / level / EXP cap into the cap choices; Export .txt (swappable)
  *   PART 5a FARM       the one auto-farm service (basic wave mobs only): level-400 tolerant, 10% batching, safe restore of your own set-up
  *   PART 5b TASKS      task master: Monsters, Adventure Guild, Battle Pass, Merchant (weekly), PvP placeholders; Automator.tasks.define({...}) adds more
+ *   PART 5c CUBE RUN   scheduled Cube fast run: pauses the rest, watches for the new Cube every few seconds, jumps in (drives Cube Suite; swappable)
  *   PART 5  [slots]    other parts: Kernel.register({ id, name, icon, every, tick, panel })
  *   PART 5  PANEL      Core.float panel: Tasks, Overview, Bosses (Waves | Dungeons, waves grouped by area), Loot, Settings, Activity
  *
@@ -23,7 +24,7 @@
  * default cap of a boss is its highest loot requirement, and bosses the roster did not know yet are added. Export .txt writes it all out.
  */
 Core.module({
-  id: 'automator', name: 'Automator', icon: '🤖', version: '1.12.6',
+  id: 'automator', name: 'Automator', icon: '🤖', version: '1.13.2',
   // Offered to other addons through Core capabilities (guides/CAPABILITIES.md):
   //   automator.status() -> the status string     automator.start() / automator.stop()     automator.scan() -> scan the bosses now
   provides: (api) => api && api.start ? {
@@ -34,7 +35,7 @@ Core.module({
   } : {},
   init(Core) {
 'use strict';
-const ID = 'automator', VERSION = '1.12.6';
+const ID = 'automator', VERSION = '1.13.2';
 const FARM_MARK = '\u2063farm\u2063';          // a task line is written when the task looks; this marks where the farm's state goes, filled in live when the line is drawn (a line saying "queued" while the farm is already checking the graveyard was stale)
 if (window.__automatorLoaded) { console.warn('[automator] already loaded', window.__automatorLoaded); return null; }
 window.__automatorLoaded = VERSION;
@@ -108,6 +109,7 @@ const DEFAULT_CFG = {
     monsters: { enabled: true },       // the boss engine's own switch (Start / Stop is the master switch for everything)
     farm:     { auto: true },        // auto: use Auto-Farm when the game allows it (level 400+); the normal attack path otherwise
   },
+  cubeFast: { enabled: false, day: 'sun', time: '23:00', leadMin: 5, pollSec: 5 },   // scheduled Cube fast run (PART 5c). day + time are SERVER time (IST)
   logFilter: 'all',
 };
 const cfgStore = Core.store(ID, { def: DEFAULT_CFG });
@@ -125,6 +127,9 @@ function mergeCfg(saved) {
   out.tasks = (() => { const d = JSON.parse(JSON.stringify(DEFAULT_CFG.tasks)), t = s.tasks && typeof s.tasks === 'object' ? s.tasks : {};
     for (const k of Object.keys(d)) { const v = t[k]; if (!v || typeof v !== 'object') continue; if (k === 'pvp') { for (const j of Object.keys(d.pvp)) d.pvp[j] = Object.assign({}, d.pvp[j], v[j] && typeof v[j] === 'object' ? v[j] : {}); } else d[k] = Object.assign({}, d[k], v); }
     return d; })();
+  out.cubeFast = (() => { const d = DEFAULT_CFG.cubeFast, v = Object.assign({}, d, s.cubeFast && typeof s.cubeFast === 'object' ? s.cubeFast : {}), n = (x, lo, hi, dflt) => (Number.isFinite(+x) && +x >= lo && +x <= hi ? +x : dflt);
+    v.enabled = !!v.enabled; v.leadMin = n(v.leadMin, 1, 60, d.leadMin); v.pollSec = n(v.pollSec, 2, 60, d.pollSec); delete v.holdMin;   // (an older save may still carry the removed 'give up after' setting)
+    v.time = parseClock(v.time) || d.time; if (!/^(sun|mon|tue|wed|thu|fri|sat)$/.test(v.day)) v.day = d.day; return v; })();
   out.maxTier = 'WORLD_BREAKER';
   // stamina: one potion (Large or Full). Older saves had two slots (A, then B): keep whichever was switched on.
   const os = s.stam || {}, A = os.A || {}, B = os.B || {};
@@ -2383,6 +2388,7 @@ const SHADOW_TERR = {
   4: { name: 'Territory Center', mobs: ['Brog Skull', 'Gorvash the Stone-Ram', 'Gribble Junk-Magus', 'Rukka The Wolf Raider', 'Tharka Blood-Howl'] },
 };
 const SHADOW_BOSS_LOC = 5, SHADOW_LOCS = [1, 2, 3, 4, SHADOW_BOSS_LOC];
+const CUBE_BOSS_LOC = 14, CUBE_LOCS = [11, 12, 13, 14];   // the Cube's PvE rooms (Cube Suite: Gate Prism, Ash Lane, Crown Lens, Zenith Lock = boss). Known ids: no map read needed
 // The other Shadowbridge mob types, one entry per NAME (a mob seen in two territories is one entry that covers both). Not loaded unless
 // "Show all mobs" is on (cfg.shadowAll) or the entry is ticked: the Gribbles and the boss are the Shadowbridge list.
 const shadowExtras = (() => {
@@ -2449,7 +2455,7 @@ Object.assign(Dungeons, (() => {
     return { html, doc: parseHtml(html), state: 'ok' };
   }
 
-  /* ---- open + finished instances, by type (easy = Shadowbridge, hard = Castle, crucible = cube: listed, never touched) ---- */
+  /* ---- open + finished instances, by type (easy = Shadowbridge, hard = Castle, crucible = cube: its PvE room corpses are lootable like the others; Cube Suite does the fighting) ---- */
   let inst = { at: 0, v: { easy: [], hard: [], crucible: [] }, ended: { easy: [], hard: [], crucible: [] } };
   async function instances(force) {
     if (!force && Date.now() - inst.at < 30000) return inst;
@@ -2769,13 +2775,13 @@ Object.assign(Loot, (() => {
     return out;
   }
 
-  /* ---- dungeon corpses: Castle locations the map shows as cleared, Shadowbridge Gribble rooms. Never the cube. ---- */
+  /* ---- dungeon corpses: Castle locations the map shows as cleared, Shadowbridge Gribble rooms, the Cube's PvE rooms (open and cleared Cubes alike: an old Cube stays here until its corpses are all claimed) ---- */
   async function dungeonRows() {
     Work.set('scan', 'Graveyard · dungeon maps', 0, 0);
     const ins = await Dungeons.instances(true), out = [];
     const counted = (label, fn, total) => { let n = 0; Work.set('scan', label, 0, total); return (j) => fn(j).finally(() => Work.set('scan', label, ++n, total)); };
     const all = (t) => [...new Set([...(ins.v[t] || []), ...(ins.ended[t] || [])])];
-    const push = (rows, inst, loc, isBoss, dtype) => rows.forEach((r) => { LootScan.learn({ name: r.name, kind: 'dungeon', dtype, locationId: loc, boss: isBoss, id: r.dgmid, instanceId: inst }); out.push({ key: `dungeon:${inst}:${r.dgmid}`, kind: 'dungeon', dtype, area: dtype === 'hard' ? 'castle' : 'shadow', monsterId: r.dgmid, instanceId: inst, locationId: loc, name: r.name, nameLow: r.name.toLowerCase(), isBoss, icon: r.icon, userDamage: null, needsLoot: true, expPerDmg: r.expPerDmg }); });
+    const push = (rows, inst, loc, isBoss, dtype) => rows.forEach((r) => { LootScan.learn({ name: r.name, kind: 'dungeon', dtype, locationId: loc, boss: isBoss, id: r.dgmid, instanceId: inst }); out.push({ key: `dungeon:${inst}:${r.dgmid}`, kind: 'dungeon', dtype, area: dtype === 'hard' ? 'castle' : dtype === 'crucible' ? 'cube' : 'shadow', monsterId: r.dgmid, instanceId: inst, locationId: loc, name: r.name, nameLow: r.name.toLowerCase(), isBoss, icon: r.icon, userDamage: null, needsLoot: true, expPerDmg: r.expPerDmg }); });
     const hard = all('hard'), pinSets = await Dungeons.pool(hard, (id) => Dungeons.pins(id), 3), jobs = [];
     hard.forEach((id, i) => (pinSets[i] || []).forEach((p) => { if (!p.isLocked && p.isDone && p.locationId != null) jobs.push({ inst: id, loc: p.locationId }); }));
     const hr = await Dungeons.pool(jobs, counted('Graveyard · Castle rooms', (j) => Dungeons.deadMobs(j.inst, j.loc), jobs.length), 4);
@@ -2783,6 +2789,9 @@ Object.assign(Loot, (() => {
     const easy = []; all('easy').forEach((id) => SHADOW_LOCS.forEach((loc) => easy.push({ inst: id, loc })));
     const er = await Dungeons.pool(easy, counted('Graveyard · Shadowbridge rooms', (j) => Dungeons.deadMobs(j.inst, j.loc), easy.length), 4);
     easy.forEach((j, i) => push(er[i] || [], j.inst, j.loc, j.loc === SHADOW_BOSS_LOC, 'easy'));
+    const cube = []; all('crucible').forEach((id) => CUBE_LOCS.forEach((loc) => cube.push({ inst: id, loc })));
+    const cr = await Dungeons.pool(cube, counted('Graveyard · Cube rooms', (j) => Dungeons.deadMobs(j.inst, j.loc), cube.length), 4);
+    cube.forEach((j, i) => push(cr[i] || [], j.inst, j.loc, j.loc === CUBE_BOSS_LOC, 'crucible'));
     return out;
   }
 
@@ -3132,8 +3141,8 @@ Object.assign(LootScan, (() => {
   const TIER_RANK = { MYTHIC: 0, LEGENDARY: 1, EPIC: 2, RARE: 3, UNCOMMON: 4, COMMON: 5 };
   function whereOf(e) {
     if (e.kind === 'wave') { const w = WaveMap.of(e.gate, e.wave); return { sort: (e.gate || 0) * 1000 + (e.wave || 0), head: `${w.group.title} · Gate ${e.gate} · Wave ${e.wave}${w.group.id === 'other' ? '' : ' · ' + w.label}`, short: `G${e.gate} W${e.wave}` }; }
-    const hard = e.dtype === 'hard';
-    return { sort: 1e6 + (hard ? 0 : 1e4) + (e.locationId || 0), head: `${hard ? 'Castle' : 'Shadowbridge'} · location ${e.locationId || '?'}`, short: `${hard ? 'Castle' : 'Shadowbridge'} #${e.locationId || '?'}` };
+    const hard = e.dtype === 'hard', cube = e.dtype === 'crucible', area = hard ? 'Castle' : cube ? 'Cube' : 'Shadowbridge';
+    return { sort: 1e6 + (hard ? 0 : cube ? 2e4 : 1e4) + (e.locationId || 0), head: `${area} · location ${e.locationId || '?'}`, short: `${area} #${e.locationId || '?'}` };
   }
   function text() {
     const ridx = new Map(Roster.list.map((d, i) => [d.low, i])), ri = (e) => { const k = ridx.get(e.name.toLowerCase()); return k == null ? -1 : k; };
@@ -4336,6 +4345,125 @@ Object.assign(Tasks, (() => {
 })());
 
 /* ===================================================================================================================
+ * PART 5c — CUBE FAST RUN, scheduled (swappable: delete this block and nothing else changes)
+ * Cube Suite owns the Cube and is a SERVICE (it runs on any page and offers cube.* capabilities). This part only clears the way, notices the new
+ * Cube, and COMMANDS Cube Suite: Core.call('cube.fastrun.start', { instanceId }) / 'cube.status' / 'cube.follow' / 'cube.background.set'.
+ * It never opens or navigates a tab and never touches Cube Suite's storage or URL.
+ * The weekly slot is SERVER time: Core.clock.next(day, time, now - 3 days) is the run that is current right now.
+ *   idle   until slot - lead (5 min): nothing
+ *   watch  from slot - lead: boss engine + tasks paused (Run.pause), your own build put back (the boss engine's gear / pets must not be what Cube Suite
+ *          fights in), the Cube ids already open are remembered, guild_dungeon.php is read every pollSec (5 s) until a Cube id that was not there
+ *          before appears. Dungeons.instances() is the same list Castle / Shadowbridge use.
+ *   late   opened (or switched on) AFTER the slot: a person looks at the list and takes the Cube that is newer than the last one they knew. Ids only go up,
+ *          so "known" = the highest Cube id ever seen / run here (kept across weeks) or in the Clears list; an open Cube above it is the new one and is
+ *          taken at once, any time within the 3 days the slot stays current. With nothing known yet (first week) everything open counts as old: safe.
+ *   run    new Cube: cube.fastrun.start (follow it, Fast Run, automation on, background on). Everything stays paused until cube.status says the
+ *          mode is back to normal (Cube Suite does that by itself when the whole dungeon is cleared). No timer: that is the only exit.
+ *          On the way out the follow pin is dropped and the background switch goes back to what it was.
+ *          (No new Cube within WATCH_MIN of the slot: watching stops and everything resumes.)
+ *   done   this slot is finished; next week's slot re-arms by itself
+ * ================================================================================================================ */
+/* CUBEFAST-BEGIN */
+const CubeFast = (() => {
+  const GONE_EVERY = 60000;                                                             // run phase: how often the list is read to see that the Cube is still open
+  let goneAt = 0, goneN = 0, hopWarnAt = 0;                                             // (memory only) last still-open read, misses in a row, last "would not start" warning
+  const WATCH_MIN = 60;                                                                 // the watch ends this long after the slot if no new Cube ever shows up (not a setting: a Fast Run itself has no time limit)
+  const st = Core.store(ID + '-cubefast', { def: { slot: 0, phase: 'idle', base: [], inst: '', bg: null, at: 0, warned: false, known: 0 } });   // known: the highest Cube id seen or run so far (survives the weekly reset)
+  const fresh = (slot, known) => ({ slot, phase: 'idle', base: [], inst: '', bg: null, at: 0, warned: false, known: known || 0 });
+  const top = (ids) => (ids || []).reduce((m, x) => Math.max(m, Number(x) || 0), 0);
+  const live = (s) => !!s && (s.phase === 'watch' || s.phase === 'run');
+  const put = (n) => { if (JSON.stringify(n) !== JSON.stringify(st.get())) st.set(n); return n; };
+  // The slot this week's run belongs to stays the same for 3 days after it starts, so a long Fast Run keeps its state. Then the next week's slot takes over.
+  const slotNow = () => { const c = cfg.cubeFast; try { return Core.clock.next(c.day, c.time, Date.now() - 3 * 86400000); } catch (_) { return null; } };
+  const upcoming = () => { const c = cfg.cubeFast; try { return Core.clock.next(c.day, c.time); } catch (_) { return null; } };
+  const hold = () => { if (!Run.pausedBy().includes('cubefast')) Run.pause('cubefast'); };
+  const release = () => { if (Run.pausedBy().includes('cubefast')) Run.resume('cubefast'); };
+  const cubeIds = (ins) => ((ins && ins.v && ins.v.crucible) || []).map(String);
+  const gotList = (ins) => !!ins && Date.now() - ins.at < 20000;           // Dungeons.instances() hands back its old list when a fetch fails: never act on that
+  // Every command goes to Cube Suite through its capabilities (Core.call). Nothing here touches its storage keys, its URL or its tab.
+  const cube = async (name, ...args) => {
+    try { const r = await Core.call(name, ...args); return r && typeof r === 'object' ? r : { ok: true, value: r }; }
+    catch (e) { return { ok: false, missing: !!(e && e.code === 'NO_CAP'), message: (e && e.message) || String(e) }; }
+  };
+  // The boss engine is halted but its gear / pets stay on: put your own build back, so Cube Suite fights in it. Never awaited: Fast Run is never delayed by it.
+  const restoreBuild = (why) => {
+    try { if (Tab.isMain() && Presets.origin.get()) Presets.restore(why).then((r) => { if (r && r.ok === false) log(`⚠️ cube fast run: could not put your own build back (${r.message || 'unknown'}) — Fast Run uses what is on now`, 'warn'); }).catch(() => {}); } catch (_) { /* no build part */ }
+  };
+  async function finish(s, why, kind, o) {                                              // the run is over (back on Normal, switched off, gave up): hand Cube Suite back the way it was
+    put({ ...s, phase: 'done' }); release();
+    if (s.phase === 'run') {
+      if (o && o.resetMode) await cube('cube.mode.set', 'normal');                      // the Cube ended without being cleared: Cube Suite would stay on Fast Run for the next Cube
+      await cube('cube.follow', null); if (s.bg === false) await cube('cube.background.set', false);
+    }
+    if (why) log('⏰ cube fast run: ' + why, kind || 'info');
+  }
+  async function hop(s, id) {
+    const r = await cube('cube.fastrun.start', { instanceId: id });
+    if (!r.ok) { if (Date.now() - hopWarnAt >= 60000) { hopWarnAt = Date.now(); log(`⚠️ cube fast run: Cube Suite would not start on #${id} (${r.message || 'no answer'}) — still trying every beat`, 'warn'); } return; }
+    goneAt = Date.now(); goneN = 0;
+    put({ ...s, phase: 'run', inst: id, at: Date.now(), warned: false, known: Math.max(s.known || 0, Number(id) || 0) });
+    log(`⏰ cube fast run: new Cube #${id} — Fast Run commanded`, 'ok');
+  }
+
+  async function tick() {
+    const c = cfg.cubeFast; let s = st.get() || fresh(0);
+    const slot = c.enabled ? slotNow() : null;
+    if (!slot) { if (live(s)) await finish(s, 'switched off — resuming'); else release(); return; }   // switched off (or no server clock yet): stand down
+    if (s.slot !== slot) {                                                              // a new week's slot: forget the last one (a run that never ended is wound up first: follow pin, background switch)
+      if (live(s)) await finish(s, `last week's run${s.inst ? ' (Cube #' + s.inst + ')' : ''} never ended — handing Cube Suite back`, 'warn');
+      s = fresh(slot, s.known);
+    }
+    const now = Date.now(), end = slot + WATCH_MIN * 60000;
+    if (s.phase === 'done' || (s.phase === 'idle' && now < slot - c.leadMin * 60000)) { put(s); release(); return; }
+    const look = s.phase === 'idle' && now > end;                                       // the watch window passed before we ever ran (browser closed, feature switched on mid-week): ONE look at the list, nothing is held unless a new Cube is there
+
+    if (!look) hold();                                                                  // watch / run: nothing else may spend stamina or swap the build
+    if (s.phase === 'run') {
+      const cs = await cube('cube.status');
+      if (!cs.ok) return finish(s, 'Cube Suite stopped answering — resuming', 'warn');
+      if (cs.mode !== 'fast') return finish(s, 'Cube Suite is back on Normal — resuming');
+      if (!cs.running && !s.warned && now - s.at > 3 * 60000) { put({ ...s, warned: true }); log('⚠️ cube fast run: Cube Suite has not reported in for 3 min — is any tab open on this site?', 'warn'); }
+      if (now - goneAt >= GONE_EVERY) {                                                 // a Cube can end without being cleared (it ran out of time): Cube Suite then never goes back to Normal. Two fresh reads in a row without it = over
+        goneAt = now; const ins = await Dungeons.instances(true);
+        if (gotList(ins)) { goneN = cubeIds(ins).includes(String(s.inst)) ? 0 : goneN + 1; if (goneN >= 2) return finish(s, `Cube #${s.inst} is no longer open — resuming`, 'warn', { resetMode: true }); }
+      }
+      return;
+    }
+    if (s.phase === 'watch' && now > end) { await finish(s, 'no new Cube appeared — giving up, resuming', 'warn'); return; }
+    const ins = await Dungeons.instances(true);                                         // force: a fresh read of guild_dungeon.php every time
+    if (!gotList(ins)) return;                                                          // no fresh list: try again next beat
+    if (s.phase === 'idle') {
+      // On time (before the slot): everything open now is old. After the slot a person takes the Cube that is newer than the last one they knew; ids only go up.
+      // known = the highest id seen / run before (kept across weeks) or sitting in the Clears list. Nothing known yet: everything open is old (safe).
+      const ids = cubeIds(ins), seen = Math.max(s.known || 0, top((ins.ended || {}).crucible)), after = now >= slot && seen > 0;
+      const base = after ? ids.filter((x) => Number(x) <= seen) : ids, found = after && base.length < ids.length, known = Math.max(seen, top(base));
+      if (look && !found) { put({ ...s, phase: 'done', known }); return; }             // a late look that finds nothing new: done for this week, nothing was held
+      if (!(await Core.when('cube.fastrun.start', { timeout: 3000 }))) { put({ ...s, phase: 'done', known }); release(); log('⚠️ cube fast run: Cube Suite is not loaded — nothing to drive, skipping this week', 'warn'); return; }
+      if (look) hold();
+      const cs = await cube('cube.status'), ft = (cs && cs.fastTargets) || {};
+      s = put({ ...s, phase: 'watch', base, known, bg: cs.ok ? !!cs.background : null });
+      log(`⏰ cube fast run: ${found ? `a new Cube is already open (newer than #${seen}) — taking it` : `watching for the new Cube (${s.base.length ? 'already open, ignored: #' + s.base.join(', #') : 'none open yet'})`} — everything else paused`, 'info');
+      if (!(ft.node7MatchNo > 0 || ft.node8MatchNo > 0)) log('⚠️ cube fast run: Cube Suite has no match number set for Node 7 / 8 — Fast Run will have nothing assigned to join', 'warn');
+      restoreBuild('cube fast run');
+      if (!found) return;                                                               // on time: the next beat looks for the Cube. Late: it is there already, hop now
+    }
+    const id = cubeIds(ins).filter((x) => !s.base.includes(x)).sort((a, b) => b - a)[0];   // newest id that was not open when we started watching
+    if (id) await hop(s, id);
+  }
+  function onMain() {                                                                    // a reload must not let the engine start before the first beat
+    const s = st.get(); if (live(s) && cfg.cubeFast.enabled && s.slot === slotNow()) { hold(); restoreBuild('cube fast run, after a reload'); }
+  }
+  function line() {
+    const s = st.get(), up = upcoming();
+    if (live(s) && s.slot === slotNow()) return s.phase === 'watch' ? 'Watching for the new Cube — everything else is paused' : `Fast Run on Cube #${s.inst} — everything else is paused`;
+    return up ? `Next run in ${fmtDur(up - Date.now())}` : 'Waiting for the server clock';
+  }
+  return { tick, onMain, line, state: () => st.get() };
+})();
+/* CUBEFAST-END */
+Kernel.register({ id: 'cubefast', name: 'Cube fast run', icon: '⏰', every: () => (CubeFast.state() && (CubeFast.state().phase === 'watch' || CubeFast.state().phase === 'run') ? cfg.cubeFast.pollSec * 1000 : 30000), tick: CubeFast.tick, onMain: CubeFast.onMain });
+
+/* ===================================================================================================================
  * PART 5 — PANEL (one Core.float button + panel)
  *   Overview   what it is doing now: vitals, bosses being farmed, session numbers (collapsible groups)
  *   Bosses     loot scan strip, Waves | Dungeons switch; waves grouped by area (Generals / Ocean / Olympus), one row per wave with its bosses as
@@ -5239,8 +5367,8 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   /* ===================================================== LOOT ===================================================== */
   function tLoot() {
     const L = cfg.autoLoot, s = Loot.state, groups = new Map();
-    const AREAS = [...Object.values(WaveMap.groups).sort((a, b) => a.order - b.order).map((g) => ({ id: g.id, title: g.title, ico: g.ico })), { id: 'castle', title: 'Castle', ico: '🏰' }, { id: 'shadow', title: 'Shadowbridge', ico: '🌉' }];
-    const areaOf = (r) => r.area || (r.kind === 'wave' ? WaveMap.of(r.gate, r.wave).group.id : (r.dtype === 'hard' ? 'castle' : 'shadow'));   // same monster name in two areas = two cards
+    const AREAS = [...Object.values(WaveMap.groups).sort((a, b) => a.order - b.order).map((g) => ({ id: g.id, title: g.title, ico: g.ico })), { id: 'castle', title: 'Castle', ico: '🏰' }, { id: 'shadow', title: 'Shadowbridge', ico: '🌉' }, { id: 'cube', title: 'Cube', ico: '🧊' }];
+    const areaOf = (r) => r.area || (r.kind === 'wave' ? WaveMap.of(r.gate, r.wave).group.id : (r.dtype === 'hard' ? 'castle' : r.dtype === 'crucible' ? 'cube' : 'shadow'));   // same monster name in two areas = two cards
     s.rows.filter((r) => r.needsLoot !== false).forEach((r) => { const area = areaOf(r), key = area + '|' + r.nameLow; const g = groups.get(key) || { name: r.name, low: r.nameLow, area, rows: [], boss: r.isBoss, icon: r.icon }; g.rows.push(r); if (!g.icon && r.icon) g.icon = r.icon; groups.set(key, g); });
     const need = (() => { const m = Core.me.get(), e = m && m.exp; return e && e.max > 0 ? Math.max(0, e.max - e.cur) : null; })();
     const list = [...groups.entries()].sort((a, b) => (b[1].boss - a[1].boss) || a[1].name.localeCompare(b[1].name)), total = list.reduce((n, [, g]) => n + g.rows.length, 0);
@@ -5303,6 +5431,15 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
         srow('📦', 'Collection quests', 'Adventure Guild: donates the quest item', sw(() => cfg.tasks.guild.collect !== false, (v) => { cfg.tasks.guild.collect = v; })),
         srow('🌾', 'Farm missing items', 'Short on a collection quest\'s item: find the mob that drops it and farm it (nothing is guessed)', sw(() => cfg.tasks.guild.collectFarm !== false, (v) => { cfg.tasks.guild.collectFarm = v; })),
         srow('✨', 'Skill quests', 'Adventure Guild: casts your class skill', sw(() => cfg.tasks.guild.skill !== false, (v) => { cfg.tasks.guild.skill = v; }))),
+      caption('Cube'),
+      group(
+        srow('🧊', 'Run Cube Suite on every page', 'Not only on the Cube page. Off: it only runs while a Cube page is open (a scheduled fast run turns it on by itself)', sw(() => { try { const f = Core.cap('cube.status'); return !!(f && f().background); } catch (_) { return false; } }, (v) => { Core.call('cube.background.set', v).catch(() => { /* Cube Suite is not loaded */ }); })),
+        srow('⏰', 'Scheduled fast run', cfg.cubeFast.enabled ? CubeFast.line() : 'Pauses everything else, watches for the new Cube, jumps in on Fast Run', sw(() => cfg.cubeFast.enabled, (v) => { cfg.cubeFast.enabled = v; }), cfg.cubeFast.enabled ? [
+          opt('Day', dropdown([['sun', 'Sunday'], ['mon', 'Monday'], ['tue', 'Tuesday'], ['wed', 'Wednesday'], ['thu', 'Thursday'], ['fri', 'Friday'], ['sat', 'Saturday']], cfg.cubeFast.day, (v) => { cfg.cubeFast.day = v; })),
+          opt(['Server time', h('small', {}, 'UTC' + (() => { try { return Core.clock.parts().offset; } catch (_) { return '+05:30'; } })() + ' · e.g. 11:00 PM')], num(() => toMin(cfg.cubeFast.time), (n) => { cfg.cubeFast.time = hhmm(n); },
+            { w: 84, min: 0, fmt: fmtClock, parse: (t) => { const c = parseClock(t); return c == null ? null : toMin(c); } })),
+          opt('Start watching', num(() => cfg.cubeFast.leadMin, (n) => { cfg.cubeFast.leadMin = n; }, { unit: 'min before', min: 1, max: 60, parse: parseFloat })),
+          opt('Check every', num(() => cfg.cubeFast.pollSec, (n) => { cfg.cubeFast.pollSec = n; }, { unit: 's', min: 2, max: 60, parse: parseFloat }))] : null)),
       caption('Advanced'),
       fold('adv', false, ['⏱ Timing', h('small', {}, 'pauses between requests')], () => [h('div', { class: 'ma-sr-o tm' },
         opt(['Scan every', h('small', {}, 'Waves, dungeons, and loot')], num(() => cfg.fightScanMs / 60000, (n) => { cfg.fightScanMs = Math.round(n * 60000); }, { unit: 'min', min: 0.1, parse: parseFloat })),
