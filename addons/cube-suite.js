@@ -1,5 +1,5 @@
 /* =============================================================================
- * Cube Suite  (Core addon, version 3.4.2)  -  port of the Tampermonkey script "Cube Suite" 2.7.8
+ * Cube Suite  (Core addon, version 3.5.3)  -  port of the Tampermonkey script "Cube Suite" 2.7.8
  *
  * Runs inside Core (addons/core.js): `Core` is in scope, so this file is NOT a userscript.
  * List it in addons.json (see the entry in the notes) or add its raw URL in the Addons panel.
@@ -23,15 +23,39 @@
  * v3.4.2: Fast Run now parses PvP match cards while a node is on cooldown, so a fully cleared dungeon is detected and the mode
  * switches back to Normal automatically (before, a cooled-down node never got allCleared and the reset never fired).
  * ========================================================================== */
-(async function () {
+/* v3.5.3: FFA counts as opened for a Cube only when its own 4 PM was seen after its capped phase, or when it already holds more than 6 matches (was 3.5.2: any Cube
+ * seen after 4 PM, so a Cube born at 23:00 made 18 joins before its first 4 PM instead of 6).
+ * v3.5.2: the Normal-mode join cap no longer falls back to 6 at server midnight once FFA (4PM) has opened for this Cube: it stays 40 until a new Cube starts
+ * (was: 0 joins from 00:00 to 16:00 server time every day once 6 matches were counted).
+ * v3.5.1: a command now also refreshes this tab's Automation switch from storage (the engine may be another tab than the one that sent it), one loop restart per command
+ * (was two), status is written at most every 15 s (was every loop = every second in Fast Run), and a blocked Cube page gets a "Use this tab" button.
+ * v3.5.0: Cube Suite is a Core module and a SERVICE. The engine can run on any page (not only the Cube page) and other addons command it
+ * through capabilities (Core.call), so the Automator never touches its storage keys or its URL:
+ *   cube.status()                    -> { ok, mode, master, background, follow, running, instanceId, cleared, fastTargets }   (sync, safe to poll)
+ *   cube.mode.set('fast'|'normal')   cube.background.set(bool)   cube.follow(instanceId|null)
+ *   cube.fastrun.start({ instanceId }) = follow that Cube + Fast Run + automation on + background on, in one command
+ * The panel is drawn on the Cube page only. Elsewhere the engine runs headless, and only when "background" is on (default OFF, so merely opening
+ * any page never starts PvP / PvE by itself). One tab runs the engine (Core.tab 'cube-suite'); commands are shared state + a wake event, so
+ * it does not matter which tab the command came from. */
+Core.module({
+  id: 'cube-suite', name: 'Cube Suite', icon: '🧊', version: '3.5.3',
+  provides: (api) => api && api.status ? {
+    'cube.status':         { fn: api.status,    doc: 'what Cube Suite is doing (shared across tabs)', returns: '{ ok, mode, master, background, follow, running, instanceId, cleared, fastTargets }' },
+    'cube.mode.set':       { fn: api.setMode,   doc: "switch Fast Run / Normal", args: "'fast' | 'normal'" },
+    'cube.background.set': { fn: api.setBackground, doc: 'run the engine on any page, not only the Cube page', args: 'boolean' },
+    'cube.follow':         { fn: api.follow,    doc: 'pin the engine to one Cube instance (null = unpin)', args: 'instanceId | null' },
+    'cube.fastrun.start':  { fn: api.startFastRun, doc: 'follow that Cube, Fast Run on, automation on, background on', args: '{ instanceId }' },
+  } : {},
+  async init(Core) {
   'use strict';
 
-  if (!/\/guild_dungeon_cube\.php$/.test(location.pathname) || !new URLSearchParams(location.search).get('instance_id')) return;
-  if (!window.Core || !window.Core.__isCore) { console.warn('[Cube Suite] Core is not loaded'); return; }
+  if (!window.Core || !window.Core.__isCore) { console.warn('[Cube Suite] Core is not loaded'); return null; }
 
   const RUN_KEY = '__dungeonCubeSuite_v3';
-  if (window[RUN_KEY]) return;
+  if (window[RUN_KEY]) return null;
   window[RUN_KEY] = true;
+
+  const onCubePage = /\/guild_dungeon_cube\.php$/.test(location.pathname) && !!new URLSearchParams(location.search).get('instance_id');
 
   // ┌─────────────────────────────────────────────────────────────────────────┐
   // │ GAME FLOW OVERVIEW   do not remove documentation comments in script!!   │
@@ -276,6 +300,9 @@
   const SA_PARTICIPATED_KEY = 'sa_participated_v1';     // {nodeId:matchNo} dedup set per instance
   const MASTER_ENABLED_KEY  = 'ds_suite_master_enabled_v1';
   const SHARED_MODE_KEY     = 'ds_suite_mode_v1';       // 'normal' | 'fast'
+  const FOLLOW_KEY          = 'ds_suite_follow_v1';     // { id, at }: the Cube a command pinned the engine to (beats the page URL; ignored after 24 h)
+  const BACKGROUND_KEY      = 'ds_suite_background_v1'; // '1' = the engine may run on any page, not only the Cube page
+  const STATUS_KEY          = 'ds_suite_status_v1';     // { at, instanceId, cleared }: published by the engine tab, read by cube.status() in any tab
   const POS_KEY             = 'ds_suite_pos_v1';
   const COLLAPSED_KEY       = 'ds_suite_collapsed_v1';
   const PVE_ATTACK_DMG_KEY_PREFIX = 'autocube_pve_attackdmg_';
@@ -365,7 +392,7 @@
   function dsShowTabBlocker() {
     if (tabBlockerEl) return;
     dsShowBlock('🚫', 'Already running in another tab',
-                'Close that tab <br>and this panel will resume automatically. OR just use the other tab');
+                'Close that tab <br>and this panel will resume automatically. OR just use the other tab.<br>If that one is a background tab with no panel, take over here: <button type="button" class="ds-takeover" style="margin-top:8px;cursor:pointer">Use this tab</button>');
     tabBlockerEl = uiBox;
   }
   function dsHideTabBlocker() {
@@ -461,9 +488,16 @@
     dsShowTabBlocker();
   }
 
+  let dsJoined = false;
+  function dsSyncTabJoin() {                                         // a tab that may not run must not sit in the queue: it would hold the lease for the Cube page
+    const want = dsMayRun();
+    if (want && !dsJoined) { dsJoined = true; Core.tab.join(TAB_NAME, { queue: true, keepAlive: true, onMain: dsOnMainTab, onIdle: dsOnIdleTab }); }
+    else if (!want && dsJoined) { dsJoined = false; Core.tab.leave(TAB_NAME); if (dsTabIsMain) dsOnIdleTab(); }
+  }
+
   function dsInitTabSync() {
-    mountUI(); // always mount so the panel works regardless of blocked state
-    Core.tab.join(TAB_NAME, { queue: true, keepAlive: true, onMain: dsOnMainTab, onIdle: dsOnIdleTab });
+    if (onCubePage) mountUI();                                       // the panel lives on the Cube page only; elsewhere the engine is headless
+    dsSyncTabJoin();
   }
 
   async function withRetry(fn, attempts = FETCH_RETRY_ATTEMPTS, baseDelay = FETCH_RETRY_BASE_DELAY) {
@@ -499,6 +533,24 @@
   }
   function dsSavePos(pos) { dsSafeSetItem(POS_KEY, JSON.stringify(pos)); }
 
+  function dsLoadFollow() {
+    try { const f = JSON.parse(localStorage.getItem(FOLLOW_KEY)); return f && f.id && Date.now() - (f.at || 0) < 24 * 3600_000 ? String(f.id) : ''; } catch { return ''; }
+  }
+  function dsSaveFollow(id) {
+    if (id) dsSafeSetItem(FOLLOW_KEY, JSON.stringify({ id: String(id), at: Date.now() }));
+    else { try { localStorage.removeItem(FOLLOW_KEY); } catch { /* storage blocked */ } }
+  }
+  const dsBackgroundOn = () => { try { return localStorage.getItem(BACKGROUND_KEY) === '1'; } catch { return false; } };
+  const dsMayRun = () => onCubePage || dsBackgroundOn();            // the Cube page always may; any other page only with background on
+  let dsStatusSig = '', dsStatusAt = 0;
+  function dsPublishStatus() {                                       // every loop calls this, and a write wakes every other tab: only write on a change, else every 15 s (status() treats 5 min as live)
+    try {
+      const instanceId = currentInstanceId || '', cleared = !!currentInstanceId && dsIsDungeonFullyCleared(), sig = instanceId + '|' + cleared, now = Date.now();
+      if (sig === dsStatusSig && now - dsStatusAt < 15_000) return;
+      dsStatusSig = sig; dsStatusAt = now;
+      dsSafeSetItem(STATUS_KEY, JSON.stringify({ at: now, instanceId, cleared }));
+    } catch { /* status is best effort */ }
+  }
   function dsLoadMode()  { return localStorage.getItem(SHARED_MODE_KEY) === 'fast' ? 'fast' : 'normal'; }
   function dsSaveMode(m) { dsSafeSetItem(SHARED_MODE_KEY, m === 'fast' ? 'fast' : 'normal'); }
   function dsIsFastMode(){ return dsLoadMode() === 'fast'; }
@@ -915,6 +967,8 @@
   }
 
   async function getActiveCubeInstanceId() {
+    const followed = dsLoadFollow();                                  // a command pinned it (the Automator's fast run): beats the URL, so a tab opened on the old Cube is not dragged back
+    if (followed) return followed;
     const urlId = new URLSearchParams(location.search).get('instance_id');
     if (urlId) return urlId;
     const res = await fetch(DUNGEONS_URL, { credentials: 'same-origin', cache: 'no-store' });
@@ -1568,9 +1622,26 @@
     }
   }
 
+  // FFA opens once per Cube, at the first 4 PM after the Cube was born, and then stays open: server midnight must not drop the cap back to 6 while the join counter is cumulative.
+  // The clock alone cannot say "opened for THIS Cube" (a Cube born at 23:00 is past 4 PM but FFA is a day away), so it is remembered per Cube:
+  //   capped = this Cube was seen in its capped phase (so its next 4 PM is its own opening)   ffa = FFA has opened for this Cube (never undone)
+  // A Cube that already holds more than the capped limit has necessarily been open before (the cap could not have let those joins through), so that counts as opened too.
+  const PVP_FFA_SEEN_KEY = 'ds_pvp_ffa_seen_v2';   // { id, capped, ffa }; the schedule stays the wake-up marker only
+  function pvpReadFfaMark(id) {
+    let m = null; try { m = JSON.parse(localStorage.getItem(PVP_FFA_SEEN_KEY)); } catch { /* unreadable = not seen */ }
+    return m && typeof m === 'object' && String(m.id ?? '') === id ? { id, capped: m.capped ? 1 : 0, ffa: m.ffa ? 1 : 0 } : { id, capped: 0, ffa: 0 };
+  }
   function pvpGetEffectiveScheduleEntry() {
     const now = saNowSeconds();
-    return dsGetActiveScheduleEntry(PVP_SCHEDULE, now, PVP_SCHEDULE[0]);
+    const entry = dsGetActiveScheduleEntry(PVP_SCHEDULE, now, PVP_SCHEDULE[0]);
+    const ffa = PVP_SCHEDULE.find(e => e.label === 'ffa'), capped = PVP_SCHEDULE.find(e => e.label === 'capped');
+    if (!ffa || !capped || !currentInstanceId) return entry;
+    const id = String(currentInstanceId), m = pvpReadFfaMark(id), before = JSON.stringify(m);
+    if (entry.label === 'capped') m.capped = 1;
+    if (!m.ffa && ((entry.label === 'ffa' && m.capped) || pvpLiveJoinCount > capped.limit)) m.ffa = 1;
+    if (JSON.stringify(m) !== before) dsSafeSetItem(PVP_FFA_SEEN_KEY, JSON.stringify(m));
+    if (m.ffa) return ffa;
+    return entry.label === 'ffa' ? capped : entry;       // past 4 PM but FFA has not opened for this Cube yet: still capped
   }
   function pvpGetEffectiveMatchLimit() {
     return pvpGetEffectiveScheduleEntry()?.limit ?? 6;
@@ -3999,6 +4070,7 @@
     if (!dsIsDungeonFullyCleared()) return;
     dsAutoModeResetDone = true;
     dsSaveMode('normal');
+    dsSaveFollow(null);                                               // the commanded Fast Run is over: the next Cube is found the normal way
     addLog('sys', 'info', 'Dungeon fully cleared — Fast Run switched back to Normal for the next dungeon.');
     refreshUI();
   }
@@ -4057,7 +4129,7 @@
           pvpSaveFastRunState({ ...s, lastInstanceId: instanceId, seenInstanceIds: nextSeen });
         }
       }
-      if (!uiBox || !uiBox.isConnected) mountUI();
+      if (onCubePage && (!uiBox || !uiBox.isConnected)) mountUI();
       refreshUI();
       if (!instanceId) return;
 
@@ -4100,6 +4172,7 @@
       await tick();
     } finally {
       runLoopInFlight = false;
+      dsPublishStatus();
     }
     const needsQuickRetry = !!currentInstanceId && !pvpHasScanned;
     const delay = runLoopRestartRequested ? 0 : needsQuickRetry ? 8_000 : (masterEnabled && dsIsFastMode()) ? PVP_FAST_INTERVAL_MS : Math.min(PVP_SCAN_INTERVAL_MS, SA_SCAN_MS);
@@ -4339,7 +4412,7 @@
     const panel = document.createElement('div');
     panel.id = 'ds-panel';
     panel.className = 'ds-panel ds-tab-blocked';
-    panel.innerHTML = ` <div class="ds-header"> <span class="ds-dot" id="ds-dot"></span> <span class="ds-title">Dungeon Suite <span class="ds-inst" id="ds-inst"></span></span> <label class="ds-switch" title="Enable / disable automation"> <input type="checkbox" id="ds-master-toggle"> <span class="ds-slider"></span> </label> <button class="ds-iconbtn ds-chevron" id="ds-collapse-btn" type="button" title="Collapse">▾</button> </div> <div class="ds-body"> <div class="ds-tab-block-msg"> <div class="ds-tbl-icon">⏳</div> <div class="ds-tbl-title">Starting…</div> <div class="ds-tbl-note">Checking tab status…</div> </div> <div class="ds-shared-mode-row"> <div class="ds-field-label">Mode <span class="ds-shared-tag">— Made by werewulf</span></div> <div class="ds-segmented"> <button class="ds-seg-btn" data-mode="normal" type="button">Normal</button> <button class="ds-seg-btn" data-mode="fast"   type="button">Fast Run</button> </div> </div> <div class="ds-tabs"> <button class="ds-tab" data-tab="pvp" type="button">PvP</button> <button class="ds-tab" data-tab="sa"  type="button">SA</button> <button class="ds-tab" data-tab="pve" type="button">PvE</button> <button class="ds-tab" data-tab="log" type="button">Log</button> </div> <div class="ds-tabpanel" data-tab="pvp"> <p class="ds-status" id="ds-status-pvp"></p> <div class="ds-pills" id="ds-pvp-pills"></div> <div id="ds-pvp-normal"> <p class="ds-note" title="Auto-join cap: 6 matches before 4PM server time, 40 after FFA opens at 4PM. Tyrant Conclave (Node 9) is a separate opt-in node and never counts toward or is limited by this cap.">Scans nodes every ${Math.round(PVP_SCAN_INTERVAL_MS / 1000)}s. Auto-join cap: 6 before 4PM, 40 after (FFA). Monitoring continues when paused.</p> <div id="ds-pvp-match-list"></div> </div> <div id="ds-pvp-fast" style="display:none;"> <div class="ds-fields-row"> <div class="ds-field"> <div class="ds-field-label">Node 7 · Ring Ward</div> <input class="ds-input" data-node="7" type="number" min="0" max="20" value="0"> <div class="ds-field-status" data-node="7">—</div> </div> <div class="ds-field"> <div class="ds-field-label">Node 8 · Duel Heart</div> <input class="ds-input" data-node="8" type="number" min="0" max="20" value="0"> <div class="ds-field-status" data-node="8">—</div> </div> </div> <p class="ds-note" style="margin-bottom:10px;">0 = skip node. Polls every ${(PVP_FAST_INTERVAL_MS / 1000).toFixed(1)}s when active.</p> <div class="ds-toggle-row"> <label class="ds-switch sm"><input type="checkbox" id="ds-leader-toggle"><span class="ds-slider"></span></label> <span>Leader / Vice — starts any match with at least 1 player inside instantly</span> </div> </div> <div class="ds-toggle-row" style="margin:10px 0 0;" title="Tyrant Conclave is a separate opt-in node — it is never counted toward, or limited by, the Node 7/8 join cap above (6 before 4PM, 40 after FFA)."> <label class="ds-switch sm"><input type="checkbox" id="ds-tyrant-toggle"><span class="ds-slider"></span></label> <span>Tyrant Conclave (N9) Final PVP Boss</span> </div> </div> <div class="ds-tabpanel" data-tab="sa"> <p class="ds-status" id="ds-status-sa"></p> <div class="ds-pills" id="ds-sa-pills"></div> <div id="ds-sa-node-list" style="margin-bottom:8px;"></div> <button class="ds-seg-btn" id="ds-sa-heal-all" type="button" style="width:100%;margin-bottom:8px;">Heal All Units</button> <p class="ds-note" id="ds-sa-note"></p> <div id="ds-sa-sched-wrap"> <div class="ds-divider"></div> <div class="ds-toggle-row"> <label class="ds-switch sm"><input type="checkbox" id="ds-sa-sched-nuke"><span class="ds-slider"></span></label> <span title="Also nukes any overdue fights still uncleared that are past ffa"> Scheduled clear — joins &amp; nukes each battle at <button class="ds-linkbtn" id="ds-ffa-help" type="button">FFA</button> </span> </div> </div> </div> <div class="ds-tabpanel" data-tab="pve"> <p class="ds-status" id="ds-status-pve"></p> <div class="ds-pills" id="ds-pve-pills"></div> <div class="ds-fields-row"> <div class="ds-field"> <div class="ds-field-label">Stop condition</div> <select class="ds-input" id="ds-pve-mode"> <option value="exp">EXP cap</option> <option value="fixed">Fixed cap (all mobs)</option> <option value="monster">Per-mob caps</option> <option value="loot">Full loot unlock</option> <option value="scheduled" id="ds-pve-mode-scheduled-opt">Scheduled (per-node, time-based)</option> </select> </div> <div class="ds-field"> <div class="ds-field-label">Damage Model</div> <select class="ds-input" id="ds-pve-damage-model" title="Change the Damage Model that will be used for PVE."> <option value="eco" title="Stamina conservative: Biggest attack that still fits under remaining cap.">Eco</option> <option value="fast" title="Fewest Hits: Prioritizes fewest amount of hits to close the remaining cap.">Fast</option> </select> </div> </div> <p class="ds-note" id="ds-pve-mode-note" style="margin:-4px 0 8px;"></p> <div class="ds-fields-row" id="ds-pve-fixedcap-row" style="display:none;"> <div class="ds-field"> <div class="ds-field-label">Fixed cap</div> <input class="ds-input" id="ds-pve-fixedcap" type="number" min="0" step="1000" placeholder="0 = no limit"> </div> </div> <div class="ds-fields-row"> <div class="ds-toggle-row" style="flex:1;"> <label class="ds-switch sm"><input type="checkbox" id="ds-pve-stam-potion"><span class="ds-slider"></span></label> <span>Auto stamina potion</span> </div> <div class="ds-toggle-row" style="flex:1;"> <label class="ds-switch sm"><input type="checkbox" id="ds-pve-hp-potion"><span class="ds-slider"></span></label> <span>Auto HP potion</span> </div> </div> <div style="display:flex; gap:8px; margin:8px 0; align-items:center;"> <div id="ds-pve-stamcap-wrap" style="flex:1; display:none; justify-content:flex-start;"> <div id="ds-pve-stamcap-row" style="display:flex;align-items:center;gap:5px;font-size:11px;color:#8b8d98;white-space:nowrap;"> <span>Skip LSP ≥</span> <input class="ds-input" id="ds-pve-stamcap" type="number" min="0" max="100" step="0.5" style="width:56px;padding:3px 5px;font-size:11px;"> <span>% EXP</span> </div> </div> <div style="flex:1;"> <button class="ds-seg-btn" id="ds-pve-copy-other" type="button" style="width:100%;padding:6px 14px;"> Copy from <span id="ds-pve-copy-other-label"></span></button> </div> </div> <div id="ds-pve-nodepanels"></div> <p class="ds-note" style="margin-top:6px;">Normal &amp; Fast Run keep separate profiles and mob selections.</p> </div> <div class="ds-tabpanel" data-tab="log"> <div class="ds-log-header" style="margin-bottom:6px;"> <div class="ds-log-filters"> <button class="ds-chip" data-filter="all" type="button">All</button> <button class="ds-chip" data-filter="pvp" type="button">PvP</button> <button class="ds-chip" data-filter="sa"  type="button">SA</button> <button class="ds-chip" data-filter="pve" type="button">PvE</button> <button class="ds-chip" data-filter="sys" type="button">Sys</button> </div> </div> <div class="ds-log ds-log-full" id="ds-log"></div> </div> </div> `;
+    panel.innerHTML = ` <div class="ds-header"> <span class="ds-dot" id="ds-dot"></span> <span class="ds-title">Dungeon Suite <span class="ds-inst" id="ds-inst"></span></span> <label class="ds-switch" title="Enable / disable automation"> <input type="checkbox" id="ds-master-toggle"> <span class="ds-slider"></span> </label> <button class="ds-iconbtn ds-chevron" id="ds-collapse-btn" type="button" title="Collapse">▾</button> </div> <div class="ds-body"> <div class="ds-tab-block-msg"> <div class="ds-tbl-icon">⏳</div> <div class="ds-tbl-title">Starting…</div> <div class="ds-tbl-note">Checking tab status…</div> </div> <div class="ds-shared-mode-row"> <div class="ds-field-label">Mode <span class="ds-shared-tag">— Made by werewulf</span></div> <div class="ds-segmented"> <button class="ds-seg-btn" data-mode="normal" type="button">Normal</button> <button class="ds-seg-btn" data-mode="fast"   type="button">Fast Run</button> </div> </div> <div class="ds-tabs"> <button class="ds-tab" data-tab="pvp" type="button">PvP</button> <button class="ds-tab" data-tab="sa"  type="button">SA</button> <button class="ds-tab" data-tab="pve" type="button">PvE</button> <button class="ds-tab" data-tab="log" type="button">Log</button> </div> <div class="ds-tabpanel" data-tab="pvp"> <p class="ds-status" id="ds-status-pvp"></p> <div class="ds-pills" id="ds-pvp-pills"></div> <div id="ds-pvp-normal"> <p class="ds-note" title="Auto-join cap: 6 matches before 4PM server time, 40 once FFA opens at 4PM (and it stays 40 for that Cube, also after midnight). Tyrant Conclave (Node 9) is a separate opt-in node and never counts toward or is limited by this cap.">Scans nodes every ${Math.round(PVP_SCAN_INTERVAL_MS / 1000)}s. Auto-join cap: 6 before 4PM, 40 once FFA opens (stays 40 for that Cube). Monitoring continues when paused.</p> <div id="ds-pvp-match-list"></div> </div> <div id="ds-pvp-fast" style="display:none;"> <div class="ds-fields-row"> <div class="ds-field"> <div class="ds-field-label">Node 7 · Ring Ward</div> <input class="ds-input" data-node="7" type="number" min="0" max="20" value="0"> <div class="ds-field-status" data-node="7">—</div> </div> <div class="ds-field"> <div class="ds-field-label">Node 8 · Duel Heart</div> <input class="ds-input" data-node="8" type="number" min="0" max="20" value="0"> <div class="ds-field-status" data-node="8">—</div> </div> </div> <p class="ds-note" style="margin-bottom:10px;">0 = skip node. Polls every ${(PVP_FAST_INTERVAL_MS / 1000).toFixed(1)}s when active.</p> <div class="ds-toggle-row"> <label class="ds-switch sm"><input type="checkbox" id="ds-leader-toggle"><span class="ds-slider"></span></label> <span>Leader / Vice — starts any match with at least 1 player inside instantly</span> </div> </div> <div class="ds-toggle-row" style="margin:10px 0 0;" title="Tyrant Conclave is a separate opt-in node — it is never counted toward, or limited by, the Node 7/8 join cap above (6 before 4PM, 40 after FFA)."> <label class="ds-switch sm"><input type="checkbox" id="ds-tyrant-toggle"><span class="ds-slider"></span></label> <span>Tyrant Conclave (N9) Final PVP Boss</span> </div> </div> <div class="ds-tabpanel" data-tab="sa"> <p class="ds-status" id="ds-status-sa"></p> <div class="ds-pills" id="ds-sa-pills"></div> <div id="ds-sa-node-list" style="margin-bottom:8px;"></div> <button class="ds-seg-btn" id="ds-sa-heal-all" type="button" style="width:100%;margin-bottom:8px;">Heal All Units</button> <p class="ds-note" id="ds-sa-note"></p> <div id="ds-sa-sched-wrap"> <div class="ds-divider"></div> <div class="ds-toggle-row"> <label class="ds-switch sm"><input type="checkbox" id="ds-sa-sched-nuke"><span class="ds-slider"></span></label> <span title="Also nukes any overdue fights still uncleared that are past ffa"> Scheduled clear — joins &amp; nukes each battle at <button class="ds-linkbtn" id="ds-ffa-help" type="button">FFA</button> </span> </div> </div> </div> <div class="ds-tabpanel" data-tab="pve"> <p class="ds-status" id="ds-status-pve"></p> <div class="ds-pills" id="ds-pve-pills"></div> <div class="ds-fields-row"> <div class="ds-field"> <div class="ds-field-label">Stop condition</div> <select class="ds-input" id="ds-pve-mode"> <option value="exp">EXP cap</option> <option value="fixed">Fixed cap (all mobs)</option> <option value="monster">Per-mob caps</option> <option value="loot">Full loot unlock</option> <option value="scheduled" id="ds-pve-mode-scheduled-opt">Scheduled (per-node, time-based)</option> </select> </div> <div class="ds-field"> <div class="ds-field-label">Damage Model</div> <select class="ds-input" id="ds-pve-damage-model" title="Change the Damage Model that will be used for PVE."> <option value="eco" title="Stamina conservative: Biggest attack that still fits under remaining cap.">Eco</option> <option value="fast" title="Fewest Hits: Prioritizes fewest amount of hits to close the remaining cap.">Fast</option> </select> </div> </div> <p class="ds-note" id="ds-pve-mode-note" style="margin:-4px 0 8px;"></p> <div class="ds-fields-row" id="ds-pve-fixedcap-row" style="display:none;"> <div class="ds-field"> <div class="ds-field-label">Fixed cap</div> <input class="ds-input" id="ds-pve-fixedcap" type="number" min="0" step="1000" placeholder="0 = no limit"> </div> </div> <div class="ds-fields-row"> <div class="ds-toggle-row" style="flex:1;"> <label class="ds-switch sm"><input type="checkbox" id="ds-pve-stam-potion"><span class="ds-slider"></span></label> <span>Auto stamina potion</span> </div> <div class="ds-toggle-row" style="flex:1;"> <label class="ds-switch sm"><input type="checkbox" id="ds-pve-hp-potion"><span class="ds-slider"></span></label> <span>Auto HP potion</span> </div> </div> <div style="display:flex; gap:8px; margin:8px 0; align-items:center;"> <div id="ds-pve-stamcap-wrap" style="flex:1; display:none; justify-content:flex-start;"> <div id="ds-pve-stamcap-row" style="display:flex;align-items:center;gap:5px;font-size:11px;color:#8b8d98;white-space:nowrap;"> <span>Skip LSP ≥</span> <input class="ds-input" id="ds-pve-stamcap" type="number" min="0" max="100" step="0.5" style="width:56px;padding:3px 5px;font-size:11px;"> <span>% EXP</span> </div> </div> <div style="flex:1;"> <button class="ds-seg-btn" id="ds-pve-copy-other" type="button" style="width:100%;padding:6px 14px;"> Copy from <span id="ds-pve-copy-other-label"></span></button> </div> </div> <div id="ds-pve-nodepanels"></div> <p class="ds-note" style="margin-top:6px;">Normal &amp; Fast Run keep separate profiles and mob selections.</p> </div> <div class="ds-tabpanel" data-tab="log"> <div class="ds-log-header" style="margin-bottom:6px;"> <div class="ds-log-filters"> <button class="ds-chip" data-filter="all" type="button">All</button> <button class="ds-chip" data-filter="pvp" type="button">PvP</button> <button class="ds-chip" data-filter="sa"  type="button">SA</button> <button class="ds-chip" data-filter="pve" type="button">PvE</button> <button class="ds-chip" data-filter="sys" type="button">Sys</button> </div> </div> <div class="ds-log ds-log-full" id="ds-log"></div> </div> </div> `;
     document.documentElement.appendChild(panel);
     const pos = dsLoadPos();
     if (innerWidth >= 520 && pos?.left && pos?.top) Object.assign(panel.style, { left: pos.left, top: pos.top, right: 'auto' });
@@ -4370,6 +4443,7 @@
     };
     hdr.onpointerup = () => { if (from) { from = null; dsSavePos({ left: panel.style.left, top: panel.style.top }); } };
 
+    panel.addEventListener('click', e => { if (e.target && e.target.closest && e.target.closest('.ds-takeover')) void Core.tab.takeOver(TAB_NAME); });
     panel.querySelector('#ds-master-toggle').addEventListener('change', e => {
       masterEnabled = e.target.checked;
       dsSaveMasterEnabled(masterEnabled);
@@ -5446,7 +5520,35 @@
     dsInitTabSync(); // mounts UI and starts runLoop only when this tab owns the lease
   }
 
+  /* ---- the commands other addons send (the capabilities offered in provides above) ---- */
+  const dsWake = () => { try { Core.emit('cube:wake', {}, { shared: true }); } catch (_) { masterEnabled = dsLoadMasterEnabled(); if (dsTabIsMain) dsRestartLoop(); } };   // emit also fires the handler below in this tab
+  const api = {
+    status() {
+      let st = {}; try { st = JSON.parse(localStorage.getItem(STATUS_KEY)) || {}; } catch { /* none yet */ }
+      const live = Date.now() - (st.at || 0) < 5 * 60_000;                              // the engine tab publishes after every loop
+      let f = {}; try { f = pvpLoadFastRunState() || {}; } catch { /* none yet */ }
+      return { ok: true, mode: dsLoadMode(), master: dsLoadMasterEnabled(), background: dsBackgroundOn(), follow: dsLoadFollow(),
+        running: live, instanceId: live ? String(st.instanceId || '') : '', cleared: live && !!st.cleared,
+        fastTargets: { node7MatchNo: Number(f.node7MatchNo) || 0, node8MatchNo: Number(f.node8MatchNo) || 0 } };
+    },
+    setMode(m) { dsSaveMode(m === 'fast' ? 'fast' : 'normal'); dsWake(); return api.status(); },
+    setBackground(on) { dsSafeSetItem(BACKGROUND_KEY, on ? '1' : '0'); dsSyncTabJoin(); dsWake(); return api.status(); },
+    follow(id) { dsSaveFollow(id); dsWake(); return api.status(); },
+    startFastRun(o) {
+      const id = o && o.instanceId != null ? String(o.instanceId).replace(/\D/g, '') : '';
+      if (!id) return { ok: false, message: 'startFastRun needs { instanceId }' };
+      dsSaveFollow(id); dsSaveMode('fast'); dsSaveMasterEnabled(true); masterEnabled = true;
+      dsSafeSetItem(BACKGROUND_KEY, '1'); dsSyncTabJoin(); dsWake();
+      addLog('sys', 'info', `Commanded: Fast Run on Cube #${id}`);
+      return Object.assign(api.status(), { message: `Fast Run on Cube #${id}` });
+    },
+  };
+  window.addEventListener('storage', (e) => { if (e.key === BACKGROUND_KEY) dsSyncTabJoin(); });   // another tab changed it
+  Core.on('cube:wake', () => { masterEnabled = dsLoadMasterEnabled(); if (dsTabIsMain) dsRestartLoop(); });   // masterEnabled is per tab: the command may have come from another one
+
   if (document.body) init();
   else document.addEventListener('DOMContentLoaded', init);
+  return api;
 
-})();
+  },
+});
