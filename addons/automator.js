@@ -13,10 +13,11 @@
  *                      (cube.scan, Cube Suite 3.6.0+); the PvE nodes open an editor for the damage settings: mode, caps per mob).
  *                      Swappable: turn the part off (or delete it) and the wave bosses keep working.
  *   PART 3  DUELS      Phase duels, shared by wave and dungeon bosses
- *   PART 4  LOOT       graveyard scan + EXP-aware auto-loot
+ *   PART 4  LOOT       graveyard scan + persisted ledger (corpses remembered by id, checked on their battle page before looting) + EXP-aware auto-loot,
+ *                      clearRun (EXP corpses with stamina potions held, then the out-levelled ones), run by the Graveyard task
  *   PART 4b LOOT SCAN  reads every boss's loot / level / EXP cap into the cap choices; Export .txt (swappable)
  *   PART 5a FARM       the one auto-farm service (basic wave mobs only): level-400 tolerant, 10% batching, safe restore of your own set-up
- *   PART 5b TASKS      task master: Monsters, Adventure Guild, Battle Pass, Merchant (weekly), PvP placeholders; Automator.tasks.define({...}) adds more
+ *   PART 5b TASKS      task master: Monsters, Adventure Guild, Battle Pass, Merchant (weekly), Extraction (shadows), PvP placeholders; Automator.tasks.define({...}) adds more
  *   PART 5c CUBE RUN   scheduled Cube fast run: pauses the rest, watches for the new Cube every few seconds, jumps in (drives Cube Suite; swappable)
  *   PART 5  [slots]    other parts: Kernel.register({ id, name, icon, every, tick, panel })
  *   PART 5  PANEL      Core.float panel: Tasks, Overview, Bosses (Waves | Dungeons, waves grouped by area), Loot, Settings, Activity
@@ -26,7 +27,7 @@
  * default cap of a boss is its highest loot requirement, and bosses the roster did not know yet are added. Export .txt writes it all out.
  */
 Core.module({
-  id: 'automator', name: 'Automator', icon: '🤖', version: '1.14.5',
+  id: 'automator', name: 'Automator', icon: '🤖', version: '1.14.9',
   // Offered to other addons through Core capabilities (guides/CAPABILITIES.md):
   //   automator.status() -> the status string     automator.start() / automator.stop()     automator.scan() -> scan the bosses now
   provides: (api) => api && api.start ? {
@@ -37,7 +38,7 @@ Core.module({
   } : {},
   init(Core) {
 'use strict';
-const ID = 'automator', VERSION = '1.14.5';
+const ID = 'automator', VERSION = '1.14.9';
 const FARM_MARK = '\u2063farm\u2063';          // a task line is written when the task looks; this marks where the farm's state goes, filled in live when the line is drawn (a line saying "queued" while the farm is already checking the graveyard was stale)
 if (window.__automatorLoaded) { console.warn('[automator] already loaded', window.__automatorLoaded); return null; }
 window.__automatorLoaded = VERSION;
@@ -107,6 +108,8 @@ const DEFAULT_CFG = {
     guild:    { enabled: false, everyMin: 60, collect: true, collectFarm: true, skill: true },   // everyMin = the longest wait only: a task wakes itself when something is due
     bp:       { enabled: false, everyMin: 60 },
     merchant: { enabled: false, everyMin: 60 },
+    graveyard: { enabled: false, checkMin: 20, pile: 15, expiryH: 4, levelUp: true, maxDays: 2 },   // checkMin = how often the wave pages are looked at (cheap); a clear-out (PART 4 clearRun) runs when: pile corpses wait / levelUp (the EXP waiting covers the next level) / one has expiryH hours left / maxDays passed
+    extract:  { enabled: false, everyMin: 5, mobs: {} },   // shadow extraction (PART 5b): mobs = the Grakthar gate mobs ticked to extract, by lower-case name
     pvp:      { solo: { enabled: false }, team: { enabled: false } },   // placeholders until the PvP module registers itself
     monsters: { enabled: true },       // the boss engine's own switch (Start / Stop is the master switch for everything)
     farm:     { auto: true },        // auto: use Auto-Farm when the game allows it (level 400+); the normal attack path otherwise
@@ -129,6 +132,9 @@ function mergeCfg(saved) {
   out.tasks = (() => { const d = JSON.parse(JSON.stringify(DEFAULT_CFG.tasks)), t = s.tasks && typeof s.tasks === 'object' ? s.tasks : {};
     for (const k of Object.keys(d)) { const v = t[k]; if (!v || typeof v !== 'object') continue; if (k === 'pvp') { for (const j of Object.keys(d.pvp)) d.pvp[j] = Object.assign({}, d.pvp[j], v[j] && typeof v[j] === 'object' ? v[j] : {}); } else d[k] = Object.assign({}, d[k], v); }
     return d; })();
+  { const g = out.tasks.graveyard, d = DEFAULT_CFG.tasks.graveyard, n = (x, lo, hi, dflt) => (Number.isFinite(+x) && +x >= lo && +x <= hi ? +x : dflt);
+    g.enabled = !!g.enabled; g.checkMin = n(g.checkMin, 5, 240, d.checkMin); g.pile = Math.round(n(g.pile, 1, 500, d.pile)); g.expiryH = n(g.expiryH, 1, 48, d.expiryH); g.levelUp = g.levelUp !== false; g.maxDays = n(g.maxDays, 1, 30, d.maxDays);
+    delete g.everyMin; }      // (1.14.8 cleared on a fixed interval: that setting is retired, the triggers are the schedule now)
   out.cubeFast = (() => { const d = DEFAULT_CFG.cubeFast, v = Object.assign({}, d, s.cubeFast && typeof s.cubeFast === 'object' ? s.cubeFast : {}), n = (x, lo, hi, dflt) => (Number.isFinite(+x) && +x >= lo && +x <= hi ? +x : dflt);
     v.enabled = !!v.enabled; v.leadMin = n(v.leadMin, 1, 60, d.leadMin); v.pollSec = n(v.pollSec, 2, 60, d.pollSec); delete v.holdMin;   // (an older save may still carry the removed 'give up after' setting)
     v.time = parseClock(v.time) || d.time; if (!/^(sun|mon|tue|wed|thu|fri|sat)$/.test(v.day)) v.day = d.day; return v; })();
@@ -1136,7 +1142,13 @@ const Potions = (() => {
     } finally { refilling = false; }
   }
   let saveWarn = 0;
+  // A graveyard clear-out holds the stamina potions (they would be drunk just before the loot levels you up and refills the bar). The hold lives on a
+  // heartbeat in the shared state: if the page is reloaded mid-run nothing renews it, and it lapses by itself after HOLD_MS. No startup cleanup needed.
+  const HOLD_MS = 120000;
+  const held = () => { const t = Number((stateStore.get() || {}).gyHold) || 0; return t > 0 && Date.now() - t < HOLD_MS; };
+  const hold = (on) => { stateStore.update((s) => { s.gyHold = on ? Date.now() : 0; }); };
   function canUseStam() {
+    if (held()) { if (Date.now() - saveWarn > 30000) { saveWarn = Date.now(); log('⏸️ stamina potions on hold — the graveyard is being cleared', 'info'); } return false; }
     const t = cfg.stam.save.thresholdPct;
     if (!(t > 0 && t < 100)) return true;                                  // 100 (or nothing) = never save
     const pct = Me.expPct(); if (pct == null) return true;
@@ -1160,7 +1172,7 @@ const Potions = (() => {
     stats.hpUses++; Me.hp = Me.maxHp; Me.statsAt = 0; log(`💊 HP potion${why ? ' — ' + why : ''}`, 'ok'); return true;
   }
   const hpTrip = () => cfg.hp.enabled && Me.hp > 0 && Me.maxHp > 1 && cfg.hp.thresholdPct > 0 && Me.hp <= Math.ceil(Me.maxHp * cfg.hp.thresholdPct / 100);
-  return { refillMana, refillStamina, heal, hpTrip };
+  return { refillMana, refillStamina, heal, hpTrip, held, hold };
 })();
 const stats = { hits: 0, dmg: 0, cycles: 0, stamA: 0, stamB: 0, hpUses: 0, mpRefills: 0, started: Date.now() };
 
@@ -2774,9 +2786,67 @@ Kernel.register({
   id: 'loot', name: 'Graveyard & loot',  icon: '🪦',          // no periodic scan: the graveyard is read on demand (Scan graveyard / Loot now / out of stamina)
 });
 Object.assign(Loot, (() => {
-  const st = { rows: [], scanning: false, looting: false, estimating: false, lastScanAt: 0, lastStuckAt: 0, claiming: new Set() };
+  const st = { rows: [], scanning: false, looting: false, estimating: false, clearing: '', lastScanAt: 0, lastPeekAt: 0, lastStuckAt: 0, claiming: new Set() };
   const rate = new Map(), capInfo = new Map(), upTo = new Map(), dmgCache = new Map();
   const expNeeded = () => { const m = Core.me.get(), e = m && m.exp; return e && e.max > 0 ? Math.max(0, e.max - e.cur) : null; };
+
+  /* ---- the LEDGER: every corpse the scans ever saw, kept by the id the game knows it by (battle id for waves; instance + dgmid + room for dungeons),
+   * so a corpse the game stops listing (an old Cube that left Clears, a wave corpse that scrolled off) is not forgotten. A scan MERGES into it; it
+   * never replaces it. state: lootable (seen on the last scan) | unverified (remembered, not listed any more: its battle page decides) | looted | gone
+   * (the page says "Monster not found." / "Instance not found.") | foreign (a dungeon corpse of another guild's instance: kept apart, a later
+   * old-dungeon scan can use it). Looted and gone are final. Every corpse is checked on its own battle page right before it is claimed. ---- */
+  const ledger = Core.store(ID + '-graveyard', { def: { rows: {} } });
+  const L_KEEP_MS = 14 * 86400000, L_MAX = 3000, VERIFY_MAX = 40;
+  let led = (() => { try { const r = (ledger.get() || {}).rows; return r && typeof r === 'object' ? r : {}; } catch (_) { return {}; } })();
+  let ledTimer = 0;
+  const saveLed = () => { clearTimeout(ledTimer); ledTimer = setTimeout(() => { try { const o = {}; for (const [k, e] of Object.entries(led)) { const c = Object.assign({}, e); delete c.est; o[k] = c; } ledger.set({ rows: o }); } catch (_) { /* storage full: memory still has it */ } }, 400); };
+  const isLive = (e) => e.state === 'lootable' || e.state === 'unverified';
+  const FAIL_MAX = 3, FAIL_PAUSE_MS = 6 * 3600000;
+  const blocked = (e) => (e.fails || 0) >= FAIL_MAX && Date.now() - (e.failAt || 0) < FAIL_PAUSE_MS;      // a corpse the game keeps refusing is left alone for a while (not retried on every pass), then tried again
+  function setState(e, state, why) {
+    e.state = state; e.why = why || ''; e.needsLoot = isLive(e); if (!e.needsLoot) { e.closedAt = Date.now(); st.rows = st.rows.filter((x) => x.key !== e.key); }
+    saveLed(); UI.dirty('loot');
+  }
+  const liveRows = (prev) => { const m = new Map((prev || []).map((r) => [r.key, r])); return Object.values(led).filter(isLive).map((e) => { const o = m.get(e.key); if (o && o.est !== undefined) e.est = o.est; e.needsLoot = true; return e; }); };
+  st.rows = liveRows();                                                   // what was remembered before the reload is lootable straight away
+  function merge(fresh, kinds) {
+    const now = Date.now(), nowSec = Math.floor(now / 1000), seen = new Set();
+    for (const r of fresh) {
+      seen.add(r.key); const e = led[r.key];
+      if (!e) { led[r.key] = Object.assign({}, r, { state: 'lootable', needsLoot: true, first: now, seen: now, verified: 0 }); continue; }
+      e.icon = r.icon || e.icon; e.area = r.area || e.area; e.isBoss = r.isBoss; if (r.expPerDmg != null) e.expPerDmg = r.expPerDmg; if (Number.isFinite(r.userDamage)) e.userDamage = r.userDamage; if (r.expire) e.expire = r.expire;
+      e.seen = now; if (e.state === 'unverified') { e.state = 'lootable'; e.why = ''; }
+    }
+    for (const e of Object.values(led)) {
+      if (!isLive(e) || seen.has(e.key) || !kinds.has(e.kind)) continue;     // (a kind that was not scanned this time says nothing about its corpses)
+      if (e.kind === 'wave' && e.expire > 0 && e.expire < nowSec) setState(e, 'gone', 'expired'); else if (e.state === 'lootable') { e.state = 'unverified'; e.why = 'not listed any more'; }
+    }
+    const all = Object.entries(led);
+    for (const [k, e] of all) if (!isLive(e) && now - (e.closedAt || e.seen || 0) > L_KEEP_MS) delete led[k];
+    if (Object.keys(led).length > L_MAX) Object.entries(led).filter(([, e]) => !isLive(e)).sort((a, b) => (a[1].closedAt || 0) - (b[1].closedAt || 0)).slice(0, Object.keys(led).length - L_MAX).forEach(([k]) => delete led[k]);
+    saveLed();
+  }
+  const battleUrlOf = (r) => (r.kind === 'dungeon' ? `/battle.php?dgmid=${r.monsterId}&instance_id=${r.instanceId}` : `/battle.php?id=${r.monsterId}`);
+  // The battle page of one corpse says what it is. Returns lootable | looted | gone | foreign | unknown | error and updates the ledger. A dungeon page whose
+  // loot state is not recognised stays 'unknown' (not dropped): the claim itself settles it.
+  async function verify(e) {
+    let html;
+    try { html = await netText(battleUrlOf(e), { force: true, ttl: 0, key: 'ma:gyv:' + e.key }); } catch (_) { return 'error'; }
+    const gs = Guard.pageState(html); if (gs !== 'ok') { Guard.fault(gs, 'graveyard check'); return 'error'; }
+    const p = Extract.pageOf(html); e.verified = Date.now();
+    if (p.state === 'gone' || p.state === 'instance-gone') { setState(e, 'gone', p.state); return 'gone'; }
+    if (p.state === 'foreign') { setState(e, 'foreign', 'not your guild instance'); return 'foreign'; }   // later: old-dungeon scanning (another guild's instance)
+    if (p.loot === 'looted') { setState(e, 'looted', 'already claimed'); return 'looted'; }
+    if (p.loot === 'lootable') { if (e.state !== 'lootable') { e.state = 'lootable'; e.why = ''; saveLed(); } return 'lootable'; }
+    return 'unknown';
+  }
+  async function verifyPending() {                                        // the remembered corpses the game no longer lists: look each one up by its id
+    const todo = Object.values(led).filter((e) => e.state === 'unverified').sort((a, b) => (a.verified || 0) - (b.verified || 0)).slice(0, VERIFY_MAX);
+    for (const [i, e] of todo.entries()) {
+      if (Guard.isFaulted()) break; Work.set('scan', 'Graveyard · checking remembered corpses', i, todo.length);
+      if ((await verify(e)) === 'error') break; await sleep(150);
+    }
+  }
 
   /* ---- wave corpses: the wave page with the monster cookies set to show dead ones ---- */
   async function waveRows() {
@@ -2800,7 +2870,7 @@ Object.assign(Loot, (() => {
         const exp = parseNum(card.dataset.expire, 0); if (exp > 0 && exp < nowSec) return;       // despawned: nothing to claim
         const id = card.dataset.monsterId, raw = (card.dataset.name || '').trim(); if (!id || !raw) return;
         const img = card.querySelector('img');
-        out.push({ key: 'wave:' + id, kind: 'wave', gate: l.gate, wave: l.wave, area: WaveMap.of(l.gate, l.wave).group.id, monsterId: String(id), name: raw, nameLow: raw.toLowerCase(), isBoss: !!Roster.get(raw.toLowerCase()), icon: img ? img.getAttribute('src') : undefined, userDamage: dmg, needsLoot: true });
+        out.push({ key: 'wave:' + id, kind: 'wave', gate: l.gate, wave: l.wave, area: WaveMap.of(l.gate, l.wave).group.id, monsterId: String(id), name: raw, nameLow: raw.toLowerCase(), isBoss: !!Roster.get(raw.toLowerCase()), icon: img ? img.getAttribute('src') : undefined, userDamage: dmg, needsLoot: true, expire: exp });
       });
       await sleep(150);
     }
@@ -2833,14 +2903,34 @@ Object.assign(Loot, (() => {
       const t0 = Date.now(), before = st.lastScanAt ? st.rows.length : -1, prev = Status.get(); Status.set('GRAVEYARD');
       if (manual === true) log('🪦 scanning the graveyard…', 'info');
       try {
-        const w = await waveRows();
-        const d = Kernel.isOn('dungeons') ? await dungeonRows() : [];
-        st.rows = [...w, ...d]; st.lastScanAt = Date.now();
-        if (manual === true || st.rows.length !== before) log(`🪦 graveyard scan done · ${st.rows.length} corpse${st.rows.length === 1 ? '' : 's'} (${w.length} wave, ${d.length} dungeon) · ${((Date.now() - t0) / 1000).toFixed(1)}s`, 'info');
+        const w = await waveRows(), dOn = Kernel.isOn('dungeons');
+        const d = dOn ? await dungeonRows() : [];
+        const prev = st.rows; merge([...w, ...d], new Set(dOn ? ['wave', 'dungeon'] : ['wave']));
+        await verifyPending(); st.rows = liveRows(prev); st.lastScanAt = Date.now();
+        const kept = st.rows.filter((r) => r.state === 'unverified').length;
+        if (manual === true || st.rows.length !== before) log(`🪦 graveyard scan done · ${st.rows.length} corpse${st.rows.length === 1 ? '' : 's'} (${w.length} wave, ${d.length} dungeon${kept ? `, ${kept} remembered but no longer listed` : ''}) · ${((Date.now() - t0) / 1000).toFixed(1)}s`, 'info');
       } catch (e) { log(`⚠️ graveyard scan error: ${e.message}`, 'warn'); }
       finally { Work.clear('scan'); if (Status.get() === 'GRAVEYARD') Status.set(prev); }
     }); await estimateAll().catch(() => {});                          // the total EXP of what the scan found (after the site lane is free again)
     } finally { st.scanning = false; UI.dirty('loot'); }          // always released: a throw before the inner try used to leave scanning=true and block every later scan AND the out-of-stamina loot
+  }
+
+  /* ---- peek: the cheap look the Graveyard task takes between clear-outs. Wave pages only (one request per gate / wave: no dungeon maps, no check of every
+   * remembered corpse); new corpses join the ledger and get an EXP estimate, so the task can tell when there is enough to be worth a clear-out. It never changes
+   * the status line and never logs. A look that failed leaves the ledger as it was. Dungeon corpses are only seen by a full scan (clear-out / stamina stall / button). ---- */
+  async function peek() {
+    if (st.scanning || st.looting || st.clearing) return false;
+    st.scanning = true; UI.dirty('loot');
+    let ok = false;
+    try {
+      await Lane.run(async () => {
+        const w = await waveRows(); if (Guard.isFaulted()) return;
+        const prev = st.rows; merge(w, new Set(['wave'])); st.rows = liveRows(prev); st.lastPeekAt = Date.now(); ok = true;
+      });
+      if (ok) await estimateAll(true).catch(() => {});
+    } catch (e) { log(`⚠️ graveyard look error: ${e.message}`, 'warn'); }
+    finally { Work.clear('scan'); st.scanning = false; UI.dirty('loot'); }
+    return ok;
   }
 
   /* ---- EXP estimate per corpse (one battle page per monster NAME gives rate, cap and reward level) ---- */
@@ -2880,8 +2970,8 @@ Object.assign(Loot, (() => {
     return Math.ceil(eff * rt);
   }
   // estimated EXP of every corpse of the last scan, kept on the row (row.est: a number, 0 = out-levelled, null = unknown). The Loot tab sums them.
-  async function estimateAll() {
-    const rows = st.rows.filter((r) => r.needsLoot !== false); if (!rows.length) return;
+  async function estimateAll(onlyNew) {
+    const rows = st.rows.filter((r) => r.needsLoot !== false && (!onlyNew || r.est === undefined)); if (!rows.length) return;
     st.estimating = true; UI.dirty('loot');
     try {
       let n = 0; Work.set('scan', 'Graveyard · estimating EXP', 0, rows.length);
@@ -2907,15 +2997,19 @@ Object.assign(Loot, (() => {
 
   /* ---- claiming (one request at a time, through the action queue) ---- */
   async function claim(row) {
+    const v = await verify(row);                                  // right before it is needed: is it still there, still unclaimed, still ours?
+    if (v === 'looted' || v === 'gone' || v === 'foreign') return { ok: false, skipped: v, expDelta: 0 };
+    if (v === 'error') return { ok: false, retry: true, expDelta: 0 };                      // the check did not load (signed out / site down): never claim blind, and it is not a refusal either
     const r = await Act.run(() => (row.kind === 'dungeon'
       ? post('/dungeon_loot.php', { instance_id: row.instanceId, dgmid: row.monsterId, user_id: uid() })
       : post('/loot.php', { monster_id: row.monsterId })), cfg.minActionGapMs);
     const j = r && r.json;
     const ok = !!(j && j.status === 'success') || (row.kind === 'wave' && !j && /success|looted|claimed/i.test((r && r.text) || ''));
+    if (ok) setState(row, 'looted', 'claimed'); else if (row.state) { row.fails = (row.fails || 0) + 1; row.failAt = Date.now(); await verify(row); saveLed(); }   // a refused claim: the page tells why (already claimed / gone), else it is tried again next time
     return { ok, expDelta: Number(j && j.rewards && j.rewards.exp) || 0 };
   }
   async function pass() {
-    if (st.looting) return;
+    if (st.looting || st.clearing) return;
     const claimable = st.rows.filter((r) => r.needsLoot !== false); if (!claimable.length) return;
     st.looting = true; UI.dirty('loot');
     try {
@@ -2929,7 +3023,8 @@ Object.assign(Loot, (() => {
           st.rows = st.rows.filter((x) => x.key !== row.key);
           if (res.expDelta > 0) await syncMe();
           if (Me.level() > startLevel) { log('✅ leveled up — stopping the loot pass', 'ok'); break; }
-        } else log(`⚠️ loot claim failed for ${esc(row.name)}`, 'warn');
+        } else if (res.skipped) log(`🪦 ${esc(row.name)} is ${res.skipped === 'looted' ? 'already looted' : res.skipped === 'foreign' ? 'not yours (another guild\'s instance)' : 'gone'} — dropped from the graveyard`, 'info');
+        else log(`⚠️ loot claim failed for ${esc(row.name)}`, 'warn');
         UI.dirty('loot'); await sleep(cfg.autoLoot.claimGapMs ?? 250);
       }
     } finally { st.looting = false; UI.dirty('loot'); }
@@ -2941,6 +3036,7 @@ Object.assign(Loot, (() => {
       for (const row of st.rows.filter((r) => r.nameLow === nameLow && (r.area || '') === (area || '') && r.needsLoot !== false)) {
         const res = await claim(row);
         if (res.ok) { log(`🎒 looted ${esc(row.name)}${res.expDelta ? ` (+${fmtNum(res.expDelta)} EXP)` : ''}`, 'ok'); row.needsLoot = false; if (res.expDelta > 0) await syncMe(); }
+        else if (res.skipped) log(`🪦 ${esc(row.name)} is ${res.skipped === 'looted' ? 'already looted' : res.skipped === 'foreign' ? 'not yours' : 'gone'} — dropped`, 'info');
         else log(`⚠️ claim failed for ${esc(row.name)}`, 'warn');
         UI.dirty('loot'); await sleep(cfg.autoLoot.claimGapMs ?? 250);
       }
@@ -2949,14 +3045,64 @@ Object.assign(Loot, (() => {
   }
   async function onStamStall() {
     if (!cfg.autoLoot.enabled || !Kernel.isOn('loot') || !Tab.isMain()) return;
-    if (st.scanning || st.looting || Date.now() - st.lastStuckAt < 15000) return;
+    if (st.scanning || st.looting || st.clearing || Date.now() - st.lastStuckAt < 15000) return;
     st.lastStuckAt = Date.now();
     log('⏸️ out of stamina and no potion — checking the graveyard for loot', 'info');
     await scan(); await pass();
   }
   // "Loot now": always look first (the rows are only as fresh as the last scan), then claim
   async function scanAndPass() { await scan(true); await pass(); }
-  return { onStamStall, scan, pass, scanAndPass, claimGroup, state: st, estimate, claimOne: async (row) => { const r = await claim(row); if (r.ok) { st.rows = st.rows.filter((x) => x.key !== row.key); UI.dirty('loot'); } return r; } };
+  /* ---- the clear-out (run by the Graveyard task, PART 5b; nothing here depends on Fast Run or any schedule of the Cube) ----
+   * scan + check every remembered corpse -> stamina potions on hold -> loot EVERY corpse that still gives EXP, biggest first (a level-up may turn some into
+   * 0-EXP ones: each is estimated again right before it is claimed) -> potions back -> then the out-levelled (0-EXP) ones: they still give items and quest credit.
+   * The hold lives on a heartbeat, so a reload mid-run cannot leave the potions off (see Potions.hold). */
+  let stopReq = false;
+  async function clearRun(opts) {
+    if (st.clearing || st.looting || st.scanning) return null;
+    st.clearing = 'run'; stopReq = false; UI.dirty('loot');
+    const R = { exp: 0, zero: 0, rescued: 0, skipped: 0, blocked: 0, unknown: 0, left: 0, exped: 0, stopped: false }; let beat = 0;
+    const go = () => !stopReq && Tab.isMain() && !Guard.isFaulted() && Run.tasksOn();
+    const loot = async (todo, label, mode) => {                    // mode: 'exp' (still gives EXP) | 'zero' (out-levelled) | 'rescue' (no EXP estimate, about to despawn)
+      let n = 0;
+      for (const row of todo) {
+        if (!go()) { R.stopped = true; break; }
+        Work.set('scan', label, n++, todo.length);
+        if (blocked(row)) { R.blocked++; continue; }
+        const e = await estimate(row).catch(() => null);               // you may have levelled since the scan: an out-levelled corpse moves to the second half
+        if (Number.isFinite(e)) row.est = e;
+        if (mode === 'exp' ? !(e > 0) : mode === 'zero' ? !(e === 0) : Number.isFinite(e)) { R.skipped++; continue; }
+        const res = await claim(row);
+        if (res.ok) { if (mode === 'exp') R.exp++; else if (mode === 'zero') R.zero++; else R.rescued++; R.exped += res.expDelta || 0; log(`${mode === 'exp' ? '🎒' : '🎁'} looted ${esc(row.name)}${row.isBoss ? ' 👑' : ''}${res.expDelta ? ` (+${fmtNum(res.expDelta)} EXP)` : ''}`, 'ok'); if (res.expDelta > 0) await syncMe(); }
+        else if (res.skipped) R.skipped++; else log(`⚠️ loot claim failed for ${esc(row.name)}`, 'warn');
+        UI.dirty('loot'); await sleep(cfg.autoLoot.claimGapMs ?? 250);
+      }
+    };
+    try {
+      await scan(true); await syncMe();
+      const byEst = (r) => r.needsLoot !== false;
+      const expRows = st.rows.filter((r) => byEst(r) && !blocked(r) && r.est > 0).sort((a, b) => b.est - a.est);
+      if (expRows.length && go()) {
+        Potions.hold(true); beat = setInterval(() => Potions.hold(true), 20000);
+        log(`🧹 clearing the graveyard — ${expRows.length} corpse${expRows.length === 1 ? '' : 's'} still give EXP; stamina potions are on hold until they are looted`, 'info');
+        try { await loot(expRows, 'Clearing graveyard · EXP corpses', 'exp'); } finally { clearInterval(beat); beat = 0; Potions.hold(false); }
+      }
+      const zeroRows = st.rows.filter((r) => byEst(r) && !blocked(r) && r.est === 0);
+      if (zeroRows.length && go()) await loot(zeroRows, 'Clearing graveyard · out-levelled corpses', 'zero');
+      // a corpse with no EXP estimate is normally left alone (looting it could level you with the potions back on), but one about to despawn is taken: losing it is worse
+      const rs = opts && opts.rescueSec > 0 ? opts.rescueSec : 0, nowSec = Math.floor(Date.now() / 1000);
+      const rescueRows = rs ? st.rows.filter((r) => byEst(r) && !blocked(r) && !Number.isFinite(r.est) && r.expire > 0 && r.expire - nowSec <= rs).sort((a, b) => a.expire - b.expire) : [];
+      if (rescueRows.length && go()) await loot(rescueRows, 'Clearing graveyard · corpses about to despawn', 'rescue');
+      R.unknown = st.rows.filter((r) => byEst(r) && !Number.isFinite(r.est)).length;
+      R.left = st.rows.filter(byEst).length;
+    } catch (e) { log('⚠️ graveyard clear-out: ' + esc(e.message), 'warn'); }
+    finally {
+      if (beat) { clearInterval(beat); Potions.hold(false); } Work.clear('scan'); st.clearing = ''; UI.dirty('loot');
+      if (R.exp + R.zero + R.rescued) log(`🧹 graveyard cleared · ${R.exp} with EXP${R.exped ? ' (+' + fmtNum(R.exped) + ' EXP)' : ''} · ${R.zero} out-levelled${R.rescued ? ` · ${R.rescued} taken before they despawned` : ''}${R.blocked ? ` · ${R.blocked} refused by the game, left for later` : ''}${R.stopped ? ' · stopped early' : ''}${R.skipped ? ` · ${R.skipped} moved on (levelled past, already looted or gone)` : ''}${R.unknown ? ` · ${R.unknown} without an EXP estimate left alone` : ''}`, 'ok');
+    }
+    return R;
+  }
+  const ledgerInfo = () => { const c = { lootable: 0, unverified: 0, looted: 0, gone: 0, foreign: 0 }; Object.values(led).forEach((e) => { c[e.state] = (c[e.state] || 0) + 1; }); return c; };
+  return { onStamStall, scan, peek, pass, scanAndPass, clearRun, blocked, expNeeded, waiting: () => Object.values(led).filter(isLive), stopClear: () => { stopReq = true; }, ledgerInfo, state: st, estimate, claimOne: async (row) => { const r = await claim(row); if (r.ok) { st.rows = st.rows.filter((x) => x.key !== row.key); UI.dirty('loot'); } return r; } };
 })());
 
 /* ===================================================================================================================
@@ -3576,7 +3722,7 @@ Object.assign(Farm, (() => {
   /* ---- one run of one batch ---- */
   function settingsFor(batch, killed) {
     const set = { TOTAL_MONSTERS_TO_KILL: killed + batch.total + EXTRA, AUTO_LOOT_TO_LEVEL: 0, PRC_EXP_LEFT: 80 };   // auto-loot off: the corpses are looted here (quest credit comes from the loot)
-    const big = (on) => (on ? UNLIMITED : 0), item = cfg.stam.item, st = cfg.stam.enabled;
+    const big = (on) => (on ? UNLIMITED : 0), item = cfg.stam.item, st = cfg.stam.enabled && !Potions.held();
     Object.assign(set, { HP_POTIONS_MAX_TO_USE: big(cfg.hp.enabled), STAM_POT_SMALL_ITEM_MAX_TO_USE: 0, STAM_POT_ADV_ITEM_MAX_TO_USE: 0,
       STAM_POT_HALF_ITEM_ID_MAX_TO_USE: big(st && /large/i.test(item)), STAM_POT_FULL_ITEM_ID_MAX_TO_USE: big(st && /full/i.test(item)) });
     return set;
@@ -3918,6 +4064,12 @@ Object.assign(Farm, (() => {
  *                     finishes done quests, accepts the next one it can do.
  *   Battle Pass       the hunt on /battle_pass.php (Lizardman Flamecaster / Shadowclaw by default) the same way.
  *   Merchant          buys the weekly-restock gold items (and Damon's weekly offers) once per server week (resets Sunday 00:00 server time).
+ *   Graveyard         takes a cheap look at the wave pages every N min and clears out when a trigger fires (corpses pile up / a level-up is waiting /
+ *                     one is about to despawn / N days passed / a Cube run ended): scans + checks the ledger, loots the corpses that still give EXP (stamina potions on hold), then the out-levelled
+ *                     ones (items + quest credit). The EXP-needed auto-loot on a stamina stall stays as it was.
+ *   Extraction        raises shadows from dead Grakthar gate mobs you tick (Generals included). Needs only the corpse: no join, no kill. Remembers the
+ *                     ids of ticked mobs while they live, checks each corpse's battle page, POSTs the extraction; stops when the day's attempts are used
+ *                     and tries again every 10 min (a refused try costs nothing); skips a mob type the game refuses (until Retry skipped types).
  *   PvP               placeholders (Solo, Team): your PvP module registers itself with  Automator.tasks.define({ id: 'pvp.solo', ... }).
  *   (Cube Suite       will register here later the same way.)
  * Tasks only run in the main tab, one tick at a time per task; a tick that cannot finish says why in the task's status line.
@@ -4329,6 +4481,60 @@ const Battle = (() => {
   return { tick, parseQuest };
 })();
 
+const Graveyard = (() => {                                              // the task: a cheap look on a short beat, and Loot.clearRun when a trigger says it is worth it
+  const setInfo = (p) => Tasks.info('graveyard', p);
+  const trig = Core.store(ID + '-graveyard-trigger', { def: { lastRunAt: 0, lastWhy: '', cubeAt: 0 } });
+  const T = () => Object.assign({ lastRunAt: 0, lastWhy: '', cubeAt: 0 }, trig.get() || {});
+  const MIN_GAP_MS = 20 * 60000;                                        // two clear-outs are never closer than this: a corpse nobody can loot must not turn a trigger into a loop
+  let force = false;
+  const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
+  // what the ledger says right now (no requests): only corpses seen on the last look count, and not the ones the game keeps refusing
+  function look(g) {
+    const nowSec = Math.floor(Date.now() / 1000), rows = Loot.waiting().filter((e) => e.state === 'lootable' && e.needsLoot !== false && !Loot.blocked(e));
+    const known = rows.filter((e) => Number.isFinite(e.est)), exp = known.filter((e) => e.est > 0);
+    return { rows, known, exp, expSum: exp.reduce((a, e) => a + e.est, 0), soon: rows.filter((e) => e.kind === 'wave' && e.expire > 0 && e.expire - nowSec <= g.expiryH * 3600) };
+  }
+  function decide(g, v) {
+    const t = T(), now = Date.now();
+    if (now - t.lastRunAt < MIN_GAP_MS) return null;
+    if (v.soon.length) return { why: 'expiry', text: `${plural(v.soon.length, 'corpse')} about to despawn` };
+    if (t.cubeAt > t.lastRunAt) return { why: 'cube', text: 'a Cube run just ended' };
+    if (v.known.length >= g.pile) return { why: 'pile', text: `${plural(v.known.length, 'corpse')} waiting` };
+    if (g.levelUp && v.expSum > 0) { const need = Loot.expNeeded(); if (need > 0 && v.expSum >= need) return { why: 'levelup', text: `the EXP waiting (${fmtNum(v.expSum)}) covers the ${fmtNum(need)} you need to level` }; }
+    if (now - t.lastRunAt >= g.maxDays * 86400000) return { why: 'age', text: `${plural(g.maxDays, 'day')} since the last clear-out` };
+    return null;
+  }
+  async function tick() {
+    const g = cfg.tasks.graveyard; if (!g.enabled) return;
+    const busy = () => Loot.state.clearing || Loot.state.looting || Loot.state.scanning;
+    if (busy()) { setInfo({ state: 'idle', line: 'the graveyard is busy — looks again soon' }); return 2 * 60000; }
+    const forced = force; force = false;
+    let why = forced ? { why: 'manual', text: 'you pressed Clear now' } : null, v;
+    if (!why) {
+      setInfo({ state: 'run', line: 'looking for new corpses…' });
+      await Loot.peek(); v = look(g);
+      if (g.levelUp && v.expSum > 0) { try { await syncMe(); } catch (_) { /* the last known EXP will do */ } }
+      why = decide(g, v);
+    }
+    if (!why) {
+      const t = T();
+      setInfo({ state: 'ok', line: `${plural(v.known.length, 'corpse')} waiting${v.expSum ? ` (${fmtNum(v.expSum)} EXP)` : ''} · clears at ${g.pile}${g.levelUp ? ', a level-up' : ''} or ${g.expiryH} h before one despawns · last cleared ${t.lastRunAt ? fmtDur(Date.now() - t.lastRunAt) + ' ago' : 'never'}`, looted: 0 });
+      return undefined;
+    }
+    log(`🧹 graveyard: ${why.text} — clearing`, 'info');
+    setInfo({ state: 'run', line: `clearing — ${why.text}` });
+    const r = await Loot.clearRun({ rescueSec: g.expiryH * 3600 });
+    if (!r) { force = forced; setInfo({ state: 'idle', line: 'the graveyard is busy — looks again soon' }); return 2 * 60000; }
+    if (!r.stopped) trig.set(Object.assign(T(), { lastRunAt: Date.now(), lastWhy: why.why }));       // a run cut short by Stop / a halt does not count: the trigger still stands
+    const left = Loot.state.rows.filter((x) => x.needsLoot !== false).length, n = r.exp + r.zero + r.rescued;
+    setInfo({ state: r.left || r.stopped ? 'warn' : 'ok', line: n ? `looted ${n} (${r.exp} with EXP, ${r.zero} out-levelled${r.rescued ? `, ${r.rescued} before they despawned` : ''}) · ${why.text}${r.stopped ? ' · stopped early' : r.left ? ` · ${r.left} left` : ''}` : left ? `${plural(left, 'corpse')} left that could not be looted${r.unknown ? ' (no EXP estimate)' : r.blocked ? ' (refused by the game, tried again later)' : ''}` : 'nothing to loot', looted: n });
+    return undefined;
+  }
+  const clearNow = () => { force = true; Tasks.poke('graveyard'); };
+  const afterCube = () => { if (!cfg.tasks.graveyard.enabled) return; trig.set(Object.assign(T(), { cubeAt: Date.now() })); Tasks.poke('graveyard', 90000); };   // a Cube run leaves corpses in the Cube rooms: look 90 s after it ends
+  return { tick, clearNow, afterCube, decide, look };
+})();
+
 const Merchant = (() => {
   const ONE_TIME_GOLD = new Set(['26', '40', '41']);                      // limited gold items that never restock (same list as the UI Cleanup merchant)
   const store = Core.store(ID + '-merchant', { def: { week: 0, done: false, at: 0, spent: 0, bought: 0 } });
@@ -4387,6 +4593,210 @@ const Merchant = (() => {
   return { tick, scrape, weekly, left, state: () => store.get() || {}, reset: () => store.set({ week: 0, done: false, at: 0, spent: 0, bought: 0 }) };
 })();
 
+/* ---- Extraction: raises a shadow from a dead Grakthar-gate monster. All it needs is the corpse: no join, no kill, no damage. ----
+ * A tick:  read the gate's wave pages (alive view + dead view) -> remember the id of every TICKED mob while it is alive -> an id that is no longer
+ *          alive (or shows on the dead view) is a candidate -> its battle page says what it is (ready / shadowless / gone / still alive)
+ *          -> POST action=extract_shadow to /battle.php?id=<id>. The corpse closest to expiring goes first.
+ * Replies:  ok = done · "used all your extraction attempts" = asleep until a probe works again (one try per PROBE_MS, a refused try costs nothing)
+ *           "Necromancers only" = the task switches itself off · "no extractable form" / "skill not strong enough" = that mob type is skipped until
+ *           you press Retry skipped types (the page never says whether a refused try spends an attempt, so it is never tried twice).
+ * The loot ledger / graveyard is NOT involved: unjoined corpses never show there and extraction does not need them to. */
+const Extract = (() => {
+  const GATE = 3, WAVES = [3, 5, 8];                         // Grakthar gate; the waves known to hold mobs (the Roster's gate-3 waves are added)
+  const PROBE_MS = 10 * 60000;                               // out of attempts: one extraction try this often
+  const SCAN_LIMITED_MS = 30 * 60000;                        // out of attempts: the wave pages are only re-read this often
+  const MAX_VERIFY = 20, MAX_IDS = 600, KEEP_MS = 7 * 86400000, READY_TRUST_MS = 6 * 3600000;
+  const EMPTY = { ids: {}, mobs: {}, never: {}, weak: {}, limitedAt: 0, scanAt: 0, got: 0, run: 0, last: [] };
+  const store = Core.store(ID + '-extract', { def: EMPTY });
+  const setInfo = (p) => Tasks.info('extract', p);
+  let resetAt = 0;                                           // when Retry skipped types was last pressed (a tick that started before it must not save the old skips back)
+  const S = () => Object.assign(JSON.parse(JSON.stringify(EMPTY)), JSON.parse(JSON.stringify(store.get() || {})));
+  const put = (s) => store.set(s);
+  const norm = (t) => String(t == null ? '' : t).replace(/\s+/g, ' ').trim();
+  const lowOf = (n) => String(n || '').trim().toLowerCase();
+  const textOf = (doc) => { const b = doc && doc.body; if (!b) return ''; const c = b.cloneNode(true); c.querySelectorAll('script,style').forEach((n) => n.remove()); return norm(c.textContent); };
+
+  /* ---- parsers (pure: no requests) ---- */
+  // What a corpse's battle page says. A blank page ("Monster not found.", "Instance not found.", "Not your guild instance.") has no site header at all.
+  // state: gone | instance-gone | foreign (a dungeon corpse of another guild: kept apart for old-dungeon scanning later) | ready (Extraction button)
+  //        | shadowless (nothing to extract: already extracted, or a mob that has no shadow) | alive | unknown      loot: lootable | looted | ''
+  function pageOf(html) {
+    const doc = typeof html === 'string' ? parseHtml(html) : html, text = textOf(doc), chrome = !!(doc.querySelector('.gtb-inner') || doc.getElementById('stamina_span'));
+    const blank = (re) => text.length < 400 && re.test(text);
+    let state = 'unknown';
+    if (blank(/monster not found/i)) state = 'gone';
+    else if (blank(/instance not found/i)) state = 'instance-gone';
+    else if (blank(/not your guild instance/i)) state = 'foreign';
+    else if (doc.getElementById('extract-shadow-btn')) state = 'ready';
+    else if (/this monster is shadowless/i.test(text)) state = 'shadowless';
+    else if (chrome && !/monster has been slain/i.test(text)) state = 'alive';
+    const loot = doc.getElementById('loot-button') ? 'lootable' : /already claimed your loot/i.test(text) ? 'looted' : '';
+    return { state, loot };
+  }
+  // The POST reply -> { kind, msg, shadow }.  kind: done | limit | necro | weak | never | shadowless | gone | alive | net | unknown
+  // (only "done", "used all your extraction attempts" and the shape of a success are known word for word: the rest match loosely, and an unknown
+  //  reply is logged as it came so the match can be tightened)
+  function replyOf(res) {
+    const j = res && res.json, raw = j && j.message != null ? j.message : res && !j ? res.text : '', msg = norm(raw).slice(0, 200);
+    if (j && j.ok === true) return { kind: 'done', msg, shadow: j.shadow && typeof j.shadow === 'object' ? j.shadow : {} };
+    if (!j && res && (res.error || res.timeout || !res.status)) return { kind: 'net', msg, shadow: null };
+    const k = (kind) => ({ kind, msg, shadow: null });
+    if (/used all|all your (daily )?extraction attempts|no (more )?(extraction )?attempts|attempts? (left|remaining)|daily (extraction )?limit/i.test(msg)) return k('limit');
+    if (/necromancer/i.test(msg)) return k('necro');
+    if (/not (strong|powerful|skilled|high)|too (weak|low)|stronger|insufficient|(skill|level).{0,40}(low|weak|not enough)|not enough.{0,20}(skill|level)/i.test(msg)) return k('weak');
+    if (/already (been )?extracted|shadowless/i.test(msg)) return k('shadowless');
+    if (/no (extractable )?shadow|(can ?not|can't|cannot) be extracted|not extractable|unextractable|no extract/i.test(msg)) return k('never');
+    if (/still alive|not (been )?(slain|dead|killed)|must be (dead|slain)/i.test(msg)) return k('alive');
+    if (/not found|despawn|expired|no longer (exist|available)/i.test(msg)) return k('gone');
+    return k('unknown');
+  }
+
+  /* ---- the Grakthar gate's wave pages ---- */
+  const waves = () => {
+    const m = new Map(WAVES.map((w) => [w, [GATE, w]]));
+    for (const d of Roster.list) { if (d.kind !== 'wave') continue; const l = bossLoc(d.low); if (l && String(l.gate) === String(GATE) && Number(l.wave) > 0) m.set(Number(l.wave), [GATE, Number(l.wave)]); }
+    return [...m.values()].sort((a, b) => a[1] - b[1]);
+  };
+  const wavePage = (gate, wave, mode) => Lane.run(async () => {                // 'alive' | 'all' (the dead view): the two views take turns with the boss scan
+    try {
+      const doc = parseHtml(await netText(`/active_wave.php?gate=${gate}&wave=${wave}`, { force: true, ttl: 0, key: `ma:ex:${mode}:${gate}:${wave}` }, mode)), st = Guard.pageState(doc);
+      if (st !== 'ok') { Guard.fault(st, `extraction ${gate}/${wave}`); return null; }
+      return Guard.chromeOk(doc) ? doc : null;
+    } catch (_) { return null; }
+  });
+  const cardsOf = (doc) => Array.from(doc.querySelectorAll('.monster-card')).map((c) => ({
+    id: String(Scan.cardId(c) || ''), name: norm(c.dataset.name || (c.querySelector('.monster-name,.name,h2,h3') || {}).textContent), dead: c.dataset.dead === '1',
+    expire: parseNum(c.dataset.expire, 0), boss: c.dataset.boss === '1',
+  })).filter((c) => c.id && c.name);
+
+  /* ---- the mob list (what the dropdown shows) and what is ticked ---- */
+  const ticked = () => cfg.tasks.extract.mobs || {};
+  const isOn = (low) => !!ticked()[low];
+  function mobs() {                                                              // every mob seen on the gate + its Generals, in wave order
+    const s = S(), m = new Map(Object.entries(s.mobs).map(([low, v]) => [low, Object.assign({ low }, v)]));
+    for (const d of Roster.list) { const l = d.kind === 'wave' ? bossLoc(d.low) : null; if (l && String(l.gate) === String(GATE) && !m.has(d.low)) m.set(d.low, { low: d.low, name: d.name, gate: GATE, wave: Number(l.wave), boss: true }); }
+    return [...m.values()].map((v) => Object.assign({ skip: s.never[v.low] ? 'no shadow form' : s.weak[v.low] ? 'skill too low' : '' }, v)).sort((a, b) => a.wave - b.wave || (b.boss ? 1 : 0) - (a.boss ? 1 : 0) || a.name.localeCompare(b.name));
+  }
+
+  /* ---- the ledger of remembered corpses ---- */
+  const close = (s, id, why) => { const v = s.ids[id]; if (v) s.ids[id] = { low: v.low, name: v.name, state: 'closed', why, at: Date.now() }; };
+  const closeType = (s, low, why) => { for (const [id, v] of Object.entries(s.ids)) if (v.low === low && v.state !== 'closed') close(s, id, why); };
+  function prune(s) {
+    const now = Date.now();
+    for (const [id, v] of Object.entries(s.ids)) if ((v.state === 'closed' && now - v.at > KEEP_MS) || (v.state === 'alive' && now - (v.alive || v.firstSeen || 0) > 3 * 86400000)) delete s.ids[id];
+    const all = Object.entries(s.ids);
+    if (all.length > MAX_IDS) all.sort((a, b) => (a[1].state === 'closed' ? 0 : 1) - (b[1].state === 'closed' ? 0 : 1) || (a[1].at || a[1].firstSeen || 0) - (b[1].at || b[1].firstSeen || 0)).slice(0, all.length - MAX_IDS).forEach(([id]) => delete s.ids[id]);
+  }
+  const rank = (v) => (v.dexp > 0 ? v.dexp * 1000 : 1e15 + (v.firstSeen || 0));              // closest to expiring first; unknown expiry last
+  const queue = (s) => Object.entries(s.ids).filter(([, v]) => (v.state === 'dead' || v.state === 'ready') && isOn(v.low) && !s.never[v.low] && !s.weak[v.low]).sort((a, b) => rank(a[1]) - rank(b[1]));
+
+  // read the gate: learn the mob names, remember ticked ids while they are alive, and mark the ones that are not alive any more
+  async function scan(s) {
+    const now = Date.now(), list = waves(), aliveSeen = new Set(), okWave = new Set(); let read = 0;
+    const learn = (c, g, w) => { const low = lowOf(c.name), m = s.mobs[low]; if (!m || m.wave !== w || (c.boss && !m.boss)) s.mobs[low] = { name: c.name, gate: g, wave: w, boss: !!(c.boss || (m && m.boss)) }; };
+    try {
+      for (const [i, [g, w]] of list.entries()) {
+        Work.set('scan', `Extraction · Gate ${g} · Wave ${w}`, i, list.length);
+        const a = await wavePage(g, w, 'alive');
+        if (a) {
+          read++; okWave.add(w);
+          for (const c of cardsOf(a)) {
+            if (c.dead) continue; learn(c, g, w); const low = lowOf(c.name); if (!isOn(low) || s.never[low] || s.weak[low]) continue;
+            aliveSeen.add(c.id); const v = s.ids[c.id];
+            if (!v) s.ids[c.id] = { low, name: c.name, gate: g, wave: w, state: 'alive', firstSeen: now, alive: now, dexp: 0 }; else if (v.state === 'alive') v.alive = now;
+          }
+        }
+        await sleep(150);
+        const d = await wavePage(g, w, 'all');
+        if (d) {
+          for (const c of cardsOf(d)) {
+            if (!c.dead) continue; learn(c, g, w); const low = lowOf(c.name); if (!isOn(low) || s.never[low] || s.weak[low]) continue;
+            const v = s.ids[c.id];
+            if (!v) s.ids[c.id] = { low, name: c.name, gate: g, wave: w, state: 'dead', firstSeen: now, alive: 0, dexp: c.expire };
+            else if (v.state === 'alive') { v.state = 'dead'; v.dexp = c.expire; }
+            else if (v.state === 'dead' || v.state === 'ready') v.dexp = c.expire || v.dexp;
+          }
+        }
+        await sleep(150);
+      }
+    } finally { Work.clear('scan'); }
+    for (const [id, v] of Object.entries(s.ids)) if (v.state === 'alive' && okWave.has(Number(v.wave)) && !aliveSeen.has(id)) v.state = 'dead';   // read fine and not on the alive view any more: it died (or went), its battle page decides which
+    s.scanAt = now; prune(s); put(s);
+    return read > 0;
+  }
+
+  // the battle page of one corpse
+  async function look(id) {
+    let html;
+    try { html = await netText(`/battle.php?id=${encodeURIComponent(id)}`, { force: true, ttl: 0, key: 'ma:ex:b:' + id }); } catch (_) { return { state: 'error' }; }
+    const st = Guard.pageState(html); if (st !== 'ok') { Guard.fault(st, 'extraction'); return { state: 'error' }; }
+    return pageOf(html);
+  }
+  const ago2 = (t) => (t ? fmtDur(Date.now() - t) : '?');
+  const lineOf = (s, n, extra) => {
+    const bits = [];
+    if (!Object.keys(ticked()).length) return 'no mobs ticked yet — tick the ones to extract below';
+    if (s.limitedAt) bits.push(`⏸ daily attempts used (${ago2(s.limitedAt)} ago) — one try every ${PROBE_MS / 60000} min`);
+    bits.push(`${n} corpse${n === 1 ? '' : 's'} waiting`); if (s.run) bits.push(`${s.run} extracted since the last limit`); if (s.got) bits.push(`${s.got} in total`);
+    if (extra) bits.push(extra);
+    return bits.join(' · ');
+  };
+
+  async function tick() {
+    const t = cfg.tasks.extract; if (!t.enabled) return;
+    const t0 = Date.now(), put = (x) => { if (resetAt >= t0) { x.never = {}; x.weak = {}; } store.set(x); };
+    const every = Math.max(1, Number(t.everyMin) || 5) * 60000, s = S(); let wait = every, more = false, extra = '', probed = false, verified = 0;
+    setInfo({ state: 'run', line: 'reading the Grakthar gate…' });
+    if (Date.now() - s.scanAt >= (s.limitedAt ? SCAN_LIMITED_MS : every) - 5000) {
+      if (!(await scan(s))) { setInfo({ state: 'warn', line: 'could not read the gate\'s wave pages — tries again soon' }); return 2 * 60000; }
+    }
+    for (const [id] of queue(s)) {
+      if (!Run.tasksOn() || Guard.isFaulted()) { put(s); setInfo({ state: 'idle', line: 'stopped or halted — carries on later' }); return 15000; }
+      const v = s.ids[id]; if (!v || (v.state !== 'dead' && v.state !== 'ready')) continue;
+      if (s.limitedAt && probed) break;                                            // out of attempts: ONE try per tick
+      if (v.dexp > 0 && v.dexp < Math.floor(Date.now() / 1000) - 30) { close(s, id, 'expired'); continue; }
+      if (v.state !== 'ready' || Date.now() - (v.okAt || 0) > READY_TRUST_MS) {
+        if (verified >= MAX_VERIFY) { more = true; break; }
+        verified++; setInfo({ state: 'run', line: `checking ${v.name} (${verified})…` });
+        const pg = await look(id);
+        if (pg.state === 'error') { wait = 60000; extra = '⚠️ a page did not load — retrying'; break; }
+        if (pg.state === 'gone' || pg.state === 'instance-gone' || pg.state === 'foreign') { close(s, id, pg.state); continue; }
+        if (pg.state === 'shadowless') { close(s, id, 'shadowless'); continue; }
+        if (pg.state === 'alive') { v.state = 'alive'; v.alive = Date.now(); continue; }
+        if (pg.state !== 'ready') { v.tries = (v.tries || 0) + 1; if (v.tries >= 3) close(s, id, 'unreadable'); Diag.skip('extract-page-unknown', id); continue; }
+        v.state = 'ready'; v.okAt = Date.now();
+      }
+      probed = true; setInfo({ state: 'run', line: `extracting ${v.name}…` });
+      const res = await Act.run(() => post(`/battle.php?id=${encodeURIComponent(id)}`, { action: 'extract_shadow' }), cfg.minActionGapMs), r = replyOf(res);
+      if (r.kind === 'done') {
+        const sh = r.shadow || {}; s.got++; s.run++; if (s.limitedAt) { s.limitedAt = 0; log('☠ extraction: attempts are back — carrying on', 'info'); }
+        s.last = [{ mob: v.name, shadow: sh.name || 'Shadow', stars: sh.stars_text || '', copies: sh.extra_copies_now == null ? null : sh.extra_copies_now, at: Date.now() }, ...s.last].slice(0, 8);
+        log(`☠ extracted ${esc(sh.name || 'a shadow')}${sh.stars_text ? ' ' + esc(sh.stars_text) : ''} from ${esc(v.name)}${sh.extra_copies_now != null ? ' · extra copies ' + esc(String(sh.extra_copies_now)) : ''}`, 'ok');
+        close(s, id, 'extracted'); put(s); await sleep(cfg.autoLoot.claimGapMs ?? 250); continue;
+      }
+      if (r.kind === 'limit') { if (!s.limitedAt) log('☠ extraction: all of today\'s attempts are used — probing again every ' + PROBE_MS / 60000 + ' min', 'info'); s.limitedAt = s.limitedAt || Date.now(); s.run = 0; put(s); wait = PROBE_MS; break; }
+      if (r.kind === 'necro') { put(s); t.enabled = false; saveCfg(); UI.dirty(); log('☠ extraction: the game says only Necromancers can extract — switched off', 'warn'); setInfo({ state: 'warn', line: 'only Necromancers can extract — switched off' }); return; }
+      if (r.kind === 'never' || r.kind === 'weak') {
+        (r.kind === 'never' ? s.never : s.weak)[v.low] = r.msg || r.kind; closeType(s, v.low, r.kind);
+        log(`☠ extraction: ${esc(v.name)} — ${esc(r.msg || (r.kind === 'weak' ? 'skill not strong enough' : 'no extractable shadow'))} — skipped until you press Retry skipped types`, 'warn'); put(s); continue;
+      }
+      if (r.kind === 'shadowless' || r.kind === 'gone') { close(s, id, r.kind); put(s); continue; }
+      if (r.kind === 'alive') { v.state = 'alive'; v.alive = Date.now(); put(s); continue; }
+      if (r.kind === 'net') { wait = 60000; extra = '⚠️ no answer — retrying'; break; }
+      v.tries = (v.tries || 0) + 1; if (v.tries >= 3) close(s, id, 'unreadable');           // unknown reply: log it as it came, then back off
+      log(`⚠️ extraction: unexpected reply for ${esc(v.name)}: "${esc(r.msg || 'empty')}" — backing off`, 'warn'); Diag.skip('extract-reply-unknown', r.msg); put(s); wait = PROBE_MS; extra = '⚠️ unexpected reply — see Activity'; break;
+    }
+    put(s);
+    if (more && wait === every) wait = 15000;                                           // more to check than one tick does: the rest follows at once
+    if (s.limitedAt && wait < PROBE_MS && wait === every) wait = PROBE_MS;
+    const n = queue(s).length;
+    setInfo({ state: extra ? 'warn' : s.limitedAt ? 'idle' : 'ok', line: lineOf(s, n, extra), queued: n, limited: s.limitedAt });
+    return wait;
+  }
+  const resetSkips = () => { resetAt = Date.now(); const s = S(); s.never = {}; s.weak = {}; put(s); Tasks.poke('extract'); UI.dirty('tasks'); };
+  return { tick, state: S, mobs, resetSkips, pageOf, replyOf, _test: { scan, queue, prune } };
+})();
+
 /* ---- the registry + scheduler ---- */
 Object.assign(Tasks, (() => {
   const defs = new Map(), state = new Map(), due = new Map(), busy = new Set(), t0 = Date.now();
@@ -4412,6 +4822,8 @@ Object.assign(Tasks, (() => {
   define({ id: 'guild', name: 'Adventure Guild', icon: '📜', desc: 'Kill quests: finish, accept, auto-farm the kills', every: () => mins(cfg.tasks.guild.everyMin, 5), enabled: () => !!cfg.tasks.guild.enabled, tick: Guild.tick });
   define({ id: 'bp', name: 'Battle Pass', icon: '🎫', desc: 'The hunt of the pass, auto-farmed', every: () => mins(cfg.tasks.bp.everyMin, 10), enabled: () => !!cfg.tasks.bp.enabled, tick: Battle.tick });
   define({ id: 'merchant', name: 'Merchant', icon: '🛒', desc: 'Buys the weekly restock once per server week', every: () => mins(cfg.tasks.merchant.everyMin, 30), enabled: () => !!cfg.tasks.merchant.enabled, tick: Merchant.tick });
+  define({ id: 'graveyard', name: 'Graveyard', icon: '🪦', desc: 'Looks for corpses on a short beat and clears out when it is worth it (EXP ones first, potions on hold, then the out-levelled ones)', every: () => mins(cfg.tasks.graveyard.checkMin, 20), enabled: () => !!cfg.tasks.graveyard.enabled, tick: Graveyard.tick });
+  define({ id: 'extract', name: 'Extraction', icon: '☠️', desc: 'Raises shadows from dead Grakthar gate monsters: no join or kill needed', every: () => mins(cfg.tasks.extract.everyMin, 5), enabled: () => !!cfg.tasks.extract.enabled, tick: Extract.tick });
   define({ id: 'pvp.solo', name: 'PvP · Solo', icon: '⚔️', group: 'pvp', desc: 'placeholder — plug your PvP module in', placeholder: true, enabled: () => !!cfg.tasks.pvp.solo.enabled });
   define({ id: 'pvp.team', name: 'PvP · Team', icon: '🛡️', group: 'pvp', desc: 'placeholder — plug your PvP module in', placeholder: true, enabled: () => !!cfg.tasks.pvp.team.enabled });
   return { define, info, poke, nextDue: (id) => due.get(id) || 0, list: () => [...defs.values()], get: (id) => defs.get(id), busy: (id) => busy.has(id) };
@@ -4464,6 +4876,7 @@ const CubeFast = (() => {
   };
   async function finish(s, why, kind, o) {                                              // the run is over (back on Normal, switched off, gave up): hand Cube Suite back the way it was
     put({ ...s, phase: 'done' }); release();
+    if (s.phase === 'run') { try { Graveyard.afterCube(); } catch (_) { /* no graveyard task */ } }
     if (s.phase === 'run') {
       if (o && o.resetMode) await cube('cube.mode.set', 'normal');                      // the Cube ended without being cleared: Cube Suite would stay on Fast Run for the next Cube
       await cube('cube.follow', null); if (s.bg === false) await cube('cube.background.set', false); if (s.mst === false) await cube('cube.master.set', false);
@@ -4982,7 +5395,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   const STATE_TXT = { FIGHTING: 'Fighting', RUNNING: 'Running', SCANNING: '🔎 Scanning bosses', GRAVEYARD: '🪦 Scanning graveyard', WAITING: 'Waiting for a boss', 'NO STAMINA': 'Out of stamina', DUEL: 'Phase duel', SWITCHING: '🎒 Switching build', PLANNING: '🧭 Planning build order', PAUSED: 'Paused', FARMING: '🌾 Auto-farming', STOPPED: 'Stopped', FOLLOWER: 'Another tab is running it' };
   const dotOf = (st) => (!Tab.isMain() ? 'follower' : /FIGHT|RUN|DUEL|SCAN|GRAVE|SWITCH|PLAN|FARM/.test(st) ? 'running' : /WAIT|STAMINA/.test(st) ? 'waiting' : /PAUSE/.test(st) ? 'follower' : '');
   // what the automator is doing apart from the bosses: the farm (and who it farms for), a task mid-tick, or the tasks that are switched on
-  const SHORT = { guild: 'Quests', bp: 'BP', merchant: 'Merchant' }, tShort = (d) => SHORT[d.id] || d.name, taskTag = (d) => `${d.icon} ${tShort(d)}`;
+  const SHORT = { guild: 'Quests', bp: 'BP', merchant: 'Merchant', extract: 'Extraction', graveyard: 'Graveyard' }, tShort = (d) => SHORT[d.id] || d.name, taskTag = (d) => `${d.icon} ${tShort(d)}`;
   const taskDone = (d) => { const i = Tasks.info(d.id) || {}; return i.at > 0 && (i.state === 'ok' || i.state === 'idle'); };            // this task has nothing to do for now
   const enabledTasks = () => Tasks.list().filter((d) => d.id !== 'monsters' && !d.placeholder && d.enabled && d.enabled());
   function otherWork() {
@@ -5039,6 +5452,28 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     out.push(card('🛒', 'Merchant', 'Buys the weekly restock (gold items + Damon) once per server week — resets Sunday 00:00 server time', T.merchant.enabled, (v) => { T.merchant.enabled = v; if (v) Tasks.poke('merchant'); },
       [tStatus('merchant'), T.merchant.enabled ? nextNote('merchant') : null,
         T.merchant.enabled ? btn(ms.done ? 'Check again' : 'Buy now', 'soft', () => { Merchant.reset(); Tasks.poke('merchant'); draw(); }) : null]));
+    // Graveyard
+    const gt = T.graveyard;
+    out.push(card('🪦', 'Graveyard', 'Loots the corpses you can: first the ones that still give EXP (stamina potions are held meanwhile, then given back), then the out-levelled ones for items and quest credit', gt.enabled, (v) => { gt.enabled = !!v; if (v) Tasks.poke('graveyard'); },
+      [tStatus('graveyard'), gt.enabled ? nextNote('graveyard') : null,
+        gt.enabled ? opt('Look every', num(() => gt.checkMin, (n) => { gt.checkMin = n; }, { w: 56, min: 5, max: 240, unit: 'min', parse: parseFloat }), 'wave pages only: a short look, not a clear-out') : null,
+        gt.enabled ? caption('Clear out when…') : null,
+        gt.enabled ? opt('Corpses waiting', num(() => gt.pile, (n) => { gt.pile = Math.round(n); }, { w: 56, min: 1, max: 500, unit: 'or more', parse: parseFloat })) : null,
+        gt.enabled ? opt('A level-up is waiting', sw(() => gt.levelUp, (v) => { gt.levelUp = !!v; }, { sm: true, redraw: false }), 'the EXP waiting covers what you need to level', 'row') : null,
+        gt.enabled ? opt('One is about to despawn', num(() => gt.expiryH, (n) => { gt.expiryH = n; }, { w: 56, min: 1, max: 48, unit: 'h left', parse: parseFloat }), 'also takes corpses with no EXP estimate, so none is lost') : null,
+        gt.enabled ? opt('Nothing came up for', num(() => gt.maxDays, (n) => { gt.maxDays = n; }, { w: 56, min: 1, max: 30, unit: 'days', parse: parseFloat }), 'a full scan, dungeon corpses included') : null,
+        gt.enabled ? note('It also clears about a minute after a Cube Fast Run ends.') : null,
+        gt.enabled ? btn(Loot.state.clearing ? 'Clearing…' : 'Clear now', 'soft', () => { Graveyard.clearNow(); draw(); }) : null]));
+    // Extraction
+    const xt = T.extract, xm = xt.enabled ? Extract.mobs() : [], xOn = xm.filter((m) => xt.mobs[m.low]).length, xs = Extract.state(), xSkip = Object.keys(xs.never).length + Object.keys(xs.weak).length;
+    out.push(card('☠️', 'Extraction', 'Raises shadows from dead Grakthar gate mobs (Generals included): no join or kill needed. Stops when the day\'s attempts are used', xt.enabled, (v) => { xt.enabled = !!v; if (v) Tasks.poke('extract'); },
+      [tStatus('extract'), xt.enabled ? nextNote('extract') : null,
+        xt.enabled ? fold('ex:mobs', true, ['Mobs to extract', h('small', {}, `${xOn} of ${xm.length} ticked`)], () => [
+          h('div', { class: 'ma-sr-o' }, btn('Tick all', 'soft', () => { xm.forEach((m) => { xt.mobs[m.low] = true; }); saveCfg(); Tasks.poke('extract'); draw(); }), btn('Untick all', 'soft', () => { xt.mobs = {}; saveCfg(); draw(); })),
+          ...(xm.length ? xm.map((m) => srow(m.boss ? '♛' : '👹', m.name, `Gate ${m.gate} · Wave ${m.wave}${m.skip ? ' · skipped: ' + m.skip : ''}`, sw(() => !!xt.mobs[m.low], (v) => { if (v) xt.mobs[m.low] = true; else delete xt.mobs[m.low]; Tasks.poke('extract'); }, { sm: true }))) : [note('No mobs known yet: the first look at the gate fills this list.')])]) : null,
+        xt.enabled && xSkip ? note(`${xSkip} mob type${xSkip === 1 ? '' : 's'} skipped (the game refused: no shadow form, or your extraction skill is too low)`) : null,
+        xt.enabled && xSkip ? btn('Retry skipped types', 'soft', () => { Extract.resetSkips(); draw(); }) : null,
+        xt.enabled ? btn('Look now', 'soft', () => { Tasks.poke('extract'); draw(); }) : null]));
     return out;
   }
 
@@ -5126,6 +5561,15 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
       out.push(fold('ov:merchant', true, ['🛒 Merchant', h('small', {}, mst.done ? 'bought this week' : wm.n + dm.n ? `${wm.got + dm.got} / ${wm.units + dm.units} units${mst.gold != null ? ' · ' + fmtNum(mst.gold) + ' gold' : ''}` : '')], () => [
         shopRow('🛒', 'Weekly Merchant', wm), shopRow('🏛️', "Damon's shop", dm),
         mst.spent || mst.bought ? note(`This week: ${fmtNum(mst.bought || 0)} purchase${mst.bought === 1 ? '' : 's'} for ${fmtNum(mst.spent || 0)} gold.`) : null, tStatus('merchant'), nextNote('merchant')], { aside: stPill(mi) }));
+    }
+    if (tcfg.graveyard.enabled) {
+      const gi = Tasks.info('graveyard'), left = Loot.state.rows.filter((r) => r.needsLoot !== false).length;
+      out.push(fold('ov:graveyard', true, ['🪦 Graveyard', h('small', {}, left ? `${left} corpse${left === 1 ? '' : 's'} waiting` : '')], () => [tStatus('graveyard'), nextNote('graveyard')], { aside: stPill(gi) }));
+    }
+    if (tcfg.extract.enabled) {
+      const ei = Tasks.info('extract'), es = Extract.state();
+      out.push(fold('ov:extract', true, ['☠️ Extraction', h('small', {}, ei.queued ? `${ei.queued} waiting` : es.got ? `${es.got} extracted` : '')], () => [
+        tStatus('extract'), nextNote('extract'), ...es.last.slice(0, 3).map((x) => note(`${x.shadow}${x.stars ? ' ' + x.stars : ''} · from ${x.mob} · ${ago(x.at)}`))], { aside: stPill(ei) }));
     }
     if (tcfg.guild.enabled || tcfg.bp.enabled) {
       const F = Farm.info(), md = Farm.mode();
@@ -5572,7 +6016,8 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
       .map(({ a, items }) => { const n = items.reduce((c, [, g]) => c + g.rows.length, 0); return fold('loot:' + a.id, true, [a.ico + ' ' + a.title, h('small', {}, `${n} corpse${n === 1 ? '' : 's'}`)], () => items.map(lootCard)); });
     return [
       h('div', { class: 'ma-alert info' }, L.enabled ? 'Auto-loot is on: it claims these when you run out of stamina.' : 'Auto-loot is off.', ' ', h('button', { type: 'button', class: 'ma-link', onclick: () => go('settings') }, 'Change in Settings')),
-      h('div', { class: 'ma-actions' }, btn(s.scanning ? 'Scanning…' : '🔎 Scan graveyard', 'soft', () => { Loot.scan(true); }), btn(s.looting ? 'Looting…' : '🎒 Loot now', 'success', () => { Loot.scanAndPass(); })),
+      h('div', { class: 'ma-actions' }, btn(s.scanning ? 'Scanning…' : '🔎 Scan graveyard', 'soft', () => { Loot.scan(true); }), btn(s.looting || s.clearing ? 'Looting…' : '🎒 Loot now', 'success', () => { Loot.scanAndPass(); })),
+      (() => { const c = Loot.ledgerInfo(), kept = c.unverified, odd = c.foreign; return kept || odd ? note(`🗂 ${kept ? kept + ' remembered corpse' + (kept === 1 ? '' : 's') + ' the game no longer lists (checked by id before looting)' : ''}${kept && odd ? ' · ' : ''}${odd ? odd + ' in another guild\'s instance' : ''}`) : null; })(),
       (() => {                                                       // one line: lootable · XP · level-ups · when scanned · EXP to the next level
         if (!s.lastScanAt) return note('Not scanned yet.');
         const rows = [...groups.values()].flatMap((g) => g.rows), known = rows.filter((r) => Number.isFinite(r.est)), xp = known.reduce((n, r) => n + r.est, 0), unk = rows.length - known.length;
