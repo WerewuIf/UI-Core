@@ -5415,7 +5415,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
      (live state of every node, one switch for "run on every page", the mode). Nothing to tick: Cube Suite owns the fighting. ---- */
   // The Cube's node layout is fixed (Cube Suite: PVP_NODE_PRIORITY + the Tyrant N9, SA_TARGET_NODES, PVE_TARGET_NODES), so every node is listed all the time, like the Gribbles:
   // with nothing running a node reads "idle". The live pills of cube.status() are laid over it by name; a pill with a name not listed here (a node added later) is appended.
-  const CUBE_NODES = [['PvP', 'fast run', 'pvp', ['N7', 'N8', 'N9']], ['SA', 'army', 'sa', ['N5', 'N6', 'N11']], ['PvE', 'rooms', 'pve', ['Gate Prism', 'Ash Lane', 'Crown Lens', 'Zenith Lock']]];
+  const CUBE_NODES = [['PvE', 'rooms', 'pve', ['Gate Prism', 'Ash Lane', 'Crown Lens', 'Zenith Lock']]];   // only the PvE rooms are dungeons: PvP has its own card in Settings, the SA army nodes are Cube Suite's alone
   const cubePillName = (t) => String(t).split(' · ')[0];
   const cubeNodeGroups = (c = cubeSt()) => CUBE_NODES.map(([g, sub, key, names]) => {
     const live = Array.isArray(((c || {}).nodes || {})[key]) ? c.nodes[key] : [];
@@ -5469,7 +5469,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
       h('div', { class: 'ma-grid' }, g[2].map(node(g))),
       ...(g[0] === 'PvE' && ui.cubeSel && Core.has('cube.pve.get') && g[2].some(([, t]) => cubePillName(t) === ui.cubeSel) ? [cubePveEditor(ui.cubeSel)] : []));
     const head = ['\u{1F9CA} Cube', h('small', {}, c.instanceId ? '#' + c.instanceId + ' \u00b7 ' + (c.mode === 'fast' ? 'fast run' : 'normal') : 'no active Cube')];
-    const aside = [h('span', { class: 'ma-pill' + (c.cleared ? ' ok' : done ? ' blue' : '') }, done + '/' + all.length),
+    const aside = [h('span', { class: 'ma-pill' + (all.length && done === all.length ? ' ok' : done ? ' blue' : '') }, done + '/' + all.length),
       Core.has('cube.background.set') ? sw(() => !!c.background, (v) => { cubeSet('cube.background.set', v).then(() => v && cubeSet('cube.master.set', true)); }, { sm: true, redraw: false }) : null].filter(Boolean);
     return fold('grp:cube', !!(c.running || c.background), head, () => {
       const body = [note(cubeLine())];
