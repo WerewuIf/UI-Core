@@ -26,7 +26,7 @@
  * default cap of a boss is its highest loot requirement, and bosses the roster did not know yet are added. Export .txt writes it all out.
  */
 Core.module({
-  id: 'automator', name: 'Automator', icon: '🤖', version: '1.14.1',
+  id: 'automator', name: 'Automator', icon: '🤖', version: '1.14.4',
   // Offered to other addons through Core capabilities (guides/CAPABILITIES.md):
   //   automator.status() -> the status string     automator.start() / automator.stop()     automator.scan() -> scan the bosses now
   provides: (api) => api && api.start ? {
@@ -37,7 +37,7 @@ Core.module({
   } : {},
   init(Core) {
 'use strict';
-const ID = 'automator', VERSION = '1.14.2';
+const ID = 'automator', VERSION = '1.14.4';
 const FARM_MARK = '\u2063farm\u2063';          // a task line is written when the task looks; this marks where the farm's state goes, filled in live when the line is drawn (a line saying "queued" while the farm is already checking the graveyard was stale)
 if (window.__automatorLoaded) { console.warn('[automator] already loaded', window.__automatorLoaded); return null; }
 window.__automatorLoaded = VERSION;
@@ -185,6 +185,14 @@ const Log = (() => {
   const RANK = { info: 0, ok: 1, dmg: 1, skill: 1, warn: 2, err: 3 };
   function add(msg, kind, grp) {
     const k = kindOf(msg, kind), last = rows[rows.length - 1], now = Date.now();
+    if (!grp && (k === 'warn' || k === 'err')) {                                           // the same warning again (an outage repeats it every few minutes, and the tasks alternate): look back over the last rows, bump a counter, move it to the end
+      for (let i = rows.length - 1, lo = Math.max(0, rows.length - 12); i >= lo; i--) {
+        const r = rows[i];
+        if (r.k !== k || (r.b || r.m) !== String(msg) || now - (r.at || 0) >= 30 * 60000) continue;
+        const n = (r.n || 1) + 1; rows.splice(i, 1); rows.push(Object.assign({}, r, { t: ts(), b: String(msg), n, at: now, m: String(msg) + ' (×' + n + ')' }));
+        dirty = true; if (!timer) timer = setTimeout(flush, 2500); UI.dirty('log'); return;
+      }
+    }
     if (grp && last && last.g === grp && now - (last.at || 0) < 45000) {                    // a follow-up of the line above: one row, "first · then · then" (the icon and "auto-farm:" are not repeated)
       const more = String(msg).replace(/^[^\p{L}\p{N}<]+/u, '').replace(/^auto-farm:\s*/i, '');
       rows[rows.length - 1] = Object.assign({}, last, { m: last.m + ' · ' + more, k: (RANK[k] || 0) > (RANK[last.k] || 0) ? k : last.k });   // a new object: the open panel redraws instead of appending
@@ -3282,10 +3290,10 @@ Object.assign(LootScan, (() => {
  * ================================================================================================================ */
 Object.assign(Farm, (() => {
   const ACT = '/auto_farm_actions.php', STAT = '/auto_farm_status.php';
-  const LEVEL_LOCK = 400, MAX_STACK = 250, SIMILAR = 0.9, GAP = 180, POLL = 5000, BLIND_POLL = 20000, EXTRA = 1, UNLIMITED = 999999, DEMAND_TTL = 20 * 60000, PROBE_TTL = 10 * 60000, HELD_MARGIN = 3 * 60, WHERE_TTL = 20 * 60000;       // HELD_MARGIN (s): a kill-ahead corpse that would expire within this long no longer counts as held (the chain of quests uses them within a few minutes, so keep it short: a wide margin re-kills mobs that are about to be looted)
+  const LEVEL_LOCK = 400, MAX_STACK = 250, SIMILAR = 0.9, GAP = 180, POLL = 5000, BLIND_POLL = 20000, EXTRA = 1, UNLIMITED = 999999, DEMAND_TTL = 30 * 60000, PROBE_TTL = 10 * 60000, HELD_MARGIN = 3 * 60, WHERE_TTL = 20 * 60000;       // HELD_MARGIN (s): a kill-ahead corpse that would expire within this long no longer counts as held (the chain of quests uses them within a few minutes, so keep it short: a wide margin re-kills mobs that are about to be looted)
   const store = Core.store(ID + '-farm', { def: { snap: null, owed: false, ids: {} } });
   const idxStore = Core.store(ID + '-farm-index', { def: { fullAt: 0, where: {}, known: {} } });   // which page each mob lives on: survives a reload, so the first quest check after one is not a sweep of every page
-  const S = { where: new Map(), known: new Map(), fullDeadAt: 0, idxDirty: false, acctFull: false, busy: false, hold: false, retryAt: 0, sess: null, qtxt: '', stop: false, recheck: false, looted: new Set(), line: '', last: '', probe: null, probeAt: 0, demands: new Map(), skipped: new Map(), runs: 0, kills: 0, waves: { at: 0, alive: new Map() } };
+  const S = { where: new Map(), known: new Map(), fullDeadAt: 0, idxDirty: false, acctFull: false, busy: false, running: false, dirty: false, served: new Map(), kick: 0, lastActive: 0, hold: false, retryAt: 0, sess: null, qtxt: '', stop: false, recheck: false, looted: new Set(), line: '', last: '', probe: null, probeAt: 0, demands: new Map(), skipped: new Map(), runs: 0, kills: 0, waves: { at: 0, alive: new Map() } };
   const stateOf = () => Object.assign({ snap: null, owed: false, ids: {} }, store.get() || {});
   const patch = (p) => { const s = Object.assign(stateOf(), p); store.set(s); return s; };
   const say = (line) => { S.line = line; UI.dirty('tasks'); };
@@ -3333,7 +3341,8 @@ Object.assign(Farm, (() => {
   }
   function nudge() {                                                      // the switch was flipped: a running run notices, an idle one re-plans now
     S.probe = null; S.probeAt = 0;
-    if (S.busy) S.recheck = true; else setTimeout(() => { service().catch(() => {}); }, 300);
+    if (S.busy) S.recheck = true;
+    wake(300);                                                            // (a pass already running marks itself dirty and re-plans when it ends)
     UI.dirty('tasks');
   }
   /* ---- is it usable at all? Asks the API (only when it is not locked or switched off) ---- */
@@ -3450,7 +3459,7 @@ Object.assign(Farm, (() => {
   async function lootOne(id) {
     const res = await Act.run(() => post('/loot.php', { monster_id: String(id) }), cfg.minActionGapMs), j = res && res.json;
     const ok = !!((j && j.status === 'success') || (!j && /success|looted|claimed/i.test((res && res.text) || '')));
-    if (ok) S.looted.add(String(id));
+    if (ok) { S.looted.add(String(id)); if (S.looted.size > 5000) for (const k of S.looted) { S.looted.delete(k); if (S.looted.size <= 4000) break; } }   // (a corpse id is only ever looted once; the dead view forgets old ones)
     await sleep(cfg.autoLoot.claimGapMs ?? 250);
     return ok;
   }
@@ -3546,9 +3555,10 @@ Object.assign(Farm, (() => {
   }
   async function restore(why) {
     const st = stateOf(), snap = st.snap; if (!snap) { patch({ owed: false }); return { ok: true, put: 0, left: [] }; }
-    const s = await status(); if (s.ok && Number(s.settings.FINISHED) === 1) await api('reset');
+    const s = await status(); if (!s.ok && s.net) throw new Error('the site could not be reached');      // nothing was put back: the set-up stays owed, and is tried again (a reload during an outage used to give it up as "an ended event")
+    if (s.ok && Number(s.settings.FINISHED) === 1) await api('reset');
     await api('toggle', { enabled: 0 });
-    await api('clear_targets');
+    const clr = await api('clear_targets'); if (!clr.ok) throw new Error('could not clear the target list: ' + (clr.msg || 'no reply'));   // (adding yours on top of the run's would mix the two)
     if (Object.keys(snap.settings || {}).length) {                         // ONE call with everything: the endpoint resets any field that is left out
       const set = Object.assign({}, snap.settings);
       for (const k of ['TOTAL_MONSTERS_TO_KILL', 'HP_POTIONS_MAX_TO_USE', 'STAM_POT_SMALL_ITEM_MAX_TO_USE', 'STAM_POT_HALF_ITEM_ID_MAX_TO_USE', 'STAM_POT_FULL_ITEM_ID_MAX_TO_USE', 'STAM_POT_ADV_ITEM_MAX_TO_USE']) if (set[k] != null) set[k] = capOut(set[k]);
@@ -3597,7 +3607,7 @@ Object.assign(Farm, (() => {
         const set = s.settings; killed = Number(set.TOTAL_MONSTERS_TO_KILLED || 0);
         if (Number(set.FINISHED || 0) === 1) return 'finished';
         if (Number(set.IS_ENABLED || 0) === 0) { offSince = offSince || Date.now(); if (Date.now() - offSince > 20000) return 'disabled'; } else offSince = 0;
-      } else if (s.net) continue;
+      } else if (s.net) { moved = Date.now(); continue; }                // the site could not be reached: the stall clock waits too, or the first answer after a long outage would read as a stall
       else { killed = (await corpses(batch, true)).total; if (killed >= batch.total) return 'finished'; }       // no status page (below level 400): count the corpses
       S.kills = killed; say(`${S.qtxt ? S.qtxt + ' · ' : ''}${killed}/${batch.total} kills · ${batch.targets.map((t) => t.name).join(', ')}${batch.targets.every((t) => t.defer) ? ' (ahead)' : ''}`);
       if (killed !== last) { last = killed; moved = Date.now(); } else if (Date.now() - moved > stallMs) return 'stalled';
@@ -3729,17 +3739,38 @@ Object.assign(Farm, (() => {
   // a quest's monster name as the waves spell it (known mobs only; no unique match = the name as given)
   const canonKey = (name) => { const k = keyOf(name); return S.known.has(k) ? k : fuzzyKey(k, S.known.keys()) || k; };
   const canonName = (name) => { const e = S.known.get(canonKey(name)); return e && !e.boss ? e.name : name; };
-  function want(owner, items) {
-    S.demands.set(owner, { at: Date.now(), items: (items || []).filter((i) => i && i.need > 0).map((i) => Object.assign({}, i, { name: canonName(i.name) })) }); S.skipped.delete(owner);
+  // asOf = when the owner READ the numbers these items come from (default: now). A demand is only as fresh as that read: see S.served in collect().
+  function want(owner, items, asOf) {
+    S.demands.set(owner, { at: Date.now(), asOf: Number(asOf) > 0 ? Number(asOf) : Date.now(), items: (items || []).filter((i) => i && i.need > 0).map((i) => Object.assign({}, i, { name: canonName(i.name) })) }); S.skipped.delete(owner);
     if ((items || []).some((i) => i && i.need > 0 && !i.defer)) {                          // a quest that is active NOW: do not wait for the 15 s timer
-      S.lastActive = Date.now();
-      if (!S.busy && !S.kick) S.kick = setTimeout(() => { S.kick = 0; service().catch((e) => log('⚠️ auto-farm: ' + esc(e.message), 'warn')); }, 600);
+      S.lastActive = Date.now(); wake(600);
     }
   }
   function drop(owner) { S.demands.delete(owner); }
-  function collect() {
-    const out = []; for (const [o, d] of S.demands) { if (Date.now() - d.at > DEMAND_TTL) { S.demands.delete(o); continue; } d.items.forEach((i) => out.push(Object.assign({ owner: o }, i))); } return out;
+  /* ONE way to start a pass. service() is single-flight: every caller (a quest turning active, the switch being flipped, the 15 s timer, the end of a pass)
+     goes through here. Idle: one coalesced timer starts it. Running: it only marks "something changed" and the pass runs again by itself when it ends.
+     (Before, three copies of this checked S.busy, which is false while a pass is still probing / reading the board: two passes could run at once, each
+     clearing the other's server-side target list, and a demand that arrived mid-pass was dropped when that pass ended.) */
+  function wake(ms) {
+    if (S.running) { S.dirty = true; return; }
+    if (S.kick) return;
+    S.kick = setTimeout(() => { S.kick = 0; service().catch((e) => log('⚠️ auto-farm: ' + esc(e.message), 'warn')); }, ms == null ? 600 : ms);
   }
+  /* A quest's remaining need is read by its owner (the guild board, the pass page) and arrives here later; this farm's own looting changes that number in
+     between. Without a check, a demand written from a read taken BEFORE the farm looted a mob for the active quest asked for those kills again after the
+     quest was already complete: a whole wasted run (and the hand-in waited behind it). S.served says when each mob was last satisfied for an active quest;
+     an active item read before that moment is stale and is skipped (its owner is poked when the pass ends and asks again with the true number).
+     Kill-ahead items need no check: their corpses stay in the graveyard, so the graveyard count already covers them. */
+  function collect() {
+    const out = [], now = Date.now();
+    for (const [k, t] of S.served) if (now - t > DEMAND_TTL) S.served.delete(k);
+    for (const [o, d] of S.demands) {
+      if (now - d.at > DEMAND_TTL) { S.demands.delete(o); continue; }
+      d.items.forEach((i) => { if (!i.defer && (d.asOf || d.at) <= (S.served.get(keyOf(i.name)) || 0)) return; out.push(Object.assign({ owner: o }, i)); });
+    }
+    return out;
+  }
+  const served = (items) => { const now = Date.now(); for (const i of items) if (i && !i.defer) S.served.set(keyOf(i.name), now); };   // these active items are fully done (looted / killed)
   /* earlier kills are still in the graveyard: loot them first for a quest that is active now (the quest counts them), and take the ones held for a
      quest that is not active yet off what has to be killed (otherwise every look at the board would pre-kill the same mobs again) */
   async function account(items) {                                            // loot / count what is held: the pages these mobs are known on first, the whole graveyard only if something is still owed
@@ -3773,8 +3804,16 @@ Object.assign(Farm, (() => {
   }
   const acctTxt = () => { const a = S.acct; if (!a || !a.seen) return 'no matching corpses in the graveyard'; const p = [`${a.seen} matching corpse${a.seen === 1 ? '' : 's'}`]; if (a.looted) p.push(`${a.looted} looted`); if (a.low) p.push(`${a.low} under the minimum damage`); if (a.big) p.push(`${a.big} the wrong size`); if (a.expiring) p.push(`${a.expiring} about to expire`); if (a.refused) p.push(`${a.refused} refused by the site`); return p.join(', '); };
   async function service() {
-    if (S.busy || S.hold || Date.now() < S.retryAt || !Tab.isMain() || Guard.isFaulted() || !Run.tasksOn()) return;   // stopped / halted: nothing starts, queued demands wait; a skill quest casting needs the server farm off
+    if (S.running) { S.dirty = true; return; }                                          // single-flight: the running pass picks the change up when it ends
+    S.running = true; S.dirty = false;
+    try { await pass(); }
+    finally { S.running = false; if (S.dirty) { S.dirty = false; wake(600); } }
+  }
+  async function pass() {
+    if (S.busy || S.hold || !Tab.isMain() || Guard.isFaulted() || !Run.tasksOn()) return;   // stopped / halted: nothing starts, queued demands wait; a skill quest casting needs the server farm off
     const list = collect(); if (!list.length) { if (S.line) say(''); if (S.sess && Date.now() - S.sess.at > 15 * 60000) S.sess = null; return; }
+    if (!list.some((d) => !d.defer) && (Date.now() < S.retryAt || Date.now() - S.lastActive < 45000)) return;   // only kill-ahead is asked, and it is not its time: no probe / mob lookups for nothing
+    const seen = new Map(S.demands), consume = (o) => { if (S.demands.get(o) === seen.get(o)) S.demands.delete(o); };   // only a demand this pass actually read is answered: one that was replaced meanwhile (a quest accepted mid-pass) stays
     if (!S.sess) S.sess = { done: 0, at: Date.now() }; S.sess.at = Date.now();                    // "quests done / quests in the queue" for the status line
     S.qtxt = `${S.sess.done}/${S.sess.done + list.length} quest${S.sess.done + list.length === 1 ? '' : 's'}`;
     const pr = await probe(); if (!pr.ok && pr.transient) { say(pr.why); return; }
@@ -3784,11 +3823,12 @@ Object.assign(Farm, (() => {
     if (!pool.length) return;
     if (act.length) S.lastActive = Date.now();
     const ahead = !act.length;
-    if (ahead && Date.now() - (S.lastActive || 0) < 45000) return;                    // a quest was active a moment ago: the guild is between "handed in" and "accepted" — the next one is about to need these corpses, not a new run
+    if (ahead && (Date.now() < S.retryAt || Date.now() - (S.lastActive || 0) < 45000)) return;   // (an unreadable graveyard delays only the kill-ahead, never a quest that is active)                    // a quest was active a moment ago: the guild is between "handed in" and "accepted" — the next one is about to need these corpses, not a new run
     if (ahead) {                                                                        // kill-ahead: corpses already held count, so the same mobs are not killed twice
       S.busy = true; let left; try { say('checking the graveyard for earlier kills…'); left = await account(pool); } finally { S.busy = false; say(''); }
+      if (collect().some((d) => !d.defer)) { S.dirty = true; return; }                          // a quest became active while the graveyard was being read: it goes first, from the top
       if (!left) { S.retryAt = Date.now() + 2 * 60000; Diag.skip('graveyard-unverified', 'kill-ahead waits: the dead view could not be read'); return; }
-      if (!left.length) { for (const d of pool) S.demands.delete(d.owner); return; }     // all of it is already held: nothing to do until the guild asks again
+      if (!left.length) { for (const d of pool) consume(d.owner); return; }               // all of it is already held: nothing to do until the guild asks again
       pool = left;
     }
     const manual = pool.some((i) => i.manual), first = manual ? null : plan(pool)[0]; if (!manual && !first) return;
@@ -3797,13 +3837,14 @@ Object.assign(Farm, (() => {
     try {
       if (manual) {
         const d = pool.find((i) => i.manual); say(`hunting ${d.name}…`); log(`🗡 attack path (${esc(d.why || 'Auto-Farm not usable')}): ${esc(d.name)} ×${d.need} (≥${fmtNum(d.minDamage)})${d.defer ? ' — kill ahead, not looted yet' : ''}`, 'info');
-        const r = await hunt(d); S.runs++; waitFor = r.wait || 0; if (r.done) S.sess.done++;
+        const r = await hunt(d); S.runs++; waitFor = r.wait || 0; if (r.done) { S.sess.done++; served([d]); }
         log(`🗡 hunt: ${d.defer ? 'killed ahead (unlooted until the quest is accepted)' : r.looted + ' ' + esc(d.name) + ' looted'}${r.switched ? ' — switching to Auto-Farm' : ''}${r.why ? ' — ' + esc(r.why) : ''}`, r.looted ? 'ok' : 'warn'); if (r.why) S.skipped.set(d.owner, `${d.name}: ${r.why}`);
       } else {
         let left = pool; if (!ahead) { say('checking the graveyard for earlier kills…'); left = await account(pool); }      // an active quest: loot what was killed ahead first
         if (!left) left = pool;
+        else served(pool.filter((i) => !left.some((l) => l.owner === i.owner && keyOf(l.name) === keyOf(i.name))));     // looted whole from the graveyard
         const batch = left.length === pool.length && left.every((x, i) => x.need === pool[i].need) ? first : left.length ? plan(left)[0] : null;
-        if (batch) { log(`🌾 auto-farm: killing ${batch.targets.map((t) => esc(t.name)).join(' + ')} — graveyard check: ${acctTxt()}`, 'info'); const how = await runBatch(batch); if (how === 'finished') S.sess.done += pool.filter((i) => batch.targets.some((t) => keyOf(t.name) === keyOf(i.name))).length; }
+        if (batch) { log(`🌾 auto-farm: killing ${batch.targets.map((t) => esc(t.name)).join(' + ')} — graveyard check: ${acctTxt()}`, 'info'); const how = await runBatch(batch); if (how === 'finished') served(pool.filter((i) => batch.targets.some((t) => keyOf(t.name) === keyOf(i.name)))); if (how === 'finished') S.sess.done += pool.filter((i) => batch.targets.some((t) => keyOf(t.name) === keyOf(i.name))).length; }
         else { S.sess.done += pool.length; log('🌾 auto-farm: nothing left to kill — the earlier kills cover it', 'ok', 'farm-run'); }
       }
     }
@@ -3811,12 +3852,15 @@ Object.assign(Farm, (() => {
     finally {
       if (!manual) { try { await restore('run over'); } catch (e) { log(`⚠️ auto-farm restore: ${esc(e.message)} — it is tried again on the next run and after a reload`, 'warn'); } }
       S.busy = false; S.manual = false; S.owners = []; say(''); if (manual) { try { await AF.resumeIfWePaused('hunt over'); } catch (_) { /* */ } } if (paused) Run.resume('farm');
-      owners.forEach((o) => { S.demands.delete(o); try { Tasks.poke(o, waitFor); } catch (_) { /* tasks not up yet */ } });     // the owners re-read their numbers and ask again if something is left
+      owners.forEach((o) => { consume(o); try { Tasks.poke(o, waitFor); } catch (_) { /* tasks not up yet */ } });     // the owners re-read their numbers and ask again if something is left
     }
   }
-  async function recover() {                                                // a reload in the middle of a run: the snapshot is owed
-    if (S.busy || !stateOf().owed) return;
-    try { await restore('recovered after reload'); } catch (e) { log(`⚠️ auto-farm recovery: ${esc(e.message)}`, 'warn'); }
+  async function recover(tries = 0) {                                       // a reload in the middle of a run: the snapshot is owed
+    if (S.busy || S.running || !stateOf().owed) return;                     // (a run in progress puts it back itself when it ends)
+    try { await restore('recovered after reload'); } catch (e) {
+      log(`⚠️ auto-farm recovery: ${esc(e.message)}`, 'warn');
+      if (tries < 3) setTimeout(() => { try { if (Tab.isMain()) recover(tries + 1); } catch (_) { /* */ } }, 5 * 60000);   // the site was unreachable: try again, 3 times at most
+    }
   }
   /* ---- which basic mob drops an item: the "Possible Loot" panel of each mob's battle page (Drop % + DMG req, the same chips as the boss loot scan),
    * read once per mob and kept a week. The Adventure Guild uses it for collection quests it is short on. Nothing is guessed: no known source = no farming. ---- */
@@ -4167,7 +4211,7 @@ const Guild = (() => {
   async function tick() {
     const G = kinds(); if (!G.enabled) return;
     setInfo({ state: 'run', line: 'reading the quest board…' });
-    const doc = parseHtml(await netText(URL_GUILD, { force: true, ttl: 0, key: 'ma:guild' })), st = Guard.pageState(doc);
+    const doc = parseHtml(await netText(URL_GUILD, { force: true, ttl: 0, key: 'ma:guild' })), readAt = Date.now(), st = Guard.pageState(doc);
     if (st !== 'ok') { Guard.fault(st, 'guild'); setInfo({ state: 'err', line: 'not signed in' }); return 5 * MIN; }
     const rows = parseBoard(doc);
     Tasks.info('guild', { board: rows.map((r) => ({ name: r.name, kind: r.kind, active: !!r.active, available: !!r.available, done: !!r.finishId, cooldown: !!r.cooldown, cdTs: r.cooldownTs || 0, note: r.note || '', cur: r.progress ? r.progress.current : null, total: r.progress ? r.progress.total : null, mob: (r.meta && r.meta.monsterName) || '', minDmg: (r.meta && r.meta.minimumDamage) || 0 })) });
@@ -4217,7 +4261,7 @@ const Guild = (() => {
     }
     if (queuedQ.size) notes.push(`${working ? '+ ' : ''}${queuedQ.size} more kill quest${queuedQ.size === 1 ? '' : 's'} queued to pre-kill`);   // one short line: the rows in the Overview say which
     { const b = Tasks.info('guild').board; if (Array.isArray(b)) b.forEach((q) => { q.queued = queuedQ.has(q.name); }); }
-    if (wants.length) Farm.want('guild', wants); else Farm.drop('guild');
+    if (wants.length) Farm.want('guild', wants, readAt); else Farm.drop('guild');
     const worked = working || did > 0;
     if (!rows.some((r) => r.active)) {                       // 3. no quest in progress (the guild holds one at a time): take the next one that can be done
       let noClass = false; if (G.skill !== false && rows.some((x) => x.available && x.kind === 'skill') && !effectiveClass()) { try { await detectClass(); } catch (_) { /* */ } noClass = !effectiveClass(); }
@@ -4229,6 +4273,7 @@ const Guild = (() => {
       const cand = rows.filter((x) => x.available && ((x.kind === 'skill' && G.skill !== false && !noClass) || x.kind === 'kill' || (x.kind === 'collect' && G.collect !== false)))
         .sort((x, y) => rank(x) - rank(y));
       if (cand.length > 1 && cand.some((r) => r.kind === 'skill' && rank(r) === 3)) notes.push('skill quests go last: mana potions are off and MP is too low for all the casts');
+      let refused = 0;                                                   // a quest the site refuses (a requirement, a hiccup) must not hold back the others behind it: up to 3 tries
       for (const r of cand) {
         if (r.kind === 'kill') { const c = await Farm.canFarm(r.meta.monsterName); if (!c.ok) { Diag.skip('guild-skip-available', `${r.name}: ${c.why}`); continue; } }
         if (r.kind === 'collect' && !(await collectOk(r))) continue;
@@ -4236,7 +4281,7 @@ const Guild = (() => {
         const res = await Act.run(() => post('/adventurers_accept_quest.php', { quest_id: String(r.acceptId) }), 250), good = ok200(res && res.json, res && res.text);
         log(good ? `📜 quest accepted: ${esc(r.name)} (${r.kind}${r.kind === 'kill' ? `: ${r.meta.amountNeeded} × ${esc(r.meta.monsterName)} ≥ ${fmtNum(r.meta.minimumDamage)}` : ''})` : `⚠️ could not accept ${esc(r.name)}: ${esc(msgOf(res) || 'no reply')}`, good ? 'ok' : 'warn');
         if (good) { setInfo({ state: 'ok', line: `accepted “${r.name}”` }); return 3000; }
-        notes.push(`could not accept “${r.name}”: ${msgOf(res) || 'no reply'}`); later(30 * MIN); break;
+        notes.push(`could not accept “${r.name}”: ${msgOf(res) || 'no reply'}`); later(30 * MIN); if (++refused >= 3) break;
       }
     }
     if (!rows.some((r) => r.active) && rows.some((r) => r.available && r.kind === 'skill') && !effectiveClass()) notes.push('a skill quest is waiting but no class is picked (the site\'s Classes page)');
@@ -4265,7 +4310,7 @@ const Battle = (() => {
   async function tick() {
     if (!cfg.tasks.bp.enabled) return;
     setInfo({ state: 'run', line: 'reading the pass page…' });
-    const doc = parseHtml(await netText('/battle_pass.php', { force: true, ttl: 0, key: 'ma:bp' })), st = Guard.pageState(doc);
+    const doc = parseHtml(await netText('/battle_pass.php', { force: true, ttl: 0, key: 'ma:bp' })), readAt = Date.now(), st = Guard.pageState(doc);
     if (st !== 'ok') { Guard.fault(st, 'battle pass'); setInfo({ state: 'err', line: 'not signed in' }); return 5 * 60000; }
     let hunt = null, stam = null;
     doc.querySelectorAll('.card .quest').forEach((q) => { const p = parseQuest(q); if (p && p.type === 'hunt') hunt = p; if (p && p.type === 'stamina') stam = p; });
@@ -4277,7 +4322,7 @@ const Battle = (() => {
     for (const n of names) { const c = await Farm.canFarm(n); if (c.ok && !c.manual) { pick = n; break; } if (c.ok) { any = any || n; if (c.locked) lockedNow = true; } else why = `${n}: ${c.why}`; }
     pick = pick || any;
     if (!pick) { Farm.drop('bp'); setInfo({ state: 'warn', line: `hunt ${hunt.current}/${hunt.total} — ${why || 'no target names set'}` + sx, have: hunt.current, total: hunt.total }); Diag.skip('bp-not-farmable', why); return lockedNow ? 30 * 60000 : 20 * 60000; }
-    Farm.want('bp', [{ name: pick, need: hunt.total - hunt.current, minDamage: hunt.minimumDamage }]);
+    Farm.want('bp', [{ name: pick, need: hunt.total - hunt.current, minDamage: hunt.minimumDamage }], readAt);
     setInfo({ state: 'run', line: `hunt ${hunt.current}/${hunt.total} — ${pick} ≥ ${fmtNum(hunt.minimumDamage)}${FARM_MARK}` + sx, have: hunt.current, total: hunt.total });
     return 20 * 60000;                                                   // the farm run pokes this task when it is over
   }
