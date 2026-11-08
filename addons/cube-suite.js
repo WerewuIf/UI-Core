@@ -37,12 +37,16 @@
  * The panel is drawn on the Cube page only. Elsewhere the engine runs headless, and only when "background" is on (default OFF, so merely opening
  * any page never starts PvP / PvE by itself). One tab runs the engine (Core.tab 'cube-suite'); commands are shared state + a wake event, so
  * it does not matter which tab the command came from. */
-/* v3.5.6: status().nodes = the node pills as data ({ pvp, sa, pve }: [[kind, text], ...]), published by the engine tab, so another tab or the Automator can show the nodes.
+/* v3.6.0: the PvE damage settings are a capability, so the Automator can show and edit them WITHOUT a Cube being open (it used to have no way to reach them):
+ *   cube.pve.get()  -> { ok, profile: 'normal'|'fast', damageMode, fixedDamageCap, damageModel, nodes: [{ id, label, mobs: [{ key, name, selected, cap }] }] }   (sync)
+ *   cube.pve.set({ damageMode?, damageModel?, fixedDamageCap?, mob?: { nodeId, key, selected?, cap? } })   the same profile the Cube panel edits (Normal or Fast Run, whichever is active)
+ * The mobs of a node are the known ones + every one seen so far (pveGetNodeMobEntries), exactly the list the panel shows, so a node is never empty.
+ * v3.5.6: status().nodes = the node pills as data ({ pvp, sa, pve }: [[kind, text], ...]), published by the engine tab, so another tab or the Automator can show the nodes.
  * v3.5.5: cube.settings.set({ node7MatchNo, node8MatchNo, isLeader }); status() also reports `leader`; the Cube page takes the engine over from a headless tab (the panel lives there).
  * v3.5.4: new capability cube.master.set(bool) so the Automator can switch Cube Suite's automation on / off (status().master already reported it, nothing could set it).
  * NOTE: addons.json must NOT give cube-suite a "match": this is a service that runs on any page. With a match Core skips it everywhere else and no cube.* capability exists there. */
 Core.module({
-  id: 'cube-suite', name: 'Cube Suite', icon: '🧊', version: '3.5.6',
+  id: 'cube-suite', name: 'Cube Suite', icon: '🧊', version: '3.6.0',
   provides: (api) => api && api.status ? {
     'cube.status':         { fn: api.status,    doc: 'what Cube Suite is doing (shared across tabs)', returns: '{ ok, mode, master, background, follow, running, instanceId, cleared, fastTargets }' },
     'cube.mode.set':       { fn: api.setMode,   doc: "switch Fast Run / Normal", args: "'fast' | 'normal'" },
@@ -51,6 +55,8 @@ Core.module({
     'cube.background.set': { fn: api.setBackground, doc: 'run the engine on any page, not only the Cube page', args: 'boolean' },
     'cube.follow':         { fn: api.follow,    doc: 'pin the engine to one Cube instance (null = unpin)', args: 'instanceId | null' },
     'cube.fastrun.start':  { fn: api.startFastRun, doc: 'follow that Cube, Fast Run on, automation on, background on', args: '{ instanceId }' },
+    'cube.pve.get':        { fn: api.pveGet,    doc: 'PvE damage settings of the active profile + every node\'s mobs (selected, cap); works with no Cube open', returns: '{ ok, profile, damageMode, fixedDamageCap, damageModel, nodes: [{ id, label, mobs: [{ key, name, selected, cap }] }] }' },
+    'cube.pve.set':        { fn: api.pveSet,    doc: 'change the PvE damage settings of the active profile (same as the Cube panel); works with no Cube open', args: '{ damageMode?: exp|fixed|monster|loot|scheduled, damageModel?: eco|fast, fixedDamageCap?: number, mob?: { nodeId, key, selected?: boolean, cap?: number } }' },
   } : {},
   async init(Core) {
   'use strict';
@@ -5571,6 +5577,37 @@ Core.module({
     },
     setBackground(on) { dsSafeSetItem(BACKGROUND_KEY, on ? '1' : '0'); dsSyncTabJoin(); dsWake(); return api.status(); },
     follow(id) { dsSaveFollow(id); dsWake(); return api.status(); },
+    pveGet() {                                                                          // the ACTIVE profile (Normal / Fast Run) and the mobs of every node: nothing here needs a Cube
+      const p = pveGetProfile(), allIn = p.damageMode !== 'monster';                     // per-mob mode: a node with no saved selection ticks nothing (the engine's rule); any other mode: every mob is in
+      return { ok: true, profile: pveActiveProfileKey(), damageMode: p.damageMode, fixedDamageCap: p.fixedDamageCap, damageModel: p.damageModel,
+        nodes: PVE_TARGET_NODES.map((id) => {
+          const has = Object.prototype.hasOwnProperty.call(p.selectedMobsByNode, id), sel = new Set(p.selectedMobsByNode[id] || []);
+          return { id, label: PVE_NODE_LABELS[id] || 'Node ' + id, mobs: pveGetNodeMobEntries(id).map(([key, name]) => ({ key, name, selected: has ? sel.has(key) : allIn, cap: Number(p.monsterCaps[key]) || 0 })) };
+        }) };
+    },
+    pveSet(o) {                                                                         // the same edits the Cube panel makes, same rules (see the change handlers in wireUI)
+      o = o || {}; const m = o.mob, nodeId = m ? Number(m.nodeId) : null;
+      if (m && (!PVE_TARGET_NODES.includes(nodeId) || !m.key)) return { ok: false, message: 'pve.set: mob needs a known nodeId and a key' };
+      const modes = ['exp', 'fixed', 'monster', 'loot'].concat(pveActiveProfileKey() === 'normal' ? ['scheduled'] : []);   // timed caps are a Normal-profile feature
+      const modeEdit = modes.includes(o.damageMode) || o.fixedDamageCap != null;
+      pveUpdateProfile((p) => {
+        if (modes.includes(o.damageMode)) p.damageMode = o.damageMode;
+        if (o.damageModel === 'eco' || o.damageModel === 'fast') p.damageModel = o.damageModel;
+        if (o.fixedDamageCap != null) p.fixedDamageCap = Math.max(0, parseInt(o.fixedDamageCap, 10) || 0);
+        if (!m) return;
+        const key = normText(m.key);
+        if (m.cap != null) p.monsterCaps[key] = Math.max(0, parseInt(m.cap, 10) || 0);
+        if (m.selected != null) {
+          const has = Object.prototype.hasOwnProperty.call(p.selectedMobsByNode, nodeId);
+          const list = new Set(has ? p.selectedMobsByNode[nodeId] : p.damageMode === 'monster' ? [] : pveGetNodeMobEntries(nodeId).map(([k]) => k));
+          m.selected ? list.add(key) : list.delete(key);
+          p.selectedMobsByNode[nodeId] = [...list];
+          const seen = pveLoadDiscovered(), ever = new Set(seen[nodeId] || []); ever.add(key); seen[nodeId] = [...ever]; pveSaveDiscovered(seen);   // ticked / unticked here = not "new" when first met, or the scan would tick it again
+        }
+      }, { resetActionable: modeEdit, resetActionableNodeId: m ? nodeId : null });
+      if (m) pveVerifyNodeSoon(nodeId); else if (modeEdit) pveVerifyAllNodesSoon();    // (no Cube open: these return at once)
+      return api.pveGet();
+    },
     startFastRun(o) {
       const id = o && o.instanceId != null ? String(o.instanceId).replace(/\D/g, '') : '';
       if (!id) return { ok: false, message: 'startFastRun needs { instanceId }' };
