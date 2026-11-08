@@ -5454,15 +5454,15 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
         T.merchant.enabled ? btn(ms.done ? 'Check again' : 'Buy now', 'soft', () => { Merchant.reset(); Tasks.poke('merchant'); draw(); }) : null]));
     // Graveyard
     const gt = T.graveyard;
-    out.push(card('🪦', 'Graveyard', 'Loots the corpses you can: first the ones that still give EXP (stamina potions are held meanwhile, then given back), then the out-levelled ones for items and quest credit', gt.enabled, (v) => { gt.enabled = !!v; if (v) Tasks.poke('graveyard'); },
+    out.push(card('🪦', 'Graveyard', 'Clears the graveyard by itself when something triggers it (set below): corpses pile up, a level-up is sitting in the pile, one is about to despawn, a Cube run ends, or days pass. EXP corpses first (stamina potions held, then given back), then the out-levelled ones for items and quest credit', gt.enabled, (v) => { gt.enabled = !!v; if (v) Tasks.poke('graveyard'); },
       [tStatus('graveyard'), gt.enabled ? nextNote('graveyard') : null,
-        gt.enabled ? opt('Look every', num(() => gt.checkMin, (n) => { gt.checkMin = n; }, { w: 56, min: 5, max: 240, unit: 'min', parse: parseFloat }), 'wave pages only: a short look, not a clear-out') : null,
-        gt.enabled ? caption('Clear out when…') : null,
-        gt.enabled ? opt('Corpses waiting', num(() => gt.pile, (n) => { gt.pile = Math.round(n); }, { w: 56, min: 1, max: 500, unit: 'or more', parse: parseFloat })) : null,
-        gt.enabled ? opt('A level-up is waiting', sw(() => gt.levelUp, (v) => { gt.levelUp = !!v; }, { sm: true, redraw: false }), 'the EXP waiting covers what you need to level', 'row') : null,
-        gt.enabled ? opt('One is about to despawn', num(() => gt.expiryH, (n) => { gt.expiryH = n; }, { w: 56, min: 1, max: 48, unit: 'h left', parse: parseFloat }), 'also takes corpses with no EXP estimate, so none is lost') : null,
-        gt.enabled ? opt('Nothing came up for', num(() => gt.maxDays, (n) => { gt.maxDays = n; }, { w: 56, min: 1, max: 30, unit: 'days', parse: parseFloat }), 'a full scan, dungeon corpses included') : null,
-        gt.enabled ? note('It also clears about a minute after a Cube Fast Run ends.') : null,
+        opt('Look every', num(() => gt.checkMin, (n) => { gt.checkMin = n; }, { w: 56, min: 5, max: 240, unit: 'min', parse: parseFloat }), 'wave pages only: a short look, not a clear-out'),
+        caption('Clear out when…'),
+        opt('Corpses waiting', num(() => gt.pile, (n) => { gt.pile = Math.round(n); }, { w: 56, min: 1, max: 500, unit: 'or more', parse: parseFloat })),
+        opt('A level-up is waiting', sw(() => gt.levelUp, (v) => { gt.levelUp = !!v; }, { sm: true, redraw: false }), 'the EXP waiting covers what you need to level', 'row'),
+        opt('One is about to despawn', num(() => gt.expiryH, (n) => { gt.expiryH = n; }, { w: 56, min: 1, max: 48, unit: 'h left', parse: parseFloat }), 'also takes corpses with no EXP estimate, so none is lost'),
+        opt('Nothing came up for', num(() => gt.maxDays, (n) => { gt.maxDays = n; }, { w: 56, min: 1, max: 30, unit: 'days', parse: parseFloat }), 'a full scan, dungeon corpses included'),
+        note('It also clears about a minute after a Cube Fast Run ends.'),
         gt.enabled ? btn(Loot.state.clearing ? 'Clearing…' : 'Clear now', 'soft', () => { Graveyard.clearNow(); draw(); }) : null]));
     // Extraction
     const xt = T.extract, xm = xt.enabled ? Extract.mobs() : [], xOn = xm.filter((m) => xt.mobs[m.low]).length, xs = Extract.state(), xSkip = Object.keys(xs.never).length + Object.keys(xs.weak).length;
