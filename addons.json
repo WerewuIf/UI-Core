@@ -45,7 +45,7 @@
     {
       "id": "ui-cleanup",
       "name": "UI Cleanup",
-      "version": "2.6.0",
+      "version": "2.6.1",
       "url": "addons/ui-cleanup.js",
       "button": false
     },
@@ -61,14 +61,14 @@
     {
       "id": "cube-suite",
       "name": "Cube Suite",
-      "version": "3.5.6",
+      "version": "3.6.0",
       "url": "addons/cube-suite.js",
       "button": false
     },
     {
       "id": "automator",
       "name": "Automator",
-      "version": "1.13.7",
+      "version": "1.14.4",
       "url": "addons/automator.js",
       "button": true
     },
