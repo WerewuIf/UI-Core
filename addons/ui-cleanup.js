@@ -1,4 +1,5 @@
 /* UI Cleanup — Core addon (migrated from the standalone userscript).
+ * v2.6.1: Main page: Mail is listed under Guild & Community (the social tiles) instead of "More".
  * v2.6.0: Options: one switch per part (home button, pin, guild, dungeon map, battle back, main page, waves, merchant). See OPTIONS below.
  * Loaded by core.user.js; `Core` is in scope. No @require / header needed.
  * Cookie helper + 3 toast copies removed (Core.cookies / Core.ui.toast); quest/battle-pass/PvP polls share Core.net cache.
@@ -1896,6 +1897,7 @@ const __ucOn = (id) => { try { return !(Core && Core.settings && Core.settings.m
     'adventurers_guild.php': 'Guild & Community',
     'referrals.php': 'Guild & Community',
     'chat.php': 'Guild & Community',
+    'game_mail.php': 'Guild & Community',   // Mail sits with the other social tiles, not in "More"
     'weekly.php': 'Guild & Community',
     'achievements.php': 'Progress & Info',
     'collections.php': 'Progress & Info',
