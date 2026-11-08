@@ -37,7 +37,7 @@ Core.module({
   } : {},
   init(Core) {
 'use strict';
-const ID = 'automator', VERSION = '1.14.1';
+const ID = 'automator', VERSION = '1.14.2';
 const FARM_MARK = '\u2063farm\u2063';          // a task line is written when the task looks; this marks where the farm's state goes, filled in live when the line is drawn (a line saying "queued" while the farm is already checking the graveyard was stale)
 if (window.__automatorLoaded) { console.warn('[automator] already loaded', window.__automatorLoaded); return null; }
 window.__automatorLoaded = VERSION;
@@ -3273,6 +3273,8 @@ Object.assign(LootScan, (() => {
  *     a corpse far bigger than what is still needed is left alone, and live mobs that already carry the minimum damage are only waited for.
  *   - Several targets share one run when their stacks are within 10% of each other (the Dragon Realm orchestrator's rule: a small remainder
  *     never drags a full 250-stack along). Each target stacks at most 250 per cycle; kills = stack x cycles.
+ *     The active quest's mob leads the run, and every mob that is done in ONE cycle (need <= 250) rides along: all the queued kill quests are
+ *     pre-killed together with it instead of one run each.
  *   - Your own Auto-Farm set-up is captured BEFORE it is touched and put back afterwards (owed + persisted: a reload mid-run still restores it).
  *     The restore trusts the ids it captured (an event mob that is not in the base waves still goes back), asks for a new id by name only if the
  *     server refuses one, never throws the snapshot away when a target cannot be put back, and says which ones.
@@ -3494,8 +3496,10 @@ Object.assign(Farm, (() => {
     const batches = []; let guard = 0;
     while ([...rem.values()].some((v) => v > 0) && guard++ < 500) {
       const avail = [...rem.keys()].filter((k) => rem.get(k) > 0), stack = new Map(avail.map((k) => [k, Math.min(MAX_STACK, rem.get(k))]));
-      const floor = Math.max(...stack.values()) * SIMILAR, names = avail.filter((k) => stack.get(k) >= floor);
+      const live = avail.filter((k) => !info.get(k).defer), base = live.length ? live : avail;   // a quest that is active now leads the run
+      const floor = Math.max(...base.map((k) => stack.get(k))) * SIMILAR, names = base.filter((k) => stack.get(k) >= floor);
       const cycles = Math.max(1, Math.min(...names.map((k) => Math.floor(rem.get(k) / stack.get(k)))));
+      if (cycles === 1) for (const k of avail) if (!names.includes(k) && rem.get(k) <= MAX_STACK) names.push(k);   // one cycle only: every mob that is done in one cycle (stack = what is needed) shares this run, so ALL the queued quests are killed together
       const targets = names.map((k) => ({ name: shown.get(k) || k, key: k, id: info.get(k).id, minDamage: info.get(k).minDamage, defer: !!info.get(k).defer, stack: stack.get(k), kills: stack.get(k) * cycles }));
       batches.push({ cycles, targets, total: targets.reduce((a, t) => a + t.kills, 0), cycleTotal: targets.reduce((a, t) => a + t.stack, 0) });
       for (const t of targets) rem.set(t.key, Math.max(0, rem.get(t.key) - t.kills));
@@ -3776,7 +3780,7 @@ Object.assign(Farm, (() => {
     const pr = await probe(); if (!pr.ok && pr.transient) { say(pr.why); return; }
     const items = []; for (const d of list) { const c = await canFarm(d.name); if (c.ok) items.push(Object.assign({}, d, { id: c.id, manual: !!c.manual, why: c.why, name: c.canon || d.name })); else { S.skipped.set(d.owner, `${d.name}: ${c.why}`); Diag.skip('auto-farm-target', `${d.name}: ${c.why}`); } }
     const act = items.filter((i) => !i.defer);
-    let pool = act.length ? act : items;                                                // the active quest first; kill-ahead only when nothing active is waiting
+    let pool = act.length ? act.concat(items.filter((i) => i.defer && !i.manual)) : items;   // the active quest leads; the queued quests are killed in the same run (kill-ahead, looted once accepted)
     if (!pool.length) return;
     if (act.length) S.lastActive = Date.now();
     const ahead = !act.length;
