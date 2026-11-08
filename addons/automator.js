@@ -4720,6 +4720,9 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
 .ma-ed{grid-column:1/-1;margin:1px 0 3px;padding:9px 11px 10px;background:#16213f;border:1px solid rgba(110,168,255,.34);border-radius:16px}.ma-ed .ma-in,.ma-bulk .ma-in{background:#101a33}
 .ma-pms{margin-top:4px}.ma-pm{display:flex;align-items:center;gap:10px;padding:7px 2px;border-top:1px solid rgba(255,255,255,.06)}.ma-pm-n{flex:1;min-width:0;font-size:12px;color:#d6e0ff;overflow-wrap:anywhere}.ma-pm .ma-num{width:104px;flex:0 0 auto}.ma-pm .ma-num .ma-in{width:100%;height:30px;padding:0 10px;font-size:12px;border-radius:9px}
 .ma-card.cube{background:linear-gradient(180deg,#152040,#111a33);border-color:rgba(110,168,255,.16);box-shadow:0 6px 16px rgba(0,0,0,.22),inset 0 1px 0 rgba(255,255,255,.04);padding:11px 13px;margin-bottom:9px}.ma-card.cube.off{background:#0f1628;box-shadow:none}.ma-card.cube .ma-ico{width:32px;height:32px;font-size:16px;background:#1d2b55;border-color:rgba(110,168,255,.22)}.ma-card.cube .ma-card-b{margin-top:10px;padding-top:10px}.ma-card.cube .ma-sr-o.tm{margin:0}.ma-card.cube .ma-seg{flex:0 0 auto;width:auto}
+.ma-ed-f{display:flex;gap:10px;margin:6px 0 8px}.ma-ed-f>.ma-opt{flex:1 1 0;gap:4px}.ma-ed-f .ma-opt-l{font-size:11px;font-weight:600;letter-spacing:0;text-transform:none;color:#c3cdef}.ma-ed-f .ma-in{height:30px;font-size:12px}
+.ma-ed-n{margin:-2px 1px 8px;min-height:15px;color:#7c88ad}.ma-pvg{grid-column:1/-1;padding:8px 10px 3px;background:#0d1322;border:1px solid rgba(255,255,255,.06);border-radius:14px}.ma-pvg-h{display:flex;align-items:baseline;justify-content:space-between;gap:8px;margin-bottom:6px}.ma-pvg-h b{font:800 11px Arial,sans-serif;letter-spacing:.06em;text-transform:uppercase;color:#cfd8f7}.ma-pvg-h small{font-size:10.5px;color:#7c88ad}.ma-pvg .ma-ed-f{margin:0 0 8px}.ma-pvg .ma-ed-n{margin:-3px 1px 8px}.ma-ed-c{display:flex;justify-content:space-between;gap:8px;padding:2px 2px 2px;color:#7c88ad;font-size:10.5px;font-weight:700;letter-spacing:.04em;text-transform:uppercase}
+.ma-ed .ma-pm{padding:4px 2px;gap:9px}.ma-ed .ma-pm:first-child{border-top:0}.ma-ed .ma-pm .ma-num .ma-in{height:27px;font-size:12px}
 .ma-ed-h{display:flex;align-items:center;gap:8px;margin-bottom:4px}.ma-ed-t{flex:1;min-width:0;display:flex;align-items:center;gap:4px 8px;flex-wrap:wrap}.ma-ed-t b{font:800 13px Arial,sans-serif;color:#fff;overflow-wrap:anywhere}
 .ma-ed-t small{display:flex;align-items:center;gap:6px;flex-wrap:wrap;color:#7c88ad;font-size:10.5px}
 .ma-in.off,.ma-in:disabled{opacity:.45;cursor:not-allowed}   /* Auto is choosing: plain greyed-out disabled, same look as any disabled control */
@@ -5425,28 +5428,42 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   });
   const cubeNodeCount = () => cubeNodeGroups().reduce((n, g) => n + g[2].length, 0);
   /* ---- PvE damage settings of one node (Cube Suite's PvE profile for the current mode: cube.pve.get / cube.pve.set): damage mode, fixed cap, model, and per mob: ticked + cap ---- */
-  const PVE_MODES = [['monster', 'Per-mob caps'], ['exp', 'EXP caps'], ['loot', 'Loot-unlock caps'], ['fixed', 'One fixed cap']];   // + ['scheduled', 'Timed caps'] on the Normal profile
-  const PVE_MODE_HINT = { monster: 'A cap per mob below. 0 = skip that mob.', exp: 'Stops at each mob\'s server EXP cap. No setup needed.', loot: 'Stops at the DMG req for the rarest drop on each mob.', fixed: 'One damage cap for every mob.', scheduled: 'Time-based caps per node: build the breakpoints in the Cube panel on the Cube page.' };
+  const PVE_MODES = [['exp', 'EXP cap'], ['fixed', 'Fixed cap (all mobs)'], ['monster', 'Per-mob caps'], ['loot', 'Full loot unlock']];   // + ['scheduled', ...] on the Normal profile: same names as Cube Suite's panel
+  const PVE_MODE_HINT = { exp: 'Stops at each mob\'s server EXP cap. No setup needed.', fixed: 'One damage cap for all mobs.', monster: 'Per-mob caps below. 0 = skip that mob.', loot: 'Stops once you\'ve hit the DMG req for the rarest drop on each mob.', scheduled: 'Per-node, time-based caps. Build the breakpoints in the Cube panel on the Cube page.' };
   const cubePveSet = (o) => {
     if (!Core.has('cube.pve.set')) { log('⚠️ Cube Suite is too old for PvE settings: reload so 3.6.0+ loads', 'warn'); return Promise.resolve(); }
     return Promise.resolve(Core.call('cube.pve.set', o)).then(() => draw()).catch((e) => log('⚠️ Cube Suite: ' + esc((e && e.message) || e), 'warn'));
   };
+  const cubePveGet = () => { try { const f = Core.has('cube.pve.get') ? Core.cap('cube.pve.get') : null; return f ? f() : null; } catch (_) { return null; } };
+  const pveFmt = (n) => (n > 0 ? short(n) : '0');
+  const pveCapWord = (d) => ({ monster: 'damage cap', exp: 'EXP cap', loot: 'loot unlock', scheduled: 'timed caps', fixed: 'every mob: ' + (d.fixedDamageCap > 0 ? short(d.fixedDamageCap) : 'no limit') }[d.damageMode] || '');
+  /* GLOBAL: one profile-wide setting for ALL PvE rooms (Cube Suite keeps it above its room list too). Always visible, so changing the stop condition is one tap away and never looks like a per-room choice. */
+  function cubePveGlobal() {
+    const d = cubePveGet();
+    if (!d) return h('div', { class: 'ma-pvg' }, note('Needs Cube Suite 3.6.0+ for the PvE damage settings (reload so the new version loads).'));
+    const fast = d.profile === 'fast';
+    return h('div', { class: 'ma-pvg' },
+      h('div', { class: 'ma-pvg-h' }, h('b', {}, 'All PvE rooms'), h('small', {}, (fast ? 'Fast Run' : 'Normal') + ' profile')),
+      h('div', { class: 'ma-ed-f' },
+        opt('Stop condition', dropdown(PVE_MODES.concat(fast ? [] : [['scheduled', 'Scheduled (per-node, time-based)']]), d.damageMode, (v) => { cubePveSet({ damageMode: v }); })),
+        opt('Damage model', dropdown([['eco', 'Eco'], ['fast', 'Fast']], d.damageModel, (v) => { cubePveSet({ damageModel: v }); }))),
+      h('div', { class: 'ma-note ma-ed-n' }, PVE_MODE_HINT[d.damageMode] || ''),
+      d.damageMode === 'fixed' ? h('div', { class: 'ma-ed-f' }, opt('Fixed cap', num(() => d.fixedDamageCap, (n) => { cubePveSet({ fixedDamageCap: n }); }, { min: 0, fmt: pveFmt, parse: parseCap }), '0 = no limit')) : null);
+  }
+  /* LOCAL: one room. Only what belongs to this room: which of its mobs are attacked and, in per-mob mode, each one's cap. */
   function cubePveEditor(label) {
     const close = () => { ui.cubeSel = ''; saveUi(); draw(); };
     const head = (sub) => h('div', { class: 'ma-ed-h' }, h('div', { class: 'ma-ed-t' }, h('b', {}, label), h('small', {}, sub)), h('button', { type: 'button', class: 'ma-link', title: 'Close', onclick: close }, '✕'));
-    let d = null; try { const f = Core.has('cube.pve.get') ? Core.cap('cube.pve.get') : null; d = f ? f() : null; } catch (_) { d = null; }
-    if (!d) return h('div', { class: 'ma-ed' }, head('damage settings'), note('Needs Cube Suite 3.6.0+ (reload so the new version loads).'));
-    const node = (d.nodes || []).find((n) => n.label === label), fmt = (n) => (n > 0 ? short(n) : '0'), mobs = node ? node.mobs : [];
-    const monster = d.damageMode === 'monster';
-    return h('div', { class: 'ma-ed' }, head('damage cap per mob · ' + (d.profile === 'fast' ? 'Fast Run' : 'Normal') + ' profile'),
-      h('div', { class: 'ma-sr-o tm' }, opt('Damage mode', dropdown(PVE_MODES.concat(d.profile === 'fast' ? [] : [['scheduled', 'Timed caps']]), d.damageMode, (v) => { cubePveSet({ damageMode: v }); }), PVE_MODE_HINT[d.damageMode], 'wide')),
-      d.damageMode === 'fixed' ? h('div', { class: 'ma-sr-o tm' }, opt('Fixed cap', num(() => d.fixedDamageCap, (n) => { cubePveSet({ fixedDamageCap: n }); }, { w: 92, min: 0, fmt, parse: parseCap }))) : null,
-      h('div', { class: 'ma-sr-o tm' }, opt(['Damage model', h('small', {}, 'how hits are spent')], dropdown([['eco', 'Eco · stamina-safe'], ['fast', 'Fast · fewest hits']], d.damageModel, (v) => { cubePveSet({ damageModel: v }); }))),
+    const d = cubePveGet();
+    if (!d) return h('div', { class: 'ma-ed' }, head('monsters'), note('Needs Cube Suite 3.6.0+ (reload so the new version loads).'));
+    const node = (d.nodes || []).find((n) => n.label === label), mobs = node ? node.mobs : [], monster = d.damageMode === 'monster';
+    return h('div', { class: 'ma-ed' }, head('this room only'),
+      h('div', { class: 'ma-ed-c' }, h('span', {}, 'Attack these ' + mobs.length + ' monster' + (mobs.length === 1 ? '' : 's')), h('span', {}, pveCapWord(d))),
       mobs.length ? h('div', { class: 'ma-pms' }, mobs.map((m) => h('div', { class: 'ma-pm' },
         sw(() => !!m.selected, (v) => { cubePveSet({ mob: { nodeId: node.id, key: m.key, selected: v } }); }, { sm: true, redraw: false }),
         h('span', { class: 'ma-pm-n' }, m.name),
-        monster ? num(() => m.cap, (n) => { cubePveSet({ mob: { nodeId: node.id, key: m.key, cap: n } }); }, { w: 92, min: 0, fmt, parse: parseCap }) : null)))
-        : h('div', { class: 'ma-empty' }, 'No mobs known on this node yet: the Cube scan lists them as soon as it has seen the node.'));
+        monster ? num(() => m.cap, (n) => { cubePveSet({ mob: { nodeId: node.id, key: m.key, cap: n } }); }, { min: 0, fmt: pveFmt, parse: parseCap }) : null)))
+        : h('div', { class: 'ma-empty' }, 'No monsters known on this room yet: the Cube scan lists them as soon as it has seen it.'));
   }
   const CUBE_WORD = { cleared: 'cleared', joined: 'joined', avail: 'available', cd: 'cooldown', locked: 'locked', mon: 'waiting', idle: 'idle' };   // only used when a pill has no " · state" part
   function cubeFold(f, force) {
@@ -5466,6 +5483,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
         h('div', { class: 'ma-bb-n' }, h('b', {}, nm), h('small', {}, h('span', { class: kind ? 'st-' + kind : '' }, st || CUBE_WORD[k] || ''))));
     };
     const rowOfNodes = (g) => h('div', { class: 'ma-wv' },
+      ...(g[0] === 'PvE' && Core.has('cube.pve.get') ? [cubePveGlobal()] : []),   // settings for every room come first, so a room's card opens right under its own pills
       h('div', { class: 'ma-wv-l' + (g[2].some(live) ? ' on' : '') }, h('b', {}, g[0]), h('small', { title: g[1] }, g[1])),
       h('div', { class: 'ma-grid' }, g[2].map(node(g))),
       ...(g[0] === 'PvE' && ui.cubeSel && Core.has('cube.pve.get') && g[2].some(([, t]) => cubePillName(t) === ui.cubeSel) ? [cubePveEditor(ui.cubeSel)] : []));
