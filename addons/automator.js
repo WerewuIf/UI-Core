@@ -26,7 +26,7 @@
  * default cap of a boss is its highest loot requirement, and bosses the roster did not know yet are added. Export .txt writes it all out.
  */
 Core.module({
-  id: 'automator', name: 'Automator', icon: '🤖', version: '1.14.4',
+  id: 'automator', name: 'Automator', icon: '🤖', version: '1.14.5',
   // Offered to other addons through Core capabilities (guides/CAPABILITIES.md):
   //   automator.status() -> the status string     automator.start() / automator.stop()     automator.scan() -> scan the bosses now
   provides: (api) => api && api.start ? {
@@ -37,7 +37,7 @@ Core.module({
   } : {},
   init(Core) {
 'use strict';
-const ID = 'automator', VERSION = '1.14.4';
+const ID = 'automator', VERSION = '1.14.5';
 const FARM_MARK = '\u2063farm\u2063';          // a task line is written when the task looks; this marks where the farm's state goes, filled in live when the line is drawn (a line saying "queued" while the farm is already checking the graveyard was stale)
 if (window.__automatorLoaded) { console.warn('[automator] already loaded', window.__automatorLoaded); return null; }
 window.__automatorLoaded = VERSION;
@@ -5425,7 +5425,8 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   });
   const cubeNodeCount = () => cubeNodeGroups().reduce((n, g) => n + g[2].length, 0);
   /* ---- PvE damage settings of one node (Cube Suite's PvE profile for the current mode: cube.pve.get / cube.pve.set): damage mode, fixed cap, model, and per mob: ticked + cap ---- */
-  const PVE_MODE_NAME = { fixed: 'one fixed cap', exp: 'EXP caps', loot: 'loot-unlock caps', scheduled: 'timed caps' };   // what Cube Suite is on when it is not on per-mob caps
+  const PVE_MODES = [['monster', 'Per-mob caps'], ['exp', 'EXP caps'], ['loot', 'Loot-unlock caps'], ['fixed', 'One fixed cap']];   // + ['scheduled', 'Timed caps'] on the Normal profile
+  const PVE_MODE_HINT = { monster: 'A cap per mob below. 0 = skip that mob.', exp: 'Stops at each mob\'s server EXP cap. No setup needed.', loot: 'Stops at the DMG req for the rarest drop on each mob.', fixed: 'One damage cap for every mob.', scheduled: 'Time-based caps per node: build the breakpoints in the Cube panel on the Cube page.' };
   const cubePveSet = (o) => {
     if (!Core.has('cube.pve.set')) { log('⚠️ Cube Suite is too old for PvE settings: reload so 3.6.0+ loads', 'warn'); return Promise.resolve(); }
     return Promise.resolve(Core.call('cube.pve.set', o)).then(() => draw()).catch((e) => log('⚠️ Cube Suite: ' + esc((e && e.message) || e), 'warn'));
@@ -5438,8 +5439,8 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     const node = (d.nodes || []).find((n) => n.label === label), fmt = (n) => (n > 0 ? short(n) : '0'), mobs = node ? node.mobs : [];
     const monster = d.damageMode === 'monster';
     return h('div', { class: 'ma-ed' }, head('damage cap per mob · ' + (d.profile === 'fast' ? 'Fast Run' : 'Normal') + ' profile'),
-      monster ? null : h('div', { class: 'ma-note', style: { margin: '2px 0 6px' } }, 'Cube Suite is on ' + (PVE_MODE_NAME[d.damageMode] || d.damageMode) + ', so the caps below are not used' + (d.damageMode === 'scheduled' ? ' (timed caps are edited in the Cube panel on the Cube page).' : '.') + ' ',
-        h('button', { type: 'button', class: 'ma-link', onclick: () => { cubePveSet({ damageMode: 'monster' }); } }, 'Use per-mob caps')),
+      h('div', { class: 'ma-sr-o tm' }, opt('Damage mode', dropdown(PVE_MODES.concat(d.profile === 'fast' ? [] : [['scheduled', 'Timed caps']]), d.damageMode, (v) => { cubePveSet({ damageMode: v }); }), PVE_MODE_HINT[d.damageMode], 'wide')),
+      d.damageMode === 'fixed' ? h('div', { class: 'ma-sr-o tm' }, opt('Fixed cap', num(() => d.fixedDamageCap, (n) => { cubePveSet({ fixedDamageCap: n }); }, { w: 92, min: 0, fmt, parse: parseCap }))) : null,
       h('div', { class: 'ma-sr-o tm' }, opt(['Damage model', h('small', {}, 'how hits are spent')], dropdown([['eco', 'Eco · stamina-safe'], ['fast', 'Fast · fewest hits']], d.damageModel, (v) => { cubePveSet({ damageModel: v }); }))),
       mobs.length ? h('div', { class: 'ma-pms' }, mobs.map((m) => h('div', { class: 'ma-pm' },
         sw(() => !!m.selected, (v) => { cubePveSet({ mob: { nodeId: node.id, key: m.key, selected: v } }); }, { sm: true, redraw: false }),
