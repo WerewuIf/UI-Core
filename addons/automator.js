@@ -27,7 +27,7 @@
  * default cap of a boss is its highest loot requirement, and bosses the roster did not know yet are added. Export .txt writes it all out.
  */
 Core.module({
-  id: 'automator', name: 'Automator', icon: '🤖', version: '1.14.10',
+  id: 'automator', name: 'Automator', icon: '🤖', version: '1.14.11',
   // Offered to other addons through Core capabilities (guides/CAPABILITIES.md):
   //   automator.status() -> the status string     automator.start() / automator.stop()     automator.scan() -> scan the bosses now
   provides: (api) => api && api.start ? {
@@ -38,7 +38,7 @@ Core.module({
   } : {},
   init(Core) {
 'use strict';
-const ID = 'automator', VERSION = '1.14.10';
+const ID = 'automator', VERSION = '1.14.11';
 const FARM_MARK = '\u2063farm\u2063';          // a task line is written when the task looks; this marks where the farm's state goes, filled in live when the line is drawn (a line saying "queued" while the farm is already checking the graveyard was stale)
 if (window.__automatorLoaded) { console.warn('[automator] already loaded', window.__automatorLoaded); return null; }
 window.__automatorLoaded = VERSION;
@@ -109,7 +109,7 @@ const DEFAULT_CFG = {
     bp:       { enabled: false, everyMin: 60 },
     merchant: { enabled: false, everyMin: 60 },
     graveyard: { enabled: false, keepLevels: 5 },   // keepLevels = the stash: EXP corpses worth this many level-ups are kept for later, everything above it (oldest first) and the out-levelled ones are looted (PART 4 clearRun)
-    extract:  { enabled: false, everyMin: 5, mobs: {} },   // shadow extraction (PART 5b): mobs = the gate mobs ticked to extract (any gate), by lower-case name
+    extract:  { enabled: false, everyMin: 5, mobs: {} },   // shadow extraction (PART 5b): mobs = the Grakthar gate mobs ticked to extract, by lower-case name
     pvp:      { solo: { enabled: false }, team: { enabled: false } },   // placeholders until the PvP module registers itself
     monsters: { enabled: true },       // the boss engine's own switch (Start / Stop is the master switch for everything)
     farm:     { auto: true },        // auto: use Auto-Farm when the game allows it (level 400+); the normal attack path otherwise
@@ -4602,8 +4602,8 @@ const Merchant = (() => {
  *           you press Retry skipped types (the page never says whether a refused try spends an attempt, so it is never tried twice).
  * The loot ledger / graveyard is NOT involved: unjoined corpses never show there and extraction does not need them to. */
 const Extract = (() => {
-  const GATES = { 3: [3, 5, 8], 5: [9, 10, 11, 12, 13, 14, 15, 16, 17] };   // the waves known to hold mobs: Grakthar (gate 3), Ocean + Olympus (gate 5); the Roster's waves of any gate are added
-  const LEARN_MS = 12 * 3600000;                             // a wave nobody is extracting from is only re-read this often (just to learn its mob names)
+  const GATE = 3, WAVES = [3, 5, 8];                         // Grakthar gate; the waves known to hold mobs (the Roster's gate-3 waves are added)
+  const LEARN_MS = 12 * 3600000;                             // a wave with no ticked mob is only re-read this often, and only its alive view: just to learn the mob names
   const PROBE_MS = 10 * 60000;                               // out of attempts: one extraction try this often
   const SCAN_LIMITED_MS = 30 * 60000;                        // out of attempts: the wave pages are only re-read this often
   const MAX_VERIFY = 20, MAX_IDS = 600, KEEP_MS = 7 * 86400000, READY_TRUST_MS = 6 * 3600000;
@@ -4654,10 +4654,9 @@ const Extract = (() => {
 
   /* ---- the Grakthar gate's wave pages ---- */
   const waves = () => {
-    const m = new Map(), add = (g, w) => { g = Number(g); w = Number(w); if (g > 0 && w > 0) m.set(g + '/' + w, [g, w]); };
-    for (const [g, ws] of Object.entries(GATES)) ws.forEach((w) => add(g, w));
-    for (const d of Roster.list) { if (d.kind !== 'wave') continue; const l = bossLoc(d.low); if (l) add(l.gate, l.wave); }
-    return [...m.values()].sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+    const m = new Map(WAVES.map((w) => [w, [GATE, w]]));
+    for (const d of Roster.list) { if (d.kind !== 'wave') continue; const l = bossLoc(d.low); if (l && String(l.gate) === String(GATE) && Number(l.wave) > 0) m.set(Number(l.wave), [GATE, Number(l.wave)]); }
+    return [...m.values()].sort((a, b) => a[1] - b[1]);
   };
   const wavePage = (gate, wave, mode) => Lane.run(async () => {                // 'alive' | 'all' (the dead view): the two views take turns with the boss scan
     try {
@@ -4675,8 +4674,8 @@ const Extract = (() => {
   const ticked = () => cfg.tasks.extract.mobs || {};
   const isOn = (low) => !!ticked()[low];
   function mobs() {                                                              // every mob seen on the gate + its Generals, in wave order
-    const s = S(), m = new Map(Object.entries(s.mobs).map(([low, v]) => [low, Object.assign({ low }, v)]));
-    for (const d of Roster.list) { const l = d.kind === 'wave' ? bossLoc(d.low) : null; if (l && Number(l.wave) > 0 && !m.has(d.low)) m.set(d.low, { low: d.low, name: d.name, gate: Number(l.gate), wave: Number(l.wave), boss: true }); }
+    const s = S(), m = new Map(Object.entries(s.mobs).filter(([, v]) => Number(v.gate) === GATE).map(([low, v]) => [low, Object.assign({ low }, v)]));
+    for (const d of Roster.list) { const l = d.kind === 'wave' ? bossLoc(d.low) : null; if (l && String(l.gate) === String(GATE) && Number(l.wave) > 0 && !m.has(d.low)) m.set(d.low, { low: d.low, name: d.name, gate: GATE, wave: Number(l.wave), boss: true }); }
     return [...m.values()].map((v) => Object.assign({ skip: s.never[v.low] ? 'no shadow form' : s.weak[v.low] ? 'skill too low' : '', label: WaveMap.of(v.gate, v.wave).label }, v)).sort((a, b) => a.gate - b.gate || a.wave - b.wave || (b.boss ? 1 : 0) - (a.boss ? 1 : 0) || a.name.localeCompare(b.name));
   }
 
@@ -4692,15 +4691,16 @@ const Extract = (() => {
   const rank = (v) => (v.dexp > 0 ? v.dexp * 1000 : 1e15 + (v.firstSeen || 0));              // closest to expiring first; unknown expiry last
   const queue = (s) => Object.entries(s.ids).filter(([, v]) => (v.state === 'dead' || v.state === 'ready') && isOn(v.low) && !s.never[v.low] && !s.weak[v.low]).sort((a, b) => rank(a[1]) - rank(b[1]));
 
+  const learnMob = (s, c, g, w) => { const low = lowOf(c.name), m = s.mobs[low]; if (!m || m.wave !== w || m.gate !== g || (c.boss && !m.boss)) s.mobs[low] = { name: c.name, gate: g, wave: w, boss: !!(c.boss || (m && m.boss)) }; };
   // read the gate: learn the mob names, remember ticked ids while they are alive, and mark the ones that are not alive any more
   async function scan(s) {
-    const now = Date.now(), list = waves(), aliveSeen = new Set(), okWave = new Set(); let read = 0;
-    const hot = new Set(Object.entries(s.mobs).filter(([low]) => isOn(low) && !s.never[low] && !s.weak[low]).map(([, m]) => m.gate + '/' + m.wave));   // the waves that hold a ticked mob: read every time, the others only now and then
-    const learn = (c, g, w) => { const low = lowOf(c.name), m = s.mobs[low]; if (!m || m.wave !== w || m.gate !== g || (c.boss && !m.boss)) s.mobs[low] = { name: c.name, gate: g, wave: w, boss: !!(c.boss || (m && m.boss)) }; };
+    const now = Date.now(), list = waves(), aliveSeen = new Set(), okWave = new Set(); let read = 0, fresh = 0;
+    const hot = new Set(mobs().filter((m) => isOn(m.low) && !m.skip).map((m) => m.gate + '/' + m.wave));   // the waves that hold a ticked mob: read every time, the others only now and then
+    const learn = (c, g, w) => learnMob(s, c, g, w);
     try {
       for (const [i, [g, w]] of list.entries()) {
         Work.set('scan', `Extraction · Gate ${g} · Wave ${w}`, i, list.length);
-        const key = g + '/' + w; if (!hot.has(key) && s.seen[key] && now - s.seen[key] < LEARN_MS) continue;
+        const key = g + '/' + w, isHot = hot.has(key); if (!isHot && s.seen[key] && now - s.seen[key] < LEARN_MS) { fresh++; continue; }
         const a = await wavePage(g, w, 'alive');
         if (a) {
           read++; okWave.add(key); s.seen[key] = now;
@@ -4711,6 +4711,7 @@ const Extract = (() => {
           }
         }
         await sleep(150);
+        if (!isHot) continue;                                                // nobody is extracting here: the alive view was enough to learn the names
         const d = await wavePage(g, w, 'all');
         if (d) {
           for (const c of cardsOf(d)) {
@@ -4726,10 +4727,21 @@ const Extract = (() => {
     } finally { Work.clear('scan'); }
     for (const [id, v] of Object.entries(s.ids)) if (v.state === 'alive' && okWave.has(v.gate + '/' + v.wave) && !aliveSeen.has(id)) v.state = 'dead';   // read fine and not on the alive view any more: it died (or went), its battle page decides which
     s.scanAt = now; prune(s); put(s);
-    return read > 0;
+    return read > 0 || fresh > 0;
   }
 
   // the battle page of one corpse
+  let learning = false, learnTry = 0;
+  async function learnSoon() {
+    if (learning || !Tab.isMain() || Tasks.busy('extract') || Date.now() - learnTry < 10 * 60000) return;
+    const s = S(), now = Date.now(), stale = waves().filter(([g, w]) => !(s.seen[g + '/' + w] && now - s.seen[g + '/' + w] < LEARN_MS)); if (!stale.length) return;
+    learning = true; learnTry = now;
+    try {
+      let n = 0;
+      for (const [g, w] of stale) { const a = await wavePage(g, w, 'alive'); if (!a) continue; n++; cardsOf(a).forEach((c) => learnMob(s, c, g, w)); s.seen[g + '/' + w] = Date.now(); await sleep(150); }
+      if (n) { const f = S(); f.mobs = Object.assign(f.mobs, s.mobs); f.seen = Object.assign(f.seen, s.seen); put(f); UI.dirty('tasks'); }
+    } catch (_) { /* the list just stays as it was */ } finally { learning = false; }
+  }
   async function look(id) {
     let html;
     try { html = await netText(`/battle.php?id=${encodeURIComponent(id)}`, { force: true, ttl: 0, key: 'ma:ex:b:' + id }); } catch (_) { return { state: 'error' }; }
@@ -4748,6 +4760,7 @@ const Extract = (() => {
 
   async function tick() {
     const t = cfg.tasks.extract; if (!t.enabled) return;
+    if (learning) return 20000;
     const t0 = Date.now(), put = (x) => { if (resetAt >= t0) { x.never = {}; x.weak = {}; } store.set(x); };
     const every = Math.max(1, Number(t.everyMin) || 5) * 60000, s = S(); let wait = every, more = false, extra = '', probed = false, verified = 0;
     setInfo({ state: 'run', line: 'reading the gate waves…' });
@@ -4798,7 +4811,7 @@ const Extract = (() => {
     return wait;
   }
   const resetSkips = () => { resetAt = Date.now(); const s = S(); s.never = {}; s.weak = {}; put(s); Tasks.poke('extract'); UI.dirty('tasks'); };
-  return { tick, state: S, mobs, resetSkips, pageOf, replyOf, _test: { scan, queue, prune } };
+  return { tick, state: S, mobs, learnSoon, resetSkips, pageOf, replyOf, _test: { scan, queue, prune } };
 })();
 
 /* ---- the registry + scheduler ---- */
@@ -4827,7 +4840,7 @@ Object.assign(Tasks, (() => {
   define({ id: 'bp', name: 'Battle Pass', icon: '🎫', desc: 'The hunt of the pass, auto-farmed', every: () => mins(cfg.tasks.bp.everyMin, 10), enabled: () => !!cfg.tasks.bp.enabled, tick: Battle.tick });
   define({ id: 'merchant', name: 'Merchant', icon: '🛒', desc: 'Buys the weekly restock once per server week', every: () => mins(cfg.tasks.merchant.everyMin, 30), enabled: () => !!cfg.tasks.merchant.enabled, tick: Merchant.tick });
   define({ id: 'graveyard', name: 'Graveyard', icon: '🪦', desc: 'Keeps a stash of EXP corpses worth a few level-ups, loots everything above it (oldest first, potions on hold) and the out-levelled ones', every: () => 20 * 60000, enabled: () => !!cfg.tasks.graveyard.enabled, tick: Graveyard.tick });
-  define({ id: 'extract', name: 'Extraction', icon: '☠️', desc: 'Raises shadows from dead gate monsters: no join or kill needed', every: () => mins(cfg.tasks.extract.everyMin, 5), enabled: () => !!cfg.tasks.extract.enabled, tick: Extract.tick });
+  define({ id: 'extract', name: 'Extraction', icon: '☠️', desc: 'Raises shadows from dead Grakthar gate monsters: no join or kill needed', every: () => mins(cfg.tasks.extract.everyMin, 5), enabled: () => !!cfg.tasks.extract.enabled, tick: Extract.tick });
   define({ id: 'pvp.solo', name: 'PvP · Solo', icon: '⚔️', group: 'pvp', desc: 'placeholder — plug your PvP module in', placeholder: true, enabled: () => !!cfg.tasks.pvp.solo.enabled });
   define({ id: 'pvp.team', name: 'PvP · Team', icon: '🛡️', group: 'pvp', desc: 'placeholder — plug your PvP module in', placeholder: true, enabled: () => !!cfg.tasks.pvp.team.enabled });
   return { define, info, poke, nextDue: (id) => due.get(id) || 0, list: () => [...defs.values()], get: (id) => defs.get(id), busy: (id) => busy.has(id) };
@@ -5465,12 +5478,15 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
         opt('Stash', num(() => gt.keepLevels, (n) => { gt.keepLevels = Math.round(n); }, { w: 56, min: 0, max: 50, unit: 'level-ups', parse: parseFloat }), 'the newest EXP corpses worth this many level-ups stay'),
         gt.enabled ? btn(Loot.state.clearing ? 'Clearing…' : 'Clear now', 'soft', () => { Graveyard.clearNow(); draw(); }) : null]));
     // Extraction
+    Extract.learnSoon().catch(() => {});
     const xt = T.extract, xm = Extract.mobs(), xOn = xm.filter((m) => xt.mobs[m.low]).length, xs = Extract.state(), xSkip = Object.keys(xs.never).length + Object.keys(xs.weak).length;
-    out.push(card('☠️', 'Extraction', 'Raises shadows from dead mobs of any gate (Grakthar, Ocean, Olympus…): no join or kill needed. Stops when the day\'s attempts are used', xt.enabled, (v) => { xt.enabled = !!v; if (v) Tasks.poke('extract'); },
+    out.push(card('☠️', 'Extraction', 'Raises shadows from dead Grakthar gate mobs, Generals and normal ones: no join or kill needed. Stops when the day\'s attempts are used', xt.enabled, (v) => { xt.enabled = !!v; if (v) Tasks.poke('extract'); },
       [tStatus('extract'), xt.enabled ? nextNote('extract') : null,
-        fold('ex:mobs', true, ['Mobs to extract', h('small', {}, `${xOn} of ${xm.length} ticked`)], () => [
+        fold('ex:mobs2', false, ['Mobs to extract', h('small', {}, `${xOn} of ${xm.length} ticked`)], () => [
           h('div', { class: 'ma-sr-o' }, btn('Tick all', 'soft', () => { xm.forEach((m) => { xt.mobs[m.low] = true; }); saveCfg(); Tasks.poke('extract'); draw(); }), btn('Untick all', 'soft', () => { xt.mobs = {}; saveCfg(); draw(); })),
-          ...(xm.length ? xm.map((m) => srow(m.boss ? '♛' : '👹', m.name, `Gate ${m.gate} · ${m.label && m.label !== 'Gate ' + m.gate ? m.label + ' · ' : ''}Wave ${m.wave}${m.skip ? ' · skipped: ' + m.skip : ''}`, sw(() => !!xt.mobs[m.low], (v) => { if (v) xt.mobs[m.low] = true; else delete xt.mobs[m.low]; Tasks.poke('extract'); }, { sm: true }))) : [note('No mobs known yet: the first look at the gates fills this list.')])]),
+          ...(xm.length ? [...new Set(xm.map((m) => m.wave))].map((w) => { const ms = xm.filter((m) => m.wave === w), on = ms.filter((m) => xt.mobs[m.low]).length, lb = ms.find((m) => m.label && !/^Gate /.test(m.label));
+            return fold('ex:w' + w, false, [lb ? `${lb.label} · wave ${w}` : `Wave ${w}`, h('small', {}, `${on} of ${ms.length} ticked`)], () => ms.map((m) => srow(m.boss ? '♛' : '👹', m.name, m.skip ? 'skipped: ' + m.skip : m.boss ? 'boss' : '', sw(() => !!xt.mobs[m.low], (v) => { if (v) xt.mobs[m.low] = true; else delete xt.mobs[m.low]; Tasks.poke('extract'); }, { sm: true }))), { sub: true }); })
+            : [note('No mobs known yet: the first look at the gate fills this list.')])]),
         xt.enabled && xSkip ? note(`${xSkip} mob type${xSkip === 1 ? '' : 's'} skipped (the game refused: no shadow form, or your extraction skill is too low)`) : null,
         xt.enabled && xSkip ? btn('Retry skipped types', 'soft', () => { Extract.resetSkips(); draw(); }) : null,
         xt.enabled ? btn('Look now', 'soft', () => { Tasks.poke('extract'); draw(); }) : null]));
