@@ -14,7 +14,7 @@
  *                      Swappable: turn the part off (or delete it) and the wave bosses keep working.
  *   PART 3  DUELS      Phase duels, shared by wave and dungeon bosses
  *   PART 4  LOOT       graveyard scan + persisted ledger (corpses remembered by id, checked on their battle page before looting) + EXP-aware auto-loot,
- *                      clearRun (EXP corpses with stamina potions held, then the out-levelled ones), run by the Graveyard task
+ *                      clearRun (the EXP corpses above the stash, stamina potions held; out-levelled corpses are left alone), run by the Graveyard task
  *   PART 4b LOOT SCAN  reads every boss's loot / level / EXP cap into the cap choices; Export .txt (swappable)
  *   PART 5a FARM       the one auto-farm service (basic wave mobs only): level-400 tolerant, 10% batching, safe restore of your own set-up
  *   PART 5b TASKS      task master: Monsters, Adventure Guild, Battle Pass, Merchant (weekly), Extraction (shadows), PvP placeholders; Automator.tasks.define({...}) adds more
@@ -27,7 +27,7 @@
  * default cap of a boss is its highest loot requirement, and bosses the roster did not know yet are added. Export .txt writes it all out.
  */
 Core.module({
-  id: 'automator', name: 'Automator', icon: '🤖', version: '1.14.12',
+  id: 'automator', name: 'Automator', icon: '🤖', version: '1.14.14',
   // Offered to other addons through Core capabilities (guides/CAPABILITIES.md):
   //   automator.status() -> the status string     automator.start() / automator.stop()     automator.scan() -> scan the bosses now
   provides: (api) => api && api.start ? {
@@ -38,7 +38,7 @@ Core.module({
   } : {},
   init(Core) {
 'use strict';
-const ID = 'automator', VERSION = '1.14.12';
+const ID = 'automator', VERSION = '1.14.14';
 const FARM_MARK = '\u2063farm\u2063';          // a task line is written when the task looks; this marks where the farm's state goes, filled in live when the line is drawn (a line saying "queued" while the farm is already checking the graveyard was stale)
 if (window.__automatorLoaded) { console.warn('[automator] already loaded', window.__automatorLoaded); return null; }
 window.__automatorLoaded = VERSION;
@@ -94,7 +94,7 @@ const DEFAULT_CFG = {
   attackDelayMs: 0,                    // extra pause between swings, WAVE bosses (0: swings are only spaced by the request gap)
   dungeonAttackDelayMs: 0,             // dungeon bosses chain swings back-to-back
   minActionGapMs: 450, skillToAttackGapMs: 1250,
-  fightScanMs: 300000,                 // THE scan interval: wave pages and dungeon maps follow this (Settings → Timing, in minutes). The graveyard has no timer: Scan graveyard / Loot now / out of stamina
+  fightScanMs: 300000,                 // THE scan interval: wave pages and dungeon maps follow this (Settings → Timing, in minutes). The graveyard task has its own interval in days (Tasks → Graveyard); Scan graveyard / Loot now / out of stamina work any time
   spawnLeadMs: 5000,
   mana: { enabled: true, type: 'S', threshold: 20 },     // drink a mana potion when MP <= threshold (or below the class skill's cost)
   stam: { enabled: false, item: 'Large Stamina Potion', save: { thresholdPct: 100 } },     // item: 'Large Stamina Potion' | 'Full Stamina Potion'
@@ -108,7 +108,7 @@ const DEFAULT_CFG = {
     guild:    { enabled: false, everyMin: 60, collect: true, collectFarm: true, skill: true },   // everyMin = the longest wait only: a task wakes itself when something is due
     bp:       { enabled: false, everyMin: 60 },
     merchant: { enabled: false, everyMin: 60 },
-    graveyard: { enabled: false, keepLevels: 5 },   // keepLevels = the stash: EXP corpses worth this many level-ups are kept for later, everything above it (oldest first) and the out-levelled ones are looted (PART 4 clearRun)
+    graveyard: { enabled: false, keepLevels: 5, everyDays: 1 },   // keepLevels = the stash: EXP corpses worth this many level-ups are kept for later, everything above it is looted, oldest first; out-levelled (0 EXP) corpses are never touched (PART 4 clearRun); everyDays = how often it checks
     extract:  { enabled: false, everyMin: 5, mob: '' },   // shadow extraction (PART 5b): mob = the ONE Grakthar gate mob type to extract, by lower-case name ('' = none)
     pvp:      { solo: { enabled: false }, team: { enabled: false } },   // placeholders until the PvP module registers itself
     monsters: { enabled: true },       // the boss engine's own switch (Start / Stop is the master switch for everything)
@@ -132,9 +132,10 @@ function mergeCfg(saved) {
   out.tasks = (() => { const d = JSON.parse(JSON.stringify(DEFAULT_CFG.tasks)), t = s.tasks && typeof s.tasks === 'object' ? s.tasks : {};
     for (const k of Object.keys(d)) { const v = t[k]; if (!v || typeof v !== 'object') continue; if (k === 'pvp') { for (const j of Object.keys(d.pvp)) d.pvp[j] = Object.assign({}, d.pvp[j], v[j] && typeof v[j] === 'object' ? v[j] : {}); } else d[k] = Object.assign({}, d[k], v); }
     return d; })();
-  { const g = out.tasks.graveyard, d = DEFAULT_CFG.tasks.graveyard, k = Number(g.keepLevels);
+  { const g = out.tasks.graveyard, d = DEFAULT_CFG.tasks.graveyard, k = Number(g.keepLevels), e = Number(g.everyDays);
     g.enabled = !!g.enabled; g.keepLevels = Number.isFinite(k) && k >= 0 && k <= 50 ? Math.round(k) : d.keepLevels;
-    for (const x of ['everyMin', 'checkMin', 'pile', 'expiryH', 'levelUp', 'maxDays']) delete g[x]; }      // (1.14.8 / 1.14.9 had an interval and triggers: retired, the stash is the rule now)
+    g.everyDays = Number.isFinite(e) && e >= 0.25 && e <= 30 ? Math.round(e * 100) / 100 : d.everyDays;
+    for (const x of ['everyMin', 'checkMin', 'pile', 'expiryH', 'levelUp', 'maxDays']) delete g[x]; }      // (1.14.8 had minutes and triggers: retired; the stash and the days are the whole schedule now)
   { const x = out.tasks.extract; if (typeof x.mob !== 'string') x.mob = ''; if (!x.mob && x.mobs && typeof x.mobs === 'object') x.mob = Object.keys(x.mobs).find((k) => x.mobs[k]) || '';
     x.mob = x.mob.trim().toLowerCase(); delete x.mobs; }      // (1.14.x ticked any number of mobs: the first ticked one carries over)
   out.cubeFast = (() => { const d = DEFAULT_CFG.cubeFast, v = Object.assign({}, d, s.cubeFast && typeof s.cubeFast === 'object' ? s.cubeFast : {}), n = (x, lo, hi, dflt) => (Number.isFinite(+x) && +x >= lo && +x <= hi ? +x : dflt);
@@ -2788,7 +2789,7 @@ Kernel.register({
   id: 'loot', name: 'Graveyard & loot',  icon: '🪦',          // no periodic scan: the graveyard is read on demand (Scan graveyard / Loot now / out of stamina)
 });
 Object.assign(Loot, (() => {
-  const st = { rows: [], scanning: false, looting: false, estimating: false, clearing: '', lastScanAt: 0, lastPeekAt: 0, lastStuckAt: 0, claiming: new Set() };
+  const st = { rows: [], scanning: false, looting: false, estimating: false, clearing: '', lastScanAt: 0, lastStuckAt: 0, claiming: new Set() };
   const rate = new Map(), capInfo = new Map(), upTo = new Map(), dmgCache = new Map();
   const expNeeded = () => { const m = Core.me.get(), e = m && m.exp; return e && e.max > 0 ? Math.max(0, e.max - e.cur) : null; };
 
@@ -2917,24 +2918,6 @@ Object.assign(Loot, (() => {
     } finally { st.scanning = false; UI.dirty('loot'); }          // always released: a throw before the inner try used to leave scanning=true and block every later scan AND the out-of-stamina loot
   }
 
-  /* ---- peek: the cheap look the Graveyard task takes between clear-outs. Wave pages only (one request per gate / wave: no dungeon maps, no check of every
-   * remembered corpse); new corpses join the ledger and get an EXP estimate, so the task can tell when there is enough to be worth a clear-out. It never changes
-   * the status line and never logs. A look that failed leaves the ledger as it was. Dungeon corpses are only seen by a full scan (clear-out / stamina stall / button). ---- */
-  async function peek() {
-    if (st.scanning || st.looting || st.clearing) return false;
-    st.scanning = true; UI.dirty('loot');
-    let ok = false;
-    try {
-      await Lane.run(async () => {
-        const w = await waveRows(); if (Guard.isFaulted()) return;
-        const prev = st.rows; merge(w, new Set(['wave'])); st.rows = liveRows(prev); st.lastPeekAt = Date.now(); ok = true;
-      });
-      if (ok) await estimateAll(true).catch(() => {});
-    } catch (e) { log(`⚠️ graveyard look error: ${e.message}`, 'warn'); }
-    finally { Work.clear('scan'); st.scanning = false; UI.dirty('loot'); }
-    return ok;
-  }
-
   /* ---- age, from the corpse itself (no history needed): a wave corpse that expires sooner is older; dungeon ids only go up (instance, then room mob). Waves
    * count as older than dungeon corpses: they are the ones that despawn, the old dungeon corpses stay. ---- */
   const nz = (x) => Number(x) || 0;
@@ -2942,7 +2925,7 @@ Object.assign(Loot, (() => {
     ? (a.kind === 'wave' ? (a.expire > 0 ? a.expire : Infinity) - (b.expire > 0 ? b.expire : Infinity) || nz(a.monsterId) - nz(b.monsterId) : nz(a.instanceId) - nz(b.instanceId) || nz(a.monsterId) - nz(b.monsterId))
     : a.kind === 'wave' ? -1 : 1);
   // The stash: EXP corpses worth `levels` level-ups are kept (the newest ones), everything older than that is surplus. One level-up = what you still need now,
-  // the next ones are counted at today's level cost. 0-EXP (out-levelled) corpses never count towards it: they are always surplus.
+  // the next ones are counted at today's level cost. 0-EXP (out-levelled) corpses never count towards it and are never looted (`zero`: only counted for the status line).
   function plan(levels) {
     const m = Core.me.get(), e = m && m.exp, max = e && e.max > 0 ? e.max : 0, need = expNeeded();
     const rows = st.rows.filter((r) => r.needsLoot !== false && !blocked(r));
@@ -3071,29 +3054,29 @@ Object.assign(Loot, (() => {
     await scan(); await pass();
   }
   // "Loot now": always look first (the rows are only as fresh as the last scan), then claim
-  async function scanAndPass() { await scan(true); await pass(); }
+  async function scanAndPass() { if (st.clearing) return; await scan(true); await pass(); }
   /* ---- the clear-out (run by the Graveyard task, PART 5b; nothing here depends on Fast Run or any schedule of the Cube) ----
-   * scan + check every remembered corpse -> stamina potions on hold -> loot EVERY corpse that still gives EXP, biggest first (a level-up may turn some into
-   * 0-EXP ones: each is estimated again right before it is claimed) -> potions back -> then the out-levelled (0-EXP) ones: they still give items and quest credit.
-   * The hold lives on a heartbeat, so a reload mid-run cannot leave the potions off (see Potions.hold). */
+   * scan + check every remembered corpse -> stamina potions on hold -> loot the EXP corpses above the stash, oldest first (a level-up may turn some into 0-EXP
+   * ones: each is estimated again right before it is claimed) -> potions back. Out-levelled (0 EXP) corpses are never claimed: they add no level-up, so the
+   * game has nothing to "clean" for them. The hold lives on a heartbeat, so a reload mid-run cannot leave the potions off (see Potions.hold). */
   let stopReq = false;
   async function clearRun(opts) {
     if (st.clearing || st.looting || st.scanning) return null;
     st.clearing = 'run'; stopReq = false; UI.dirty('loot');
-    const R = { exp: 0, zero: 0, rescued: 0, skipped: 0, blocked: 0, unknown: 0, left: 0, exped: 0, stopped: false, kept: 0, noExpInfo: false }; let beat = 0;
+    const R = { exp: 0, skipped: 0, blocked: 0, unknown: 0, left: 0, exped: 0, stopped: false, kept: 0, noExpInfo: false, outLevelled: 0 }; let beat = 0;
     const levels = opts && Number.isFinite(opts.levels) ? opts.levels : null;               // null = no stash: every EXP corpse, biggest first (the old way)
     const go = () => !stopReq && Tab.isMain() && !Guard.isFaulted() && Run.tasksOn();
-    const loot = async (todo, label, mode) => {                    // mode: 'exp' (still gives EXP) | 'zero' (out-levelled) | 'rescue' (no EXP estimate, about to despawn)
+    const loot = async (todo, label) => {
       let n = 0;
       for (const row of todo) {
         if (!go()) { R.stopped = true; break; }
         Work.set('scan', label, n++, todo.length);
         if (blocked(row)) { R.blocked++; continue; }
-        const e = await estimate(row).catch(() => null);               // you may have levelled since the scan: an out-levelled corpse moves to the second half
+        const e = await estimate(row).catch(() => null);               // you may have levelled since the scan: a corpse that is out-levelled now is skipped
         if (Number.isFinite(e)) row.est = e;
-        if (mode === 'exp' ? !(e > 0) : mode === 'zero' ? !(e === 0) : Number.isFinite(e)) { R.skipped++; continue; }
+        if (!(e > 0)) { R.skipped++; continue; }                      // out-levelled by now (or no estimate): left alone
         const res = await claim(row);
-        if (res.ok) { if (mode === 'exp') R.exp++; else if (mode === 'zero') R.zero++; else R.rescued++; R.exped += res.expDelta || 0; log(`${mode === 'exp' ? '🎒' : '🎁'} looted ${esc(row.name)}${row.isBoss ? ' 👑' : ''}${res.expDelta ? ` (+${fmtNum(res.expDelta)} EXP)` : ''}`, 'ok'); if (res.expDelta > 0) await syncMe(); }
+        if (res.ok) { R.exp++; R.exped += res.expDelta || 0; log(`🎒 looted ${esc(row.name)}${row.isBoss ? ' 👑' : ''}${res.expDelta ? ` (+${fmtNum(res.expDelta)} EXP)` : ''}`, 'ok'); if (res.expDelta > 0) await syncMe(); }
         else if (res.skipped) R.skipped++; else log(`⚠️ loot claim failed for ${esc(row.name)}`, 'warn');
         UI.dirty('loot'); await sleep(cfg.autoLoot.claimGapMs ?? 250);
       }
@@ -3107,21 +3090,20 @@ Object.assign(Loot, (() => {
       if (expRows.length && go()) {
         Potions.hold(true); beat = setInterval(() => Potions.hold(true), 20000);
         log(`🧹 clearing the graveyard — ${expRows.length} EXP corpse${expRows.length === 1 ? '' : 's'}${P ? ` above your stash of ${levels} level-up${levels === 1 ? '' : 's'} (${R.kept} kept), oldest first` : ''}; stamina potions are on hold until they are looted`, 'info');
-        try { await loot(expRows, 'Clearing graveyard · EXP corpses', 'exp'); } finally { clearInterval(beat); beat = 0; Potions.hold(false); }
+        try { await loot(expRows, 'Clearing graveyard · EXP corpses'); } finally { clearInterval(beat); beat = 0; Potions.hold(false); }
       }
-      const zeroRows = st.rows.filter((r) => byEst(r) && !blocked(r) && r.est === 0).sort(ageOrder);
-      if (zeroRows.length && go()) await loot(zeroRows, 'Clearing graveyard · out-levelled corpses', 'zero');
+      R.outLevelled = st.rows.filter((r) => byEst(r) && r.est === 0).length;
       R.unknown = st.rows.filter((r) => byEst(r) && !Number.isFinite(r.est)).length;
       R.left = st.rows.filter(byEst).length;
     } catch (e) { log('⚠️ graveyard clear-out: ' + esc(e.message), 'warn'); }
     finally {
       if (beat) { clearInterval(beat); Potions.hold(false); } Work.clear('scan'); st.clearing = ''; UI.dirty('loot');
-      if (R.exp + R.zero + R.rescued) log(`🧹 graveyard cleared · ${R.exp} with EXP${R.exped ? ' (+' + fmtNum(R.exped) + ' EXP)' : ''} · ${R.zero} out-levelled${R.rescued ? ` · ${R.rescued} taken before they despawned` : ''}${R.blocked ? ` · ${R.blocked} refused by the game, left for later` : ''}${R.stopped ? ' · stopped early' : ''}${R.skipped ? ` · ${R.skipped} moved on (levelled past, already looted or gone)` : ''}${R.unknown ? ` · ${R.unknown} without an EXP estimate left alone` : ''}`, 'ok');
+      if (R.exp) log(`🧹 graveyard cleared · ${R.exp} looted${R.exped ? ' (+' + fmtNum(R.exped) + ' EXP)' : ''}${R.blocked ? ` · ${R.blocked} refused by the game, left for later` : ''}${R.stopped ? ' · stopped early' : ''}${R.skipped ? ` · ${R.skipped} moved on (levelled past, already looted or gone)` : ''}${R.unknown ? ` · ${R.unknown} without an EXP estimate left alone` : ''}`, 'ok');
     }
     return R;
   }
   const ledgerInfo = () => { const c = { lootable: 0, unverified: 0, looted: 0, gone: 0, foreign: 0 }; Object.values(led).forEach((e) => { c[e.state] = (c[e.state] || 0) + 1; }); return c; };
-  return { onStamStall, scan, peek, plan, ageOrder, pass, scanAndPass, clearRun, blocked, expNeeded, waiting: () => Object.values(led).filter(isLive), stopClear: () => { stopReq = true; }, ledgerInfo, state: st, estimate, claimOne: async (row) => { const r = await claim(row); if (r.ok) { st.rows = st.rows.filter((x) => x.key !== row.key); UI.dirty('loot'); } return r; } };
+  return { onStamStall, scan, plan, ageOrder, pass, scanAndPass, clearRun, blocked, expNeeded, waiting: () => Object.values(led).filter(isLive), stopClear: () => { stopReq = true; }, ledgerInfo, state: st, estimate, claimOne: async (row) => { const r = await claim(row); if (r.ok) { st.rows = st.rows.filter((x) => x.key !== row.key); UI.dirty('loot'); } return r; } };
 })());
 
 /* ===================================================================================================================
@@ -4083,9 +4065,8 @@ Object.assign(Farm, (() => {
  *                     finishes done quests, accepts the next one it can do.
  *   Battle Pass       the hunt on /battle_pass.php (Lizardman Flamecaster / Shadowclaw by default) the same way.
  *   Merchant          buys the weekly-restock gold items (and Damon's weekly offers) once per server week (resets Sunday 00:00 server time).
- *   Graveyard         keeps a stash of EXP corpses worth N level-ups (default 5) and loots everything above it, oldest first (a look at the wave pages every
- *                     20 min; a full scan after a page load and after a Cube run): scans + checks the ledger, loots the corpses that still give EXP (stamina potions on hold), then the out-levelled
- *                     ones (items + quest credit). The EXP-needed auto-loot on a stamina stall stays as it was.
+ *   Graveyard         two settings: keep a stash of EXP corpses worth N level-ups (default 5) and check every N days (default 1; also right after a Cube run). A check scans +
+ *                     checks the ledger, loots everything above the stash that still gives EXP, oldest first (stamina potions on hold). Out-levelled (0 EXP) corpses are left alone. The EXP-needed auto-loot on a stamina stall stays as it was.
  *   Extraction        raises shadows from one dead Grakthar gate mob type you pick (a General or a normal mob). Needs only the corpse: no join, no kill. Remembers the
  *                     ids of the chosen mob while they live, checks each corpse's battle page, POSTs the extraction; stops when the day's attempts are used
  *                     and tries again every 10 min (a refused try costs nothing); skips a mob type the game refuses (until Retry skipped types).
@@ -4500,41 +4481,35 @@ const Battle = (() => {
   return { tick, parseQuest };
 })();
 
-const Graveyard = (() => {                                              // the task: keeps a stash of EXP corpses worth N level-ups, loots what is above it (oldest first) and the out-levelled ones
+const Graveyard = (() => {                                              // the task: every N days (and after a Cube run) a full scan + clear-out: keeps a stash of EXP corpses worth N level-ups, loots what is above it (oldest first) and the out-levelled ones
   const setInfo = (p) => Tasks.info('graveyard', p);
-  const trig = Core.store(ID + '-graveyard-trigger', { def: { lastRunAt: 0, fullAt: 0, cubeAt: 0 } });
-  const T = () => Object.assign({ lastRunAt: 0, fullAt: 0, cubeAt: 0 }, trig.get() || {});
-  const MIN_GAP_MS = 20 * 60000;                                        // two clear-outs are never closer than this (a corpse nobody can loot must not turn this into a loop)
-  const BEAT_MS = 20 * 60000;                                           // how often the wave pages are looked at
-  let force = false, started = false;                                   // started: the first tick after a page load does a full scan (waves + dungeons) to fill the ledger
+  const DAY = 86400000, RETRY_MS = 20 * 60000;
+  const trig = Core.store(ID + '-graveyard-trigger', { def: { lastRunAt: 0, cubeDue: false, line: '' } });   // lastRunAt: the last finished check; cubeDue: a Cube run ended and its corpses are not scanned yet; line: the result shown while waiting
+  const T = () => Object.assign({ lastRunAt: 0, cubeDue: false, line: '' }, trig.get() || {});
+  const gapMs = () => Math.max(0.25, Number(cfg.tasks.graveyard.everyDays) || 1) * DAY;
   const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
+  const save = (o) => trig.set(Object.assign(T(), o));
   async function tick() {
     const g = cfg.tasks.graveyard; if (!g.enabled) return;
     if (Loot.state.clearing || Loot.state.looting || Loot.state.scanning) { setInfo({ state: 'idle', line: 'the graveyard is busy — looks again soon' }); return 2 * 60000; }
-    const forced = force, t = T(); force = false;
-    const full = forced || !started || t.cubeAt > t.fullAt;               // full scan: after a page load, after a Cube run (its corpses), and on Clear now
-    if (!full) {
-      setInfo({ state: 'run', line: 'looking for new corpses…' });
-      await Loot.peek(); try { await syncMe(); } catch (_) { /* the last known EXP will do */ }
-      const P = Loot.plan(g.keepLevels), work = P.surplus.length + P.zero.length;
-      if (!work || Date.now() - t.lastRunAt < MIN_GAP_MS) {
-        setInfo({ state: 'ok', line: !P.ok ? 'waiting for your EXP numbers' : `${plural(P.kept.length, 'EXP corpse')} in the stash (${fmtNum(P.keptSum)} of ${fmtNum(P.allowance)} EXP kept for ${plural(g.keepLevels, 'level-up')}) · ${work ? work + ' above it, looted shortly' : 'nothing above it'}`, looted: 0 });
-        return BEAT_MS;
-      }
-    }
-    started = true;
-    log(`🧹 graveyard: ${forced ? 'you pressed Clear now' : full ? 'full scan' : 'corpses above the stash'} — clearing`, 'info');
-    setInfo({ state: 'run', line: full ? 'scanning the whole graveyard…' : 'looting what is above the stash…' });
-    const r = await Loot.clearRun({ levels: g.keepLevels, scan: full });
-    if (!r) { force = forced; setInfo({ state: 'idle', line: 'the graveyard is busy — looks again soon' }); return 2 * 60000; }
-    if (!r.stopped) trig.set(Object.assign(T(), { lastRunAt: Date.now() }, full ? { fullAt: Date.now() } : {}));       // a run cut short by Stop / a halt does not count: it picks up again
-    const left = Loot.state.rows.filter((x) => x.needsLoot !== false).length, n = r.exp + r.zero;
-    setInfo({ state: r.stopped || r.noExpInfo ? 'warn' : 'ok', line: r.noExpInfo ? 'could not read your EXP — no EXP corpse was touched' : n ? `looted ${n} (${r.exp} above the stash, ${r.zero} out-levelled) · ${plural(r.kept, 'EXP corpse')} kept${r.stopped ? ' · stopped early' : ''}` : `${plural(r.kept, 'EXP corpse')} kept for ${plural(g.keepLevels, 'level-up')} · nothing above it`, looted: n });
-    return BEAT_MS;
+    const t = T();
+    const wait = t.lastRunAt + gapMs() - Date.now();                      // a first check (lastRunAt 0) is due at once; a page load alone does not make one due
+    if (!t.cubeDue && wait > 0) { setInfo({ state: 'ok', line: t.line || 'waiting for the next check', at: t.lastRunAt }); return wait; }   // shown with the time of the last real check
+    const wasCube = !!t.cubeDue; if (wasCube) save({ cubeDue: false });  // cleared as the scan starts: a Cube run that ends while it is under way owes the next one
+    log(`🧹 graveyard check — ${wasCube ? 'a Cube run ended' : 'the interval is up'}`, 'info');
+    setInfo({ state: 'run', line: 'scanning the whole graveyard…' });
+    const r = await Loot.clearRun({ levels: g.keepLevels });
+    if (!r) { if (wasCube) save({ cubeDue: true }); setInfo({ state: 'idle', line: 'the graveyard is busy — looks again soon' }); return 2 * 60000; }
+    const stash = g.keepLevels > 0 ? `${plural(r.kept, 'EXP corpse')} kept for ${plural(g.keepLevels, 'level-up')}` : 'no stash',
+      extra = (r.outLevelled ? ` · ${r.outLevelled} out-levelled left alone` : '') + (r.blocked ? ` · ${r.blocked} refused by the game` : '') + (r.unknown ? ` · ${r.unknown} without an EXP estimate left alone` : '');
+    const line = r.noExpInfo ? 'could not read your EXP — no EXP corpse was touched' + extra : (r.exp ? `looted ${r.exp} above the stash${r.exped ? ' (+' + fmtNum(r.exped) + ' EXP)' : ''}` : 'nothing above the stash') + ' · ' + stash + extra;
+    if (r.stopped) { if (wasCube) save({ cubeDue: true }); setInfo({ state: 'warn', line: line + ' · stopped early', looted: r.exp }); return RETRY_MS; }   // a run cut short by Stop / a halt does not count: it picks up again
+    save({ lastRunAt: Date.now(), line });
+    setInfo({ state: r.noExpInfo ? 'warn' : 'ok', line, looted: r.exp });
+    return gapMs();
   }
-  const clearNow = () => { force = true; Tasks.poke('graveyard'); };
-  const afterCube = () => { if (!cfg.tasks.graveyard.enabled) return; trig.set(Object.assign(T(), { cubeAt: Date.now() })); Tasks.poke('graveyard', 90000); };   // a Cube run leaves corpses in the Cube rooms: a full scan 90 s after it ends
-  return { tick, clearNow, afterCube };
+  const afterCube = () => { if (!cfg.tasks.graveyard.enabled) return; save({ cubeDue: true }); Tasks.poke('graveyard', 90000); };   // a Cube run leaves corpses in the Cube rooms: a scan 90 s after it ends
+  return { tick, afterCube, nextAt: () => T().lastRunAt + gapMs() };
 })();
 
 const Merchant = (() => {
@@ -4669,16 +4644,17 @@ const Extract = (() => {
   });
   const cardsOf = (doc) => Array.from(doc.querySelectorAll('.monster-card')).map((c) => ({
     id: String(Scan.cardId(c) || ''), name: norm(c.dataset.name || (c.querySelector('.monster-name,.name,h2,h3') || {}).textContent), dead: c.dataset.dead === '1',
-    expire: parseNum(c.dataset.expire, 0), boss: c.dataset.boss === '1',
+    expire: parseNum(c.dataset.expire, 0), boss: c.dataset.boss === '1', img: ((c.querySelector('img.monster-img') || {}).getAttribute ? c.querySelector('img.monster-img').getAttribute('src') : '') || '',
   })).filter((c) => c.id && c.name);
 
   /* ---- the mob list (what the dropdown shows) and the one that is chosen ---- */
   const chosen = () => lowOf(cfg.tasks.extract.mob);
   const isOn = (low) => !!low && low === chosen();
-  function mobs() {                                                              // every mob seen on the gate + its Generals, in wave order
+  function mobs() {
+    const cnt = {}; for (const v of Object.values(S().ids)) { const c = cnt[v.low] || (cnt[v.low] = { waiting: 0, alive: 0 }); if (v.state === 'dead' || v.state === 'ready') c.waiting++; else if (v.state === 'alive') c.alive++; }                                                              // every mob seen on the gate + its Generals, in wave order
     const s = S(), m = new Map(Object.entries(s.mobs).filter(([, v]) => Number(v.gate) === GATE).map(([low, v]) => [low, Object.assign({ low }, v)]));
     for (const d of Roster.list) { const l = d.kind === 'wave' ? bossLoc(d.low) : null; if (l && String(l.gate) === String(GATE) && Number(l.wave) > 0 && !m.has(d.low)) m.set(d.low, { low: d.low, name: d.name, gate: GATE, wave: Number(l.wave), boss: true }); }
-    return [...m.values()].map((v) => Object.assign({ skip: s.never[v.low] ? 'no shadow form' : s.weak[v.low] ? 'skill too low' : '', label: WaveMap.of(v.gate, v.wave).label }, v)).sort((a, b) => a.gate - b.gate || a.wave - b.wave || (b.boss ? 1 : 0) - (a.boss ? 1 : 0) || a.name.localeCompare(b.name));
+    return [...m.values()].map((v) => Object.assign({ skip: s.never[v.low] ? 'no shadow form' : s.weak[v.low] ? 'skill too low' : '', label: WaveMap.of(v.gate, v.wave).label, waiting: (cnt[v.low] || {}).waiting || 0, alive: (cnt[v.low] || {}).alive || 0 }, v)).sort((a, b) => a.gate - b.gate || a.wave - b.wave || (b.boss ? 1 : 0) - (a.boss ? 1 : 0) || a.name.localeCompare(b.name));
   }
 
   /* ---- the ledger of remembered corpses ---- */
@@ -4693,7 +4669,7 @@ const Extract = (() => {
   const rank = (v) => (v.dexp > 0 ? v.dexp * 1000 : 1e15 + (v.firstSeen || 0));              // closest to expiring first; unknown expiry last
   const queue = (s) => Object.entries(s.ids).filter(([, v]) => (v.state === 'dead' || v.state === 'ready') && isOn(v.low) && !s.never[v.low] && !s.weak[v.low]).sort((a, b) => rank(a[1]) - rank(b[1]));
 
-  const learnMob = (s, c, g, w) => { const low = lowOf(c.name), m = s.mobs[low]; if (!m || m.wave !== w || m.gate !== g || (c.boss && !m.boss)) s.mobs[low] = { name: c.name, gate: g, wave: w, boss: !!(c.boss || (m && m.boss)) }; };
+  const learnMob = (s, c, g, w) => { const low = lowOf(c.name), m = s.mobs[low]; if (!m || m.wave !== w || m.gate !== g || (c.boss && !m.boss) || m.img == null || (c.img && m.img !== c.img)) s.mobs[low] = { name: c.name, gate: g, wave: w, boss: !!(c.boss || (m && m.boss)), img: c.img || (m && m.img) || '' }; };
   // read the gate: learn the mob names, remember ticked ids while they are alive, and mark the ones that are not alive any more
   async function scan(s) {
     const now = Date.now(), list = waves(), aliveSeen = new Set(), okWave = new Set(); let read = 0, fresh = 0;
@@ -4736,7 +4712,7 @@ const Extract = (() => {
   let learning = false, learnTry = 0;
   async function learnSoon() {
     if (learning || !Tab.isMain() || Tasks.busy('extract') || Date.now() - learnTry < 10 * 60000) return;
-    const s = S(), now = Date.now(), stale = waves().filter(([g, w]) => !(s.seen[g + '/' + w] && now - s.seen[g + '/' + w] < LEARN_MS)); if (!stale.length) return;
+    const s = S(), now = Date.now(), stale = waves().filter(([g, w]) => !(s.seen[g + '/' + w] && now - s.seen[g + '/' + w] < LEARN_MS) || Object.values(s.mobs).some((m) => m.gate === g && m.wave === w && m.img == null)); if (!stale.length) return;
     learning = true; learnTry = now;
     try {
       let n = 0;
@@ -4821,7 +4797,7 @@ Object.assign(Tasks, (() => {
   const defs = new Map(), state = new Map(), due = new Map(), busy = new Set(), t0 = Date.now();
   const mins = (n, d) => Math.max(1, Number(n) || d) * 60000;
   function define(d) { if (!d || !d.id) return; defs.set(d.id, Object.assign({ icon: '🧩', name: d.id, desc: '', every: 600000, enabled: () => false, group: '' }, d)); UI.dirty('tasks'); return d; }
-  function info(id, p) { if (p === undefined) return state.get(id) || { state: 'idle', line: '', at: 0 }; state.set(id, Object.assign({}, state.get(id), p, { at: Date.now() })); UI.dirty('tasks'); }
+  function info(id, p) { if (p === undefined) return state.get(id) || { state: 'idle', line: '', at: 0 }; state.set(id, Object.assign({}, state.get(id), p, { at: Number(p.at) > 0 ? Number(p.at) : Date.now() })); UI.dirty('tasks'); }
   const poked = new Map();
   function poke(id, inMs) { due.set(id, Date.now() + (inMs || 0)); poked.set(id, Date.now()); }
   async function beat() {
@@ -4841,7 +4817,7 @@ Object.assign(Tasks, (() => {
   define({ id: 'guild', name: 'Adventure Guild', icon: '📜', desc: 'Kill quests: finish, accept, auto-farm the kills', every: () => mins(cfg.tasks.guild.everyMin, 5), enabled: () => !!cfg.tasks.guild.enabled, tick: Guild.tick });
   define({ id: 'bp', name: 'Battle Pass', icon: '🎫', desc: 'The hunt of the pass, auto-farmed', every: () => mins(cfg.tasks.bp.everyMin, 10), enabled: () => !!cfg.tasks.bp.enabled, tick: Battle.tick });
   define({ id: 'merchant', name: 'Merchant', icon: '🛒', desc: 'Buys the weekly restock once per server week', every: () => mins(cfg.tasks.merchant.everyMin, 30), enabled: () => !!cfg.tasks.merchant.enabled, tick: Merchant.tick });
-  define({ id: 'graveyard', name: 'Graveyard', icon: '🪦', desc: 'Keeps a stash of EXP corpses worth a few level-ups, loots everything above it (oldest first, potions on hold) and the out-levelled ones', every: () => 20 * 60000, enabled: () => !!cfg.tasks.graveyard.enabled, tick: Graveyard.tick });
+  define({ id: 'graveyard', name: 'Graveyard', icon: '🪦', desc: 'Every few days: keeps a stash of EXP corpses worth a few level-ups, loots everything above it (oldest first, potions on hold); out-levelled corpses are left alone', every: () => 6 * 3600000, enabled: () => !!cfg.tasks.graveyard.enabled, tick: Graveyard.tick });
   define({ id: 'extract', name: 'Extraction', icon: '☠️', desc: 'Raises shadows from dead Grakthar gate monsters: no join or kill needed', every: () => mins(cfg.tasks.extract.everyMin, 5), enabled: () => !!cfg.tasks.extract.enabled, tick: Extract.tick });
   define({ id: 'pvp.solo', name: 'PvP · Solo', icon: '⚔️', group: 'pvp', desc: 'placeholder — plug your PvP module in', placeholder: true, enabled: () => !!cfg.tasks.pvp.solo.enabled });
   define({ id: 'pvp.team', name: 'PvP · Team', icon: '🛡️', group: 'pvp', desc: 'placeholder — plug your PvP module in', placeholder: true, enabled: () => !!cfg.tasks.pvp.team.enabled });
@@ -5059,6 +5035,14 @@ const Panel = (() => {
 .ma-chip{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:#0d1322;border:1px solid #27324f;color:#9caad0;font:700 11.5px Arial,sans-serif;padding:5px 11px;border-radius:999px;cursor:pointer;transition:.15s}
 .ma-chip:hover{border-color:#3b4a73;color:#cfd8f7}.ma-chip.on{background:rgba(75,115,224,.2);border-color:#6ea8ff;color:#d6e5ff}
 .ma-chip i{font-style:normal;margin-left:5px;opacity:.7}
+.ma-mp-sel{display:flex;align-items:center;gap:10px;background:#0d1322;border:1px solid #27324f;border-radius:12px;padding:8px 10px}.ma-mp-sel .t{min-width:0;flex:1}
+.ma-mp-sel b{display:block;font:700 13px Arial,sans-serif;color:#e4ebff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.ma-mp-sel small{color:#8fa0cf;font:11.5px Arial,sans-serif}
+.ma-mp-h{margin:10px 0 5px;font:800 10.5px Arial,sans-serif;letter-spacing:.06em;text-transform:uppercase;color:#7f8fba}
+.ma-mp-g{display:grid;grid-template-columns:repeat(auto-fill,minmax(76px,1fr));gap:6px}
+.ma-mt{position:relative;display:flex;flex-direction:column;align-items:center;gap:4px;background:#0d1322;border:1px solid #27324f;border-radius:11px;padding:7px 3px 6px;color:#9caad0;font:700 10.5px Arial,sans-serif;cursor:pointer;min-width:0}
+.ma-mt:hover{border-color:#3b4a73;color:#cfd8f7}.ma-mt.on{background:rgba(75,115,224,.2);border-color:#6ea8ff;color:#d6e5ff}.ma-mt.bad{opacity:.45}
+.ma-mt .n{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ma-mt em{position:absolute;top:3px;right:4px;font:800 10px Arial,sans-serif;font-style:normal;background:#2a7a4b;color:#fff;border-radius:999px;padding:1px 5px}
 /* inputs */
 .ma-in{box-sizing:border-box;width:92px;background:#101a33;border:1px solid rgba(255,255,255,.12);color:#eef3ff;border-radius:10px;padding:5px 9px;font:12.5px Arial,sans-serif;transition:.15s}
 .ma-in:focus{outline:none;border-color:#6ea8ff;box-shadow:0 0 0 2px rgba(110,168,255,.18)}
@@ -5326,7 +5310,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     h('button', { type: 'button', title: tip || null, class: 'ma-seg-btn' + (String(v) === String(cur) ? ' on' : ''), onclick: (e) => { stop(e); if (String(v) !== String(cur)) { set(v); saveCfg(); draw(); } } }, label)));
   const chips = (opts, cur, set) => h('div', { class: 'ma-chips' }, opts.map(([v, label]) => h('button', { type: 'button', class: 'ma-chip' + (String(v) === String(cur) ? ' on' : ''), onclick: (e) => { stop(e); set(v); saveCfg(); draw(); } }, label)));
   const dropdown = (opts, cur, set, off, tip) => h('select', Object.assign({ class: 'ma-in' + (off ? ' off' : ''), onclick: stop, onchange: (e) => { set(e.target.value); saveCfg(); draw(); } }, off ? { disabled: true, title: tip || 'Off while Auto is on' } : {}),
-    opts.map(([v, l]) => h('option', Object.assign({ value: v }, String(v) === String(cur) ? { selected: true } : {}), l)));
+    opts.reduce((k, [v, l, g]) => { const o = h('option', Object.assign({ value: v }, String(v) === String(cur) ? { selected: true } : {}), l), last = k[k.length - 1]; if (!g) k.push(o); else if (last && last.label === g) last.append(o); else k.push(h('optgroup', { label: g }, o)); return k; }, []));
   const num = (get, set, o = {}) => h('span', { class: 'ma-num' }, h('input', { class: 'ma-in', inputmode: 'decimal', style: o.w ? { width: o.w + 'px' } : null, value: o.fmt ? o.fmt(get()) : get(), onclick: stop,
     onchange: (e) => { const n = (o.parse || parseCap)(e.target.value); if (n != null && Number.isFinite(n) && (o.min == null || n >= o.min) && (o.max == null || n <= o.max)) { set(n); saveCfg(); e.target.value = o.fmt ? o.fmt(n) : n; } else e.target.value = o.fmt ? o.fmt(get()) : get(); } }),
     o.unit ? h('i', {}, o.unit) : null);
@@ -5474,6 +5458,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     // Graveyard
     const gt = T.graveyard;
     const stashLine = () => { const P = Loot.plan(gt.keepLevels); return P.ok ? `📦 ${P.kept.length} kept (${fmtNum(P.keptSum)} of ${fmtNum(P.allowance)} EXP) · ${P.surplus.length} above the stash · ${P.zero.length} out-levelled` : null; };
+    const gNext = Graveyard.nextAt() - Date.now();
     out.push(card('🪦', 'Graveyard', 'Keeps the newest EXP corpses worth this many level-ups and loots everything older, oldest first. Out-levelled corpses are looted too', gt.enabled, (v) => { gt.enabled = !!v; if (v) Tasks.poke('graveyard'); },
       [tStatus('graveyard'), gt.enabled ? nextNote('graveyard') : null,
         stashLine() ? note(stashLine()) : null,
@@ -5481,14 +5466,23 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
       num(() => gt.keepLevels, (n) => { gt.keepLevels = Math.round(n); }, { w: 44, min: 0, max: 50, unit: 'levels', parse: parseFloat })));
     // Extraction
     Extract.learnSoon().catch(() => {});
-    const xt = T.extract, xm = Extract.mobs(), xs = Extract.state(), xBad = xt.mob && (xs.never[xt.mob] || xs.weak[xt.mob]);
-    const xName = (m) => `${m.boss ? '♛ ' : ''}${m.name} · ${m.label && !/^Gate /.test(m.label) ? m.label : 'wave ' + m.wave}${m.skip ? ' · refused' : ''}`;
-    const xOpts = [['', xm.length ? 'Choose a mob…' : 'No mobs seen yet'], ...xm.map((m) => [m.low, xName(m)])];
-    if (xt.mob && !xm.some((m) => m.low === xt.mob)) xOpts.push([xt.mob, xt.mob + ' · not seen yet']);
+    const xt = T.extract, xm = Extract.mobs(), xs = Extract.state(), xBad = xt.mob && (xs.never[xt.mob] || xs.weak[xt.mob]), xCur = xm.find((m) => m.low === xt.mob);
+    const xShort = (n) => String(n).replace(/^(lizardman|general)\s+/i, '').replace(/\s+the\s+.*$/i, '') || n;                // "Lizardman Vanguard" -> "Vanguard", "General Skarn the Radiant Bastion" -> "Skarn"
+    const xGroup = (m) => (m.label && !/^Gate /.test(m.label) ? `${m.label} · wave ${m.wave}` : `Wave ${m.wave}`);
+    const xPick = (low) => { xt.mob = xt.mob === low ? '' : low; ui.open['ex:pick'] = !xt.mob; saveUi(); saveCfg(); Tasks.poke('extract'); draw(); };
+    const xTile = (m) => h('button', { type: 'button', class: 'ma-mt' + (m.low === xt.mob ? ' on' : '') + (m.skip ? ' bad' : ''), title: `${m.name}${m.skip ? ' · refused by the game (' + m.skip + ')' : ''}${m.waiting ? ' · ' + m.waiting + ' corpse' + (m.waiting === 1 ? '' : 's') + ' waiting' : ''}`, onclick: (e) => { stop(e); xPick(m.low); } },
+      avatar(m.name, m.img, { size: 'lg', boss: m.boss }), h('span', { class: 'n' }, xShort(m.name)), m.waiting ? h('em', {}, String(m.waiting)) : null);
+    const xSections = () => {
+      const g = [], by = new Map(); for (const m of xm) { const k = xGroup(m); if (!by.has(k)) { by.set(k, []); g.push(k); } by.get(k).push(m); }
+      return g.length ? g.flatMap((k) => [h('div', { class: 'ma-mp-h' }, `${k} · ${by.get(k).length}`), h('div', { class: 'ma-mp-g' }, by.get(k).map(xTile))]) : [note('No mobs seen yet: the first look at the gate fills this.')];
+    };
     out.push(card('☠️', 'Extraction', 'Raises a shadow from one dead mob type of the Grakthar gate. No join or kill needed; it stops when the day\'s attempts are used', xt.enabled, (v) => { xt.enabled = !!v; if (v) Tasks.poke('extract'); },
       [tStatus('extract'), xt.enabled ? nextNote('extract') : null,
-        opt('Mob', dropdown(xOpts, xt.mob, (v) => { xt.mob = v; Tasks.poke('extract'); }), 'one type at a time'),
-        xBad ? note(`The game refused ${xt.mob} (${xs.never[xt.mob] ? 'it has no shadow form' : 'your extraction skill is too low'}): pick another mob, or retry`) : null,
+        xt.mob ? h('div', { class: 'ma-mp-sel' }, avatar(xCur ? xCur.name : xt.mob, xCur && xCur.img, { size: 'lg', boss: xCur && xCur.boss }),
+          h('div', { class: 't' }, h('b', {}, xCur ? xCur.name : xt.mob), h('small', {}, xCur ? `${xCur.waiting} waiting · ${xCur.alive} alive${xBad ? ' · refused by the game' : ''}` : 'not seen yet')),
+          btn('Clear', 'soft', () => { xPick(xt.mob); })) : null,
+        fold('ex:pick', !xt.mob, [xt.mob ? 'Change mob' : 'Choose the mob', h('small', {}, `${xm.length} seen`)], xSections),
+        xBad ? note(`The game refused ${xCur ? xCur.name : xt.mob} (${xs.never[xt.mob] ? 'it has no shadow form' : 'your extraction skill is too low'}): pick another mob, or retry`) : null,
         xBad ? btn('Retry', 'soft', () => { Extract.resetSkips(); draw(); }) : null,
         xt.enabled ? btn('Look now', 'soft', () => { Tasks.poke('extract'); draw(); }) : null]));
     return out;
