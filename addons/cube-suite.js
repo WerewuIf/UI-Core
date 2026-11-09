@@ -37,7 +37,11 @@
  * The panel is drawn on the Cube page only. Elsewhere the engine runs headless, and only when "background" is on (default OFF, so merely opening
  * any page never starts PvP / PvE by itself). One tab runs the engine (Core.tab 'cube-suite'); commands are shared state + a wake event, so
  * it does not matter which tab the command came from. */
-/* v3.6.0: the PvE damage settings are a capability, so the Automator can show and edit them WITHOUT a Cube being open (it used to have no way to reach them):
+/* v3.6.1: cube.pve.get / cube.pve.set also carry the rest of the PvE tab, so the Automator needs nothing from the panel:
+ *   get -> useStaminaPotion, staminaPotionExpCap, useHpPotion, and per node: schedule = [{ hour, minute, noTime, mode, fixedCap }] (Normal profile; null on Fast Run)
+ *   set -> { useStaminaPotion?, staminaPotionExpCap?, useHpPotion?, copyFromOther?: true, node?: { nodeId, selected } (a whole room on / off),
+ *            schedule?: { nodeId, add } | { nodeId, idx, remove | hour | minute | noTime | mode | fixedCap } }
+ * v3.6.0: the PvE damage settings are a capability, so the Automator can show and edit them WITHOUT a Cube being open (it used to have no way to reach them):
  *   cube.pve.get()  -> { ok, profile: 'normal'|'fast', damageMode, fixedDamageCap, damageModel, nodes: [{ id, label, mobs: [{ key, name, selected, cap }] }] }   (sync)
  *   cube.pve.set({ damageMode?, damageModel?, fixedDamageCap?, mob?: { nodeId, key, selected?, cap? } })   the same profile the Cube panel edits (Normal or Fast Run, whichever is active)
  * The mobs of a node are the known ones + every one seen so far (pveGetNodeMobEntries), exactly the list the panel shows, so a node is never empty.
@@ -46,7 +50,7 @@
  * v3.5.4: new capability cube.master.set(bool) so the Automator can switch Cube Suite's automation on / off (status().master already reported it, nothing could set it).
  * NOTE: addons.json must NOT give cube-suite a "match": this is a service that runs on any page. With a match Core skips it everywhere else and no cube.* capability exists there. */
 Core.module({
-  id: 'cube-suite', name: 'Cube Suite', icon: '🧊', version: '3.6.0',
+  id: 'cube-suite', name: 'Cube Suite', icon: '🧊', version: '3.6.1',
   provides: (api) => api && api.status ? {
     'cube.status':         { fn: api.status,    doc: 'what Cube Suite is doing (shared across tabs)', returns: '{ ok, mode, master, background, follow, running, instanceId, cleared, fastTargets }' },
     'cube.mode.set':       { fn: api.setMode,   doc: "switch Fast Run / Normal", args: "'fast' | 'normal'" },
@@ -56,7 +60,7 @@ Core.module({
     'cube.follow':         { fn: api.follow,    doc: 'pin the engine to one Cube instance (null = unpin)', args: 'instanceId | null' },
     'cube.fastrun.start':  { fn: api.startFastRun, doc: 'follow that Cube, Fast Run on, automation on, background on', args: '{ instanceId }' },
     'cube.pve.get':        { fn: api.pveGet,    doc: 'PvE damage settings of the active profile + every node\'s mobs (selected, cap); works with no Cube open', returns: '{ ok, profile, damageMode, fixedDamageCap, damageModel, nodes: [{ id, label, mobs: [{ key, name, selected, cap }] }] }' },
-    'cube.pve.set':        { fn: api.pveSet,    doc: 'change the PvE damage settings of the active profile (same as the Cube panel); works with no Cube open', args: '{ damageMode?: exp|fixed|monster|loot|scheduled, damageModel?: eco|fast, fixedDamageCap?: number, mob?: { nodeId, key, selected?: boolean, cap?: number } }' },
+    'cube.pve.set':        { fn: api.pveSet,    doc: 'change the PvE damage settings of the active profile (same as the Cube panel); works with no Cube open', args: '{ damageMode?: exp|fixed|monster|loot|scheduled, damageModel?: eco|fast, fixedDamageCap?: number, useStaminaPotion?: boolean, staminaPotionExpCap?: number, useHpPotion?: boolean, copyFromOther?: true, mob?: { nodeId, key, selected?: boolean, cap?: number }, node?: { nodeId, selected: boolean }, schedule?: { nodeId, add?: true, idx?: number, remove?: true, hour?, minute?, noTime?, mode?, fixedCap? } }' },
   } : {},
   async init(Core) {
   'use strict';
@@ -5580,20 +5584,47 @@ Core.module({
     pveGet() {                                                                          // the ACTIVE profile (Normal / Fast Run) and the mobs of every node: nothing here needs a Cube
       const p = pveGetProfile(), allIn = p.damageMode !== 'monster';                     // per-mob mode: a node with no saved selection ticks nothing (the engine's rule); any other mode: every mob is in
       return { ok: true, profile: pveActiveProfileKey(), damageMode: p.damageMode, fixedDamageCap: p.fixedDamageCap, damageModel: p.damageModel,
+        useStaminaPotion: !!p.useStaminaPotion, staminaPotionExpCap: Number(p.staminaPotionExpCap) || 0, useHpPotion: !!p.useHpPotion,
         nodes: PVE_TARGET_NODES.map((id) => {
           const has = Object.prototype.hasOwnProperty.call(p.selectedMobsByNode, id), sel = new Set(p.selectedMobsByNode[id] || []);
-          return { id, label: PVE_NODE_LABELS[id] || 'Node ' + id, mobs: pveGetNodeMobEntries(id).map(([key, name]) => ({ key, name, selected: has ? sel.has(key) : allIn, cap: Number(p.monsterCaps[key]) || 0 })) };
+          return { id, label: PVE_NODE_LABELS[id] || 'Node ' + id, mobs: pveGetNodeMobEntries(id).map(([key, name]) => ({ key, name, selected: has ? sel.has(key) : allIn, cap: Number(p.monsterCaps[key]) || 0 })),
+            schedule: p.nodeSchedules ? (p.nodeSchedules[id] || []).map((e) => ({ hour: Number(e.hour) || 0, minute: Number(e.minute) || 0, noTime: !!e.noTime, mode: e.mode || 'exp', fixedCap: Number(e.fixedCap) || 0 })) : null };   // timed caps: Normal profile only (null on Fast Run)
         }) };
     },
     pveSet(o) {                                                                         // the same edits the Cube panel makes, same rules (see the change handlers in wireUI)
-      o = o || {}; const m = o.mob, nodeId = m ? Number(m.nodeId) : null;
-      if (m && (!PVE_TARGET_NODES.includes(nodeId) || !m.key)) return { ok: false, message: 'pve.set: mob needs a known nodeId and a key' };
+      o = o || {}; const m = o.mob, nd = o.node, sc = o.schedule, nodeId = m ? Number(m.nodeId) : nd ? Number(nd.nodeId) : sc ? Number(sc.nodeId) : null;
+      if ((m || nd || sc) && !PVE_TARGET_NODES.includes(nodeId)) return { ok: false, message: 'pve.set: unknown nodeId' };
+      if (m && !m.key) return { ok: false, message: 'pve.set: mob needs a key' };
+      if (sc && pveActiveProfileKey() !== 'normal') return { ok: false, message: 'pve.set: timed caps are a Normal-profile feature' };
+      if (o.copyFromOther) { pveCopyProfileFromOtherMode(); return api.pveGet(); }
       const modes = ['exp', 'fixed', 'monster', 'loot'].concat(pveActiveProfileKey() === 'normal' ? ['scheduled'] : []);   // timed caps are a Normal-profile feature
       const modeEdit = modes.includes(o.damageMode) || o.fixedDamageCap != null;
       pveUpdateProfile((p) => {
         if (modes.includes(o.damageMode)) p.damageMode = o.damageMode;
         if (o.damageModel === 'eco' || o.damageModel === 'fast') p.damageModel = o.damageModel;
         if (o.fixedDamageCap != null) p.fixedDamageCap = Math.max(0, parseInt(o.fixedDamageCap, 10) || 0);
+        if (o.useStaminaPotion != null) p.useStaminaPotion = !!o.useStaminaPotion;
+        if (o.useHpPotion != null) p.useHpPotion = !!o.useHpPotion;
+        if (o.staminaPotionExpCap != null) p.staminaPotionExpCap = Math.min(100, Math.max(0, parseFloat(o.staminaPotionExpCap) || 0));
+        if (nd && nd.selected != null) {                                                // a whole room on / off: every known mob ticked / unticked
+          const keys = pveGetNodeMobEntries(nodeId).map(([k]) => k);
+          p.selectedMobsByNode[nodeId] = nd.selected ? keys : [];
+          const seen = pveLoadDiscovered(), ever = new Set(seen[nodeId] || []); keys.forEach((k) => ever.add(k)); seen[nodeId] = [...ever]; pveSaveDiscovered(seen);
+        }
+        if (sc) {                                                                       // one timed-cap row: { nodeId, add } | { nodeId, idx, remove | hour | minute | noTime | mode | fixedCap }
+          const list = (p.nodeSchedules || (p.nodeSchedules = {}))[nodeId] || (p.nodeSchedules[nodeId] = []), idx = Number(sc.idx), e = list[idx];
+          if (sc.add) list.push({ hour: 0, minute: 0, mode: 'exp' });
+          else if (e) {
+            if (sc.remove) list.splice(idx, 1);
+            else {
+              if (sc.noTime === true) { list.forEach((x, i) => { if (i !== idx) x.noTime = false; }); e.noTime = true; } else if (sc.noTime === false) e.noTime = false;
+              if (sc.hour != null) e.hour = Math.min(23, Math.max(0, parseInt(sc.hour, 10) || 0));
+              if (sc.minute != null) e.minute = Math.min(59, Math.max(0, parseInt(sc.minute, 10) || 0));
+              if (Object.prototype.hasOwnProperty.call(PVE_SCHED_MODE_LABELS, sc.mode)) { e.mode = sc.mode; if (sc.mode === 'monster' && !e.monsterCaps) e.monsterCaps = { ...p.monsterCaps }; }
+              if (sc.fixedCap != null) e.fixedCap = Math.max(0, parseInt(sc.fixedCap, 10) || 0);
+            }
+          }
+        }
         if (!m) return;
         const key = normText(m.key);
         if (m.cap != null) p.monsterCaps[key] = Math.max(0, parseInt(m.cap, 10) || 0);
@@ -5604,8 +5635,8 @@ Core.module({
           p.selectedMobsByNode[nodeId] = [...list];
           const seen = pveLoadDiscovered(), ever = new Set(seen[nodeId] || []); ever.add(key); seen[nodeId] = [...ever]; pveSaveDiscovered(seen);   // ticked / unticked here = not "new" when first met, or the scan would tick it again
         }
-      }, { resetActionable: modeEdit, resetActionableNodeId: m ? nodeId : null });
-      if (m) pveVerifyNodeSoon(nodeId); else if (modeEdit) pveVerifyAllNodesSoon();    // (no Cube open: these return at once)
+      }, { resetActionable: modeEdit, resetActionableNodeId: nodeId });
+      if (nodeId != null) pveVerifyNodeSoon(nodeId); else if (modeEdit) pveVerifyAllNodesSoon();    // (no Cube open: these return at once)
       return api.pveGet();
     },
     startFastRun(o) {
