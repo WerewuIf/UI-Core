@@ -9,8 +9,9 @@
  *   PART 1b BUILD KIT  crystals + sigils that follow the Build Engine's gear / pets, and the way back (swappable: without it Auto still
  *                      picks gear + pets, it just leaves crystals and sigils alone)
  *   PART 2  DUNGEONS   Castle bosses (+ Khaal phases), Shadowbridge Gribble swarm. NOT the cube: Cube Suite owns it
- *                      (the Bosses > Dungeons tab lists the Cube's nodes next to Castle / Shadowbridge, scanned even with Cube Suite off
- *                      (cube.scan, Cube Suite 3.6.0+); the PvE nodes open an editor for the damage settings: mode, caps per mob).
+ *                      (the Bosses > Dungeons tab has a Cube fold next to Castle / Shadowbridge: PvP + SA as one line of info pills each (they run by
+ *                      themselves), the PvE rooms as bubbles with an on / off switch and an editor (mobs, caps, timed caps), the PvE settings in one fold
+ *                      (Cube Suite 3.6.1+: cube.pve.get / cube.pve.set). Node states are live only while Cube Suite runs).
  *                      Swappable: turn the part off (or delete it) and the wave bosses keep working.
  *   PART 3  DUELS      Phase duels, shared by wave and dungeon bosses
  *   PART 4  LOOT       graveyard scan + persisted ledger (corpses remembered by id, checked on their battle page before looting) + EXP-aware auto-loot,
@@ -27,7 +28,7 @@
  * default cap of a boss is its highest loot requirement, and bosses the roster did not know yet are added. Export .txt writes it all out.
  */
 Core.module({
-  id: 'automator', name: 'Automator', icon: '🤖', version: '1.14.15',
+  id: 'automator', name: 'Automator', icon: '🤖', version: '1.14.16',
   // Offered to other addons through Core capabilities (guides/CAPABILITIES.md):
   //   automator.status() -> the status string     automator.start() / automator.stop()     automator.scan() -> scan the bosses now
   provides: (api) => api && api.start ? {
@@ -38,7 +39,7 @@ Core.module({
   } : {},
   init(Core) {
 'use strict';
-const ID = 'automator', VERSION = '1.14.15';
+const ID = 'automator', VERSION = '1.14.16';
 const FARM_MARK = '\u2063farm\u2063';          // a task line is written when the task looks; this marks where the farm's state goes, filled in live when the line is drawn (a line saying "queued" while the farm is already checking the graveyard was stale)
 if (window.__automatorLoaded) { console.warn('[automator] already loaded', window.__automatorLoaded); return null; }
 window.__automatorLoaded = VERSION;
@@ -4912,20 +4913,6 @@ const CubeFast = (() => {
 })();
 /* CUBEFAST-END */
 Kernel.register({ id: 'cubefast', name: 'Cube fast run', icon: '⏰', every: () => (CubeFast.state() && (CubeFast.state().phase === 'watch' || CubeFast.state().phase === 'run') ? cfg.cubeFast.pollSec * 1000 : 30000), tick: CubeFast.tick, onMain: CubeFast.onMain });
-/* ---- Cube scan: the node states + the PvE mob lists are read once even with Cube Suite switched off and no Cube page open (cube.scan = Cube Suite's passive pass: it never fights and never changes
-   an automation switch, and does nothing while an engine is live). Run by this part every "Scan every" minutes in the main tab, by the Cube fold when it is shown, and by its Scan button. ---- */
-const CubeScan = (() => {
-  let at = 0, busy = false;
-  const can = () => { try { return !!(Core.has && Core.has('cube.scan')); } catch (_) { return false; } };
-  async function run(force) {
-    if (!can() || busy || (!force && Date.now() - at < 45000)) return false;
-    busy = true; at = Date.now();
-    try { await Core.call('cube.scan', { force: !!force }); } catch (_) { /* best effort: the nodes just stay idle */ } finally { busy = false; UI.dirty('status'); }
-    return true;
-  }
-  return { run, can, busy: () => busy };
-})();
-Kernel.register({ id: 'cubescan', name: 'Cube scan', icon: '🧊', every: () => Math.max(60000, cfg.fightScanMs || 0), tick: () => CubeScan.run(false) });
 
 /* ===================================================================================================================
  * PART 5 — PANEL (one Core.float button + panel)
@@ -5102,6 +5089,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
 .ma-ed{grid-column:1/-1;margin:1px 0 3px;padding:9px 11px 10px;background:#16213f;border:1px solid rgba(110,168,255,.34);border-radius:16px}.ma-ed .ma-in,.ma-bulk .ma-in{background:#101a33}
 .ma-pms{margin-top:4px}.ma-pm{display:flex;align-items:center;gap:10px;padding:7px 2px;border-top:1px solid rgba(255,255,255,.06)}.ma-pm-n{flex:1;min-width:0;font-size:12px;color:#d6e0ff;overflow-wrap:anywhere}.ma-pm .ma-num{width:104px;flex:0 0 auto}.ma-pm .ma-num .ma-in{width:100%;height:30px;padding:0 10px;font-size:12px;border-radius:9px}
 .ma-card.cube{background:linear-gradient(180deg,#152040,#111a33);border-color:rgba(110,168,255,.16);box-shadow:0 6px 16px rgba(0,0,0,.22),inset 0 1px 0 rgba(255,255,255,.04);padding:11px 13px;margin-bottom:9px}.ma-card.cube.off{background:#0f1628;box-shadow:none}.ma-card.cube .ma-ico{width:32px;height:32px;font-size:16px;background:#1d2b55;border-color:rgba(110,168,255,.22)}.ma-card.cube .ma-card-b{margin-top:10px;padding-top:10px}.ma-card.cube .ma-sr-o.tm{margin:0}.ma-card.cube .ma-seg{flex:0 0 auto;width:auto}
+.ma-cinfo{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:3px 3px 5px}.ma-cinfo>b{flex:0 0 32px;font:800 10.5px Arial,sans-serif;letter-spacing:.04em;text-transform:uppercase;color:#7c88ad}
 .ma-ed-f{display:flex;gap:10px;margin:6px 0 8px}.ma-ed-f>.ma-opt{flex:1 1 0;gap:4px}.ma-ed-f .ma-opt-l{font-size:11px;font-weight:600;letter-spacing:0;text-transform:none;color:#c3cdef}.ma-ed-f .ma-in{height:30px;font-size:12px}
 .ma-ed-n{margin:-2px 1px 8px;min-height:15px;color:#7c88ad}.ma-pvg{grid-column:1/-1;padding:8px 10px 3px;background:#0d1322;border:1px solid rgba(255,255,255,.06);border-radius:14px}.ma-pvg-h{display:flex;align-items:baseline;justify-content:space-between;gap:8px;margin-bottom:6px}.ma-pvg-h b{font:800 11px Arial,sans-serif;letter-spacing:.06em;text-transform:uppercase;color:#cfd8f7}.ma-pvg-h small{font-size:10.5px;color:#7c88ad}.ma-pvg .ma-ed-f{margin:0 0 8px}.ma-pvg .ma-ed-n{margin:-3px 1px 8px}.ma-ed-c{display:flex;justify-content:space-between;gap:8px;padding:2px 2px 2px;color:#7c88ad;font-size:10.5px;font-weight:700;letter-spacing:.04em;text-transform:uppercase}
 .ma-ed .ma-pm{padding:4px 2px;gap:9px}.ma-ed .ma-pm:first-child{border-top:0}.ma-ed .ma-pm .ma-num .ma-in{height:27px;font-size:12px}
@@ -5839,24 +5827,18 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     const f = (ui.filter || '').trim().toLowerCase();
     return Roster.list.filter((d) => Roster.canon(d) === d && (sec === 'dungeons' ? d.kind !== 'wave' && Kernel.isOn('dungeons') : d.kind === 'wave') && (!f || Roster.members(d).some((m) => m.name.toLowerCase().includes(f))));
   };
-  /* ---- the Cube in the Dungeons list: same fold + row + bubble look as Castle / Shadowbridge, but the Cube is Cube Suite's, so it is read-only here
-     (live state of every node, one switch for "run on every page", the mode). Nothing to tick: Cube Suite owns the fighting. ---- */
-  // The Cube's node layout is fixed (Cube Suite: PVP_NODE_PRIORITY + the Tyrant N9, SA_TARGET_NODES, PVE_TARGET_NODES), so every node is listed all the time, like the Gribbles:
-  // with nothing running a node reads "idle". The live pills of cube.status() are laid over it by name; a pill with a name not listed here (a node added later) is appended.
-  const CUBE_NODES = [['PvE', 'rooms', 'pve', ['Gate Prism', 'Ash Lane', 'Crown Lens', 'Zenith Lock']]];   // only the PvE rooms are dungeons: PvP has its own card in Settings, the SA army nodes are Cube Suite's alone
+  /* ---- the Cube in the Dungeons list. PvP and SA run by themselves, so here they are INFO only: one line of pills each (Cube Suite's own node states, status().nodes).
+     The PvE rooms are the part you steer, and they look like Castle / Shadowbridge: a bubble per room with an on / off switch, tap it for its mobs and caps,
+     everything that is profile-wide sits in one fold above them. ---- */
+  const CUBE_ROOMS = ['Gate Prism', 'Ash Lane', 'Crown Lens', 'Zenith Lock'];   // the PvE rooms (fixed ids in Cube Suite): listed even when nothing is live
   const cubePillName = (t) => String(t).split(' · ')[0];
-  const cubeNodeGroups = (c = cubeSt()) => CUBE_NODES.map(([g, sub, key, names]) => {
-    const live = Array.isArray(((c || {}).nodes || {})[key]) ? c.nodes[key] : [];
-    const rows = names.map((nm) => live.find(([, t]) => cubePillName(t) === nm) || ['idle', nm + ' · idle']);
-    live.forEach((p) => { if (!names.includes(cubePillName(p[1]))) rows.push(p); });
-    return [g, sub, rows];
-  });
-  const cubeNodeCount = () => cubeNodeGroups().reduce((n, g) => n + g[2].length, 0);
-  /* ---- PvE damage settings of one node (Cube Suite's PvE profile for the current mode: cube.pve.get / cube.pve.set): damage mode, fixed cap, model, and per mob: ticked + cap ---- */
+  const cubeRoomNames = (d = cubePveGet()) => (d && Array.isArray(d.nodes) && d.nodes.length ? d.nodes.map((n) => n.label) : CUBE_ROOMS);
+  const cubeNodeCount = () => cubeRoomNames().length;
+  /* ---- PvE damage settings (Cube Suite's PvE profile for the current mode: cube.pve.get / cube.pve.set): damage mode, fixed cap, model, potions, and per mob: ticked + cap ---- */
   const PVE_MODES = [['exp', 'EXP cap'], ['fixed', 'Fixed cap (all mobs)'], ['monster', 'Per-mob caps'], ['loot', 'Full loot unlock']];   // + ['scheduled', ...] on the Normal profile: same names as Cube Suite's panel
   const PVE_MODE_HINT = { exp: 'Stops at each mob\'s server EXP cap. No setup needed.', fixed: 'One damage cap for all mobs.', monster: 'Per-mob caps below. 0 = skip that mob.', loot: 'Stops once you\'ve hit the DMG req for the rarest drop on each mob.', scheduled: 'Different caps at different times of day. Tap a room below to set its times.' };
   const cubePveSet = (o) => {
-    if (!Core.has('cube.pve.set')) { log('⚠️ Cube Suite is too old for PvE settings: reload so 3.6.0+ loads', 'warn'); return Promise.resolve(); }
+    if (!Core.has('cube.pve.set')) { log('⚠️ Cube Suite is too old for PvE settings: reload so 3.6.1+ loads', 'warn'); return Promise.resolve(); }
     return Promise.resolve(Core.call('cube.pve.set', o)).then((r) => { if (r && r.ok === false) log('⚠️ Cube Suite: ' + esc(r.message || 'refused'), 'warn'); draw(); }).catch((e) => log('⚠️ Cube Suite: ' + esc((e && e.message) || e), 'warn'));
   };
   /* Scheduled stop condition, one room: the times are edited HERE through cube.pve.set (Cube Suite 3.6.1+), not on the Cube page. A row applies from its time until the next one;
@@ -5895,18 +5877,22 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   const cubePveGet = () => { try { const f = Core.has('cube.pve.get') ? Core.cap('cube.pve.get') : null; return f ? f() : null; } catch (_) { return null; } };
   const pveFmt = (n) => (n > 0 ? short(n) : '0');
   const pveCapWord = (d) => ({ monster: 'damage cap', exp: 'EXP cap', loot: 'loot unlock', scheduled: 'timed caps', fixed: 'every mob: ' + (d.fixedDamageCap > 0 ? short(d.fixedDamageCap) : 'no limit') }[d.damageMode] || '');
-  /* GLOBAL: one profile-wide setting for ALL PvE rooms (Cube Suite keeps it above its room list too). Always visible, so changing the stop condition is one tap away and never looks like a per-room choice. */
-  function cubePveGlobal() {
-    const d = cubePveGet();
-    if (!d) return h('div', { class: 'ma-pvg' }, note('Needs Cube Suite 3.6.0+ for the PvE damage settings (reload so the new version loads).'));
-    const fast = d.profile === 'fast';
-    return h('div', { class: 'ma-pvg' },
-      h('div', { class: 'ma-pvg-h' }, h('b', {}, 'All PvE rooms'), h('small', {}, (fast ? 'Fast Run' : 'Normal') + ' profile')),
+  /* ONE fold for everything that is profile-wide (all rooms): stop condition, damage model, potions, copy from the other profile. Closed by default: its summary says what is set. */
+  function cubePveSettings(d) {
+    const fast = d.profile === 'fast', other = fast ? 'Normal' : 'Fast Run';
+    const head = ['⚙ PvE settings', h('small', {}, (fast ? 'Fast Run' : 'Normal') + ' · ' + (pveCapWord(d) || d.damageMode) + ' · ' + (d.damageModel === 'fast' ? 'fewest hits' : 'eco'))];
+    return fold('cube:pvecfg', false, head, () => [
       h('div', { class: 'ma-ed-f' },
         opt('Stop condition', dropdown(PVE_MODES.concat(fast ? [] : [['scheduled', 'Scheduled (per-node, time-based)']]), d.damageMode, (v) => { cubePveSet({ damageMode: v }); })),
         opt('Damage model', dropdown([['eco', 'Eco'], ['fast', 'Fast']], d.damageModel, (v) => { cubePveSet({ damageModel: v }); }))),
       h('div', { class: 'ma-note ma-ed-n' }, PVE_MODE_HINT[d.damageMode] || ''),
-      d.damageMode === 'fixed' ? h('div', { class: 'ma-ed-f' }, opt('Fixed cap', num(() => d.fixedDamageCap, (n) => { cubePveSet({ fixedDamageCap: n }); }, { min: 0, fmt: pveFmt, parse: parseCap }), '0 = no limit')) : null);
+      d.damageMode === 'fixed' ? h('div', { class: 'ma-ed-f' }, opt('Fixed cap', num(() => d.fixedDamageCap, (n) => { cubePveSet({ fixedDamageCap: n }); }, { min: 0, fmt: pveFmt, parse: parseCap }), '0 = no limit')) : null,
+      opt('Stamina potion', sw(() => !!d.useStaminaPotion, (v) => { cubePveSet({ useStaminaPotion: v }); }, { sm: true, redraw: false }), 'Large potion when stamina runs out', 'row'),
+      d.useStaminaPotion ? opt('Skip from EXP', num(() => d.staminaPotionExpCap, (n) => { cubePveSet({ staminaPotionExpCap: n }); }, { min: 0, max: 100, parse: parseFloat, unit: '%' }), 'At or above this the level-up refills stamina instead', 'row') : null,
+      opt('HP potion', sw(() => !!d.useHpPotion, (v) => { cubePveSet({ useHpPotion: v }); }, { sm: true, redraw: false }), 'Full HP potion after a death', 'row'),
+      h('div', { class: 'ma-note' }, 'Normal and Fast Run keep separate PvE profiles (settings, mob picks, caps).'),
+      h('div', { class: 'ma-actions ma-block' }, btn('Copy from ' + other, 'soft', () => { if (confirm(`Copy all PvE settings (potions, mob caps and picks) from ${other} into the current profile? This overwrites it. The stop condition stays.`)) cubePveSet({ copyFromOther: true }); }))
+    ], { sub: true });
   }
   /* LOCAL: one room. Only what belongs to this room: which of its mobs are attacked and, in per-mob mode, each one's cap. */
   function cubePveEditor(label) {
@@ -5925,36 +5911,49 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
         : h('div', { class: 'ma-empty' }, 'No monsters known on this room yet: the Cube scan lists them as soon as it has seen it.'));
   }
   const CUBE_WORD = { cleared: 'cleared', joined: 'joined', avail: 'available', cd: 'cooldown', locked: 'locked', mon: 'waiting', idle: 'idle' };   // only used when a pill has no " · state" part
+  const cubeInfo = (c) => {                                          // the one info line: which Cube, how it runs, what Fast Run is aimed at
+    const ft = c.fastTargets || {}, bits = [c.instanceId ? 'Cube #' + c.instanceId : 'no active Cube', c.mode === 'fast' ? 'Fast Run' : 'Normal', c.master ? 'automation on' : 'automation paused', c.background ? 'every page' : 'Cube page only'];
+    if (c.mode === 'fast') bits.push(`N7 match ${ft.node7MatchNo || '–'} · N8 match ${ft.node8MatchNo || '–'}${c.leader ? ' · leader' : ''}`);
+    if (!c.running) bits.push('engine not running');
+    return bits.join(' · ');
+  };
+  // PvP and SA are automatic: one line of pills each, nothing to click
+  const cubeInfoRow = (label, pills) => (Array.isArray(pills) && pills.length ? h('div', { class: 'ma-cinfo' }, h('b', {}, label),
+    pills.map(([k, t]) => h('span', { class: 'ma-pill' + (CUBE_PILL[k] ? ' ' + CUBE_PILL[k] : ''), title: String(t) }, String(t)))) : null);
+  const cubeLive = ([k]) => k === 'joined' || k === 'avail';
+  /* a PvE room as a bubble, like a boss: avatar (dot = live state), name, "picked/total mobs · state", switch (the whole room on / off). Tap it for its mobs and caps. */
+  function cubeRoom(c, d, nm) {
+    const live = ((c.nodes || {}).pve || []).find(([, t]) => cubePillName(t) === nm) || ['idle', nm + ' · idle'];
+    const kind = CUBE_PILL[live[0]] || '', st = String(live[1]).split(' · ').slice(1).join(' · ') || CUBE_WORD[live[0]] || '';
+    const node = d && (d.nodes || []).find((n) => n.label === nm), mobs = node ? node.mobs : [], picked = mobs.filter((m) => m.selected).length, on = picked > 0, open = ui.cubeSel === nm;
+    const at = { class: 'ma-bb' + (on ? ' on' : '') + (open ? ' open' : ''), title: nm + ' (tap for mobs and caps)' };
+    at.onclick = () => { ui.cubeSel = open ? '' : nm; saveUi(); draw(); };
+    return h('div', at,
+      avatar(nm, null, { dot: kind }),
+      h('div', { class: 'ma-bb-n' }, h('b', {}, nm), h('small', {}, mobs.length ? picked + '/' + mobs.length + ' mobs · ' : '', h('span', { class: kind ? 'st-' + kind : '' }, st))),
+      node && mobs.length ? sw(() => on, (v) => { cubePveSet({ node: { nodeId: node.id, selected: v } }); }, { sm: true, redraw: false }) : null);
+  }
   function cubeFold(f, force) {
     const c = cubeSt(); if (!c) return null;                         // Cube Suite is not loaded on this page: the Settings tab explains it, no empty folder here
-    if (!c.running) setTimeout(() => { CubeScan.run(false); }, 0);    // nothing live: read the Cube once (throttled; Cube Suite does nothing while an engine runs)
-    const hit = (g, t) => !f || ['cube', 'crucible', g[0], t].join(' ').toLowerCase().includes(f);
-    const groups = cubeNodeGroups(c).map((g) => [g[0], g[1], g[2].filter(([, t]) => hit(g, t))]).filter((g) => g[2].length);
-    if (f && !groups.length && !'cube crucible'.includes(f)) return null;
-    const all = cubeNodeGroups(c).reduce((a, g) => a.concat(g[2]), []).filter(([k]) => k !== 'locked'), done = all.filter(([k]) => k === 'cleared').length;   // locked / off / not-assigned nodes can never be cleared: leave them out of the goal
-    const live = ([k]) => k === 'joined' || k === 'avail';
-    const node = (g) => ([k, t]) => {                                // "Gate Prism · active" -> name | state; the PvE nodes open their damage settings, the rest is read-only (Cube Suite owns the fights)
-      const parts = String(t).split(' · '), nm = parts[0], st = parts.slice(1).join(' · '), kind = CUBE_PILL[k] || '', pve = g[0] === 'PvE' && Core.has('cube.pve.get'), sel = pve && ui.cubeSel === nm;
-      const at = { class: 'ma-bb' + (pve ? ' pk' : ' ro') + (live([k]) ? ' on' : '') + (sel ? ' open' : ''), title: pve ? t + ' (tap for damage settings)' : t };
-      if (pve) at.onclick = () => { ui.cubeSel = sel ? '' : nm; saveUi(); draw(); };
-      return h('div', at,
-        avatar(nm, null, { dot: kind }),
-        h('div', { class: 'ma-bb-n' }, h('b', {}, nm), h('small', {}, h('span', { class: kind ? 'st-' + kind : '' }, st || CUBE_WORD[k] || ''))));
-    };
-    const rowOfNodes = (g) => h('div', { class: 'ma-wv' },
-      ...(g[0] === 'PvE' && Core.has('cube.pve.get') ? [cubePveGlobal()] : []),   // settings for every room come first, so a room's card opens right under its own pills
-      h('div', { class: 'ma-wv-l' + (g[2].some(live) ? ' on' : '') }, h('b', {}, g[0]), h('small', { title: g[1] }, g[1])),
-      h('div', { class: 'ma-grid' }, g[2].map(node(g))),
-      ...(g[0] === 'PvE' && ui.cubeSel && Core.has('cube.pve.get') && g[2].some(([, t]) => cubePillName(t) === ui.cubeSel) ? [cubePveEditor(ui.cubeSel)] : []));
-    const head = ['\u{1F9CA} Cube', h('small', {}, c.instanceId ? '#' + c.instanceId + ' \u00b7 ' + (c.mode === 'fast' ? 'fast run' : 'normal') : 'no active Cube')];
-    const aside = [h('span', { class: 'ma-pill' + (all.length && done === all.length ? ' ok' : done ? ' blue' : '') }, done + '/' + all.length),
+    const d = cubePveGet(), n = c.nodes || {}, rooms = cubeRoomNames(d);
+    const shown = rooms.filter((nm) => !f || ['cube', 'crucible', 'pve', nm].join(' ').toLowerCase().includes(f));
+    if (f && !shown.length && !'cube crucible pvp sa shadow army'.includes(f)) return null;
+    const all = [].concat(n.pvp || [], n.sa || [], n.pve || []).filter(([k]) => k !== 'locked'), done = all.filter(([k]) => k === 'cleared').length;   // locked / not-assigned nodes can never be cleared: leave them out of the goal
+    const head = ['\u{1F9CA} Cube', h('small', {}, c.instanceId ? '#' + c.instanceId + ' · ' + (c.mode === 'fast' ? 'fast run' : 'normal') : 'no active Cube')];
+    const aside = [all.length ? h('span', { class: 'ma-pill' + (done === all.length ? ' ok' : done ? ' blue' : '') }, done + '/' + all.length) : null,
       Core.has('cube.background.set') ? sw(() => !!c.background, (v) => { cubeSet('cube.background.set', v).then(() => v && cubeSet('cube.master.set', true)); }, { sm: true, redraw: false }) : null].filter(Boolean);
     return fold('grp:cube', !!(c.running || c.background), head, () => {
-      const body = [note(cubeLine())];
+      const body = [note(cubeInfo(c))];
       if (Core.has('cube.mode.set')) body.push(opt('Mode', seg([['normal', 'Normal'], ['fast', 'Fast Run']], c.mode || 'normal', (v) => { cubeSet('cube.mode.set', v); })));
-      if (!c.instanceId) body.push(note('No active Cube: the nodes read idle until one is open (the Automator rescans every few minutes).'));
-      else if (!c.nodes) body.push(note('Cube Suite has not reported live node states yet (it does on its next loop).'));
-      return body.concat(groups.map(rowOfNodes));
+      body.push(cubeInfoRow('PvP', n.pvp), cubeInfoRow('SA', n.sa));
+      if (!c.nodes) body.push(note(c.instanceId ? 'Cube Suite has not reported node states yet (it does on its next loop).' : 'No live read: PvP, SA and PvE states show while Cube Suite runs. Open the Cube page, or switch on the every-page switch above.'));
+      if (!d) { body.push(note('Needs Cube Suite 3.6.0+ for the PvE rooms (reload so the new version loads).')); return body; }
+      body.push(cubePveSettings(d));
+      body.push(h('div', { class: 'ma-wv' },
+        h('div', { class: 'ma-wv-l' + ((n.pve || []).some(cubeLive) ? ' on' : '') }, h('b', {}, 'PvE'), h('small', {}, 'rooms')),
+        h('div', { class: 'ma-grid' }, shown.map((nm) => cubeRoom(c, d, nm))),
+        ...(ui.cubeSel && shown.includes(ui.cubeSel) ? [cubePveEditor(ui.cubeSel)] : [])));
+      return body;
     }, { force, aside });
   }
   function bossSections(sec) {
