@@ -14,7 +14,7 @@
  *                      Swappable: turn the part off (or delete it) and the wave bosses keep working.
  *   PART 3  DUELS      Phase duels, shared by wave and dungeon bosses
  *   PART 4  LOOT       graveyard scan + persisted ledger (corpses remembered by id, checked on their battle page before looting) + EXP-aware auto-loot,
- *                      levelUpFirst (before a stamina potion: the oldest corpses that cover the next level-up are looted instead; nothing is looted in bulk)
+ *                      levelUpFirst (Graveyard: above its level limit the next potion is looted instead, oldest corpses first; nothing is looted in bulk)
  *   PART 4b LOOT SCAN  reads every boss's loot / level / EXP cap into the cap choices; Export .txt (swappable)
  *   PART 5a FARM       the one auto-farm service (basic wave mobs only): level-400 tolerant, 10% batching, safe restore of your own set-up
  *   PART 5b TASKS      task master: Monsters, Adventure Guild, Battle Pass, Merchant (weekly), Extraction (shadows), PvP placeholders; Automator.tasks.define({...}) adds more
@@ -108,7 +108,7 @@ const DEFAULT_CFG = {
     guild:    { enabled: false, everyMin: 60, collect: true, collectFarm: true, skill: true },   // everyMin = the longest wait only: a task wakes itself when something is due
     bp:       { enabled: false, everyMin: 60 },
     merchant: { enabled: false, everyMin: 60 },
-    graveyard: { enabled: false, everyDays: 1 },   // everyDays = how often it rescans the graveyard (it never loots by itself: corpses are spent on level-ups, oldest first)
+    graveyard: { enabled: false, keepLevels: 5, everyDays: 1 },   // keepLevels = while the corpses are worth up to this many level-ups they are saved and potions are used as usual; above it, the next potion is looted instead (oldest corpses, one level-up at a time); everyDays = how often it rescans the graveyard
     extract:  { enabled: false, everyMin: 5, mob: '' },   // shadow extraction (PART 5b): mob = the ONE Grakthar gate mob type to extract, by lower-case name ('' = none)
     pvp:      { solo: { enabled: false }, team: { enabled: false } },   // placeholders until the PvP module registers itself
     monsters: { enabled: true },       // the boss engine's own switch (Start / Stop is the master switch for everything)
@@ -132,10 +132,10 @@ function mergeCfg(saved) {
   out.tasks = (() => { const d = JSON.parse(JSON.stringify(DEFAULT_CFG.tasks)), t = s.tasks && typeof s.tasks === 'object' ? s.tasks : {};
     for (const k of Object.keys(d)) { const v = t[k]; if (!v || typeof v !== 'object') continue; if (k === 'pvp') { for (const j of Object.keys(d.pvp)) d.pvp[j] = Object.assign({}, d.pvp[j], v[j] && typeof v[j] === 'object' ? v[j] : {}); } else d[k] = Object.assign({}, d[k], v); }
     return d; })();
-  { const g = out.tasks.graveyard, d = DEFAULT_CFG.tasks.graveyard, e = Number(g.everyDays);
-    g.enabled = !!g.enabled;
+  { const g = out.tasks.graveyard, d = DEFAULT_CFG.tasks.graveyard, k = Number(g.keepLevels), e = Number(g.everyDays);
+    g.enabled = !!g.enabled; g.keepLevels = Number.isFinite(k) && k >= 0 && k <= 50 ? Math.round(k) : d.keepLevels;
     g.everyDays = Number.isFinite(e) && e >= 0.25 && e <= 30 ? Math.round(e * 100) / 100 : d.everyDays;
-    for (const x of ['everyMin', 'checkMin', 'pile', 'expiryH', 'levelUp', 'maxDays', 'keepLevels']) delete g[x]; }      // (older versions had minutes, triggers and a stash size: retired; the days are the whole schedule now)
+    for (const x of ['everyMin', 'checkMin', 'pile', 'expiryH', 'levelUp', 'maxDays']) delete g[x]; }      // (older versions had minutes, triggers and a stash size: retired; the days are the whole schedule now)
   { const x = out.tasks.extract; if (typeof x.mob !== 'string') x.mob = ''; if (!x.mob && x.mobs && typeof x.mobs === 'object') x.mob = Object.keys(x.mobs).find((k) => x.mobs[k]) || '';
     x.mob = x.mob.trim().toLowerCase(); delete x.mobs; }      // (1.14.x ticked any number of mobs: the first ticked one carries over)
   out.cubeFast = (() => { const d = DEFAULT_CFG.cubeFast, v = Object.assign({}, d, s.cubeFast && typeof s.cubeFast === 'object' ? s.cubeFast : {}), n = (x, lo, hi, dflt) => (Number.isFinite(+x) && +x >= lo && +x <= hi ? +x : dflt);
@@ -174,8 +174,11 @@ function mergeCfg(saved) {
 }
 let cfg = mergeCfg(cfgStore.get());
 function saveCfg() { cfgStore.set(cfg); }
-const lootOn = () => !!(cfg.autoLoot.enabled || (cfg.tasks && cfg.tasks.graveyard && cfg.tasks.graveyard.enabled));   // level-ups from old corpses (before a potion, and when out of stamina): the Auto-loot setting or the Graveyard task switches it on
+const lootOn = () => !!cfg.autoLoot.enabled;   // Auto-loot: out of stamina and no potion left -> loot what levels you up
+const graveyardOn = () => !!(cfg.tasks && cfg.tasks.graveyard && cfg.tasks.graveyard.enabled);   // Graveyard: while the corpses are worth more than its level limit, the next potion is looted instead
 const levelText = (P) => !P || !P.ok ? null : !P.all ? `📈 Next level-up: ${fmtNum(P.need)} EXP · no EXP corpses known yet` : P.picks.length ? `📈 Next level-up: ${fmtNum(P.need)} EXP · the ${P.picks.length} oldest corpse${P.picks.length === 1 ? '' : 's'} cover it` : `📈 Next level-up: ${fmtNum(P.need)} EXP · corpses cover only ${fmtNum(P.total)}`;
+const gyText = (P) => { if (!P || !P.ok) return null; const lv = P.levels > 0 ? `${P.levels} level-up${P.levels === 1 ? '' : 's'}` : '';
+  return !P.all ? '📦 No EXP corpses known yet' : P.armed ? `📈 Corpses cover ${lv ? 'over ' + lv : 'the next level-up'} · the next potion is looted instead` : `📦 ${fmtNum(P.total)} of ${fmtNum(P.allowance)} EXP saved · potions as usual until over ${lv || 'the next level-up'}`; };
 const monstersOn = () => !(cfg.tasks && cfg.tasks.monsters && cfg.tasks.monsters.enabled === false);   // (a saved config from before this switch has none: on)
 cfgStore.watch((v) => { if (v && JSON.stringify(v) !== JSON.stringify(cfg)) { cfg = mergeCfg(v); UI.dirty(); } });
 
@@ -913,7 +916,7 @@ const targetKey = (t) => `${t.kind}:${t.instanceId || ''}:${t.monsterId}`;
 /* ---- slots the other parts fill in. Each has a harmless stub, so deleting PART 2 / 3 / 4 never breaks the wave bosses ---- */
 const Dungeons = { nextCheck: () => Infinity, refresh: async () => {}, sideMobs: null, corpses: null };   // PART 2 fills this
 const Duels = { fight: null, bootPage: () => {} };                                                         // PART 3 fills this
-const Loot = { onStamStall: async () => {}, levelUpFirst: async () => false, nextPlan: () => ({ ok: false, need: 0, picks: [], pickSum: 0, total: 0, all: 0 }) };                                                              // PART 4 fills this
+const Loot = { onStamStall: async () => {}, levelUpFirst: async () => false, nextPlan: () => ({ ok: false, need: 0, picks: [], pickSum: 0, total: 0, all: 0, allowance: 0, levels: 0, armed: false }) };                                                              // PART 4 fills this
 const Farm = { busy: () => false, hold: () => {}, manual: () => false, locked: () => '', mode: () => ({ kind: 'auto', why: '' }), nudge: () => {}, wantAuto: () => true, recover: () => {}, info: () => ({}) };                                   // PART 5a fills this (the shared auto-farm service)
 const Tasks = {};                                                                                          // PART 5b fills this (task registry)
 const LootScan = { available: false, state: { running: false, stop: false, label: '', done: 0, total: 0, read: 0, added: 0, notes: [], error: '', startedAt: 0, endedAt: 0 }, run: async () => {}, stop() {}, download() {}, text: () => '', learn() {} };   // PART 4b fills this
@@ -2784,7 +2787,7 @@ Object.assign(Duels, (() => {
 
 /* ===================================================================================================================
  * PART 4 — LOOT: graveyard scan (dead monsters you fought, still lootable) + EXP-aware auto-loot
- * Claims only for a level-up: when stamina runs low (Loot.levelUpFirst, before a potion) or runs out (Loot.onStamStall), or when you press a button. Oldest corpses first.
+ * Claims only for a level-up: Graveyard above its level limit (Loot.levelUpFirst, instead of a potion), Auto-loot when stamina and potions run out (Loot.onStamStall), or when you press a button. Oldest corpses first.
  * Mode toLevel: take the corpse that fits the EXP still needed, biggest first, stop as soon as the level rises. Mode all: take everything.
  * The cube instance (Polyhedral Crucible) is never listed or touched.
  * ================================================================================================================ */
@@ -2985,9 +2988,11 @@ Object.assign(Loot, (() => {
   // What the next level-up would take, from the last scan (no requests): { need, picks (oldest first), pickSum, total (all known EXP), all (EXP corpses known) }
   function nextPlan() {
     const need = expNeeded(), rows = st.rows.filter((r) => r.needsLoot !== false && !blocked(r) && r.est > 0), total = rows.reduce((n, r) => n + r.est, 0);
-    if (!(need > 0)) return { ok: false, need: 0, picks: [], pickSum: 0, total, all: rows.length };
+    const levels = Math.max(0, Number(cfg.tasks.graveyard.keepLevels) || 0), m = Core.me.get(), max = m && m.exp && m.exp.max > 0 ? m.exp.max : 0;
+    if (!(need > 0)) return { ok: false, need: 0, picks: [], pickSum: 0, total, all: rows.length, allowance: 0, levels, armed: false };
+    const allowance = levels > 0 ? need + (levels - 1) * max : 0;       // what `levels` level-ups cost: the one you need now, the others at today's level cost
     const picks = total >= need ? oldestPlan(rows.map((r) => ({ r, est: r.est })), need) : [];
-    return { ok: true, need, picks, pickSum: picks.reduce((n, r) => n + r.est, 0), total, all: rows.length };
+    return { ok: true, need, picks, pickSum: picks.reduce((n, r) => n + r.est, 0), total, all: rows.length, allowance, levels, armed: total >= need && total > allowance };
   }
   async function buildPlan(rows) {
     await syncMe(); const needed = expNeeded(); if (!(needed > 0)) return [];
@@ -3053,16 +3058,18 @@ Object.assign(Loot, (() => {
     log('⏸️ out of stamina and no potion — checking the graveyard for loot', 'info');
     await scan(); await pass();
   }
-  // Before a stamina potion: if the old corpses can cover the NEXT level-up, loot those (oldest first) instead; the level-up refills stamina for free. True when the level rose.
+  // Graveyard: before a stamina potion, if the corpses are worth MORE than its level limit, the next potion becomes a loot: the oldest corpses that cover the next level-up are
+  // looted (the level-up refills stamina for free). Under the limit nothing happens: the corpses are saved and the potion is used as usual. True when the level rose.
   // After a miss it waits 5 minutes before trying again, so a low bar never turns into a graveyard check on every swing.
   async function levelUpFirst() {
-    if (!lootOn() || !Kernel.isOn('loot') || !Tab.isMain()) return false;
+    if (!graveyardOn() || !Kernel.isOn('loot') || !Tab.isMain()) return false;
     if (st.scanning || st.looting || st.clearing || Date.now() - st.tryAt < 5 * 60000) return false;
-    st.tryAt = Date.now();
-    log('🪦 stamina is low — trying the oldest corpses for the next level-up before a potion', 'info');
     if (!st.rows.length || Date.now() - st.lastScanAt > 10 * 60000) await scan();
+    const P = nextPlan(); if (!P.armed) return false;                       // under the limit: saved for later, the potion goes as usual
+    st.tryAt = Date.now();
+    log(`🪦 corpses are worth over ${P.levels > 0 ? P.levels + ' level-up' + (P.levels === 1 ? '' : 's') : 'the next level-up'} — looting the oldest instead of a potion`, 'info');
     const up = await pass();
-    if (up) st.tryAt = 0; else log('🪦 the corpses do not cover the next level-up — a potion it is', 'info');
+    if (up) st.tryAt = 0; else log('🪦 the corpses did not give the level-up — a potion it is', 'info');
     return up;
   }
   // "Loot now": always look first (the rows are only as fresh as the last scan), then claim
@@ -4465,7 +4472,7 @@ const Graveyard = (() => {                                              // the t
     setInfo({ state: 'run', line: 'scanning the whole graveyard…' });
     const t0 = Date.now(); await Loot.scan(true);                         // looks only: corpses are spent when a level-up is due (Loot.levelUpFirst), never in bulk
     if (!(Loot.state.lastScanAt >= t0)) { if (wasCube) save({ cubeDue: true }); setInfo({ state: 'warn', line: 'could not scan the graveyard — trying again later' }); return RETRY_MS; }   // signed out / site down / stopped: it picks up again
-    const P = Loot.nextPlan(), line = P.ok ? plural(P.all, 'EXP corpse') + ' · ' + String(levelText(P)).replace(/^📈 /, '') : 'scanned · could not read your EXP';
+    const P = Loot.nextPlan(), line = P.ok ? plural(P.all, 'EXP corpse') + ' · ' + String(gyText(P)).replace(/^\S+ /, '') : 'scanned · could not read your EXP';
     save({ lastRunAt: Date.now(), line });
     setInfo({ state: P.ok ? 'ok' : 'warn', line });
     return gapMs();
@@ -4779,7 +4786,7 @@ Object.assign(Tasks, (() => {
   define({ id: 'guild', name: 'Adventure Guild', icon: '📜', desc: 'Kill quests: finish, accept, auto-farm the kills', every: () => mins(cfg.tasks.guild.everyMin, 5), enabled: () => !!cfg.tasks.guild.enabled, tick: Guild.tick });
   define({ id: 'bp', name: 'Battle Pass', icon: '🎫', desc: 'The hunt of the pass, auto-farmed', every: () => mins(cfg.tasks.bp.everyMin, 10), enabled: () => !!cfg.tasks.bp.enabled, tick: Battle.tick });
   define({ id: 'merchant', name: 'Merchant', icon: '🛒', desc: 'Buys the weekly restock once per server week', every: () => mins(cfg.tasks.merchant.everyMin, 30), enabled: () => !!cfg.tasks.merchant.enabled, tick: Merchant.tick });
-  define({ id: 'graveyard', name: 'Graveyard', icon: '🪦', desc: 'Keeps the graveyard scanned; the oldest corpses level you up instead of a potion', every: () => 6 * 3600000, enabled: () => !!cfg.tasks.graveyard.enabled, tick: Graveyard.tick });
+  define({ id: 'graveyard', name: 'Graveyard', icon: '🪦', desc: 'Over its level limit, the next potion is looted instead', every: () => 6 * 3600000, enabled: () => !!cfg.tasks.graveyard.enabled, tick: Graveyard.tick });
   define({ id: 'extract', name: 'Extraction', icon: '☠️', desc: 'Raises shadows from dead Grakthar gate monsters: no join or kill needed', every: () => mins(cfg.tasks.extract.everyMin, 5), enabled: () => !!cfg.tasks.extract.enabled, tick: Extract.tick });
   define({ id: 'pvp.solo', name: 'PvP · Solo', icon: '⚔️', group: 'pvp', desc: 'placeholder — plug your PvP module in', placeholder: true, enabled: () => !!cfg.tasks.pvp.solo.enabled });
   define({ id: 'pvp.team', name: 'PvP · Team', icon: '🛡️', group: 'pvp', desc: 'placeholder — plug your PvP module in', placeholder: true, enabled: () => !!cfg.tasks.pvp.team.enabled });
@@ -5001,11 +5008,7 @@ const Panel = (() => {
 .ma-mp-sel{display:flex;align-items:center;gap:10px;background:#0d1322;border:1px solid #27324f;border-radius:12px;padding:8px 10px}.ma-mp-sel .t{min-width:0;flex:1}
 .ma-mp-sel b{display:block;font:700 13px Arial,sans-serif;color:#e4ebff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.ma-mp-sel small{color:#8fa0cf;font:11.5px Arial,sans-serif}
 .ma-mp-h{margin:10px 0 5px;font:800 10.5px Arial,sans-serif;letter-spacing:.06em;text-transform:uppercase;color:#7f8fba}
-.ma-mp-g{display:grid;grid-template-columns:repeat(auto-fill,minmax(76px,1fr));gap:6px}
-.ma-mt{position:relative;display:flex;flex-direction:column;align-items:center;gap:4px;background:#0d1322;border:1px solid #27324f;border-radius:11px;padding:7px 3px 6px;color:#9caad0;font:700 10.5px Arial,sans-serif;cursor:pointer;min-width:0}
-.ma-mt:hover{border-color:#3b4a73;color:#cfd8f7}.ma-mt.on{background:rgba(75,115,224,.2);border-color:#6ea8ff;color:#d6e5ff}.ma-mt.bad{opacity:.45}
-.ma-mt .n{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.ma-mt em{position:absolute;top:3px;right:4px;font:800 10px Arial,sans-serif;font-style:normal;background:#2a7a4b;color:#fff;border-radius:999px;padding:1px 5px}
+.ma-mc-g{display:flex;flex-wrap:wrap;gap:6px}.ma-mc{display:inline-flex;align-items:center;gap:6px;background:#0d1322;border:1px solid #27324f;border-radius:999px;padding:5px 11px;color:#aab7dc;font:600 12px Arial,sans-serif;text-transform:capitalize;cursor:pointer}.ma-mc:hover{border-color:#3b4a73;color:#d6e0ff}.ma-mc.on{background:rgba(75,115,224,.22);border-color:#6ea8ff;color:#e4ecff}.ma-mc.bad{opacity:.45}.ma-mc em{font:800 10px Arial,sans-serif;font-style:normal;background:#2a7a4b;color:#fff;border-radius:999px;padding:1px 6px}
 /* inputs */
 .ma-in{box-sizing:border-box;width:92px;background:#101a33;border:1px solid rgba(255,255,255,.12);color:#eef3ff;border-radius:10px;padding:5px 9px;font:12.5px Arial,sans-serif;transition:.15s}
 .ma-in:focus{outline:none;border-color:#6ea8ff;box-shadow:0 0 0 2px rgba(110,168,255,.18)}
@@ -5425,22 +5428,23 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     const ms = Merchant.state();
     out.push(card('🛒', 'Merchant', 'Weekly restock · resets Sunday 00:00 server', T.merchant.enabled, (v) => { T.merchant.enabled = v; if (v) Tasks.poke('merchant'); },
       [taskLine('merchant', T.merchant.enabled, btn(ms.done ? 'Recheck' : 'Buy now', 'soft', () => { Merchant.reset(); Tasks.poke('merchant'); draw(); }))]));
-    // Graveyard: no bulk looting. When stamina runs low the oldest corpses are tried for the NEXT level-up first (see Loot.levelUpFirst); a potion is only drunk if they cannot cover it.
-    const gt = T.graveyard, gNext = levelText(Loot.nextPlan());
-    out.push(card('🪦', 'Graveyard', 'Oldest corpses level you up instead of a potion', gt.enabled, (v) => { gt.enabled = !!v; if (v) Tasks.poke('graveyard'); },
+    // Graveyard: no bulk looting. Corpses worth more than the level limit make the NEXT potion a loot (see Loot.levelUpFirst); under the limit they are saved.
+    const gt = T.graveyard, gNext = gyText(Loot.nextPlan());
+    out.push(card('🪦', 'Graveyard', 'Over this many level-ups of corpses, the next potion is looted instead', gt.enabled, (v) => { gt.enabled = !!v; if (v) Tasks.poke('graveyard'); },
       [taskLine('graveyard', gt.enabled, btn(Loot.state.looting ? 'Looting…' : 'Level up now', 'soft', () => { Loot.scanAndPass().then(() => draw()); draw(); })),
-        gNext ? note(gNext) : null]));
+        gNext ? note(gNext) : null],
+      num(() => gt.keepLevels, (n) => { gt.keepLevels = Math.round(n); }, { w: 44, min: 0, max: 50, unit: 'levels', parse: parseFloat })));
     // Extraction
     Extract.learnSoon().catch(() => {});
     const xt = T.extract, xm = Extract.mobs(), xs = Extract.state(), xBad = xt.mob && (xs.never[xt.mob] || xs.weak[xt.mob]), xCur = xm.find((m) => m.low === xt.mob);
     const xShort = (n) => String(n).replace(/^(lizardman|general)\s+/i, '').replace(/\s+the\s+.*$/i, '') || n;                // "Lizardman Vanguard" -> "Vanguard", "General Skarn the Radiant Bastion" -> "Skarn"
-    const xGroup = (m) => (m.label && !/^Gate /.test(m.label) ? `${m.label} · wave ${m.wave}` : `Wave ${m.wave}`);
+    const xGroup = (m) => (m.label && !/^Gate /.test(m.label) ? m.label : `Wave ${m.wave}`);
     const xPick = (low) => { xt.mob = xt.mob === low ? '' : low; ui.open['ex:pick'] = !xt.mob; saveUi(); saveCfg(); Tasks.poke('extract'); draw(); };
-    const xTile = (m) => h('button', { type: 'button', class: 'ma-mt' + (m.low === xt.mob ? ' on' : '') + (m.skip ? ' bad' : ''), title: `${m.name}${m.skip ? ' · refused by the game (' + m.skip + ')' : ''}${m.waiting ? ' · ' + m.waiting + ' corpse' + (m.waiting === 1 ? '' : 's') + ' waiting' : ''}`, onclick: (e) => { stop(e); xPick(m.low); } },
-      avatar(m.name, m.img, { size: 'lg', boss: m.boss }), h('span', { class: 'n' }, xShort(m.name)), m.waiting ? h('em', {}, String(m.waiting)) : null);
+    const xTile = (m) => h('button', { type: 'button', class: 'ma-mc' + (m.low === xt.mob ? ' on' : '') + (m.skip ? ' bad' : ''), title: `${m.name}${m.skip ? ' · refused by the game (' + m.skip + ')' : ''}${m.waiting ? ' · ' + m.waiting + ' corpse' + (m.waiting === 1 ? '' : 's') + ' waiting' : ''}`, onclick: (e) => { stop(e); xPick(m.low); } },
+      xShort(m.name), m.waiting ? h('em', {}, String(m.waiting)) : null);
     const xSections = () => {
       const g = [], by = new Map(); for (const m of xm) { const k = xGroup(m); if (!by.has(k)) { by.set(k, []); g.push(k); } by.get(k).push(m); }
-      return g.length ? g.flatMap((k) => [h('div', { class: 'ma-mp-h' }, `${k} · ${by.get(k).length}`), h('div', { class: 'ma-mp-g' }, by.get(k).map(xTile))]) : [note('No mobs seen yet: the first look at the gate fills this.')];
+      return g.length ? g.flatMap((k) => [h('div', { class: 'ma-mp-h' }, k), h('div', { class: 'ma-mc-g' }, by.get(k).map(xTile))]) : [note('No mobs seen yet: the first look at the gate fills this.')];
     };
     // Same shape as the other cards: header, ONE status line with its button, then the chosen mob (tap Change to pick another). The picker is only open while no mob is chosen or after Change.
     const xOpen = isOpen('ex:pick', !xt.mob);
@@ -6017,7 +6021,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     const areaOf = (r) => r.area || (r.kind === 'wave' ? WaveMap.of(r.gate, r.wave).group.id : (r.dtype === 'hard' ? 'castle' : r.dtype === 'crucible' ? 'cube' : 'shadow'));   // same monster name in two areas = two cards
     s.rows.filter((r) => r.needsLoot !== false).forEach((r) => { const area = areaOf(r), key = area + '|' + r.nameLow; const g = groups.get(key) || { name: r.name, low: r.nameLow, area, rows: [], boss: r.isBoss, icon: r.icon }; g.rows.push(r); if (!g.icon && r.icon) g.icon = r.icon; groups.set(key, g); });
     const need = (() => { const m = Core.me.get(), e = m && m.exp; return e && e.max > 0 ? Math.max(0, e.max - e.cur) : null; })();
-    const gyOn = cfg.tasks.graveyard.enabled, P = lootOn() ? Loot.nextPlan() : null, useKeys = new Set(P ? P.picks.map((r) => r.key) : []);      // the corpses the next level-up would spend, oldest first
+    const gyOn = cfg.tasks.graveyard.enabled, P = lootOn() || gyOn ? Loot.nextPlan() : null, useKeys = new Set(P ? P.picks.map((r) => r.key) : []);      // the corpses the next level-up would spend, oldest first
     const list = [...groups.entries()].sort((a, b) => (b[1].boss - a[1].boss) || a[1].name.localeCompare(b[1].name)), total = list.reduce((n, [, g]) => n + g.rows.length, 0);
     const lootCard = ([low, g]) => {
       const dmg = g.rows.reduce((n, r) => n + (Number.isFinite(r.userDamage) ? r.userDamage : 0), 0), busy = s.claiming.has(low);
@@ -6027,7 +6031,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     const sections = AREAS.map((a) => ({ a, items: list.filter(([, g]) => g.area === a.id) })).filter((x) => x.items.length)
       .map(({ a, items }) => { const n = items.reduce((c, [, g]) => c + g.rows.length, 0); return fold('loot:' + a.id, true, [a.ico + ' ' + a.title, h('small', {}, `${n} corpse${n === 1 ? '' : 's'}`)], () => items.map(lootCard)); });
     return [
-      h('div', { class: 'ma-alert info' }, lootOn() ? 'Auto-loot is on: when stamina runs low, the oldest of these are tried for the next level-up before a potion.' : 'Auto-loot is off.', ' ', h('button', { type: 'button', class: 'ma-link', onclick: () => go('settings') }, 'Change in Settings')),
+      h('div', { class: 'ma-alert info' }, (lootOn() ? 'Auto-loot is on: out of stamina with no potion, it loots what levels you up.' : 'Auto-loot is off.') + ' ' + (gyOn ? (P && P.armed ? 'Graveyard: over the limit, so the next potion is looted instead.' : 'Graveyard: saving the corpses, potions as usual.') : 'Graveyard is off.'), ' ', h('button', { type: 'button', class: 'ma-link', onclick: () => go('settings') }, 'Change in Settings')),
       h('div', { class: 'ma-actions' }, btn(s.scanning ? 'Scanning…' : '🔎 Scan graveyard', 'soft', () => { Loot.scan(true); }), btn(s.looting || s.clearing ? 'Looting…' : '🎒 Loot now', 'success', () => { Loot.scanAndPass(); })),
       (() => { const c = Loot.ledgerInfo(), kept = c.unverified, odd = c.foreign; return kept || odd ? note(`🗂 ${kept ? kept + ' remembered corpse' + (kept === 1 ? '' : 's') + ' the game no longer lists (checked by id before looting)' : ''}${kept && odd ? ' · ' : ''}${odd ? odd + ' in another guild\'s instance' : ''}`) : null; })(),
       (() => {                                                       // one line: lootable · XP · level-ups · when scanned · EXP to the next level
@@ -6080,7 +6084,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
         srow('💧', 'Mana', 'Drinks when MP runs low', sw(() => M.enabled, (v) => { M.enabled = v; }), M.enabled ? [
           opt('Potion', dropdown([['S', 'Small · 20'], ['M', 'Medium · 40'], ['L', 'Large · 60'], ['XL', 'XL · 100']], M.type, (v) => { M.type = v; })),
           opt('Drink at or below', num(() => M.threshold, (n) => { M.threshold = n; }, { min: 0, unit: 'MP' }))] : null),
-        srow('🪦', 'Auto-loot', 'Oldest corpses level you up before a potion', sw(() => L.enabled, (v) => { L.enabled = v; }))),
+        srow('🪦', 'Auto-loot', 'Out of stamina and potions: loots what levels you up', sw(() => L.enabled, (v) => { L.enabled = v; }))),
       caption('Fighting'),
       group(
         srow('✨', 'Class skill', (cs ? cs.label : 'Not detected') + ' · cast before each World Breaker slash', sw(() => cfg.useClassSkill, (v) => { cfg.useClassSkill = v; }), skillOn ? [
