@@ -27,7 +27,7 @@
  * default cap of a boss is its highest loot requirement, and bosses the roster did not know yet are added. Export .txt writes it all out.
  */
 Core.module({
-  id: 'automator', name: 'Automator', icon: '🤖', version: '1.14.11',
+  id: 'automator', name: 'Automator', icon: '🤖', version: '1.14.12',
   // Offered to other addons through Core capabilities (guides/CAPABILITIES.md):
   //   automator.status() -> the status string     automator.start() / automator.stop()     automator.scan() -> scan the bosses now
   provides: (api) => api && api.start ? {
@@ -38,7 +38,7 @@ Core.module({
   } : {},
   init(Core) {
 'use strict';
-const ID = 'automator', VERSION = '1.14.11';
+const ID = 'automator', VERSION = '1.14.12';
 const FARM_MARK = '\u2063farm\u2063';          // a task line is written when the task looks; this marks where the farm's state goes, filled in live when the line is drawn (a line saying "queued" while the farm is already checking the graveyard was stale)
 if (window.__automatorLoaded) { console.warn('[automator] already loaded', window.__automatorLoaded); return null; }
 window.__automatorLoaded = VERSION;
@@ -109,7 +109,7 @@ const DEFAULT_CFG = {
     bp:       { enabled: false, everyMin: 60 },
     merchant: { enabled: false, everyMin: 60 },
     graveyard: { enabled: false, keepLevels: 5 },   // keepLevels = the stash: EXP corpses worth this many level-ups are kept for later, everything above it (oldest first) and the out-levelled ones are looted (PART 4 clearRun)
-    extract:  { enabled: false, everyMin: 5, mobs: {} },   // shadow extraction (PART 5b): mobs = the Grakthar gate mobs ticked to extract, by lower-case name
+    extract:  { enabled: false, everyMin: 5, mob: '' },   // shadow extraction (PART 5b): mob = the ONE Grakthar gate mob type to extract, by lower-case name ('' = none)
     pvp:      { solo: { enabled: false }, team: { enabled: false } },   // placeholders until the PvP module registers itself
     monsters: { enabled: true },       // the boss engine's own switch (Start / Stop is the master switch for everything)
     farm:     { auto: true },        // auto: use Auto-Farm when the game allows it (level 400+); the normal attack path otherwise
@@ -135,6 +135,8 @@ function mergeCfg(saved) {
   { const g = out.tasks.graveyard, d = DEFAULT_CFG.tasks.graveyard, k = Number(g.keepLevels);
     g.enabled = !!g.enabled; g.keepLevels = Number.isFinite(k) && k >= 0 && k <= 50 ? Math.round(k) : d.keepLevels;
     for (const x of ['everyMin', 'checkMin', 'pile', 'expiryH', 'levelUp', 'maxDays']) delete g[x]; }      // (1.14.8 / 1.14.9 had an interval and triggers: retired, the stash is the rule now)
+  { const x = out.tasks.extract; if (typeof x.mob !== 'string') x.mob = ''; if (!x.mob && x.mobs && typeof x.mobs === 'object') x.mob = Object.keys(x.mobs).find((k) => x.mobs[k]) || '';
+    x.mob = x.mob.trim().toLowerCase(); delete x.mobs; }      // (1.14.x ticked any number of mobs: the first ticked one carries over)
   out.cubeFast = (() => { const d = DEFAULT_CFG.cubeFast, v = Object.assign({}, d, s.cubeFast && typeof s.cubeFast === 'object' ? s.cubeFast : {}), n = (x, lo, hi, dflt) => (Number.isFinite(+x) && +x >= lo && +x <= hi ? +x : dflt);
     v.enabled = !!v.enabled; v.leadMin = n(v.leadMin, 1, 60, d.leadMin); v.pollSec = n(v.pollSec, 2, 60, d.pollSec); delete v.holdMin;   // (an older save may still carry the removed 'give up after' setting)
     v.time = parseClock(v.time) || d.time; if (!/^(sun|mon|tue|wed|thu|fri|sat)$/.test(v.day)) v.day = d.day; return v; })();
@@ -4084,8 +4086,8 @@ Object.assign(Farm, (() => {
  *   Graveyard         keeps a stash of EXP corpses worth N level-ups (default 5) and loots everything above it, oldest first (a look at the wave pages every
  *                     20 min; a full scan after a page load and after a Cube run): scans + checks the ledger, loots the corpses that still give EXP (stamina potions on hold), then the out-levelled
  *                     ones (items + quest credit). The EXP-needed auto-loot on a stamina stall stays as it was.
- *   Extraction        raises shadows from dead Grakthar gate mobs you tick (Generals included). Needs only the corpse: no join, no kill. Remembers the
- *                     ids of ticked mobs while they live, checks each corpse's battle page, POSTs the extraction; stops when the day's attempts are used
+ *   Extraction        raises shadows from one dead Grakthar gate mob type you pick (a General or a normal mob). Needs only the corpse: no join, no kill. Remembers the
+ *                     ids of the chosen mob while they live, checks each corpse's battle page, POSTs the extraction; stops when the day's attempts are used
  *                     and tries again every 10 min (a refused try costs nothing); skips a mob type the game refuses (until Retry skipped types).
  *   PvP               placeholders (Solo, Team): your PvP module registers itself with  Automator.tasks.define({ id: 'pvp.solo', ... }).
  *   (Cube Suite       will register here later the same way.)
@@ -4603,7 +4605,7 @@ const Merchant = (() => {
  * The loot ledger / graveyard is NOT involved: unjoined corpses never show there and extraction does not need them to. */
 const Extract = (() => {
   const GATE = 3, WAVES = [3, 5, 8];                         // Grakthar gate; the waves known to hold mobs (the Roster's gate-3 waves are added)
-  const LEARN_MS = 12 * 3600000;                             // a wave with no ticked mob is only re-read this often, and only its alive view: just to learn the mob names
+  const LEARN_MS = 12 * 3600000;                             // a wave that does not hold the chosen mob is only re-read this often, and only its alive view: just to learn the mob names
   const PROBE_MS = 10 * 60000;                               // out of attempts: one extraction try this often
   const SCAN_LIMITED_MS = 30 * 60000;                        // out of attempts: the wave pages are only re-read this often
   const MAX_VERIFY = 20, MAX_IDS = 600, KEEP_MS = 7 * 86400000, READY_TRUST_MS = 6 * 3600000;
@@ -4670,9 +4672,9 @@ const Extract = (() => {
     expire: parseNum(c.dataset.expire, 0), boss: c.dataset.boss === '1',
   })).filter((c) => c.id && c.name);
 
-  /* ---- the mob list (what the dropdown shows) and what is ticked ---- */
-  const ticked = () => cfg.tasks.extract.mobs || {};
-  const isOn = (low) => !!ticked()[low];
+  /* ---- the mob list (what the dropdown shows) and the one that is chosen ---- */
+  const chosen = () => lowOf(cfg.tasks.extract.mob);
+  const isOn = (low) => !!low && low === chosen();
   function mobs() {                                                              // every mob seen on the gate + its Generals, in wave order
     const s = S(), m = new Map(Object.entries(s.mobs).filter(([, v]) => Number(v.gate) === GATE).map(([low, v]) => [low, Object.assign({ low }, v)]));
     for (const d of Roster.list) { const l = d.kind === 'wave' ? bossLoc(d.low) : null; if (l && String(l.gate) === String(GATE) && Number(l.wave) > 0 && !m.has(d.low)) m.set(d.low, { low: d.low, name: d.name, gate: GATE, wave: Number(l.wave), boss: true }); }
@@ -4751,7 +4753,7 @@ const Extract = (() => {
   const ago2 = (t) => (t ? fmtDur(Date.now() - t) : '?');
   const lineOf = (s, n, extra) => {
     const bits = [];
-    if (!Object.keys(ticked()).length) return 'no mobs ticked yet — tick the ones to extract below';
+    if (!chosen()) return 'no mob chosen yet — pick one in the list';
     if (s.limitedAt) bits.push(`⏸ daily attempts used (${ago2(s.limitedAt)} ago) — one try every ${PROBE_MS / 60000} min`);
     bits.push(`${n} corpse${n === 1 ? '' : 's'} waiting`); if (s.run) bits.push(`${s.run} extracted since the last limit`); if (s.got) bits.push(`${s.got} in total`);
     if (extra) bits.push(extra);
@@ -5337,8 +5339,8 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
       h('div', { class: 'ma-fold-h', onclick: () => { ui.open[key] = !op; saveUi(); draw(); } }, h('span', { class: 'ma-fch' }, '▸'), h('span', { class: 'ma-fold-t' }, ...[].concat(head)), ...(o.aside ? [].concat(o.aside) : [])),
       op ? h('div', { class: 'ma-fold-b' }, ...[].concat(body())) : null);
   };
-  const card = (icon, title, desc, on, setOn, body) => h('div', { class: 'ma-card' + (on ? '' : ' off') },
-    h('div', { class: 'ma-card-h' }, h('span', { class: 'ma-ico' }, icon), h('div', { class: 'ma-card-t' }, h('b', {}, title), h('small', {}, desc)), setOn ? sw(() => on, setOn) : null),
+  const card = (icon, title, desc, on, setOn, body, head) => h('div', { class: 'ma-card' + (on ? '' : ' off') },
+    h('div', { class: 'ma-card-h' }, h('span', { class: 'ma-ico' }, icon), h('div', { class: 'ma-card-t' }, h('b', {}, title), h('small', {}, desc)), head || null, setOn ? sw(() => on, setOn) : null),
     body ? h('div', { class: 'ma-card-b' }, ...[].concat(body)) : null);
 
   // settings rows: [icon] title / description ........ control; the options of an enabled row sit in a line under it
@@ -5472,23 +5474,22 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     // Graveyard
     const gt = T.graveyard;
     const stashLine = () => { const P = Loot.plan(gt.keepLevels); return P.ok ? `📦 ${P.kept.length} kept (${fmtNum(P.keptSum)} of ${fmtNum(P.allowance)} EXP) · ${P.surplus.length} above the stash · ${P.zero.length} out-levelled` : null; };
-    out.push(card('🪦', 'Graveyard', 'Keeps a stash of EXP corpses for the next few level-ups and loots the rest, oldest first. Out-levelled corpses are looted too', gt.enabled, (v) => { gt.enabled = !!v; if (v) Tasks.poke('graveyard'); },
+    out.push(card('🪦', 'Graveyard', 'Keeps the newest EXP corpses worth this many level-ups and loots everything older, oldest first. Out-levelled corpses are looted too', gt.enabled, (v) => { gt.enabled = !!v; if (v) Tasks.poke('graveyard'); },
       [tStatus('graveyard'), gt.enabled ? nextNote('graveyard') : null,
         stashLine() ? note(stashLine()) : null,
-        opt('Stash', num(() => gt.keepLevels, (n) => { gt.keepLevels = Math.round(n); }, { w: 56, min: 0, max: 50, unit: 'level-ups', parse: parseFloat }), 'the newest EXP corpses worth this many level-ups stay'),
-        gt.enabled ? btn(Loot.state.clearing ? 'Clearing…' : 'Clear now', 'soft', () => { Graveyard.clearNow(); draw(); }) : null]));
+        gt.enabled ? btn(Loot.state.clearing ? 'Clearing…' : 'Clear now', 'soft', () => { Graveyard.clearNow(); draw(); }) : null],
+      num(() => gt.keepLevels, (n) => { gt.keepLevels = Math.round(n); }, { w: 44, min: 0, max: 50, unit: 'levels', parse: parseFloat })));
     // Extraction
     Extract.learnSoon().catch(() => {});
-    const xt = T.extract, xm = Extract.mobs(), xOn = xm.filter((m) => xt.mobs[m.low]).length, xs = Extract.state(), xSkip = Object.keys(xs.never).length + Object.keys(xs.weak).length;
-    out.push(card('☠️', 'Extraction', 'Raises shadows from dead Grakthar gate mobs, Generals and normal ones: no join or kill needed. Stops when the day\'s attempts are used', xt.enabled, (v) => { xt.enabled = !!v; if (v) Tasks.poke('extract'); },
+    const xt = T.extract, xm = Extract.mobs(), xs = Extract.state(), xBad = xt.mob && (xs.never[xt.mob] || xs.weak[xt.mob]);
+    const xName = (m) => `${m.boss ? '♛ ' : ''}${m.name} · ${m.label && !/^Gate /.test(m.label) ? m.label : 'wave ' + m.wave}${m.skip ? ' · refused' : ''}`;
+    const xOpts = [['', xm.length ? 'Choose a mob…' : 'No mobs seen yet'], ...xm.map((m) => [m.low, xName(m)])];
+    if (xt.mob && !xm.some((m) => m.low === xt.mob)) xOpts.push([xt.mob, xt.mob + ' · not seen yet']);
+    out.push(card('☠️', 'Extraction', 'Raises a shadow from one dead mob type of the Grakthar gate. No join or kill needed; it stops when the day\'s attempts are used', xt.enabled, (v) => { xt.enabled = !!v; if (v) Tasks.poke('extract'); },
       [tStatus('extract'), xt.enabled ? nextNote('extract') : null,
-        fold('ex:mobs2', false, ['Mobs to extract', h('small', {}, `${xOn} of ${xm.length} ticked`)], () => [
-          h('div', { class: 'ma-sr-o' }, btn('Tick all', 'soft', () => { xm.forEach((m) => { xt.mobs[m.low] = true; }); saveCfg(); Tasks.poke('extract'); draw(); }), btn('Untick all', 'soft', () => { xt.mobs = {}; saveCfg(); draw(); })),
-          ...(xm.length ? [...new Set(xm.map((m) => m.wave))].map((w) => { const ms = xm.filter((m) => m.wave === w), on = ms.filter((m) => xt.mobs[m.low]).length, lb = ms.find((m) => m.label && !/^Gate /.test(m.label));
-            return fold('ex:w' + w, false, [lb ? `${lb.label} · wave ${w}` : `Wave ${w}`, h('small', {}, `${on} of ${ms.length} ticked`)], () => ms.map((m) => srow(m.boss ? '♛' : '👹', m.name, m.skip ? 'skipped: ' + m.skip : m.boss ? 'boss' : '', sw(() => !!xt.mobs[m.low], (v) => { if (v) xt.mobs[m.low] = true; else delete xt.mobs[m.low]; Tasks.poke('extract'); }, { sm: true }))), { sub: true }); })
-            : [note('No mobs known yet: the first look at the gate fills this list.')])]),
-        xt.enabled && xSkip ? note(`${xSkip} mob type${xSkip === 1 ? '' : 's'} skipped (the game refused: no shadow form, or your extraction skill is too low)`) : null,
-        xt.enabled && xSkip ? btn('Retry skipped types', 'soft', () => { Extract.resetSkips(); draw(); }) : null,
+        opt('Mob', dropdown(xOpts, xt.mob, (v) => { xt.mob = v; Tasks.poke('extract'); }), 'one type at a time'),
+        xBad ? note(`The game refused ${xt.mob} (${xs.never[xt.mob] ? 'it has no shadow form' : 'your extraction skill is too low'}): pick another mob, or retry`) : null,
+        xBad ? btn('Retry', 'soft', () => { Extract.resetSkips(); draw(); }) : null,
         xt.enabled ? btn('Look now', 'soft', () => { Tasks.poke('extract'); draw(); }) : null]));
     return out;
   }
