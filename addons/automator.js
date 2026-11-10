@@ -28,7 +28,7 @@
  * default cap of a boss is its highest loot requirement, and bosses the roster did not know yet are added. Export .txt writes it all out.
  */
 Core.module({
-  id: 'automator', name: 'Automator', icon: '🤖', version: '1.15.3',
+  id: 'automator', name: 'Automator', icon: '🤖', version: '1.15.4',
   // Offered to other addons through Core capabilities (guides/CAPABILITIES.md):
   //   automator.status() -> the status string     automator.start() / automator.stop()     automator.scan() -> scan the bosses now
   provides: (api) => api && api.start ? {
@@ -6375,6 +6375,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   }
   const typing = () => root && root.contains(document.activeElement) && /^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement.tagName);
   function schedule(ms) { if (drawT) return; drawT = setTimeout(() => { drawT = 0; if (typing() || document.hidden) schedule(1500); else draw(true); }, ms || 400); }
+  if (typeof Core.on === 'function') Core.on('cube:log', () => { if (shown && logView === 'cube') schedule(600); });   // Cube Suite logged something (any tab): the Cube view re-reads it
   if (typeof Core.on === 'function') Core.on('caps:changed', (d) => { if (shown && d && (d.added || []).some((n) => n.startsWith('preset.') || n === 'cube.log.get')) schedule(300); });   // a preset addon loaded late
   UI.hook((what) => { if (!shown) return; if (what === 'scan') { if (tab === 'bosses') paintScan(); return; } if (what === 'log' && tab === 'activity' && paintLog()) return; if (what === undefined || what === 'status' || what === 'tasks' || DIRTY_TAB[what] === tab) schedule(); });
   let beat = 0;
