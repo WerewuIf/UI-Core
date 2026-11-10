@@ -28,7 +28,7 @@
  * default cap of a boss is its highest loot requirement, and bosses the roster did not know yet are added. Export .txt writes it all out.
  */
 Core.module({
-  id: 'automator', name: 'Automator', icon: '🤖', version: '1.15.2',
+  id: 'automator', name: 'Automator', icon: '🤖', version: '1.15.3',
   // Offered to other addons through Core capabilities (guides/CAPABILITIES.md):
   //   automator.status() -> the status string     automator.start() / automator.stop()     automator.scan() -> scan the bosses now
   provides: (api) => api && api.start ? {
@@ -39,7 +39,7 @@ Core.module({
   } : {},
   init(Core) {
 'use strict';
-const ID = 'automator', VERSION = '1.15.2';
+const ID = 'automator', VERSION = '1.15.3';
 const FARM_MARK = '\u2063farm\u2063';          // a task line is written when the task looks; this marks where the farm's state goes, filled in live when the line is drawn (a line saying "queued" while the farm is already checking the graveyard was stale)
 if (window.__automatorLoaded) { console.warn('[automator] already loaded', window.__automatorLoaded); return null; }
 window.__automatorLoaded = VERSION;
@@ -6375,10 +6375,10 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   }
   const typing = () => root && root.contains(document.activeElement) && /^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement.tagName);
   function schedule(ms) { if (drawT) return; drawT = setTimeout(() => { drawT = 0; if (typing() || document.hidden) schedule(1500); else draw(true); }, ms || 400); }
-  if (typeof Core.on === 'function') Core.on('caps:changed', (d) => { if (shown && d && (d.added || []).some((n) => n.startsWith('preset.'))) schedule(300); });   // a preset addon loaded late
+  if (typeof Core.on === 'function') Core.on('caps:changed', (d) => { if (shown && d && (d.added || []).some((n) => n.startsWith('preset.') || n === 'cube.log.get')) schedule(300); });   // a preset addon loaded late
   UI.hook((what) => { if (!shown) return; if (what === 'scan') { if (tab === 'bosses') paintScan(); return; } if (what === 'log' && tab === 'activity' && paintLog()) return; if (what === undefined || what === 'status' || what === 'tasks' || DIRTY_TAB[what] === tab) schedule(); });
   let beat = 0;
-  setInterval(() => { if (!shown || !root || !root.isConnected || document.hidden) return; if (++beat % 3 === 0 && (tab === 'home' || tab === 'tasks' || tab === 'settings' || (tab === 'bosses' && ui.bsec === 'dungeons' && cubeSt())) && !typing()) draw(true); }, 1000);   // overview: vitals + timers refresh every 3 s
+  setInterval(() => { if (!shown || !root || !root.isConnected || document.hidden) return; if (++beat % 3 === 0 && (tab === 'home' || tab === 'tasks' || tab === 'settings' || (tab === 'bosses' && ui.bsec === 'dungeons' && cubeSt()) || (tab === 'activity' && logView === 'cube')) && !typing()) draw(true); }, 1000);   // overview: vitals + timers refresh every 3 s
 
   function register() {
     Core.float.add({ id: ID, title: 'Automator', icon: '🤖', order: 40, width: 560,
