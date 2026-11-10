@@ -4886,17 +4886,17 @@ const CubeFast = (() => {
     try { const r = await Core.call(name, ...args); return r && typeof r === 'object' ? r : { ok: true, value: r }; }
     catch (e) { return { ok: false, missing: !!(e && e.code === 'NO_CAP'), message: (e && e.message) || String(e) }; }
   };
-  // Cube Suite's PvE potion flags are not settings here: the Automator already drinks the Stamina and HP potions itself (Settings → Potions), so Cube Suite's own are held OFF
-  // (both would drink for the same need). The damage model follows the profile (Normal = eco, Fast Run = fast). staminaPotionExpCap is left as it is: it only matters while the potion is on.
-  // Checked every beat for BOTH profiles; only a difference is sent, and one that was refused is not retried until something changes.
+  // Cube Suite's PvE potion flags are not settings here: they follow Settings → Potions (Stamina, Health), and the damage model follows the profile (Normal = eco, Fast Run = fast).
+  // They stay ON for Cube Suite on purpose: the Automator's own potion code only runs inside its boss / hunt attacks (paused during a Cube Fast Run), so nothing else drinks for the Cube's PvE fights.
+  // Cube Suite drinks through Core.potions, shared with the Automator, so the two never double up. Checked every beat for BOTH profiles; only a difference is sent, and one that was refused is not retried until something changes.
   const pveLast = {};
   function syncPve() {
     try {
       if (!Core.has('cube.pve.get') || !Core.has('cube.pve.set')) return;
-      const get = Core.cap('cube.pve.get');
+      const get = Core.cap('cube.pve.get'), S = cfg.stam, cap = Math.min(100, Math.max(0, Number(S.save && S.save.thresholdPct) || 100));
       for (const profile of ['normal', 'fast']) {
         const d = get({ profile }); if (!d || d.profile !== profile) continue;           // an older Cube Suite answers only for the active profile
-        const want = { damageModel: profile === 'fast' ? 'fast' : 'eco', useStaminaPotion: false, useHpPotion: false }, diff = {};
+        const want = { damageModel: profile === 'fast' ? 'fast' : 'eco', useStaminaPotion: !!S.enabled, staminaPotionExpCap: cap, useHpPotion: !!cfg.hp.enabled }, diff = {};
         for (const k in want) if (d[k] !== want[k]) diff[k] = want[k];
         const sig = JSON.stringify(diff);
         if (sig === '{}') { pveLast[profile] = ''; continue; }
