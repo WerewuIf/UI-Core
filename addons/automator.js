@@ -28,7 +28,7 @@
  * default cap of a boss is its highest loot requirement, and bosses the roster did not know yet are added. Export .txt writes it all out.
  */
 Core.module({
-  id: 'automator', name: 'Automator', icon: '🤖', version: '1.15.4',
+  id: 'automator', name: 'Automator', icon: '🤖', version: '1.15.5',
   // Offered to other addons through Core capabilities (guides/CAPABILITIES.md):
   //   automator.status() -> the status string     automator.start() / automator.stop()     automator.scan() -> scan the bosses now
   provides: (api) => api && api.start ? {
@@ -112,6 +112,7 @@ const DEFAULT_CFG = {
     graveyard: { enabled: false, keepLevels: 5, everyDays: 1 },   // keepLevels = while the corpses are worth up to this many level-ups they are saved and potions are used as usual; above it, the next potion is looted instead (oldest corpses, one level-up at a time); everyDays = how often it rescans the graveyard
     extract:  { enabled: false, everyMin: 5, mob: '' },   // shadow extraction (PART 5b): mob = the ONE Grakthar gate mob type to extract, by lower-case name ('' = none)
     pvp:      { solo: { enabled: false }, team: { enabled: false } },   // placeholders until the PvP module registers itself
+    cube:     { enabled: false },    // Cube Suite is handed to the Automator: Start turns its automation on, Stop turns it off (only the change, so the Cube page still works by hand while stopped)
     monsters: { enabled: true },       // the boss engine's own switch (Start / Stop is the master switch for everything)
     farm:     { auto: true },        // auto: use Auto-Farm when the game allows it (level 400+); the normal attack path otherwise
   },
@@ -521,18 +522,26 @@ const Prog = (() => {
   };
 })();
 
+/* Cube task: Start / Stop carry Cube Suite's automation with them, but only when the Cube task is switched on, and only at the moment of the change (nothing is enforced afterwards). */
+const cubeRun = (on) => {
+  try {
+    if (!(cfg.tasks.cube && cfg.tasks.cube.enabled) || !Core.has('cube.master.set')) return;
+    const call = (n, v) => Promise.resolve(Core.has(n) ? Core.call(n, v) : null);
+    (on ? call('cube.background.set', true).then(() => call('cube.master.set', true)) : call('cube.master.set', false)).catch(() => {});
+  } catch (_) { /* Cube Suite not on this page */ }
+};
 const Run = (() => {
   let wanted = !!(stateStore.get() || {}).run;
   const pausedBy = new Set();
   const persist = (v) => { wanted = v; stateStore.update((s) => { s.run = v; }); };
   function start() {
     if (wanted && !Run.halted()) return;
-    if (!(monstersOn() && cfg.targets.length) && !Tasks.list().some((d) => d.tick && d.enabled())) { log('⚠️ nothing to run — tick a boss in Bosses or switch a task on in Tasks', 'warn'); return; }
+    if (!(monstersOn() && cfg.targets.length) && !cfg.tasks.cube.enabled && !Tasks.list().some((d) => d.tick && d.enabled())) { log('⚠️ nothing to run — tick a boss in Bosses or switch a task on in Tasks', 'warn'); return; }
     for (const w of [...pausedBy]) if (w !== 'farm') pausedBy.delete(w);
-    persist(true); if (!pausedBy.size) Kernel.engineStart(true); log('🚀 started', 'ok'); UI.dirty();
+    persist(true); if (!pausedBy.size) Kernel.engineStart(true); cubeRun(true); log('🚀 started', 'ok'); UI.dirty();
   }
   function stop(reason) {
-    persist(false); pausedBy.clear(); Engine.halt(); Kernel.engineStop();
+    persist(false); pausedBy.clear(); Engine.halt(); Kernel.engineStop(); cubeRun(false);
     log('🛑 ' + (reason || 'stopped'), 'info'); Status.set('STOPPED'); UI.dirty();
     if (Tab.isMain()) AF.resumeIfWePaused('stopped').catch(() => {});
     if (Tab.isMain() && Presets.origin.get()) Presets.restore('the run stopped').catch(() => {});
@@ -5578,11 +5587,11 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     return out;
   }
   const cubeSchedOn = (x) => { cfg.cubeFast.enabled = !!x; };                         // the schedule only: no command goes to Cube Suite until the Fast Run itself starts
-  const cubeTaskOn = (x) => { if (Core.has('cube.background.set')) cubeSet('cube.background.set', !!x).then(() => x && cubeSet('cube.master.set', true)); };   // Cube Suite on any page; never touches the schedule
+  const cubeTaskOn = (x) => { cfg.tasks.cube.enabled = !!x; if (Run.wanted()) cubeRun(!!x); };   // a standing choice: while the Automator runs the switch acts at once, while stopped Start applies it; never touches the schedule
   function cubeRow() {
     const c = cubeSt();
-    return taskRow({ key: 'cube', icon: '🧊', title: 'Cube', tip: 'The switch lets Cube Suite run on any page. It does not touch the scheduled fast run (Settings → Cube). PvP and Shadow army: Overview.',
-      line: [cubeDot(c), ' ', cubeStatusBits(c, true).join(' · ')], on: !!(c && c.background),
+    return taskRow({ key: 'cube', icon: '🧊', title: 'Cube', tip: 'On: Start turns Cube Suite on (any page), Stop turns it off. Off: the Automator leaves Cube Suite alone. It does not touch the scheduled fast run (Settings → Cube). PvP and Shadow army: Overview.',
+      line: [cubeDot(c), ' ', cubeStatusBits(c, true).join(' · '), cfg.tasks.cube.enabled && !Run.wanted() ? ' · starts with Start' : ''], on: !!cfg.tasks.cube.enabled,
       setOn: cubeTaskOn,
       body: null });
   }
