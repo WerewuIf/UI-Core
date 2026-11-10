@@ -37,7 +37,9 @@
  * The panel is drawn on the Cube page only. Elsewhere the engine runs headless, and only when "background" is on (default OFF, so merely opening
  * any page never starts PvP / PvE by itself). One tab runs the engine (Core.tab 'cube-suite'); commands are shared state + a wake event, so
  * it does not matter which tab the command came from. */
-/* v3.6.2: cube.pve.get / cube.pve.set take { profile: 'normal' | 'fast' }, so the Fast Run caps can be edited (and shown) while Normal is the active mode, and the other way round.
+/* v3.6.3: the engine now clears its published status when it stops (background switched off on a page that is not the Cube page), so cube.status() no longer says
+ * `running` for up to 5 minutes after it stopped; status() also carries `seenAt` (when the engine last reported).
+ * v3.6.2: cube.pve.get / cube.pve.set take { profile: 'normal' | 'fast' }, so the Fast Run caps can be edited (and shown) while Normal is the active mode, and the other way round.
  * New cube.log.get({ since?, limit? }) -> { ok, lines: [{ time, at, source, level, msg }] }: the log of every tab (shared copy, appended by whichever tab logs), plus a shared 'cube:log' event
  * (Core.on) each time it grew, so the Automator streams it without touching storage.
  * v3.6.1: cube.pve.get / cube.pve.set also carry the rest of the PvE tab, so the Automator needs nothing from the panel:
@@ -53,7 +55,7 @@
  * v3.5.4: new capability cube.master.set(bool) so the Automator can switch Cube Suite's automation on / off (status().master already reported it, nothing could set it).
  * NOTE: addons.json must NOT give cube-suite a "match": this is a service that runs on any page. With a match Core skips it everywhere else and no cube.* capability exists there. */
 Core.module({
-  id: 'cube-suite', name: 'Cube Suite', icon: '🧊', version: '3.6.2',
+  id: 'cube-suite', name: 'Cube Suite', icon: '🧊', version: '3.6.3',
   provides: (api) => api && api.status ? {
     'cube.status':         { fn: api.status,    doc: 'what Cube Suite is doing (shared across tabs)', returns: '{ ok, mode, master, background, follow, running, instanceId, cleared, fastTargets }' },
     'cube.mode.set':       { fn: api.setMode,   doc: "switch Fast Run / Normal", args: "'fast' | 'normal'" },
@@ -524,7 +526,7 @@ Core.module({
   function dsSyncTabJoin() {                                         // a tab that may not run must not sit in the queue: it would hold the lease for the Cube page
     const want = dsMayRun();
     if (want && !dsJoined) { dsJoined = true; Core.tab.join(TAB_NAME, { queue: true, keepAlive: true, onMain: dsOnMainTab, onIdle: dsOnIdleTab }); }
-    else if (!want && dsJoined) { dsJoined = false; Core.tab.leave(TAB_NAME); if (dsTabIsMain) dsOnIdleTab(); }
+    else if (!want && dsJoined) { dsJoined = false; Core.tab.leave(TAB_NAME); if (dsTabIsMain) { dsStatusSig = ''; dsSafeSetItem(STATUS_KEY, JSON.stringify({ at: 0 })); dsOnIdleTab(); } }   // stopped: its last status must not keep saying "running"
   }
 
   function dsInitTabSync() {
@@ -582,6 +584,7 @@ Core.module({
     catch (_) { return null; }                                       // the nodes are a bonus: never lose the rest of the status over them
   }
   function dsPublishStatus() {                                       // every loop calls this, and a write wakes every other tab: only write on a change, else every 15 s (status() treats 5 min as live)
+    if (!dsTabIsMain || !dsJoined) return;                           // a loop that was still finishing when the engine stopped must not announce "running" again
     try {
       const instanceId = currentInstanceId || '', cleared = !!currentInstanceId && dsIsDungeonFullyCleared(), nodes = instanceId ? dsNodeSummary() : null, sig = instanceId + '|' + cleared + '|' + onCubePage + '|' + JSON.stringify(nodes), now = Date.now();
       if (sig === dsStatusSig && now - dsStatusAt < 15_000) return;
@@ -5581,7 +5584,7 @@ Core.module({
       const live = Date.now() - (st.at || 0) < 5 * 60_000;                              // the engine tab publishes after every loop
       let f = {}; try { f = pvpLoadFastRunState() || {}; } catch { /* none yet */ }
       return { ok: true, mode: dsLoadMode(), master: dsLoadMasterEnabled(), background: dsBackgroundOn(), follow: dsLoadFollow(),
-        running: live, instanceId: live ? String(st.instanceId || '') : '', cleared: live && !!st.cleared,
+        running: live, seenAt: live ? Number(st.at) || 0 : 0, instanceId: live ? String(st.instanceId || '') : '', cleared: live && !!st.cleared,
         fastTargets: { node7MatchNo: Number(f.node7MatchNo) || 0, node8MatchNo: Number(f.node8MatchNo) || 0 }, leader: !!f.isLeader, nodes: live ? st.nodes || null : null };
     },
     setMode(m) { dsSaveMode(m === 'fast' ? 'fast' : 'normal'); dsWake(); return api.status(); },
