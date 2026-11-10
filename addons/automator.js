@@ -28,7 +28,7 @@
  * default cap of a boss is its highest loot requirement, and bosses the roster did not know yet are added. Export .txt writes it all out.
  */
 Core.module({
-  id: 'automator', name: 'Automator', icon: '🤖', version: '1.15.11',
+  id: 'automator', name: 'Automator', icon: '🤖', version: '1.15.12',
   // Offered to other addons through Core capabilities (guides/CAPABILITIES.md):
   //   automator.status() -> the status string     automator.start() / automator.stop()     automator.scan() -> scan the bosses now
   provides: (api) => api && api.start ? {
@@ -39,7 +39,7 @@ Core.module({
   } : {},
   init(Core) {
 'use strict';
-const ID = 'automator', VERSION = '1.15.3';
+const ID = 'automator', VERSION = '1.15.12';
 const FARM_MARK = '\u2063farm\u2063';          // a task line is written when the task looks; this marks where the farm's state goes, filled in live when the line is drawn (a line saying "queued" while the farm is already checking the graveyard was stale)
 if (window.__automatorLoaded) { console.warn('[automator] already loaded', window.__automatorLoaded); return null; }
 window.__automatorLoaded = VERSION;
@@ -522,30 +522,45 @@ const Prog = (() => {
   };
 })();
 
-/* Cube task: Start / Stop carry Cube Suite with them, only while the Cube task is switched on, only at the moment of the change (nothing is enforced afterwards).
- * Start: Cube Suite runs on any page, automation on (what it was before is remembered). Stop (or switching the task off): it goes back to exactly that. Steps run one after the other, so a fast Start then Stop can never leave it on. */
+/* Cube Suite hand-over. ONE place decides whether Cube Suite should be running because of the Automator.
+ * The Automator drives it while it is started AND (the Cube task is on OR a scheduled Fast Run is going). Cube Suite never works in the background without that: whenever the Automator is
+ * not driving it, the background switch is forced OFF (also a leftover one, checked every Fast Run beat), and when the Automator lets go of something it had switched on, Cube Suite is left
+ * PAUSED (automation off), not as it was before. cubePrev is only the "the Automator switched it" marker (one copy, shared across tabs); it is forgotten once Cube Suite has taken the hand-back
+ * (a refused hand-back is retried by the Fast Run beat). Every command goes through one queue: Start / Stop / the toggle / a Fast Run hopping can never cross each other. */
 let cubeQ = Promise.resolve();
-const cubeRun = (on) => {
-  cubeQ = cubeQ.then(async () => {
-    try {
-      if (!Core.has('cube.master.set')) return;
-      const call = (n, v) => (Core.has(n) ? Promise.resolve(Core.call(n, v)) : Promise.resolve(null)), st = stateStore.get() || {};
-      if (on) {
-        if (!(cfg.tasks.cube && cfg.tasks.cube.enabled)) return;
-        if (!st.cubePrev && Core.has('cube.status')) {
-          const c = await Core.call('cube.status'), fs = typeof CubeFast !== 'undefined' ? CubeFast.state() : null;
-          const pre = fs && fs.phase === 'run' && !fs.sus && fs.bg !== null && fs.bg !== undefined ? { bg: !!fs.bg, mst: !!fs.mst } : null;   // a Fast Run in progress has switched Cube Suite on itself: "before" means before that, or Stop would hand it back as on
-          if (c) stateStore.update((x) => { x.cubePrev = pre || { bg: !!c.background, mst: !!c.master }; });
-        }
-        await call('cube.background.set', true); await call('cube.master.set', true);
-      } else {
-        const p = st.cubePrev; if (!p) return;
-        stateStore.update((x) => { delete x.cubePrev; });
-        await call('cube.background.set', p.bg); await call('cube.master.set', p.mst);
-      }
-    } catch (_) { /* Cube Suite not on this page */ }
-  });
+const cubeSeq = (fn) => { const p = cubeQ.then(fn); cubeQ = p.catch(() => {}); return p; };
+const cubeWants = () => Run.wanted() && !!((cfg.tasks.cube && cfg.tasks.cube.enabled) || (typeof CubeFast !== 'undefined' && CubeFast.driving()));
+const cubeBgOn = () => { try { const f = Core.has('cube.status') ? Core.cap('cube.status') : null, c = f ? f() : null; return !!(c && c.background); } catch (_) { return false; } };   // Cube Suite is set to run on any page (its status is sync, safe to poll)
+const cubeKeep = async () => {                                       // mark the takeover once (and check that Cube Suite answers): with no marker the Automator has not switched anything
+  if ((stateStore.get() || {}).cubePrev) return true;
+  if (!Core.has('cube.status')) return false;
+  const c = await Core.call('cube.status'); if (!c || c.ok === false) return false;
+  stateStore.update((x) => { if (!x.cubePrev) x.cubePrev = { bg: !!c.background, mst: !!c.master }; }); return true;
 };
+let cubeFail = false, cubeMissWarned = false;                          // (memory only) the last hand-over did not reach Cube Suite: the Fast Run beat tries again; warned once that it is not loaded
+const cubeSync = () => cubeSeq(async () => {
+  try {
+    const wants = cubeWants();
+    if (!Core.has('cube.master.set')) {                                 // Cube Suite is not loaded on this page (yet): nothing can be switched from here
+      cubeFail = wants || !!(stateStore.get() || {}).cubePrev;
+      if (wants && !cubeMissWarned) { cubeMissWarned = true; log('⚠️ Cube Suite is not loaded on this page: the Automator cannot switch it on from here', 'warn'); }
+      return;
+    }
+    cubeMissWarned = false;
+    const call = (n, v) => (Core.has(n) ? Promise.resolve(Core.call(n, v)) : Promise.resolve({ ok: true })), good = (r) => !!r && r.ok !== false;   // (a Cube Suite without the capability has nothing to hand back)
+    if (wants) {
+      if (!(await cubeKeep())) { cubeFail = true; return; }
+      const a = await call('cube.background.set', true), b = await call('cube.master.set', true);
+      cubeFail = !(good(a) && good(b));
+    } else {
+      const had = !!(stateStore.get() || {}).cubePrev;                  // the Automator had switched Cube Suite on
+      const a = await call('cube.background.set', false);               // never in the background without the Automator driving it (also a leftover switch)
+      const b = had ? await call('cube.master.set', false) : { ok: true };   // letting go of what it had on: left PAUSED, whatever Cube Suite was set to before
+      cubeFail = !(good(a) && good(b));
+      if (!cubeFail && had) stateStore.update((x) => { delete x.cubePrev; });
+    }
+  } catch (_) { cubeFail = true; /* Cube Suite not answering: the copy stays, the next beat tries again */ }
+});
 const Run = (() => {
   let wanted = !!(stateStore.get() || {}).run;
   const pausedBy = new Set();
@@ -554,10 +569,10 @@ const Run = (() => {
     if (wanted && !Run.halted()) return;
     if (!(monstersOn() && cfg.targets.length) && !cfg.tasks.cube.enabled && !Tasks.list().some((d) => d.tick && d.enabled())) { log('⚠️ nothing to run — tick a boss in Bosses or switch a task on in Tasks', 'warn'); return; }
     for (const w of [...pausedBy]) if (w !== 'farm') pausedBy.delete(w);
-    persist(true); if (!pausedBy.size) Kernel.engineStart(true); cubeRun(true); log('🚀 started', 'ok'); UI.dirty();
+    persist(true); if (!pausedBy.size) Kernel.engineStart(true); cubeSync(); log('🚀 started', 'ok'); UI.dirty();
   }
   function stop(reason) {
-    persist(false); pausedBy.clear(); Engine.halt(); Kernel.engineStop(); cubeRun(false); try { CubeFast.suspend('stop'); } catch (_) { /* no fast run part */ }
+    persist(false); pausedBy.clear(); Engine.halt(); Kernel.engineStop(); try { CubeFast.suspend('stop'); } catch (_) { /* no fast run part */ } cubeSync();
     log('🛑 ' + (reason || 'stopped'), 'info'); Status.set('STOPPED'); UI.dirty();
     if (Tab.isMain()) AF.resumeIfWePaused('stopped').catch(() => {});
     if (Tab.isMain() && Presets.origin.get()) Presets.restore('the run stopped').catch(() => {});
@@ -4838,7 +4853,7 @@ Object.assign(Tasks, (() => {
  *          taken at once, any time within the 3 days the slot stays current. With nothing known yet (first week) everything open counts as old: safe.
  *   run    new Cube: cube.fastrun.start (follow it, Fast Run, automation on, background on). Everything stays paused until cube.status says the
  *          mode is back to normal (Cube Suite does that by itself when the whole dungeon is cleared). No timer: that is the only exit.
- *          On the way out the follow pin is dropped and the background switch goes back to what it was.
+ *          On the way out the follow pin is dropped and Cube Suite is left paused with background off (unless the Cube task keeps it on).
  *          (No new Cube within WATCH_MIN of the slot: watching stops and everything resumes.)
  *   done   this slot is finished; next week's slot re-arms by itself
  * ================================================================================================================ */
@@ -4848,10 +4863,11 @@ const CubeFast = (() => {
   const BLIND_MS = 15 * 60000;                                                          // run phase: the dungeon list unreadable (page down, stale, no lists on it) this long -> let go of the Automator, leave Cube Suite as it is
   let goneAt = 0, goneN = 0, hopWarnAt = 0, badAt = 0, blindAt = 0, susBusy = false;                                             // (memory only) last still-open read, misses in a row, last "would not start" warning
   const WATCH_MIN = 60;                                                                 // the watch ends this long after the slot if no new Cube ever shows up (not a setting: a Fast Run itself has no time limit)
-  const st = Core.store(ID + '-cubefast', { def: { slot: 0, phase: 'idle', base: [], inst: '', bg: null, mst: null, at: 0, warned: false, known: 0, sus: '' } });   // known: the highest Cube id seen or run so far (survives the weekly reset)
-  const fresh = (slot, known) => ({ slot, phase: 'idle', base: [], inst: '', bg: null, mst: null, at: 0, warned: false, known: known || 0, sus: '' });
+  const st = Core.store(ID + '-cubefast', { def: { slot: 0, phase: 'idle', base: [], inst: '', at: 0, warned: false, known: 0, sus: '', owe: null } });   // known: the highest Cube id seen or run so far (survives the weekly reset)
+  const fresh = (slot, known) => ({ slot, phase: 'idle', base: [], inst: '', at: 0, warned: false, known: known || 0, sus: '', owe: null });   // owe: { pin, mode } = what Cube Suite still has to be told when a run ends (follow pin dropped, back on Normal): kept until it did
   const top = (ids) => (ids || []).reduce((m, x) => Math.max(m, Number(x) || 0), 0);
   const live = (s) => !!s && (s.phase === 'watch' || s.phase === 'run');
+  const driving = (s) => !!s && s.phase === 'run' && !s.sus;                         // a Fast Run the Automator is carrying right now
   const ownRun = (s) => !!s && s.phase === 'run' && Date.now() - (s.at || 0) < 4 * 86400000;   // a Fast Run that started less than 4 days ago keeps its slot, whatever the schedule says now
   const put = (n) => { if (JSON.stringify(n) !== JSON.stringify(st.get())) st.set(n); return n; };
   // The slot this week's run belongs to stays the same for 3 days after it starts, so a long Fast Run keeps its state. Then the next week's slot takes over.
@@ -4888,14 +4904,22 @@ const CubeFast = (() => {
   const restoreBuild = (why) => {
     try { if (Tab.isMain() && Presets.origin.get()) Presets.restore(why).then((r) => { if (r && r.ok === false) log(`⚠️ cube fast run: could not put your own build back (${r.message || 'unknown'}) — Fast Run uses what is on now`, 'warn'); }).catch(() => {}); } catch (_) { /* no build part */ }
   };
+  // Cube Suite is told to let go of the Cube (follow pin) and, when asked, to go back to Normal. Refused (page loading, a tab without it): `owe` stays and every beat tries again.
+  async function settle() {
+    const s = st.get(); if (!s || !s.owe) return;
+    const ok = await cubeSeq(async () => {
+      const cur = st.get(); if (!cur || !cur.owe) return true;                          // a new hop took over while this waited in the queue: nothing is owed any more
+      const a = await cube('cube.follow', null), b = cur.owe.mode ? await cube('cube.mode.set', 'normal') : { ok: true };
+      return !!(a.ok && b.ok);
+    });
+    if (ok) { const n = st.get(); if (n && n.owe) put({ ...n, owe: null }); }
+  }
   async function finish(s, why, kind, o) {                                              // the run is over (back on Normal, switched off, gave up): hand Cube Suite back the way it was
-    put({ ...s, phase: 'done' }); release();
+    const owe = s.phase === 'run' && !s.sus ? { pin: true, mode: !!(o && o.resetMode) } : (s.owe || null);   // resetMode: the Cube ended without being cleared, Cube Suite would stay on Fast Run for the next Cube
+    put({ ...s, phase: 'done', sus: '', owe }); release();
     if (s.phase === 'run') { try { Graveyard.afterCube(); } catch (_) { /* no graveyard task */ } }
-    if (s.phase === 'run') {
-      if (o && o.resetMode) await cube('cube.mode.set', 'normal');                      // the Cube ended without being cleared: Cube Suite would stay on Fast Run for the next Cube
-      await cube('cube.follow', null); if (s.bg === false) await cube('cube.background.set', false); if (s.mst === false) await cube('cube.master.set', false);
-    }
-    if (Run.wanted() && cfg.tasks.cube.enabled) cubeRun(true);                          // the Cube task is on: Cube Suite goes back to running on any page, not to what it was before this run
+    if (owe) await settle();
+    cubeSync();                                                                          // the switches: back to what they were, or (Cube task on) stay on for any page
     if (why) log('⏰ cube fast run: ' + why, kind || 'info');
   }
   // Suspended: Stop, or the Cube task switched off, during a Fast Run. Cube Suite is handed back (follow pin, Normal, switches as before), nothing stays paused for it,
@@ -4904,9 +4928,9 @@ const CubeFast = (() => {
     const s = st.get(); if (susBusy || !s || s.phase !== 'run' || s.sus) return;
     susBusy = true;
     try {
-      put({ ...s, sus: why }); release();
-      await cube('cube.follow', null); await cube('cube.mode.set', 'normal');
-      if (s.bg === false) await cube('cube.background.set', false); if (s.mst === false) await cube('cube.master.set', false);
+      put({ ...s, sus: why, owe: { pin: true, mode: true } }); release();
+      cubeSync();
+      await settle();
       log(`⏰ cube fast run: suspended (${why === 'task' ? 'Cube task switched off' : 'Automator stopped'}); Cube #${s.inst} stays open and is picked up again ${why === 'task' ? 'when the Cube task is back on' : 'when you press Start'}`, 'info');
     } finally { susBusy = false; }
   }
@@ -4916,19 +4940,23 @@ const CubeFast = (() => {
     if (!gotList(ins)) return;                                                          // no fresh list: nothing is held, try again next beat
     if (!cubeIds(ins).includes(String(s.inst))) return finish(s, `Cube #${s.inst} closed while it was suspended — resuming`, 'warn', { resetMode: true });
     hold();
-    const cs = await cube('cube.status');                                               // what Cube Suite is NOW is what it goes back to when this run ends
-    await hop({ ...s, bg: cs.ok ? !!cs.background : s.bg, mst: cs.ok ? !!cs.master : s.mst }, s.inst, true);
+    await hop(s, s.inst, true);
   }
   async function hop(s, id, again) {
-    const r = await cube('cube.fastrun.start', { instanceId: id });
-    if (!r.ok) { if (Date.now() - hopWarnAt >= 60000) { hopWarnAt = Date.now(); log(`⚠️ cube fast run: Cube Suite would not start on #${id} (${r.message || 'no answer'}) — still trying every beat`, 'warn'); } return; }
+    const warn = (m) => { if (Date.now() - hopWarnAt >= 60000) { hopWarnAt = Date.now(); log(`⚠️ cube fast run: ${m} — still trying every beat`, 'warn'); } };
+    if (!(await cubeSeq(cubeKeep).catch(() => false))) { warn(`Cube Suite would not tell what it is set to, so it was not started on #${id}`); return; }   // it must answer before it is switched on
+    const r = await cubeSeq(() => cube('cube.fastrun.start', { instanceId: id }));
+    if (!r.ok) { warn(`Cube Suite would not start on #${id} (${r.message || 'no answer'})`); return; }
     goneAt = Date.now(); goneN = 0; blindAt = 0;
-    put({ ...s, phase: 'run', sus: '', inst: id, at: Date.now(), warned: false, known: Math.max(s.known || 0, Number(id) || 0) });
+    put({ ...s, phase: 'run', sus: '', owe: null, inst: id, at: Date.now(), warned: false, known: Math.max(s.known || 0, Number(id) || 0) });
+    cubeSync();
     log(again ? `⏰ cube fast run: back on Cube #${id} — Fast Run commanded again` : `⏰ cube fast run: new Cube #${id} — Fast Run commanded`, 'ok');
   }
 
   async function tick() {
     syncPve();
+    { const s0 = st.get(); if (s0 && s0.owe && !driving(s0)) await settle(); }          // a hand-back Cube Suite refused is retried every beat
+    if (cubeFail || (!cubeWants() && ((stateStore.get() || {}).cubePrev || cubeBgOn()))) cubeSync();    // same for the switches (and a Start that could not reach Cube Suite); a background switch left on without the Automator driving is switched off here, started or not
     if (!Run.wanted()) { release(); const s0 = st.get(); if (s0 && s0.phase === 'run' && !s0.sus) await suspend('stop'); return; }   // Start is the master switch (for tasks too): while the Automator is stopped nothing is watched, held, swapped or commanded (a Fast Run that is going is suspended, from any tab)
     const c = cfg.cubeFast; let s = st.get() || fresh(0);
     let slot = c.enabled ? slotNow() : null;
@@ -4973,7 +5001,7 @@ const CubeFast = (() => {
       const base = after ? ids.filter((x) => Number(x) <= seen) : ids, found = after && base.length < ids.length, known = Math.max(seen, top(base));
       if (!(await Core.when('cube.fastrun.start', { timeout: 3000 }))) { put({ ...s, phase: 'done', known }); release(); log('⚠️ cube fast run: Cube Suite is not loaded — nothing to drive, skipping this week', 'warn'); return; }
       const cs = await cube('cube.status'), ft = (cs && cs.fastTargets) || {};
-      s = put({ ...s, phase: 'watch', base, known, bg: cs.ok ? !!cs.background : null, mst: cs.ok ? !!cs.master : null });
+      s = put({ ...s, phase: 'watch', base, known });
       log(`⏰ cube fast run: ${found ? `a new Cube is already open (newer than #${seen}) — taking it` : `watching for the new Cube (${s.base.length ? 'already open, ignored: #' + s.base.join(', #') : 'none open yet'})`} — everything else paused`, 'info');
       if (!(ft.node7MatchNo > 0 || ft.node8MatchNo > 0)) log('⚠️ cube fast run: Cube Suite has no match number set for Node 7 / 8 (Settings → Cube) — Fast Run will have nothing assigned to join', 'warn');
       restoreBuild('cube fast run');
@@ -4983,6 +5011,7 @@ const CubeFast = (() => {
     if (id) await hop(s, id);
   }
   function onMain() {                                                                    // a reload must not let the engine start before the first beat
+    cubeSync();                                                                         // (and a hand-back that was cut short by it is finished)
     const s = st.get(); if (Run.wanted() && live(s) && !s.sus && cfg.cubeFast.enabled && (s.slot === slotNow() || ownRun(s))) { hold(); restoreBuild('cube fast run, after a reload'); }
   }
   function line() {
@@ -4992,7 +5021,7 @@ const CubeFast = (() => {
     if (live(s) && (s.slot === slotNow() || ownRun(s))) return s.phase === 'watch' ? 'Watching for the new Cube — everything else is paused' : `Fast Run on Cube #${s.inst} — everything else is paused`;
     return up ? `Next run in ${fmtDur(up - Date.now())}` : 'Waiting for the server clock';
   }
-  return { tick, onMain, line, suspend, state: () => st.get() };
+  return { tick, onMain, line, suspend, driving: () => driving(st.get()), state: () => st.get() };
 })();
 /* CUBEFAST-END */
 Kernel.register({ id: 'cubefast', name: 'Cube fast run', icon: '⏰', every: () => (CubeFast.state() && (CubeFast.state().phase === 'watch' || CubeFast.state().phase === 'run') ? cfg.cubeFast.pollSec * 1000 : 30000), tick: CubeFast.tick, onMain: CubeFast.onMain });
@@ -5575,7 +5604,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     return bits;
   };
   const cubeEngine = (c) => !!(c && c.running && c.master && c.instanceId && (!c.seenAt || Date.now() - c.seenAt < 120000));   // Cube Suite's OWN engine is live (seenAt: its last report; older Cube Suites do not send it). "running" alone is only its heartbeat
-  const cubeFastLive = () => { const f = CubeFast.state(); return !!f && f.phase === 'run' && !f.sus; };   // a Fast Run the Automator is driving now
+  const cubeFastLive = () => CubeFast.driving();                                                       // a Fast Run the Automator is driving now
   const cubeDriven = () => Run.wanted() && (!!cfg.tasks.cube.enabled || cubeFastLive());               // the Automator is the one running Cube Suite: started, and the Cube task on or a Fast Run going
   const cubeWorking = (c) => cubeEngine(c) && cubeDriven();                                             // a stopped Automator (or the task off) is not working, whatever Cube Suite does on its own page
   const cubeDot = (c) => { const w = cubeWorking(c); return h('span', { class: 'ma-cd ' + (w ? 'on' : ''), title: w ? 'Working' : cubeEngine(c) ? 'Cube Suite is running on its own, not through the Automator' : 'Not working' }, '●'); };
@@ -5635,7 +5664,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     return out;
   }
   const cubeSchedOn = (x) => { cfg.cubeFast.enabled = !!x; };                         // the schedule only: no command goes to Cube Suite until the Fast Run itself starts
-  const cubeTaskOn = (x) => { cfg.tasks.cube.enabled = !!x; if (x && !Core.has('cube.master.set')) log('⚠️ Cube Suite is not loaded on this page: Start cannot switch it on from here', 'warn'); if (Run.wanted()) { cubeRun(!!x); if (!x) CubeFast.suspend('task'); } };   // off during a Fast Run: it is suspended (not ended) and the next beat after switching on hops back into the same Cube   // a standing choice: while the Automator runs the switch acts at once, while stopped Start applies it; never touches the schedule
+  const cubeTaskOn = (x) => { cfg.tasks.cube.enabled = !!x; if (Run.wanted()) { if (!x) CubeFast.suspend('task'); cubeSync(); } };   // off during a Fast Run: it is suspended (not ended) and the next beat after switching on hops back into the same Cube   // a standing choice: while the Automator runs the switch acts at once, while stopped Start applies it; never touches the schedule
   function cubeRow() {
     const c = cubeSt();
     return taskRow({ key: 'cube', icon: '🧊', title: 'Cube', tip: 'On: Start turns Cube Suite on (any page), Stop turns it off. Off: the Automator leaves Cube Suite alone. The scheduled fast run (Settings → Cube) has its own switch, but switching this off during a fast run suspends it, and switching it back on picks it up again. PvP and Shadow army: Overview.',
