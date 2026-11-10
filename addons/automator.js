@@ -28,7 +28,7 @@
  * default cap of a boss is its highest loot requirement, and bosses the roster did not know yet are added. Export .txt writes it all out.
  */
 Core.module({
-  id: 'automator', name: 'Automator', icon: '🤖', version: '1.15.5',
+  id: 'automator', name: 'Automator', icon: '🤖', version: '1.15.6',
   // Offered to other addons through Core capabilities (guides/CAPABILITIES.md):
   //   automator.status() -> the status string     automator.start() / automator.stop()     automator.scan() -> scan the bosses now
   provides: (api) => api && api.start ? {
@@ -5526,12 +5526,15 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   const saNext = (v) => { for (const n of v.sa) { const m = n.matches.find((x) => x.state === 'live' || x.state === 'overdue' || x.state === 'upcoming'); if (m) return { node: n.node, m }; } return null; };
   const cubeStatusBits = (c, full) => {
     if (!c) return ['Cube Suite is not loaded on this page'];
+    if (!c.running) { const b = ['not read yet']; if (cfg.cubeFast.enabled) b.push(CubeFast.line().replace(/^Next/, 'next')); return b; }   // no heartbeat from its engine (never ran, or silent for 5 min): nothing it says is current
     const v = c.view, bits = [c.instanceId ? '#' + c.instanceId : 'no active Cube', c.mode === 'fast' ? 'Fast Run' : 'Normal'];
+    if (!c.master) bits.push('automation paused');
     if (full) { if (v) { const t = saTally(v); bits.push('PvP ' + v.pvp.joined + '/' + v.pvp.cap, 'SA ' + t.fought + '/' + t.total); } else if (c.instanceId) bits.push('PvP and SA not read'); }
     if (cfg.cubeFast.enabled) bits.push(CubeFast.line().replace(/^Next/, 'next'));
     return bits;
   };
-  const cubeDot = (c) => h('span', { class: 'ma-cd ' + (c && c.running ? 'on' : '') }, '●');
+  const cubeWorking = (c) => !!(c && c.running && c.master && c.instanceId);          // "running" is only Cube Suite's heartbeat: it is WORKING when automation is on and a Cube is active
+  const cubeDot = (c) => h('span', { class: 'ma-cd ' + (cubeWorking(c) ? 'on' : ''), title: cubeWorking(c) ? 'Working' : 'Not working' }, '●');
   const segBar = (cls, items) => h('div', { class: 'ma-sb ' + cls }, ...items);
   const pvpStrip = (pv, big) => {
     if (pv.cap <= 12) return segBar(big ? 'big' : '', Array.from({ length: pv.cap }, (_, i) => h('i', { class: i < pv.joined ? 'f' : '' })));
@@ -5583,6 +5586,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   function cubeBody(c) {
     const out = [], v = c.view;
     if (v) out.push(...cubePanels(c, v));
+    else if (!c.running) out.push(note('Cube Suite has not read the page yet. It reports once its engine has looped: open the Cube page, or switch Cube on in Tasks.'));
     else out.push(note(c.instanceId ? 'PvP and Shadow army are not read yet: Cube Suite reports them on its next loop.' : 'No active Cube. PvP and Shadow army show here while a Cube is open and Cube Suite runs.'));
     return out;
   }
@@ -5735,7 +5739,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
         tStatus('extract'), nextNote('extract'), ...es.last.slice(0, 3).map((x) => note(`${x.shadow}${x.stars ? ' ' + x.stars : ''} · from ${x.mob} · ${ago(x.at)}`))], { aside: stPill(ei) }));
     }
     const cs = cubeSt();
-    if (cs || cfg.cubeFast.enabled) out.push(fold('ov:cube', true, ['🧊 Cube', h('small', {}, cubeStatusBits(cs, false).join(' · '))], () => cs ? cubeBody(cs) : [note('Cube Suite is not loaded on this page, so PvP and Shadow army cannot be read here. The scheduled fast run needs it too.')], { aside: stPill({ state: cs && cs.running ? 'run' : 'idle' }) }));   // always there while Cube Suite is loaded (it used to vanish when no Cube was open and the switches were off)
+    if (cs || cfg.cubeFast.enabled) out.push(fold('ov:cube', true, ['🧊 Cube', h('small', {}, cubeStatusBits(cs, false).join(' · '))], () => cs ? cubeBody(cs) : [note('Cube Suite is not loaded on this page, so PvP and Shadow army cannot be read here. The scheduled fast run needs it too.')], { aside: stPill({ state: cubeWorking(cs) ? 'run' : 'idle' }) }));   // always there while Cube Suite is loaded (it used to vanish when no Cube was open and the switches were off)
     if (tcfg.guild.enabled || tcfg.bp.enabled) {
       const F = Farm.info(), md = Farm.mode();
       out.push(fold('ov:farm', true, ['🌾 Auto-Farm', h('small', {}, Farm.busy() ? (Farm.line() || 'running') : md.kind === 'auto' ? '' : 'attack path')], () => [
