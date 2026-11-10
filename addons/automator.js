@@ -28,7 +28,7 @@
  * default cap of a boss is its highest loot requirement, and bosses the roster did not know yet are added. Export .txt writes it all out.
  */
 Core.module({
-  id: 'automator', name: 'Automator', icon: '🤖', version: '1.15.6',
+  id: 'automator', name: 'Automator', icon: '🤖', version: '1.15.7',
   // Offered to other addons through Core capabilities (guides/CAPABILITIES.md):
   //   automator.status() -> the status string     automator.start() / automator.stop()     automator.scan() -> scan the bosses now
   provides: (api) => api && api.start ? {
@@ -522,13 +522,25 @@ const Prog = (() => {
   };
 })();
 
-/* Cube task: Start / Stop carry Cube Suite's automation with them, but only when the Cube task is switched on, and only at the moment of the change (nothing is enforced afterwards). */
+/* Cube task: Start / Stop carry Cube Suite with them, only while the Cube task is switched on, only at the moment of the change (nothing is enforced afterwards).
+ * Start: Cube Suite runs on any page, automation on (what it was before is remembered). Stop (or switching the task off): it goes back to exactly that. Steps run one after the other, so a fast Start then Stop can never leave it on. */
+let cubeQ = Promise.resolve();
 const cubeRun = (on) => {
-  try {
-    if (!(cfg.tasks.cube && cfg.tasks.cube.enabled) || !Core.has('cube.master.set')) return;
-    const call = (n, v) => Promise.resolve(Core.has(n) ? Core.call(n, v) : null);
-    (on ? call('cube.background.set', true).then(() => call('cube.master.set', true)) : call('cube.master.set', false)).catch(() => {});
-  } catch (_) { /* Cube Suite not on this page */ }
+  cubeQ = cubeQ.then(async () => {
+    try {
+      if (!Core.has('cube.master.set')) return;
+      const call = (n, v) => (Core.has(n) ? Promise.resolve(Core.call(n, v)) : Promise.resolve(null)), st = stateStore.get() || {};
+      if (on) {
+        if (!(cfg.tasks.cube && cfg.tasks.cube.enabled)) return;
+        if (!st.cubePrev && Core.has('cube.status')) { const c = await Core.call('cube.status'); if (c) stateStore.update((x) => { x.cubePrev = { bg: !!c.background, mst: !!c.master }; }); }
+        await call('cube.background.set', true); await call('cube.master.set', true);
+      } else {
+        const p = st.cubePrev; if (!p) return;
+        stateStore.update((x) => { delete x.cubePrev; });
+        await call('cube.background.set', p.bg); await call('cube.master.set', p.mst);
+      }
+    } catch (_) { /* Cube Suite not on this page */ }
+  });
 };
 const Run = (() => {
   let wanted = !!(stateStore.get() || {}).run;
@@ -4800,7 +4812,7 @@ Object.assign(Tasks, (() => {
   define({ id: 'guild', name: 'Adventure Guild', icon: '📜', desc: 'Kill quests: finish, accept, auto-farm the kills', every: () => mins(cfg.tasks.guild.everyMin, 5), enabled: () => !!cfg.tasks.guild.enabled, tick: Guild.tick });
   define({ id: 'bp', name: 'Battle Pass', icon: '🎫', desc: 'The hunt of the pass, auto-farmed', every: () => mins(cfg.tasks.bp.everyMin, 10), enabled: () => !!cfg.tasks.bp.enabled, tick: Battle.tick });
   define({ id: 'merchant', name: 'Merchant', icon: '🛒', desc: 'Buys the weekly restock once per server week', every: () => mins(cfg.tasks.merchant.everyMin, 30), enabled: () => !!cfg.tasks.merchant.enabled, tick: Merchant.tick });
-  define({ id: 'graveyard', name: 'Graveyard keep', icon: '🪦', desc: 'Over its level limit, the next potion is looted instead', every: () => 6 * 3600000, enabled: () => !!cfg.tasks.graveyard.enabled, tick: Graveyard.tick });
+  define({ id: 'graveyard', name: 'Corpse stash', icon: '🪦', desc: 'Keeps EXP corpses for your next level-ups; past the limit, loots one instead of a potion', every: () => 6 * 3600000, enabled: () => !!cfg.tasks.graveyard.enabled, tick: Graveyard.tick });
   define({ id: 'extract', name: 'Extraction', icon: '☠️', desc: 'Raises shadows from dead Grakthar gate monsters: no join or kill needed', every: () => mins(cfg.tasks.extract.everyMin, 5), enabled: () => !!cfg.tasks.extract.enabled, tick: Extract.tick });
   define({ id: 'pvp.solo', name: 'PvP · Solo', icon: '⚔️', group: 'pvp', desc: 'placeholder — plug your PvP module in', placeholder: true, enabled: () => !!cfg.tasks.pvp.solo.enabled });
   define({ id: 'pvp.team', name: 'PvP · Team', icon: '🛡️', group: 'pvp', desc: 'placeholder — plug your PvP module in', placeholder: true, enabled: () => !!cfg.tasks.pvp.team.enabled });
@@ -5459,7 +5471,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   const STATE_TXT = { FIGHTING: 'Fighting', RUNNING: 'Running', SCANNING: '🔎 Scanning bosses', GRAVEYARD: '🪦 Scanning graveyard', WAITING: 'Waiting for a boss', 'NO STAMINA': 'Out of stamina', DUEL: 'Phase duel', SWITCHING: '🎒 Switching build', PLANNING: '🧭 Planning build order', PAUSED: 'Paused', FARMING: '🌾 Auto-farming', STOPPED: 'Stopped', FOLLOWER: 'Another tab is running it' };
   const dotOf = (st) => (!Tab.isMain() ? 'follower' : /FIGHT|RUN|DUEL|SCAN|GRAVE|SWITCH|PLAN|FARM/.test(st) ? 'running' : /WAIT|STAMINA/.test(st) ? 'waiting' : /PAUSE/.test(st) ? 'follower' : '');
   // what the automator is doing apart from the bosses: the farm (and who it farms for), a task mid-tick, or the tasks that are switched on
-  const SHORT = { guild: 'Quests', bp: 'BP', merchant: 'Merchant', extract: 'Extraction', graveyard: 'Graveyard keep' }, tShort = (d) => SHORT[d.id] || d.name, taskTag = (d) => `${d.icon} ${tShort(d)}`;
+  const SHORT = { guild: 'Quests', bp: 'BP', merchant: 'Merchant', extract: 'Extraction', graveyard: 'Corpse stash' }, tShort = (d) => SHORT[d.id] || d.name, taskTag = (d) => `${d.icon} ${tShort(d)}`;
   const taskDone = (d) => { const i = Tasks.info(d.id) || {}; return i.at > 0 && (i.state === 'ok' || i.state === 'idle'); };            // this task has nothing to do for now
   const enabledTasks = () => Tasks.list().filter((d) => d.id !== 'monsters' && !d.placeholder && d.enabled && d.enabled());
   function otherWork() {
@@ -5632,8 +5644,8 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
         setOn: (v) => { T.bp.enabled = v; if (v) Tasks.poke('bp'); else Farm.drop('bp'); }, action: check('bp', 'Check now') }),
       taskRow({ key: 'merchant', icon: '🛒', title: 'Merchant', tip: 'Weekly restock · resets Sunday 00:00 server', on: T.merchant.enabled, line: taskText('merchant', T.merchant.enabled) || 'Weekly restock · resets Sunday 00:00 server',
         setOn: (v) => { T.merchant.enabled = v; if (v) Tasks.poke('merchant'); }, action: { icon: '↻', tip: ms.done ? 'Recheck' : 'Buy now', fn: () => { Merchant.reset(); Tasks.poke('merchant'); draw(); } } }),
-      taskRow({ key: 'graveyard', icon: '🪦', title: 'Graveyard keep', tip: 'Over this many level-ups of corpses, the next potion is looted instead', on: gt.enabled,
-        line: (gt.enabled ? `keeping ${gt.keepLevels} level${gt.keepLevels === 1 ? '' : 's'}` : 'Over the limit, the next potion is looted instead') + (taskText('graveyard', gt.enabled) ? ' · ' + taskText('graveyard', gt.enabled) : ''),
+      taskRow({ key: 'graveyard', icon: '🪦', title: 'Corpse stash', tip: 'Keeps EXP corpses for your next level-ups. Past this many levels\' worth, the next potion is looted instead', on: gt.enabled,
+        line: (gt.enabled ? `keeping ${gt.keepLevels} level${gt.keepLevels === 1 ? '' : 's'}` : 'Keeps EXP corpses for your next level-ups') + (taskText('graveyard', gt.enabled) ? ' · ' + taskText('graveyard', gt.enabled) : ''),
         setOn: (v) => { gt.enabled = !!v; if (v) Tasks.poke('graveyard'); }, action: { icon: '📈', tip: Loot.state.looting ? 'Looting…' : 'Level up now', fn: () => { Loot.scanAndPass().then(() => draw()); draw(); } },
         body: () => [h('div', { class: 'ma-sr-o tm', style: { margin: 0 } }, opt('Keep a stash of', num(() => gt.keepLevels, (n) => { gt.keepLevels = Math.round(n); }, { min: 0, max: 50, unit: 'levels', parse: parseFloat }))), gNext ? note(gNext) : null] }),
       taskRow({ key: 'extract', icon: '☠️', title: 'Extraction', tip: 'Raises a shadow from a dead Grakthar mob', on: xt.enabled,
@@ -5731,7 +5743,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     }
     if (tcfg.graveyard.enabled) {
       const gi = Tasks.info('graveyard'), left = Loot.state.rows.filter((r) => r.needsLoot !== false).length;
-      out.push(fold('ov:graveyard', true, ['🪦 Graveyard keep', h('small', {}, left ? `${left} corpse${left === 1 ? '' : 's'} waiting` : '')], () => [tStatus('graveyard'), nextNote('graveyard')], { aside: stPill(gi) }));
+      out.push(fold('ov:graveyard', true, ['🪦 Corpse stash', h('small', {}, left ? `${left} corpse${left === 1 ? '' : 's'} waiting` : '')], () => [tStatus('graveyard'), nextNote('graveyard')], { aside: stPill(gi) }));
     }
     if (tcfg.extract.enabled) {
       const ei = Tasks.info('extract'), es = Extract.state();
@@ -6135,7 +6147,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     const shown = rooms.filter((nm) => !f || ['cube', 'crucible', 'pve', nm].join(' ').toLowerCase().includes(f));
     if (f && !shown.length && !'cube crucible pvp sa shadow army'.includes(f)) return null;
     const all = [].concat(n.pvp || [], n.sa || [], n.pve || []).filter(([k]) => k !== 'locked'), done = all.filter(([k]) => k === 'cleared').length;   // locked / not-assigned nodes can never be cleared: leave them out of the goal
-    const head = ['\u{1F9CA} Cube', h('small', {}, c.instanceId ? '#' + c.instanceId + ' · ' + (c.mode === 'fast' ? 'fast run' : 'normal') : 'no active Cube')];
+    const head = ['\u{1F9CA} Cube', h('small', {}, !c.running ? 'not read yet' : c.instanceId ? '#' + c.instanceId + ' · ' + (c.mode === 'fast' ? 'fast run' : 'normal') : 'no active Cube')];
     const aside = [all.length ? h('span', { class: 'ma-pill' + (done === all.length ? ' ok' : done ? ' blue' : '') }, done + '/' + all.length) : null].filter(Boolean);
     return fold('grp:cube', !!(c.running || c.background), head, () => {
       const body = [];                                               // PvP and Shadow army live in Overview, the schedule in Settings → Cube, the on / off switch in Tasks; here only the PvE rooms
