@@ -5239,7 +5239,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
 .ma-cdot{display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--cu-done);flex:0 0 auto}
 .ma-cpills{display:flex;flex-wrap:nowrap;gap:5px;overflow:hidden}.ma-cpills .ma-pill{flex:0 0 auto;font-size:8.5px;font-weight:700;padding:1px 6px}.ma-cpills .ma-pill.blue{color:var(--cu-live-t);border-color:rgba(114,166,242,.28);background:rgba(114,166,242,.09)}.ma-cpills .ma-pill.warn{color:var(--cu-late-t);border-color:rgba(213,183,109,.28);background:rgba(213,183,109,.09)}.ma-cpills .ma-pill.ok{color:var(--cu-done-t);border-color:rgba(98,182,169,.3);background:rgba(98,182,169,.1)}.ma-cpills .ma-pill.cap{color:#8b97bd;border-color:rgba(255,255,255,.1)}
 .ma-sb{display:flex;gap:3px;min-width:0}.ma-sb i{display:block;flex:1;height:6px;border-radius:2px;background:#2b3760;box-shadow:inset 0 1px 1px rgba(0,0,0,.35)}.ma-sb i.f,.ma-sb i.m,.ma-sb i.n,.ma-sb i.o{box-shadow:inset 0 1px 0 rgba(255,255,255,.22),0 0 0 1px rgba(0,0,0,.12)}.ma-sb.big i{height:6px}.ma-sb.mt{gap:2px}
-.ma-sb.fx{flex:0 0 auto}.ma-sb.fx i{flex:0 0 14px}.ma-sb.ga{gap:6px}.ma-sb .g{display:flex;gap:2px;min-width:0}.ma-sb .g i{flex:1}
+.ma-sb.sa4{display:grid;grid-template-columns:repeat(4,minmax(0,1fr))}.ma-sb.sa4 i{flex:none;height:7px}.ma-sb.ga{gap:6px}.ma-sb .g{display:flex;gap:2px;min-width:0}.ma-sb .g i{flex:1}
 .ma-sb i.f{background:var(--cu-done)}.ma-sb i.m{background:var(--cu-miss)}.ma-sb i.n{background:var(--cu-live)}.ma-sb i.o{background:var(--cu-late)}
 .ma-cnr{display:grid;grid-template-columns:28px minmax(0,1fr) 12px 28px;gap:5px;align-items:center;font:11px Arial,sans-serif;color:#8b97bd}
 .ma-cnr b{font-weight:700;color:#cfd8f7}.ma-cnr em{font-style:normal;color:var(--cu-miss-t);font-size:10.5px;text-align:center}.ma-cnr>span{text-align:right}.ma-cnr .lk{grid-column:2;text-align:left;color:#6e7a9c}
@@ -5654,7 +5654,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     const nx = saNext(v), t = saTally(v), unread = v.sa.every((n) => !n.read && !n.locked);
     const rows = v.sa.map((n) => { const f = n.matches.filter((m) => m.state === 'fought').length, ms = n.matches.filter((m) => m.state === 'missed').length;
       return h('div', { class: 'ma-cnr' }, h('b', {}, 'N' + n.node),
-        n.locked ? h('span', { class: 'lk' }, 'locked') : segBar('fx', n.matches.map((m) => h('i', { class: SA_CLS[m.state], title: 'Match ' + m.no + ' · ' + saSlot(m) + ' · ' + SA_WORD[m.state] }))),
+        n.locked ? h('span', { class: 'lk' }, 'locked') : segBar('sa4', n.matches.map((m) => h('i', { class: SA_CLS[m.state], title: 'Match ' + m.no + ' · ' + saSlot(m) + ' · ' + SA_WORD[m.state] }))),
         h('em', { title: ms ? ms + ' missed' : '' }, ms ? String(ms) : ''), h('span', {}, n.locked ? '' : f + '/' + n.matches.length)); });
     const sa = h('div', { class: 'ma-cp' }, h('div', { class: 'ma-cph' }, h('b', {}, 'Shadow army'), h('span', { title: v.schedClear ? 'Scheduled clear is on' : 'Scheduled clear is off (turn it on in Cube Suite)' }, v.schedClear ? h('i', { class: 'ma-cdot' }) : null, 'Clear at ', ffaLink())), ...rows,
       h('p', { class: 'ma-cpl' }, unread ? 'Not read yet' : nx ? 'Next: N' + nx.node + (nx.node === 11 ? ' final' : ' match ' + nx.m.no) + ' · ' + saSlot(nx.m) : 'All slots done' + (t.missed ? ' · ' + t.missed + ' missed' : '')));
