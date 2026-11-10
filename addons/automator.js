@@ -5403,6 +5403,8 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
 .ma-ll b{color:#6e7a8c;font-weight:400;font-variant-numeric:tabular-nums;white-space:nowrap}
 .ma-ll span{min-width:0;overflow-wrap:anywhere}   /* a long line wraps inside its own column: it never runs back under the time */
 .ma-ll.ok{border-left-color:#33b57f;color:#8ee6a8}.ma-ll.warn{border-left-color:#e3b341;color:#ffd978}.ma-ll.err{border-left-color:#e5484d;color:#ff9a9a}
+.ma-src{display:inline-block;margin-right:6px;padding:1px 5px;border-radius:4px;border:1px solid #8b8d9844;background:#8b8d9822;color:#8b8d98;font:700 9px/1.3 Arial,sans-serif;letter-spacing:.04em;text-transform:uppercase;vertical-align:1px}   /* Cube Suite's own source colors */
+.ma-src.pvp{color:#7eb8f0;background:#7eb8f022;border-color:#7eb8f044}.ma-src.sa{color:#c49afa;background:#c49afa22;border-color:#c49afa44}.ma-src.pve{color:#8fd19e;background:#8fd19e22;border-color:#8fd19e44}.ma-src.sys{color:#71727d;background:#71727d22;border-color:#71727d44}
 .ma-ll.dmg{border-left-color:#e3b341;color:#ffe3a3}.ma-ll.skill{border-left-color:#a371f7;color:#d9c4ff}.ma-ll.info{border-left-color:#6ea8ff;color:#c9e6ff}
 .ma-ctl{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 /* footer: status + Start / Stop, always visible */
@@ -6387,8 +6389,10 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   }
 
   const unesc = (t) => String(t).replace(/&quot;/g, '"').replace(/&#0?39;|&apos;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');   // log lines were escaped for html but are shown as text
-  const logRow = (r) => h('div', { class: 'ma-ll ' + r.k }, h('b', { title: r.at ? new Date(r.at).toLocaleString() + ' (your browser clock)' : 'your browser clock' }, r.t), h('span', {}, unesc(r.m.replace(/<[^>]+>/g, ''))));
-  let lastRow = null;                                                // newest log line already on screen
+  const logRow = (r) => h('div', { class: 'ma-ll ' + r.k }, h('b', { title: r.at ? new Date(r.at).toLocaleString() + ' (your browser clock)' : 'your browser clock' }, r.t),
+    r.cube ? h('span', {}, h('i', { class: 'ma-src ' + r.src }, CUBE_SRC[r.src] || r.src), r.msg)         // a Cube Suite line: its source badge (colored like its own log), then the message as plain text (it is raw, not html)
+      : h('span', {}, unesc(r.m.replace(/<[^>]+>/g, ''))));
+  let lastRow = null;                                               // newest log line already on screen
   /* view state (not saved): what is searched, how many lines are on screen, Automator or Cube */
   const LOG_PAGE = 200;
   let logQ = '', logLim = LOG_PAGE, logView = 'automator', logCF = 'all', logDayLbl = '';
@@ -6396,7 +6400,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   const logDay = (at) => { if (!at) return ''; const d = new Date(at), n = new Date(), y = new Date(n.getFullYear(), n.getMonth(), n.getDate() - 1); return d.toDateString() === n.toDateString() ? 'Today' : d.toDateString() === y.toDateString() ? 'Yesterday' : d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }); };
   const cubeLogCap = () => { try { return Core.cap('cube.log.get'); } catch (_) { return null; } };
   const CUBE_SRC = { pvp: 'PvP', sa: 'SA', pve: 'PvE', sys: 'Sys' };
-  const cubeLines = () => { try { const f = cubeLogCap(), r = f ? f({}) : null; return ((r && r.lines) || []).map((l) => ({ t: l.time, at: l.at, src: l.source, k: l.level === 'error' ? 'err' : l.level === 'warn' ? 'warn' : 'info', m: (CUBE_SRC[l.source] || l.source) + ' · ' + l.msg })); } catch (_) { return []; } };
+  const cubeLines = () => { try { const f = cubeLogCap(), r = f ? f({}) : null; return ((r && r.lines) || []).map((l) => ({ t: l.time, at: l.at, src: l.source, k: l.level === 'error' ? 'err' : l.level === 'warn' ? 'warn' : 'info', m: (CUBE_SRC[l.source] || l.source) + ' · ' + l.msg, msg: String(l.msg == null ? '' : l.msg), cube: true })); } catch (_) { return []; } };
   const logHit = (r) => !logQ || strip(r.m).toLowerCase().includes(logQ.toLowerCase());
   function logList() {                                               // every line behind the current view, newest last (the page cut comes later)
     if (logView === 'cube') return cubeLines().filter((r) => (logCF === 'all' || r.k === logCF || r.src === logCF) && logHit(r));
