@@ -112,7 +112,7 @@ const DEFAULT_CFG = {
     graveyard: { enabled: false, keepLevels: 5, everyDays: 1 },   // keepLevels = while the corpses are worth up to this many level-ups they are saved and potions are used as usual; above it, the next potion is looted instead (oldest corpses, one level-up at a time); everyDays = how often it rescans the graveyard
     extract:  { enabled: false, everyMin: 5, mob: '' },   // shadow extraction (PART 5b): mob = the ONE Grakthar gate mob type to extract, by lower-case name ('' = none)
     pvp:      { solo: { enabled: false }, team: { enabled: false } },   // placeholders until the PvP module registers itself
-    cube:     { enabled: false },    // Cube Suite is handed to the Automator: Start turns its automation on, Stop turns it off (only the change, so the Cube page still works by hand while stopped)
+    cube:     { enabled: false, tyrant: true },    // Cube Suite is handed to the Automator: Start turns its automation on, Stop leaves it paused. tyrant: while it drives, Tyrant Conclave (node 9) is switched on for every Cube (the Cube page still works by hand while stopped)
     monsters: { enabled: true },       // the boss engine's own switch (Start / Stop is the master switch for everything)
     farm:     { auto: true },        // auto: use Auto-Farm when the game allows it (level 400+); the normal attack path otherwise
   },
@@ -525,12 +525,14 @@ const Prog = (() => {
 /* Cube Suite hand-over. ONE place decides whether Cube Suite should be running because of the Automator.
  * The Automator drives it while it is started AND (the Cube task is on OR a scheduled Fast Run is going). Cube Suite never works in the background without that: whenever the Automator is
  * not driving it, the background switch is forced OFF (also a leftover one, checked every Fast Run beat), and when the Automator lets go of something it had switched on, Cube Suite is left
- * PAUSED (automation off), not as it was before. cubePrev is only the "the Automator switched it" marker (one copy, shared across tabs); it is forgotten once Cube Suite has taken the hand-back
+ * PAUSED (automation off), not as it was before. While it drives (and the Tyrant setting is on) Cube Suite's Tyrant Conclave is on for every Cube too (cube.tyrant.auto), and goes off with the hand-back. cubePrev is only the "the Automator switched it" marker (one copy, shared across tabs); it is forgotten once Cube Suite has taken the hand-back
  * (a refused hand-back is retried by the Fast Run beat). Every command goes through one queue: Start / Stop / the toggle / a Fast Run hopping can never cross each other. */
 let cubeQ = Promise.resolve();
 const cubeSeq = (fn) => { const p = cubeQ.then(fn); cubeQ = p.catch(() => {}); return p; };
 const cubeWants = () => Run.wanted() && !!((cfg.tasks.cube && cfg.tasks.cube.enabled) || (typeof CubeFast !== 'undefined' && CubeFast.driving()));
-const cubeBgOn = () => { try { const f = Core.has('cube.status') ? Core.cap('cube.status') : null, c = f ? f() : null; return !!(c && c.background); } catch (_) { return false; } };   // Cube Suite is set to run on any page (its status is sync, safe to poll)
+const cubeStatusNow = () => { try { const f = Core.has('cube.status') ? Core.cap('cube.status') : null; return f ? f() : null; } catch (_) { return null; } };   // (sync, safe to poll)
+const cubeLeftOn = () => { const c = cubeStatusNow(); return !!(c && (c.background || c.tyrantAuto)); };   // Cube Suite is set to run on any page, or still carries a Tyrant request from the Automator
+const cubeTyrantOn = () => !(cfg.tasks.cube && cfg.tasks.cube.tyrant === false);   // Tyrant Conclave switched on for every Cube while the Automator drives (Tasks → Cube): on by default
 const cubeKeep = async () => {                                       // mark the takeover once (and check that Cube Suite answers): with no marker the Automator has not switched anything
   if ((stateStore.get() || {}).cubePrev) return true;
   if (!Core.has('cube.status')) return false;
@@ -551,12 +553,14 @@ const cubeSync = () => cubeSeq(async () => {
     if (wants) {
       if (!(await cubeKeep())) { cubeFail = true; return; }
       const a = await call('cube.background.set', true), b = await call('cube.master.set', true);
-      cubeFail = !(good(a) && good(b));
+      const t = await call('cube.tyrant.auto', cubeTyrantOn());          // Tyrant Conclave on for this Cube and every new one (Cube Suite resets it on a new Cube), or the request withdrawn when the setting is off
+      cubeFail = !(good(a) && good(b) && good(t));
     } else {
       const had = !!(stateStore.get() || {}).cubePrev;                  // the Automator had switched Cube Suite on
       const a = await call('cube.background.set', false);               // never in the background without the Automator driving it (also a leftover switch)
       const b = had ? await call('cube.master.set', false) : { ok: true };   // letting go of what it had on: left PAUSED, whatever Cube Suite was set to before
-      cubeFail = !(good(a) && good(b));
+      const cs = cubeStatusNow(), t = (had || (cs && cs.tyrantAuto)) ? await call('cube.tyrant.auto', false) : { ok: true };   // the Tyrant request ends too: what it switched on goes off again
+      cubeFail = !(good(a) && good(b) && good(t));
       if (!cubeFail && had) stateStore.update((x) => { delete x.cubePrev; });
     }
   } catch (_) { cubeFail = true; /* Cube Suite not answering: the copy stays, the next beat tries again */ }
@@ -4956,7 +4960,7 @@ const CubeFast = (() => {
   async function tick() {
     syncPve();
     { const s0 = st.get(); if (s0 && s0.owe && !driving(s0)) await settle(); }          // a hand-back Cube Suite refused is retried every beat
-    if (cubeFail || (!cubeWants() && ((stateStore.get() || {}).cubePrev || cubeBgOn()))) cubeSync();    // same for the switches (and a Start that could not reach Cube Suite); a background switch left on without the Automator driving is switched off here, started or not
+    if (cubeFail || (!cubeWants() && ((stateStore.get() || {}).cubePrev || cubeLeftOn()))) cubeSync();    // same for the switches (and a Start that could not reach Cube Suite); a background switch left on without the Automator driving is switched off here, started or not
     if (!Run.wanted()) { release(); const s0 = st.get(); if (s0 && s0.phase === 'run' && !s0.sus) await suspend('stop'); return; }   // Start is the master switch (for tasks too): while the Automator is stopped nothing is watched, held, swapped or commanded (a Fast Run that is going is suspended, from any tab)
     const c = cfg.cubeFast; let s = st.get() || fresh(0);
     let slot = c.enabled ? slotNow() : null;
@@ -5223,7 +5227,6 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
 .ma-cvb{box-sizing:border-box;width:22px;height:28px;padding:0;border:0;background:none;color:#7f8bb1;font:11px/1 Arial,sans-serif;cursor:pointer}.ma-cvb:hover{color:#cfd8f7}
 .ma-tx{padding:0 12px 10px}
 .ma-cd{color:#6e7a9c}.ma-cd.on{color:var(--cu-done)}
-.ma-mini{display:inline-block;box-sizing:border-box;height:17px;margin:0 3px;padding:0 7px;border-radius:999px;border:1px solid rgba(110,168,255,.35);background:rgba(110,168,255,.12);color:#9fc1ff;font:11px/15px Arial,sans-serif;vertical-align:middle;text-transform:capitalize}
 .ma-xsel{text-overflow:ellipsis}
 /* the Cube card: two panels on one five-row grid, so their rows line up */
 .ma-cv2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;align-items:start}
@@ -5670,7 +5673,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     return taskRow({ key: 'cube', icon: '🧊', title: 'Cube', tip: 'On: Start turns Cube Suite on (any page), Stop turns it off. Off: the Automator leaves Cube Suite alone. The scheduled fast run (Settings → Cube) has its own switch, but switching this off during a fast run suspends it, and switching it back on picks it up again. PvP and Shadow army: Overview.',
       line: [cubeDot(c), ' ', cubeStatusBits(c, true).join(' · '), cfg.tasks.cube.enabled && !Run.wanted() ? ' · starts with Start' : ''], on: !!cfg.tasks.cube.enabled,
       setOn: cubeTaskOn,
-      body: null });
+      body: () => [h('div', { class: 'ma-sr-o tm', style: { margin: 0 } }, opt('Tyrant Conclave', sw(() => cubeTyrantOn(), (v) => { cfg.tasks.cube.tyrant = !!v; if (Run.wanted()) cubeSync(); }), 'On: while the Automator runs Cube Suite, Tyrant Conclave (node 9) auto-join + auto-attack is switched on for every Cube. Stop switches it off again.'))] });
   }
   function tTasks() {
     const out = [], T = cfg.tasks, cur = Engine.current();
