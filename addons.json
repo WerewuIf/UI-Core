@@ -61,14 +61,14 @@
     {
       "id": "cube-suite",
       "name": "Cube Suite",
-      "version": "3.6.1",
+      "version": "3.6.2",
       "url": "addons/cube-suite.js",
       "button": false
     },
     {
       "id": "automator",
       "name": "Automator",
-      "version": "1.14.16",
+      "version": "1.15.4",
       "url": "addons/automator.js",
       "button": true
     },
