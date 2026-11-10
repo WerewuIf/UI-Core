@@ -37,7 +37,10 @@
  * The panel is drawn on the Cube page only. Elsewhere the engine runs headless, and only when "background" is on (default OFF, so merely opening
  * any page never starts PvP / PvE by itself). One tab runs the engine (Core.tab 'cube-suite'); commands are shared state + a wake event, so
  * it does not matter which tab the command came from. */
-/* v3.6.1: cube.pve.get / cube.pve.set also carry the rest of the PvE tab, so the Automator needs nothing from the panel:
+/* v3.6.2: cube.pve.get / cube.pve.set take { profile: 'normal' | 'fast' }, so the Fast Run caps can be edited (and shown) while Normal is the active mode, and the other way round.
+ * New cube.log.get({ since?, limit? }) -> { ok, lines: [{ time, at, source, level, msg }] }: the log of every tab (shared copy, appended by whichever tab logs), plus a shared 'cube:log' event
+ * (Core.on) each time it grew, so the Automator streams it without touching storage.
+ * v3.6.1: cube.pve.get / cube.pve.set also carry the rest of the PvE tab, so the Automator needs nothing from the panel:
  *   get -> useStaminaPotion, staminaPotionExpCap, useHpPotion, and per node: schedule = [{ hour, minute, noTime, mode, fixedCap }] (Normal profile; null on Fast Run)
  *   set -> { useStaminaPotion?, staminaPotionExpCap?, useHpPotion?, copyFromOther?: true, node?: { nodeId, selected } (a whole room on / off),
  *            schedule?: { nodeId, add } | { nodeId, idx, remove | hour | minute | noTime | mode | fixedCap } }
@@ -50,7 +53,7 @@
  * v3.5.4: new capability cube.master.set(bool) so the Automator can switch Cube Suite's automation on / off (status().master already reported it, nothing could set it).
  * NOTE: addons.json must NOT give cube-suite a "match": this is a service that runs on any page. With a match Core skips it everywhere else and no cube.* capability exists there. */
 Core.module({
-  id: 'cube-suite', name: 'Cube Suite', icon: '🧊', version: '3.6.1',
+  id: 'cube-suite', name: 'Cube Suite', icon: '🧊', version: '3.6.2',
   provides: (api) => api && api.status ? {
     'cube.status':         { fn: api.status,    doc: 'what Cube Suite is doing (shared across tabs)', returns: '{ ok, mode, master, background, follow, running, instanceId, cleared, fastTargets }' },
     'cube.mode.set':       { fn: api.setMode,   doc: "switch Fast Run / Normal", args: "'fast' | 'normal'" },
@@ -59,8 +62,9 @@ Core.module({
     'cube.background.set': { fn: api.setBackground, doc: 'run the engine on any page, not only the Cube page', args: 'boolean' },
     'cube.follow':         { fn: api.follow,    doc: 'pin the engine to one Cube instance (null = unpin)', args: 'instanceId | null' },
     'cube.fastrun.start':  { fn: api.startFastRun, doc: 'follow that Cube, Fast Run on, automation on, background on', args: '{ instanceId }' },
-    'cube.pve.get':        { fn: api.pveGet,    doc: 'PvE damage settings of the active profile + every node\'s mobs (selected, cap); works with no Cube open', returns: '{ ok, profile, damageMode, fixedDamageCap, damageModel, nodes: [{ id, label, mobs: [{ key, name, selected, cap }] }] }' },
-    'cube.pve.set':        { fn: api.pveSet,    doc: 'change the PvE damage settings of the active profile (same as the Cube panel); works with no Cube open', args: '{ damageMode?: exp|fixed|monster|loot|scheduled, damageModel?: eco|fast, fixedDamageCap?: number, useStaminaPotion?: boolean, staminaPotionExpCap?: number, useHpPotion?: boolean, copyFromOther?: true, mob?: { nodeId, key, selected?: boolean, cap?: number }, node?: { nodeId, selected: boolean }, schedule?: { nodeId, add?: true, idx?: number, remove?: true, hour?, minute?, noTime?, mode?, fixedCap? } }' },
+    'cube.log.get':        { fn: api.logGet,    doc: 'the Cube Suite log of every tab, newest last; a shared "cube:log" event pings when it grew', args: '{ since?: ms timestamp, limit?: number }', returns: '{ ok, lines: [{ time, at, source: pvp|sa|pve|sys, level: info|warn|error, msg }] }' },
+    'cube.pve.get':        { fn: api.pveGet,    doc: 'PvE damage settings of the active profile (or args.profile) + every node\'s mobs (selected, cap); works with no Cube open', args: '{ profile?: normal|fast }', returns: '{ ok, profile, active, damageMode, fixedDamageCap, damageModel, nodes: [{ id, label, mobs: [{ key, name, selected, cap }] }] }' },
+    'cube.pve.set':        { fn: api.pveSet,    doc: 'change the PvE damage settings of the active profile (same as the Cube panel); works with no Cube open', args: '{ profile?: normal|fast (default: the active one), damageMode?: exp|fixed|monster|loot|scheduled, damageModel?: eco|fast, fixedDamageCap?: number, useStaminaPotion?: boolean, staminaPotionExpCap?: number, useHpPotion?: boolean, copyFromOther?: true, mob?: { nodeId, key, selected?: boolean, cap?: number }, node?: { nodeId, selected: boolean }, schedule?: { nodeId, add?: true, idx?: number, remove?: true, hour?, minute?, noTime?, mode?, fixedCap? } }' },
   } : {},
   async init(Core) {
   'use strict';
@@ -324,6 +328,7 @@ Core.module({
   const PVE_ATTACK_DMG_KEY_PREFIX = 'autocube_pve_attackdmg_';
   const PVP_ACTIVE_MATCHES_KEY = 'autocube_pvp_active_matches_v1';
   const LOG_SESSION_KEY = 'ds_suite_log_session_v1';
+  const LOG_SHARED_KEY  = 'ds_suite_log_shared_v1';   // the last lines of EVERY tab, newest last: read by cube.log.get() in any tab (the session copy above is per tab)
 
   let uiBox             = null;
   let currentInstanceId = null;
@@ -649,12 +654,20 @@ Core.module({
       `<span style="flex:1;${lvlColor ? `color:${lvlColor}` : ''}">${escaped}</span></div>`;
   }
 
-  let logSaveTimer = 0;
+  let logSaveTimer = 0, logPending = [];   // logPending: lines not in the shared copy yet
+  function dsFlushSharedLog() {            // append (never overwrite): the engine tab and a commanding tab both log
+    if (!logPending.length) return;
+    let ring = []; try { ring = JSON.parse(localStorage.getItem(LOG_SHARED_KEY)) || []; } catch { /* none yet */ }
+    ring = (Array.isArray(ring) ? ring : []).concat(logPending).slice(-200); logPending = [];
+    dsSafeSetItem(LOG_SHARED_KEY, JSON.stringify(ring));
+    try { Core.emit('cube:log', { n: ring.length }, { shared: true }); } catch { /* nobody listens */ }   // a ping: whoever shows the log reads it again
+  }
   function scheduleLogSave() {
     if (logSaveTimer) return;
     logSaveTimer = setTimeout(() => {
       logSaveTimer = 0;
       try { sessionStorage.setItem(LOG_SESSION_KEY, JSON.stringify(logLines)); } catch {}
+      dsFlushSharedLog();
     }, 500);
   }
 
@@ -672,8 +685,8 @@ Core.module({
 
   function addLog(source, level, msg) {
     const time = new Date().toLocaleTimeString();
-    const entry = { time, source, level, msg: String(msg) };
-    logLines.push(entry);
+    const entry = { time, at: Date.now(), source, level, msg: String(msg) };
+    logLines.push(entry); logPending.push(entry);
     if (logLines.length > MAX_LOG) logLines.shift();
     scheduleLogSave();
     appendLogLineToDom(entry);
@@ -3095,11 +3108,12 @@ Core.module({
   }
 
   function pveActiveProfileKey() { return dsIsFastMode() ? 'fast' : 'normal'; }
-  function pveGetProfile() { return pveLoadProfiles()[pveActiveProfileKey()]; }
-  function pveUpdateProfile(mutator, { resetActionable = false, resetActionableNodeId = null } = {}) {
-    const profiles = pveLoadProfiles();
-    mutator(profiles[pveActiveProfileKey()]);
+  function pveGetProfile(key) { return pveLoadProfiles()[key || pveActiveProfileKey()]; }
+  function pveUpdateProfile(mutator, { resetActionable = false, resetActionableNodeId = null, key = null } = {}) {   // key: edit the Normal or the Fast Run profile even when the other is the active one
+    const profiles = pveLoadProfiles(), k = key || pveActiveProfileKey();
+    mutator(profiles[k]);
     pveSaveProfiles(profiles);
+    if (k !== pveActiveProfileKey()) { refreshUI(); return; }                                // the engine only works from the active profile: nothing to re-verify for the other one
     if (resetActionableNodeId != null) {
       if (pveNodeStats[resetActionableNodeId]) pveNodeStats[resetActionableNodeId].noActionable = false;
     } else if (resetActionable) {
@@ -3110,9 +3124,9 @@ Core.module({
     refreshUI();
   }
 
-  function pveCopyProfileFromOtherMode() {
+  function pveCopyProfileFromOtherMode(key) {
     const profiles = pveLoadProfiles();
-    const current  = pveActiveProfileKey();
+    const current  = key || pveActiveProfileKey();
     const other    = current === 'fast' ? 'normal' : 'fast';
     const keepDamageMode = profiles[current].damageMode; // mode is per-profile on purpose — never copied
     const copied = JSON.parse(JSON.stringify(profiles[other]));
@@ -5581,9 +5595,16 @@ Core.module({
     },
     setBackground(on) { dsSafeSetItem(BACKGROUND_KEY, on ? '1' : '0'); dsSyncTabJoin(); dsWake(); return api.status(); },
     follow(id) { dsSaveFollow(id); dsWake(); return api.status(); },
-    pveGet() {                                                                          // the ACTIVE profile (Normal / Fast Run) and the mobs of every node: nothing here needs a Cube
-      const p = pveGetProfile(), allIn = p.damageMode !== 'monster';                     // per-mob mode: a node with no saved selection ticks nothing (the engine's rule); any other mode: every mob is in
-      return { ok: true, profile: pveActiveProfileKey(), damageMode: p.damageMode, fixedDamageCap: p.fixedDamageCap, damageModel: p.damageModel,
+    logGet(o) {                                                                         // every tab's lines, newest last (this tab's not-yet-shared ones included)
+      o = o || {}; let ring = []; try { ring = JSON.parse(localStorage.getItem(LOG_SHARED_KEY)) || []; } catch { /* none yet */ }
+      let lines = (Array.isArray(ring) ? ring : []).concat(logPending);
+      if (Number(o.since) > 0) lines = lines.filter((l) => (l.at || 0) > Number(o.since));
+      return { ok: true, lines: lines.slice(-Math.min(200, Math.max(1, Number(o.limit) || 200))) };
+    },
+    pveGet(o) {                                                                         // the ACTIVE profile (or { profile: 'normal' | 'fast' }) and the mobs of every node: nothing here needs a Cube
+      const key = o && (o.profile === 'fast' || o.profile === 'normal') ? o.profile : pveActiveProfileKey();
+      const p = pveGetProfile(key), allIn = p.damageMode !== 'monster';                     // per-mob mode: a node with no saved selection ticks nothing (the engine's rule); any other mode: every mob is in
+      return { ok: true, profile: key, active: pveActiveProfileKey(), damageMode: p.damageMode, fixedDamageCap: p.fixedDamageCap, damageModel: p.damageModel,
         useStaminaPotion: !!p.useStaminaPotion, staminaPotionExpCap: Number(p.staminaPotionExpCap) || 0, useHpPotion: !!p.useHpPotion,
         nodes: PVE_TARGET_NODES.map((id) => {
           const has = Object.prototype.hasOwnProperty.call(p.selectedMobsByNode, id), sel = new Set(p.selectedMobsByNode[id] || []);
@@ -5593,11 +5614,12 @@ Core.module({
     },
     pveSet(o) {                                                                         // the same edits the Cube panel makes, same rules (see the change handlers in wireUI)
       o = o || {}; const m = o.mob, nd = o.node, sc = o.schedule, nodeId = m ? Number(m.nodeId) : nd ? Number(nd.nodeId) : sc ? Number(sc.nodeId) : null;
+      const key = o.profile === 'fast' || o.profile === 'normal' ? o.profile : pveActiveProfileKey(), isActive = key === pveActiveProfileKey();   // which profile this edit is for
       if ((m || nd || sc) && !PVE_TARGET_NODES.includes(nodeId)) return { ok: false, message: 'pve.set: unknown nodeId' };
       if (m && !m.key) return { ok: false, message: 'pve.set: mob needs a key' };
-      if (sc && pveActiveProfileKey() !== 'normal') return { ok: false, message: 'pve.set: timed caps are a Normal-profile feature' };
-      if (o.copyFromOther) { pveCopyProfileFromOtherMode(); return api.pveGet(); }
-      const modes = ['exp', 'fixed', 'monster', 'loot'].concat(pveActiveProfileKey() === 'normal' ? ['scheduled'] : []);   // timed caps are a Normal-profile feature
+      if (sc && key !== 'normal') return { ok: false, message: 'pve.set: timed caps are a Normal-profile feature' };
+      if (o.copyFromOther) { pveCopyProfileFromOtherMode(key); return api.pveGet({ profile: key }); }
+      const modes = ['exp', 'fixed', 'monster', 'loot'].concat(key === 'normal' ? ['scheduled'] : []);   // timed caps are a Normal-profile feature
       const modeEdit = modes.includes(o.damageMode) || o.fixedDamageCap != null;
       pveUpdateProfile((p) => {
         if (modes.includes(o.damageMode)) p.damageMode = o.damageMode;
@@ -5635,9 +5657,9 @@ Core.module({
           p.selectedMobsByNode[nodeId] = [...list];
           const seen = pveLoadDiscovered(), ever = new Set(seen[nodeId] || []); ever.add(key); seen[nodeId] = [...ever]; pveSaveDiscovered(seen);   // ticked / unticked here = not "new" when first met, or the scan would tick it again
         }
-      }, { resetActionable: modeEdit, resetActionableNodeId: nodeId });
-      if (nodeId != null) pveVerifyNodeSoon(nodeId); else if (modeEdit) pveVerifyAllNodesSoon();    // (no Cube open: these return at once)
-      return api.pveGet();
+      }, { resetActionable: modeEdit, resetActionableNodeId: nodeId, key });
+      if (isActive) { if (nodeId != null) pveVerifyNodeSoon(nodeId); else if (modeEdit) pveVerifyAllNodesSoon(); }    // (no Cube open: these return at once)
+      return api.pveGet({ profile: key });
     },
     startFastRun(o) {
       const id = o && o.instanceId != null ? String(o.instanceId).replace(/\D/g, '') : '';
