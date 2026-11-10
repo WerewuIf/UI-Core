@@ -37,7 +37,9 @@
  * The panel is drawn on the Cube page only. Elsewhere the engine runs headless, and only when "background" is on (default OFF, so merely opening
  * any page never starts PvP / PvE by itself). One tab runs the engine (Core.tab 'cube-suite'); commands are shared state + a wake event, so
  * it does not matter which tab the command came from. */
-/* v3.6.4: new capability cube.tyrant.auto(bool) for the Automator: while on, Tyrant Conclave (node 9) automation is switched on for the current Cube AND again for every new Cube
+/* v3.6.5: status().view = PvP joins / cap / FFA and the Shadow army slots as data ({ pvp, schedClear, ffaProgress, sa }), published with the status. The Automator's Overview reads it; without it
+ * (the key was missing before) its Cube card said "PvP and Shadow army are not read yet" forever. null until PvP has been scanned once for the Cube.
+ * v3.6.4: new capability cube.tyrant.auto(bool) for the Automator: while on, Tyrant Conclave (node 9) automation is switched on for the current Cube AND again for every new Cube
  * (the new-Cube reset to OFF still happens, the Automator's request then switches it back on). Off = the Automator lets go: if IT switched Tyrant on, it is switched off again
  * (a Tyrant you ticked yourself stays). status() also carries `tyrant` (the toggle) and `tyrantAuto` (the Automator's request).
  * v3.6.3: the engine now clears its published status when it stops (background switched off on a page that is not the Cube page), so cube.status() no longer says
@@ -58,7 +60,7 @@
  * v3.5.4: new capability cube.master.set(bool) so the Automator can switch Cube Suite's automation on / off (status().master already reported it, nothing could set it).
  * NOTE: addons.json must NOT give cube-suite a "match": this is a service that runs on any page. With a match Core skips it everywhere else and no cube.* capability exists there. */
 Core.module({
-  id: 'cube-suite', name: 'Cube Suite', icon: '🧊', version: '3.6.4',
+  id: 'cube-suite', name: 'Cube Suite', icon: '🧊', version: '3.6.5',
   provides: (api) => api && api.status ? {
     'cube.status':         { fn: api.status,    doc: 'what Cube Suite is doing (shared across tabs)', returns: '{ ok, mode, master, background, follow, running, instanceId, cleared, fastTargets }' },
     'cube.mode.set':       { fn: api.setMode,   doc: "switch Fast Run / Normal", args: "'fast' | 'normal'" },
@@ -589,13 +591,49 @@ Core.module({
     try { return { pvp: dsPills(dsPvpPillsHtml(iid, dsIsFastMode(), pvpLoadFastRunState())), sa: dsPills(dsSaPillsHtml(iid)), pve: dsPills(dsPvePillsHtml()) }; }
     catch (_) { return null; }                                       // the nodes are a bonus: never lose the rest of the status over them
   }
+  /* PvP and Shadow army as data (status().view), for the Automator's Overview:
+   *   { pvp: { joined, cap, ffa }, schedClear, ffaProgress, sa: [{ node, read, locked, matches: [{ no, hour, minute, state }] }] }
+   *   state: fought | missed | live | overdue | upcoming | unknown.   ffaProgress: 0 = before the first slot, 1 = at slot 1 ... 9 = at slot 9, 10 = end of day (null = server time unknown)
+   * null until PvP has been scanned once for this Cube ("not read yet" is then true, and the Automator says so). */
+  function dsBuildView(iid) {
+    try {
+      if (!iid || !pvpHasScanned) return null;
+      const entry = pvpGetEffectiveScheduleEntry(), now = saNowSeconds();
+      const fought = new Set(saLoadParticipated(iid).keys), handled = new Set(saLoadSchedHandled(iid).keys);
+      const sa = SA_TARGET_NODES.map(nodeId => {
+        const st = saNodeStats[nodeId], locked = saLockedNodesLogged.has(nodeId);
+        const matches = SA_SCHEDULE.filter(e => e.nodeId === nodeId).map(e => {
+          const slot = dsScheduleEntrySeconds(e);
+          let state;
+          if (fought.has(`${nodeId}:${e.matchNo}`))                                                 state = 'fought';
+          else if (st && st.activeFightNo === e.matchNo)                                            state = 'live';
+          else if (handled.has(`${nodeId}:h${e.hour}:m${e.minute ?? 0}`) || (st && st.allCleared))  state = 'missed';   // over (cleared by someone, or handled by the schedule) and not one of ours
+          else if (now == null)                                                                     state = 'unknown';
+          else if (now < slot)                                                                      state = 'upcoming';
+          else                                                                                      state = 'overdue';
+          return { no: e.matchNo, hour: e.hour, minute: e.minute ?? 0, state };
+        });
+        return { node: nodeId, read: !!st && !st.scanning, locked, matches };
+      });
+      let ffaProgress = null;
+      if (now != null) {
+        const slots = SA_SCHEDULE.map(e => dsScheduleEntrySeconds(e) / 60).sort((a, b) => a - b), m = now / 60, n = slots.length;
+        if (m < slots[0]) ffaProgress = m / slots[0];
+        else if (m >= slots[n - 1]) ffaProgress = n + Math.min(1, (m - slots[n - 1]) / (1440 - slots[n - 1]));
+        else { let i = 0; while (i < n - 1 && m >= slots[i + 1]) i++; ffaProgress = (i + 1) + (m - slots[i]) / (slots[i + 1] - slots[i]); }
+        ffaProgress = Math.round(ffaProgress * 100) / 100;                                        // two decimals: the status is rewritten only when this changes (about every 30 s)
+      }
+      return { pvp: { joined: pvpLiveJoinCount, cap: entry?.limit ?? 6, ffa: entry?.label === 'ffa' }, schedClear: !!saScheduledNukeEnabled, ffaProgress, sa };
+    } catch (_) { return null; }                                                                  // the view is a bonus: never lose the rest of the status over it
+  }
   function dsPublishStatus() {                                       // every loop calls this, and a write wakes every other tab: only write on a change, else every 15 s (status() treats 5 min as live)
     if (!dsTabIsMain || !dsJoined) return;                           // a loop that was still finishing when the engine stopped must not announce "running" again
     try {
-      const instanceId = currentInstanceId || '', cleared = !!currentInstanceId && dsIsDungeonFullyCleared(), nodes = instanceId ? dsNodeSummary() : null, sig = instanceId + '|' + cleared + '|' + onCubePage + '|' + JSON.stringify(nodes), now = Date.now();
+      const instanceId = currentInstanceId || '', cleared = !!currentInstanceId && dsIsDungeonFullyCleared(), nodes = instanceId ? dsNodeSummary() : null, view = instanceId ? dsBuildView(instanceId) : null;
+      const sig = instanceId + '|' + cleared + '|' + onCubePage + '|' + JSON.stringify(nodes) + '|' + JSON.stringify(view), now = Date.now();
       if (sig === dsStatusSig && now - dsStatusAt < 15_000) return;
       dsStatusSig = sig; dsStatusAt = now;
-      dsSafeSetItem(STATUS_KEY, JSON.stringify({ at: now, instanceId, cleared, ui: onCubePage, nodes }));
+      dsSafeSetItem(STATUS_KEY, JSON.stringify({ at: now, instanceId, cleared, ui: onCubePage, nodes, view }));
     } catch { /* status is best effort */ }
   }
   function dsLoadMode()  { return localStorage.getItem(SHARED_MODE_KEY) === 'fast' ? 'fast' : 'normal'; }
@@ -5593,7 +5631,7 @@ Core.module({
       let f = {}; try { f = pvpLoadFastRunState() || {}; } catch { /* none yet */ }
       return { ok: true, mode: dsLoadMode(), master: dsLoadMasterEnabled(), background: dsBackgroundOn(), follow: dsLoadFollow(),
         running: live, seenAt: live ? Number(st.at) || 0 : 0, instanceId: live ? String(st.instanceId || '') : '', cleared: live && !!st.cleared,
-        fastTargets: { node7MatchNo: Number(f.node7MatchNo) || 0, node8MatchNo: Number(f.node8MatchNo) || 0 }, leader: !!f.isLeader, nodes: live ? st.nodes || null : null,
+        fastTargets: { node7MatchNo: Number(f.node7MatchNo) || 0, node8MatchNo: Number(f.node8MatchNo) || 0 }, leader: !!f.isLeader, nodes: live ? st.nodes || null : null, view: live ? st.view || null : null,
         tyrant: pvpLoadTyrantEnabled(), tyrantAuto: pvpTyrantAuto() };
     },
     setMode(m) { dsSaveMode(m === 'fast' ? 'fast' : 'normal'); dsWake(); return api.status(); },
