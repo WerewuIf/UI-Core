@@ -28,7 +28,7 @@
  * default cap of a boss is its highest loot requirement, and bosses the roster did not know yet are added. Export .txt writes it all out.
  */
 Core.module({
-  id: 'automator', name: 'Automator', icon: '🤖', version: '1.15.1',
+  id: 'automator', name: 'Automator', icon: '🤖', version: '1.15.2',
   // Offered to other addons through Core capabilities (guides/CAPABILITIES.md):
   //   automator.status() -> the status string     automator.start() / automator.stop()     automator.scan() -> scan the bosses now
   provides: (api) => api && api.start ? {
@@ -39,7 +39,7 @@ Core.module({
   } : {},
   init(Core) {
 'use strict';
-const ID = 'automator', VERSION = '1.15.1';
+const ID = 'automator', VERSION = '1.15.2';
 const FARM_MARK = '\u2063farm\u2063';          // a task line is written when the task looks; this marks where the farm's state goes, filled in live when the line is drawn (a line saying "queued" while the farm is already checking the graveyard was stale)
 if (window.__automatorLoaded) { console.warn('[automator] already loaded', window.__automatorLoaded); return null; }
 window.__automatorLoaded = VERSION;
@@ -4791,7 +4791,7 @@ Object.assign(Tasks, (() => {
   define({ id: 'guild', name: 'Adventure Guild', icon: '📜', desc: 'Kill quests: finish, accept, auto-farm the kills', every: () => mins(cfg.tasks.guild.everyMin, 5), enabled: () => !!cfg.tasks.guild.enabled, tick: Guild.tick });
   define({ id: 'bp', name: 'Battle Pass', icon: '🎫', desc: 'The hunt of the pass, auto-farmed', every: () => mins(cfg.tasks.bp.everyMin, 10), enabled: () => !!cfg.tasks.bp.enabled, tick: Battle.tick });
   define({ id: 'merchant', name: 'Merchant', icon: '🛒', desc: 'Buys the weekly restock once per server week', every: () => mins(cfg.tasks.merchant.everyMin, 30), enabled: () => !!cfg.tasks.merchant.enabled, tick: Merchant.tick });
-  define({ id: 'graveyard', name: 'Graveyard cleaning', icon: '🪦', desc: 'Over its level limit, the next potion is looted instead', every: () => 6 * 3600000, enabled: () => !!cfg.tasks.graveyard.enabled, tick: Graveyard.tick });
+  define({ id: 'graveyard', name: 'Graveyard keep', icon: '🪦', desc: 'Over its level limit, the next potion is looted instead', every: () => 6 * 3600000, enabled: () => !!cfg.tasks.graveyard.enabled, tick: Graveyard.tick });
   define({ id: 'extract', name: 'Extraction', icon: '☠️', desc: 'Raises shadows from dead Grakthar gate monsters: no join or kill needed', every: () => mins(cfg.tasks.extract.everyMin, 5), enabled: () => !!cfg.tasks.extract.enabled, tick: Extract.tick });
   define({ id: 'pvp.solo', name: 'PvP · Solo', icon: '⚔️', group: 'pvp', desc: 'placeholder — plug your PvP module in', placeholder: true, enabled: () => !!cfg.tasks.pvp.solo.enabled });
   define({ id: 'pvp.team', name: 'PvP · Team', icon: '🛡️', group: 'pvp', desc: 'placeholder — plug your PvP module in', placeholder: true, enabled: () => !!cfg.tasks.pvp.team.enabled });
@@ -5450,7 +5450,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   const STATE_TXT = { FIGHTING: 'Fighting', RUNNING: 'Running', SCANNING: '🔎 Scanning bosses', GRAVEYARD: '🪦 Scanning graveyard', WAITING: 'Waiting for a boss', 'NO STAMINA': 'Out of stamina', DUEL: 'Phase duel', SWITCHING: '🎒 Switching build', PLANNING: '🧭 Planning build order', PAUSED: 'Paused', FARMING: '🌾 Auto-farming', STOPPED: 'Stopped', FOLLOWER: 'Another tab is running it' };
   const dotOf = (st) => (!Tab.isMain() ? 'follower' : /FIGHT|RUN|DUEL|SCAN|GRAVE|SWITCH|PLAN|FARM/.test(st) ? 'running' : /WAIT|STAMINA/.test(st) ? 'waiting' : /PAUSE/.test(st) ? 'follower' : '');
   // what the automator is doing apart from the bosses: the farm (and who it farms for), a task mid-tick, or the tasks that are switched on
-  const SHORT = { guild: 'Quests', bp: 'BP', merchant: 'Merchant', extract: 'Extraction', graveyard: 'Graveyard cleaning' }, tShort = (d) => SHORT[d.id] || d.name, taskTag = (d) => `${d.icon} ${tShort(d)}`;
+  const SHORT = { guild: 'Quests', bp: 'BP', merchant: 'Merchant', extract: 'Extraction', graveyard: 'Graveyard keep' }, tShort = (d) => SHORT[d.id] || d.name, taskTag = (d) => `${d.icon} ${tShort(d)}`;
   const taskDone = (d) => { const i = Tasks.info(d.id) || {}; return i.at > 0 && (i.state === 'ok' || i.state === 'idle'); };            // this task has nothing to do for now
   const enabledTasks = () => Tasks.list().filter((d) => d.id !== 'monsters' && !d.placeholder && d.enabled && d.enabled());
   function otherWork() {
@@ -5619,7 +5619,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
         setOn: (v) => { T.bp.enabled = v; if (v) Tasks.poke('bp'); else Farm.drop('bp'); }, action: check('bp', 'Check now') }),
       taskRow({ key: 'merchant', icon: '🛒', title: 'Merchant', tip: 'Weekly restock · resets Sunday 00:00 server', on: T.merchant.enabled, line: taskText('merchant', T.merchant.enabled) || 'Weekly restock · resets Sunday 00:00 server',
         setOn: (v) => { T.merchant.enabled = v; if (v) Tasks.poke('merchant'); }, action: { icon: '↻', tip: ms.done ? 'Recheck' : 'Buy now', fn: () => { Merchant.reset(); Tasks.poke('merchant'); draw(); } } }),
-      taskRow({ key: 'graveyard', icon: '🪦', title: 'Graveyard cleaning', tip: 'Over this many level-ups of corpses, the next potion is looted instead', on: gt.enabled,
+      taskRow({ key: 'graveyard', icon: '🪦', title: 'Graveyard keep', tip: 'Over this many level-ups of corpses, the next potion is looted instead', on: gt.enabled,
         line: (gt.enabled ? `keeping ${gt.keepLevels} level${gt.keepLevels === 1 ? '' : 's'}` : 'Over the limit, the next potion is looted instead') + (taskText('graveyard', gt.enabled) ? ' · ' + taskText('graveyard', gt.enabled) : ''),
         setOn: (v) => { gt.enabled = !!v; if (v) Tasks.poke('graveyard'); }, action: { icon: '📈', tip: Loot.state.looting ? 'Looting…' : 'Level up now', fn: () => { Loot.scanAndPass().then(() => draw()); draw(); } },
         body: () => [h('div', { class: 'ma-sr-o tm', style: { margin: 0 } }, opt('Keep a stash of', num(() => gt.keepLevels, (n) => { gt.keepLevels = Math.round(n); }, { min: 0, max: 50, unit: 'levels', parse: parseFloat }))), gNext ? note(gNext) : null] }),
@@ -5718,7 +5718,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     }
     if (tcfg.graveyard.enabled) {
       const gi = Tasks.info('graveyard'), left = Loot.state.rows.filter((r) => r.needsLoot !== false).length;
-      out.push(fold('ov:graveyard', true, ['🪦 Graveyard cleaning', h('small', {}, left ? `${left} corpse${left === 1 ? '' : 's'} waiting` : '')], () => [tStatus('graveyard'), nextNote('graveyard')], { aside: stPill(gi) }));
+      out.push(fold('ov:graveyard', true, ['🪦 Graveyard keep', h('small', {}, left ? `${left} corpse${left === 1 ? '' : 's'} waiting` : '')], () => [tStatus('graveyard'), nextNote('graveyard')], { aside: stPill(gi) }));
     }
     if (tcfg.extract.enabled) {
       const ei = Tasks.info('extract'), es = Extract.state();
@@ -5726,7 +5726,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
         tStatus('extract'), nextNote('extract'), ...es.last.slice(0, 3).map((x) => note(`${x.shadow}${x.stars ? ' ' + x.stars : ''} · from ${x.mob} · ${ago(x.at)}`))], { aside: stPill(ei) }));
     }
     const cs = cubeSt();
-    if (cs && (cs.instanceId || cs.background || cfg.cubeFast.enabled)) out.push(fold('ov:cube', true, ['🧊 Cube', h('small', {}, cubeStatusBits(cs, false).join(' · '))], () => cubeBody(cs), { aside: stPill({ state: cs.running ? 'run' : 'idle' }) }));
+    if (cs || cfg.cubeFast.enabled) out.push(fold('ov:cube', true, ['🧊 Cube', h('small', {}, cubeStatusBits(cs, false).join(' · '))], () => cs ? cubeBody(cs) : [note('Cube Suite is not loaded on this page, so PvP and Shadow army cannot be read here. The scheduled fast run needs it too.')], { aside: stPill({ state: cs && cs.running ? 'run' : 'idle' }) }));   // always there while Cube Suite is loaded (it used to vanish when no Cube was open and the switches were off)
     if (tcfg.guild.enabled || tcfg.bp.enabled) {
       const F = Farm.info(), md = Farm.mode();
       out.push(fold('ov:farm', true, ['🌾 Auto-Farm', h('small', {}, Farm.busy() ? (Farm.line() || 'running') : md.kind === 'auto' ? '' : 'attack path')], () => [
