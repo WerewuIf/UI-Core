@@ -28,7 +28,7 @@
  * default cap of a boss is its highest loot requirement, and bosses the roster did not know yet are added. Export .txt writes it all out.
  */
 Core.module({
-  id: 'automator', name: 'Automator', icon: '🤖', version: '1.15.8',
+  id: 'automator', name: 'Automator', icon: '🤖', version: '1.15.9',
   // Offered to other addons through Core capabilities (guides/CAPABILITIES.md):
   //   automator.status() -> the status string     automator.start() / automator.stop()     automator.scan() -> scan the bosses now
   provides: (api) => api && api.start ? {
@@ -5538,14 +5538,14 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   const saNext = (v) => { for (const n of v.sa) { const m = n.matches.find((x) => x.state === 'live' || x.state === 'overdue' || x.state === 'upcoming'); if (m) return { node: n.node, m }; } return null; };
   const cubeStatusBits = (c, full) => {
     if (!c) return ['Cube Suite is not loaded on this page'];
-    if (!c.running) { const b = ['not read yet']; if (cfg.cubeFast.enabled) b.push(CubeFast.line().replace(/^Next/, 'next')); return b; }   // no heartbeat from its engine (never ran, or silent for 5 min): nothing it says is current
+    if (!c.running) { const b = [c.background ? 'not read yet' : 'not running']; if (cfg.cubeFast.enabled) b.push(CubeFast.line().replace(/^Next/, 'next')); return b; }   // no heartbeat from its engine (never ran, or silent for 5 min): nothing it says is current
     const v = c.view, bits = [c.instanceId ? '#' + c.instanceId : 'no active Cube', c.mode === 'fast' ? 'Fast Run' : 'Normal'];
     if (!c.master) bits.push('automation paused');
     if (full) { if (v) { const t = saTally(v); bits.push('PvP ' + v.pvp.joined + '/' + v.pvp.cap, 'SA ' + t.fought + '/' + t.total); } else if (c.instanceId) bits.push('PvP and SA not read'); }
     if (cfg.cubeFast.enabled) bits.push(CubeFast.line().replace(/^Next/, 'next'));
     return bits;
   };
-  const cubeWorking = (c) => !!(c && c.running && c.master && c.instanceId);          // "running" is only Cube Suite's heartbeat: it is WORKING when automation is on and a Cube is active
+  const cubeWorking = (c) => !!(c && c.running && c.master && c.instanceId && (!c.seenAt || Date.now() - c.seenAt < 120000));   // (seenAt: its last report; older Cube Suites do not send it)          // "running" is only Cube Suite's heartbeat: it is WORKING when automation is on and a Cube is active
   const cubeDot = (c) => h('span', { class: 'ma-cd ' + (cubeWorking(c) ? 'on' : ''), title: cubeWorking(c) ? 'Working' : 'Not working' }, '●');
   const segBar = (cls, items) => h('div', { class: 'ma-sb ' + cls }, ...items);
   const pvpStrip = (pv, big) => {
@@ -5598,7 +5598,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   function cubeBody(c) {
     const out = [], v = c.view;
     if (v) out.push(...cubePanels(c, v));
-    else if (!c.running) out.push(note('Cube Suite has not read the page yet. It reports once its engine has looped: open the Cube page, or switch Cube on in Tasks.'));
+    else if (!c.running) out.push(note(c.background ? 'Cube Suite has not read the page yet. It reports once its engine has looped.' : 'Cube Suite is not running on this page. It runs on the Cube page, or on any page while Cube is on in Tasks and the Automator is started.'));
     else out.push(note(c.instanceId ? 'PvP and Shadow army are not read yet: Cube Suite reports them on its next loop.' : 'No active Cube. PvP and Shadow army show here while a Cube is open and Cube Suite runs.'));
     return out;
   }
@@ -6152,7 +6152,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     const shown = rooms.filter((nm) => !f || ['cube', 'crucible', 'pve', nm].join(' ').toLowerCase().includes(f));
     if (f && !shown.length && !'cube crucible pvp sa shadow army'.includes(f)) return null;
     const all = [].concat(n.pvp || [], n.sa || [], n.pve || []).filter(([k]) => k !== 'locked'), done = all.filter(([k]) => k === 'cleared').length;   // locked / not-assigned nodes can never be cleared: leave them out of the goal
-    const head = ['\u{1F9CA} Cube', h('small', {}, !c.running ? 'not read yet' : c.instanceId ? '#' + c.instanceId + ' · ' + (c.mode === 'fast' ? 'fast run' : 'normal') : 'no active Cube')];
+    const head = ['\u{1F9CA} Cube', h('small', {}, !c.running ? (c.background ? 'not read yet' : 'not running') : c.instanceId ? '#' + c.instanceId + ' · ' + (c.mode === 'fast' ? 'fast run' : 'normal') : 'no active Cube')];
     const aside = [all.length ? h('span', { class: 'ma-pill' + (done === all.length ? ' ok' : done ? ' blue' : '') }, done + '/' + all.length) : null].filter(Boolean);
     return fold('grp:cube', !!(c.running || c.background), head, () => {
       const body = [];                                               // PvP and Shadow army live in Overview, the schedule in Settings → Cube, the on / off switch in Tasks; here only the PvE rooms
