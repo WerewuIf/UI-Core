@@ -5542,25 +5542,17 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     return [h('div', { class: 'ma-cv2' }, pvp, sa)];
   }
   function cubeBody(c) {
-    const out = [], v = c.view, cf = cfg.cubeFast, ft = c.fastTargets || {}, can = Core.has('cube.settings.set');
+    const out = [], v = c.view;
     if (v) out.push(...cubePanels(c, v));
     else out.push(note(c.instanceId ? 'PvP and Shadow army are not read yet: Cube Suite reports them on its next loop.' : 'No active Cube. PvP and Shadow army show here while a Cube is open and Cube Suite runs.'));
-    const fastOn = c.mode === 'fast' || !!cf.enabled;                  // the scheduled run switches to Fast Run by itself, so its N7 / N8 must stay reachable
-    const nm = (k, label) => opt(label, can ? num(() => (cubeSt() || { fastTargets: {} }).fastTargets[k] || 0, (n) => { cubeSet('cube.settings.set', { [k]: n }); }, { min: 0, max: 20, parse: parseFloat }) : h('span', { class: 'ma-note' }, '—'));
-    out.push(opt('Fast Run', sw(() => c.mode === 'fast', (x) => { cubeSet('cube.mode.set', x ? 'fast' : 'normal'); }, { sm: true, redraw: false }), 'Switches Cube Suite to Fast Run now. N7 / N8 show while it is on.', 'row'));
-    if (fastOn) out.push(h('div', { class: 'ma-cf' }, nm('node7MatchNo', 'N7 match'), nm('node8MatchNo', 'N8 match'),
-      opt('Leader', can ? sw(() => !!(cubeSt() || {}).leader, (x) => { cubeSet('cube.settings.set', { isLeader: x }); }, { sm: true, redraw: false }) : h('span', { class: 'ma-note' }, '—'))));
-    out.push(h('div', { class: 'ma-cf' },
-      opt('Day', dropdown([['sun', 'Sunday'], ['mon', 'Monday'], ['tue', 'Tuesday'], ['wed', 'Wednesday'], ['thu', 'Thursday'], ['fri', 'Friday'], ['sat', 'Saturday']], cf.day, (x) => { cf.day = x; })),
-      opt('Server time', num(() => toMin(cf.time), (n) => { cf.time = hhmm(n); }, { min: 0, fmt: fmtClock, parse: (x) => { const k = parseClock(x); return k == null ? null : toMin(k); } }))));
-    out.push(h('div', { class: 'ma-note' }, `Starts watching ${cf.leadMin} min before (server time). Everything else pauses until the Cube is cleared. N7 / N8: the match joined on Fast Run, 0 = none.`));
     return out;
   }
+  const cubeSchedOn = (x) => { cfg.cubeFast.enabled = !!x; if (Core.has('cube.background.set')) cubeSet('cube.background.set', !!x).then(() => x && cubeSet('cube.master.set', true)); };
   function cubeRow() {
     const c = cubeSt(), cf = cfg.cubeFast;
     return taskRow({ key: 'cube', icon: '🧊', title: 'Cube', tip: 'PvP, Shadow army and the scheduled fast run. The switch lets Cube Suite run on any page and turns the scheduled fast run on.',
       line: [cubeDot(c), ' ', cubeStatusBits(c, true).join(' · ')], on: !!(cf.enabled || (c && c.background)),
-      setOn: (x) => { cf.enabled = !!x; if (Core.has('cube.background.set')) cubeSet('cube.background.set', !!x).then(() => x && cubeSet('cube.master.set', true)); },
+      setOn: cubeSchedOn,
       body: c ? () => cubeBody(c) : null, open: true });
   }
   /* Overview: a read-only Cube strip (the controls stay in Tasks). Hidden while there is no Cube and nothing is scheduled. */
@@ -6254,6 +6246,13 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
           opt('Pierce shielded mobs', sw(() => cfg.sideMob.enabled, (v) => { cfg.sideMob.enabled = v; }, { redraw: false, sm: true }), `${cs ? cs.label : 'class skill'} on a regular mob`, 'row')] : null),
         srow('⚔️', 'Phase duels', 'Fought automatically', sw(() => cfg.autoDuel, (v) => { cfg.autoDuel = v; }, { redraw: false })),
         srow('⏸️', 'Pause server auto-farm', 'So the two never fight over stamina', sw(() => cfg.autoFarmControl, (v) => { cfg.autoFarmControl = v; }, { redraw: false }))),
+      caption('Cube'),
+      group(
+        srow('🧊', 'Scheduled fast run', 'Switches the Cube to Fast Run at its time; everything else pauses until the Cube is cleared', sw(() => cfg.cubeFast.enabled, cubeSchedOn), cfg.cubeFast.enabled ? [
+          opt('Day', dropdown([['sun', 'Sunday'], ['mon', 'Monday'], ['tue', 'Tuesday'], ['wed', 'Wednesday'], ['thu', 'Thursday'], ['fri', 'Friday'], ['sat', 'Saturday']], cfg.cubeFast.day, (x) => { cfg.cubeFast.day = x; })),
+          opt('Server time', num(() => toMin(cfg.cubeFast.time), (n) => { cfg.cubeFast.time = hhmm(n); }, { min: 0, fmt: fmtClock, parse: (x) => { const k = parseClock(x); return k == null ? null : toMin(k); } }), `Starts watching ${cfg.cubeFast.leadMin} min before`),
+          ...[['node7MatchNo', 'N7 match'], ['node8MatchNo', 'N8 match']].map(([k, label]) => opt(label, Core.has('cube.settings.set') ? num(() => (cubeSt() || { fastTargets: {} }).fastTargets[k] || 0, (n) => { cubeSet('cube.settings.set', { [k]: n }); }, { min: 0, max: 20, parse: parseFloat }) : h('span', { class: 'ma-note' }, '—'), '0 = none')),
+          opt('Leader', Core.has('cube.settings.set') ? sw(() => !!(cubeSt() || {}).leader, (x) => { cubeSet('cube.settings.set', { isLeader: x }); }, { sm: true, redraw: false }) : h('span', { class: 'ma-note' }, '—'))] : null)),
       caption('Tasks'),
       group(
         srow('🌾', 'Use Auto-Farm', afDesc(), sw(() => cfg.tasks.farm.auto !== false, (v) => { cfg.tasks.farm.auto = v; Farm.nudge(); })),
