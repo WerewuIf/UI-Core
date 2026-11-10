@@ -28,7 +28,7 @@
  * default cap of a boss is its highest loot requirement, and bosses the roster did not know yet are added. Export .txt writes it all out.
  */
 Core.module({
-  id: 'automator', name: 'Automator', icon: '🤖', version: '1.15.7',
+  id: 'automator', name: 'Automator', icon: '🤖', version: '1.15.8',
   // Offered to other addons through Core capabilities (guides/CAPABILITIES.md):
   //   automator.status() -> the status string     automator.start() / automator.stop()     automator.scan() -> scan the bosses now
   provides: (api) => api && api.start ? {
@@ -5502,9 +5502,9 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   /* =================================================== TASKS =================================================== */
   const SDOT = { ok: '✅ ', run: '▶ ', warn: '⚠️ ', err: '⛔ ', idle: '' };
   const farmWorksFor = (id) => { try { if (!Farm.busy()) return false; const o = Farm.owners ? Farm.owners() : []; return o.includes(id) || (!o.length && !!Farm.line()); } catch (_) { return false; } };   // (no owner yet = the kill-ahead check, which is for the quests waiting on the board)
-  const liveLine = (id, ln) => String(ln).split(FARM_MARK).join(farmWorksFor(id) ? ' · 🌾 ' + (Farm.line() || 'farming now') : ' · queued');
+  const liveLine = (id, ln) => String(ln).split(FARM_MARK).join(farmWorksFor(id) ? ' · 🌾 farming' : ' · queued');   // what it farms is in the Auto-Farm fold, not repeated in every task
   const tStatus = (id) => { const i = Tasks.info(id); return i.line ? h('div', { class: 'ma-note' }, (SDOT[i.state] || '') + liveLine(id, i.line) + (i.at ? ' · ' + ago(i.at) : '')) : null; };
-  const nextNote = (id) => { const d = Tasks.nextDue(id) - Date.now(); return Tasks.busy(id) ? null : farmWorksFor(id) ? h('div', { class: 'ma-note' }, '🌾 auto-farm is on it') : !Run.tasksOn() ? h('div', { class: 'ma-note' }, Run.wanted() ? '⏸ halted (signed out)' : '⏹ stopped — press ▶ Start') : h('div', { class: 'ma-note' }, d > 1500 ? '⏱ next look in ' + fmtDur(d) : '⏱ looking now'); };
+  const nextNote = (id) => { const d = Tasks.nextDue(id) - Date.now(); return Tasks.busy(id) ? null : farmWorksFor(id) ? (Tasks.info(id).line ? null : h('div', { class: 'ma-note' }, '🌾 auto-farm is on it')) : !Run.tasksOn() ? h('div', { class: 'ma-note' }, Run.wanted() ? '⏸ halted (signed out)' : '⏹ stopped — press ▶ Start') : h('div', { class: 'ma-note' }, d > 1500 ? '⏱ next look in ' + fmtDur(d) : '⏱ looking now'); };
   // Tasks tab: ONE line per card, what it did and when it looks again, with the card's action button at its right. (Stopped / halted is said once, at the top of the tab.)
   const nextBit = (id) => { if (Tasks.busy(id) || !Run.tasksOn()) return ''; if (farmWorksFor(id)) return '🌾 farming'; const d = Tasks.nextDue(id) - Date.now(); return d > 1500 ? 'next in ' + fmtDur(d) : 'checking now'; };
   const taskLine = (id, on, action) => {
@@ -5717,14 +5717,19 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     }));
 
     // the other tasks: one collapsible each, only for the ones that are switched on
-    const tcfg = cfg.tasks, KIND = { kill: ['⚔️', 'kill'], collect: ['📦', 'collect'], skill: ['✨', 'skill'] };
+    const tcfg = cfg.tasks;
     const stPill = (i) => pill({ run: 'working', warn: 'check', err: 'error' }[i.state] || 'idle', { run: 'blue', warn: 'warn', err: 'err' }[i.state] || 'ok');   // "ok" and "idle" both mean nothing to do now: one word
     const barRow = (ico, name, cur2, tot, sub, pl) => h('div', { class: 'ma-q' }, h('span', { class: 'ma-ico' }, ico), h('div', { class: 'ma-q-n' }, h('b', {}, name), tot > 0 ? h('div', { class: 'ma-bar' + (cur2 >= tot ? ' done' : '') }, h('i', { style: { width: Math.min(100, cur2 / tot * 100).toFixed(1) + '%' } })) : null, sub ? h('small', {}, sub) : null), pl || null);
+    const guildSummary = (board) => {                                  // one bar for the kills + a count per state, not a row per quest (the Tasks tab has the details)
+      const live = board.filter((q) => !q.cooldown), kq = live.filter((q) => q.kind === 'kill' && q.total > 0), cur2 = kq.reduce((n, q) => n + Math.min(q.cur || 0, q.total), 0), tot = kq.reduce((n, q) => n + q.total, 0);
+      const cnt = (f) => board.filter(f).length, bits = [[cnt((q) => q.done), 'to hand in', 'ok'], [cnt((q) => q.queued && !q.active && !q.done), 'queued', 'blue'], [cnt((q) => q.available && !q.active && !q.done && !q.queued), 'available', 'warn'], [cnt((q) => q.cooldown), 'on cooldown', '']].filter(([n]) => n);
+      return [tot > 0 ? barRow('⚔️', 'Kills', cur2, tot, `${fmtNum(cur2)} / ${fmtNum(tot)} kills · ${kq.length} quest${kq.length === 1 ? '' : 's'}`, null) : null,
+        bits.length ? h('div', { class: 'ma-sum' }, bits.map(([n, t, k]) => pill(`${n} ${t}`, k))) : null];
+    };
     if (tcfg.guild.enabled) {
       const gi = Tasks.info('guild'), board = Array.isArray(gi.board) ? gi.board : [], act = board.filter((q) => q.active || q.done);
       out.push(fold('ov:guild', true, ['📜 Adventure Guild', h('small', {}, act.length ? `${act.length} in progress` : board.length ? 'nothing in progress' : '')], () => [
-        ...(board.length ? board : []).map((q) => { const k = KIND[q.kind] || ['📜', q.kind || 'quest'], cd = q.cooldown && q.cdTs > 0 ? Math.max(0, q.cdTs * 1000 - Date.now()) : 0;
-          return barRow(k[0], q.name, q.cur || 0, q.total || 0, [k[1], q.kind === 'kill' && q.mob ? `${q.mob} ≥ ${fmtNum(q.minDmg)}` : '', q.total ? `${fmtNum(q.cur || 0)} / ${fmtNum(q.total)}` : ''].filter(Boolean).join(' · '), pill(q.done ? 'hand it in' : q.active ? 'active' : q.cooldown ? (cd ? 'cooldown ' + fmtDur(cd) : 'cooldown') : q.available ? 'available' : q.queued ? 'queued' : q.note ? (/finish or abandon/i.test(q.note) ? 'waiting' : q.note.slice(0, 28)) : '—', q.done ? 'ok' : q.active || q.queued ? 'blue' : q.cooldown ? '' : 'warn')); }),
+        ...guildSummary(board),
         tStatus('guild'), nextNote('guild')], { aside: stPill(gi) }));
     }
     if (tcfg.bp.enabled) {
@@ -5755,7 +5760,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     if (tcfg.guild.enabled || tcfg.bp.enabled) {
       const F = Farm.info(), md = Farm.mode();
       out.push(fold('ov:farm', true, ['🌾 Auto-Farm', h('small', {}, Farm.busy() ? (Farm.line() || 'running') : md.kind === 'auto' ? '' : 'attack path')], () => [
-        h('div', { class: 'ma-note' }, Farm.busy() ? '🌾 ' + (Farm.line() || 'running') : md.kind === 'hand' ? md.why + ' — using the normal attack path' : `idle · ${F.ids} monster id${F.ids === 1 ? '' : 's'} known · ${F.runs} run${F.runs === 1 ? '' : 's'} this session${F.demands ? ' · ' + F.demands + ' request' + (F.demands === 1 ? '' : 's') + ' waiting' : ''}`),
+        h('div', { class: 'ma-note' }, !Farm.busy() && md.kind === 'hand' ? md.why + ' — using the normal attack path' : (Farm.busy() ? '' : 'idle · ') + `${F.ids} monster id${F.ids === 1 ? '' : 's'} known · ${F.runs} run${F.runs === 1 ? '' : 's'} this session${F.demands ? ' · ' + F.demands + ' request' + (F.demands === 1 ? '' : 's') + ' waiting' : ''}`),
         ...Object.values(F.skipped).map((x) => note('⚠️ ' + x)),
         F.snap && F.snap.left && F.snap.left.length ? note('⚠️ could not put back: ' + F.snap.left.join(', ')) : null], { aside: stPill({ state: Farm.busy() ? 'run' : F.snap && F.snap.left && F.snap.left.length ? 'warn' : 'idle' }) }));
     }
