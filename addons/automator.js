@@ -28,7 +28,7 @@
  * default cap of a boss is its highest loot requirement, and bosses the roster did not know yet are added. Export .txt writes it all out.
  */
 Core.module({
-  id: 'automator', name: 'Automator', icon: '🤖', version: '1.14.16',
+  id: 'automator', name: 'Automator', icon: '🤖', version: '1.15.0',
   // Offered to other addons through Core capabilities (guides/CAPABILITIES.md):
   //   automator.status() -> the status string     automator.start() / automator.stop()     automator.scan() -> scan the bosses now
   provides: (api) => api && api.start ? {
@@ -39,7 +39,7 @@ Core.module({
   } : {},
   init(Core) {
 'use strict';
-const ID = 'automator', VERSION = '1.14.16';
+const ID = 'automator', VERSION = '1.15.0';
 const FARM_MARK = '\u2063farm\u2063';          // a task line is written when the task looks; this marks where the farm's state goes, filled in live when the line is drawn (a line saying "queued" while the farm is already checking the graveyard was stale)
 if (window.__automatorLoaded) { console.warn('[automator] already loaded', window.__automatorLoaded); return null; }
 window.__automatorLoaded = VERSION;
@@ -4951,6 +4951,7 @@ const Panel = (() => {
 .core-modal-card:has(.ma-root){padding:12px 14px 0;border-radius:24px}
 .core-modal-card:has(.ma-root) .core-modal-head{margin-bottom:6px}
 .core-modal-card:has(.ma-root) .core-modal-title{font-size:16px;font-weight:800}
+.ma-root,.ma-ffa-pop{--cu-done:#62b6a9;--cu-miss:#b1464c;--cu-late:#d5b76d;--cu-live:#72a6f2;--cu-todo:#2b3760;--cu-done-t:#8cd4c8;--cu-miss-t:#f4b0af;--cu-late-t:#d8c28c;--cu-live-t:#a6c6f5}
 .ma-root{display:flex;flex-direction:column;font:12.5px/1.35 Arial,sans-serif;color:#eef3ff}
 .ma-root *{box-sizing:border-box}
 .ma-root button{font-family:inherit}
@@ -5089,6 +5090,61 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
 .ma-ed{grid-column:1/-1;margin:1px 0 3px;padding:9px 11px 10px;background:#16213f;border:1px solid rgba(110,168,255,.34);border-radius:16px}.ma-ed .ma-in,.ma-bulk .ma-in{background:#101a33}
 .ma-pms{margin-top:4px}.ma-pm{display:flex;align-items:center;gap:10px;padding:7px 2px;border-top:1px solid rgba(255,255,255,.06)}.ma-pm-n{flex:1;min-width:0;font-size:12px;color:#d6e0ff;overflow-wrap:anywhere}.ma-pm .ma-num{width:104px;flex:0 0 auto}.ma-pm .ma-num .ma-in{width:100%;height:30px;padding:0 10px;font-size:12px;border-radius:9px}
 .ma-card.cube{background:linear-gradient(180deg,#152040,#111a33);border-color:rgba(110,168,255,.16);box-shadow:0 6px 16px rgba(0,0,0,.22),inset 0 1px 0 rgba(255,255,255,.04);padding:11px 13px;margin-bottom:9px}.ma-card.cube.off{background:#0f1628;box-shadow:none}.ma-card.cube .ma-ico{width:32px;height:32px;font-size:16px;background:#1d2b55;border-color:rgba(110,168,255,.22)}.ma-card.cube .ma-card-b{margin-top:10px;padding-top:10px}.ma-card.cube .ma-sr-o.tm{margin:0}.ma-card.cube .ma-seg{flex:0 0 auto;width:auto}
+/* 1.15 Tasks: grouped rows. Every control has a fixed size, so nothing stretches. */
+.ma-tg{background:#11192d;border:1px solid rgba(255,255,255,.06);border-radius:14px;margin:0 0 7px;overflow:hidden}
+.ma-tw+.ma-tw{border-top:1px solid rgba(255,255,255,.06)}.ma-tw.off .ma-ico{opacity:.55}.ma-tw.off .ma-tt b{color:#aeb9dc}
+.ma-tr{display:grid;grid-template-columns:28px minmax(0,1fr) 28px 22px 32px;gap:8px;align-items:center;box-sizing:border-box;min-height:46px;padding:8px 12px}
+.ma-tt{min-width:0}.ma-tt b{display:block;font:700 12.5px/1.3 Arial,sans-serif;color:#fff}
+.ma-tt small{display:block;color:#8b97bd;font:11px/1.35 Arial,sans-serif;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ma-tslot{display:block;width:28px;height:28px}
+.ma-ib{box-sizing:border-box;flex:0 0 auto;width:28px;height:28px;padding:0;display:inline-flex;align-items:center;justify-content:center;border-radius:9px;border:1px solid rgba(255,255,255,.12);background:transparent;color:#9caad0;font:14px/1 Arial,sans-serif;cursor:pointer;transition:.15s}
+.ma-ib:hover{border-color:#3b4a73;color:#cfd8f7}.ma-ib.sm{width:22px;height:22px;border:0;font-size:16px}
+.ma-cvb{box-sizing:border-box;width:22px;height:28px;padding:0;border:0;background:none;color:#7f8bb1;font:11px/1 Arial,sans-serif;cursor:pointer}.ma-cvb:hover{color:#cfd8f7}
+.ma-tx{padding:0 12px 10px}
+.ma-cd{color:#6e7a9c}.ma-cd.on{color:var(--cu-done)}
+.ma-mini{display:inline-block;box-sizing:border-box;height:17px;margin:0 3px;padding:0 7px;border-radius:999px;border:1px solid rgba(110,168,255,.35);background:rgba(110,168,255,.12);color:#9fc1ff;font:11px/15px Arial,sans-serif;vertical-align:middle;text-transform:capitalize}
+.ma-xf{display:flex;flex-direction:column;gap:5px}.ma-xf .ma-xsel{width:100%;height:30px;padding:0 8px;font-size:12px;text-overflow:ellipsis}
+/* the Cube card: two panels on one five-row grid, so their rows line up */
+.ma-cv2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;align-items:start}
+@media (max-width:480px){.ma-cv2{grid-template-columns:minmax(0,1fr)}}
+.ma-cp{box-sizing:border-box;min-width:0;background:linear-gradient(180deg,#1a2442,#141d38);border:1px solid rgba(120,160,255,.15);box-shadow:inset 0 1px 0 rgba(255,255,255,.06),0 2px 6px rgba(0,0,0,.28);border-radius:12px;padding:6px 9px;display:grid;grid-template-rows:18px 14px 16px 16px 14px;row-gap:3px;align-items:center}
+.ma-cph{display:flex;justify-content:space-between;align-items:center;gap:8px;min-width:0;font:11px Arial,sans-serif;color:#8b97bd;white-space:nowrap}.ma-cph b{font:700 12px Arial,sans-serif;color:#e8edff}
+.ma-cph>span{display:inline-flex;align-items:center;gap:5px;min-width:0;overflow:hidden}
+.ma-cpl{margin:0;font:11px/1.2 Arial,sans-serif;color:#8b97bd;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ma-cdot{display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--cu-done);flex:0 0 auto}
+.ma-cpills{display:flex;flex-wrap:nowrap;gap:5px;overflow:hidden}.ma-cpills .ma-pill{flex:0 0 auto;font-size:8.5px;font-weight:700;padding:1px 6px}.ma-cpills .ma-pill.blue{color:var(--cu-live-t);border-color:rgba(114,166,242,.28);background:rgba(114,166,242,.09)}.ma-cpills .ma-pill.warn{color:var(--cu-late-t);border-color:rgba(213,183,109,.28);background:rgba(213,183,109,.09)}.ma-cpills .ma-pill.ok{color:var(--cu-done-t);border-color:rgba(98,182,169,.3);background:rgba(98,182,169,.1)}.ma-cpills .ma-pill.cap{color:#8b97bd;border-color:rgba(255,255,255,.1)}
+.ma-sb{display:flex;gap:3px;min-width:0}.ma-sb i{display:block;flex:1;height:6px;border-radius:2px;background:#2b3760;box-shadow:inset 0 1px 1px rgba(0,0,0,.35)}.ma-sb i.f,.ma-sb i.m,.ma-sb i.n,.ma-sb i.o{box-shadow:inset 0 1px 0 rgba(255,255,255,.22),0 0 0 1px rgba(0,0,0,.12)}.ma-sb.big i{height:6px}.ma-sb.mt{gap:2px}
+.ma-sb.fx{flex:0 0 auto}.ma-sb.fx i{flex:0 0 14px}.ma-sb.ga{gap:6px}.ma-sb .g{display:flex;gap:2px;min-width:0}.ma-sb .g i{flex:1}
+.ma-sb i.f{background:var(--cu-done)}.ma-sb i.m{background:var(--cu-miss)}.ma-sb i.n{background:var(--cu-live)}.ma-sb i.o{background:var(--cu-late)}
+.ma-cnr{display:grid;grid-template-columns:28px minmax(0,1fr) 12px 28px;gap:5px;align-items:center;font:11px Arial,sans-serif;color:#8b97bd}
+.ma-cnr b{font-weight:700;color:#cfd8f7}.ma-cnr em{font-style:normal;color:var(--cu-miss-t);font-size:10.5px;text-align:center}.ma-cnr>span{text-align:right}.ma-cnr .lk{grid-column:2;text-align:left;color:#6e7a9c}
+.ma-clg{display:flex;flex-wrap:wrap;gap:4px 12px;margin:7px 2px 0;font:10.5px Arial,sans-serif;color:#8b97bd}.ma-clg span{display:flex;align-items:center;gap:5px}.ma-clg i{display:block;width:10px;height:8px;border-radius:2px}
+.ma-cf{display:grid;grid-template-columns:1.25fr 1.15fr .8fr .8fr auto;gap:8px;align-items:end;margin-top:9px}
+@media (max-width:440px){.ma-cf{grid-template-columns:repeat(3,minmax(0,1fr))}}
+.ma-cf .ma-opt{min-width:0}.ma-cf .ma-opt .ma-in{height:28px;font-size:12px;background:linear-gradient(180deg,#0d152c,#121b37);border:1px solid rgba(120,160,255,.2);box-shadow:inset 0 1px 3px rgba(0,0,0,.45),0 1px 0 rgba(255,255,255,.04)}.ma-cf .ma-opt .ma-in:hover{border-color:rgba(120,160,255,.36)}.ma-cf .ma-opt .ma-in:focus{border-color:#6ea8ff;box-shadow:inset 0 1px 3px rgba(0,0,0,.45),0 0 0 3px rgba(110,168,255,.2)}.ma-cf .ma-opt>.ma-sw{width:30px;height:17px;margin:5px 0 6px}.ma-cf .ma-num .ma-in{padding:0 8px}
+.ma-ffa{display:inline;height:auto;padding:0;border:0;background:none;color:#7fa6ff;font:700 11.5px Arial,sans-serif;cursor:pointer;text-decoration:underline dotted;text-underline-offset:3px}.ma-ffa:hover{color:#b5ccff}
+.ma-ffa-pop{position:fixed;z-index:2147483000;box-sizing:border-box;width:300px;background:#16213f;border:1px solid rgba(110,168,255,.34);border-radius:12px;padding:10px;font:12px Arial,sans-serif;color:#cfd8f7;box-shadow:0 10px 28px rgba(0,0,0,.45)}
+.ma-ffa-h{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;font:700 13px Arial,sans-serif;color:#fff}
+.ma-ffa-tl{position:relative;padding-left:30px}.ma-ffa-rail{position:absolute;left:11px;top:13px;bottom:13px;width:2px;background:#27324f}
+.ma-ffa-fill{position:absolute;left:11px;top:13px;width:2px;background:#4b73e0}.ma-ffa-mk{position:absolute;left:6px;width:12px;height:12px;border-radius:50%;background:#4b73e0}
+.ma-ftr{position:relative;display:grid;grid-template-columns:62px 1fr auto;gap:8px;align-items:center;min-height:26px;font-size:12px;color:#8b97bd}
+.ma-ftr::before{content:'';position:absolute;left:-22px;top:9px;width:8px;height:8px;border-radius:50%;background:#3b4a73}
+.ma-ftr.d::before{background:var(--cu-done)}.ma-ftr.m::before{background:var(--cu-miss)}.ma-ftr.n::before{background:var(--cu-live)}.ma-ftr.o::before{background:var(--cu-late)}.ma-ftr.e{opacity:.65}
+.ma-ftr .tm{color:#fff}.ma-ftr .sx{font-size:10px;text-transform:uppercase;letter-spacing:.04em}.ma-ftr.m .sx{color:var(--cu-miss-t)}.ma-ftr.n .sx{color:var(--cu-live-t)}.ma-ftr.d .sx{color:var(--cu-done-t)}.ma-ftr.o .sx{color:var(--cu-late-t)}
+.ma-ffa-n{margin:8px 0 0;font:11px/1.4 Arial,sans-serif;color:#8b97bd}
+/* Overview: read-only Cube strip */
+.ma-ovc{margin:8px 0 0;padding:8px 12px;border-radius:14px;background:linear-gradient(180deg,#16203c,#121a32);border:1px solid rgba(120,160,255,.14);box-shadow:inset 0 1px 0 rgba(255,255,255,.05),0 2px 6px rgba(0,0,0,.25);cursor:pointer}.ma-ovc:hover{border-color:rgba(110,168,255,.3)}
+.ma-ovc-h{display:grid;grid-template-columns:28px minmax(0,1fr) 14px;gap:8px;align-items:center}.ma-ovc-c{color:#7f8bb1;font:16px/1 Arial,sans-serif;text-align:center}
+.ma-ovc-s{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px 12px;margin-top:7px;padding-top:7px;border-top:1px solid rgba(255,255,255,.06)}
+@media (max-width:480px){.ma-ovc-s{grid-template-columns:minmax(0,1fr)}}
+.ma-ovi{display:grid;grid-template-columns:22px minmax(0,1fr);gap:3px 6px;align-items:center;font:10.5px Arial,sans-serif;color:#8b97bd}.ma-ovi small{grid-column:2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:10.5px}
+.ma-ovi .ma-sb{gap:2px}.ma-ovi .ma-sb i{height:6px}.ma-ovi .ma-sb.ga{gap:6px}
+/* Loot toolbar */
+.ma-lh{box-sizing:border-box;margin:0 0 7px;padding:9px 12px;border-radius:14px;background:#11192d;border:1px solid rgba(255,255,255,.06)}
+.ma-lh-r{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:6px;align-items:center}
+.ma-lb{box-sizing:border-box;flex:0 0 auto;height:28px;padding:0 12px;border-radius:9px;border:1px solid #6ea8ff;background:rgba(75,115,224,.28);color:#fff;font:700 11.5px Arial,sans-serif;cursor:pointer;white-space:nowrap}.ma-lb:hover{background:rgba(75,115,224,.42)}
+.ma-lh-n{display:flex;align-items:center;flex-wrap:wrap;gap:3px 8px;margin-top:7px;padding-top:7px;border-top:1px solid rgba(255,255,255,.06);font:11px/1.4 Arial,sans-serif;color:#8b97bd}
+.ma-lh-n .ma-link{padding:0 2px;font-size:11px}
 .ma-cinfo{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:3px 3px 5px}.ma-cinfo>b{flex:0 0 32px;font:800 10.5px Arial,sans-serif;letter-spacing:.04em;text-transform:uppercase;color:#7c88ad}
 .ma-ed-f{display:flex;gap:10px;margin:6px 0 8px}.ma-ed-f>.ma-opt{flex:1 1 0;gap:4px}.ma-ed-f .ma-opt-l{font-size:11px;font-weight:600;letter-spacing:0;text-transform:none;color:#c3cdef}.ma-ed-f .ma-in{height:30px;font-size:12px}
 .ma-ed-n{margin:-2px 1px 8px;min-height:15px;color:#7c88ad}.ma-pvg{grid-column:1/-1;padding:8px 10px 3px;background:#0d1322;border:1px solid rgba(255,255,255,.06);border-radius:14px}.ma-pvg-h{display:flex;align-items:baseline;justify-content:space-between;gap:8px;margin-bottom:6px}.ma-pvg-h b{font:800 11px Arial,sans-serif;letter-spacing:.06em;text-transform:uppercase;color:#cfd8f7}.ma-pvg-h small{font-size:10.5px;color:#7c88ad}.ma-pvg .ma-ed-f{margin:0 0 8px}.ma-pvg .ma-ed-n{margin:-3px 1px 8px}.ma-ed-c{display:flex;justify-content:space-between;gap:8px;padding:2px 2px 2px;color:#7c88ad;font-size:10.5px;font-weight:700;letter-spacing:.04em;text-transform:uppercase}
@@ -5249,11 +5305,6 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   const cubeMissing = '⚠️ Cube Suite is not loaded on this page: open Core ⚙️ and check it is ON and not SKIPPED. If it says SKIPPED here, the cube-suite entry in addons.json still has a "match" for the Cube page only';
   const cubeSt = () => { try { const f = Core.cap('cube.status'); return f ? f() : null; } catch (_) { return null; } };
   const CUBE_PILL = { cleared: 'ok', joined: 'blue', avail: 'warn', cd: 'warn', locked: 'cap', mon: '' };   // Cube Suite's pill kinds -> ours
-  const cubeLine = () => {
-    const c = cubeSt(); if (!c) return cubeMissing;
-    if (!Core.has('cube.settings.set')) return 'Needs Cube Suite 3.5.6+ (reload so the new version loads)';
-    return [c.instanceId ? 'Cube #' + c.instanceId : 'no active Cube', c.running ? (c.cleared ? 'all cleared' : 'running') : c.scanned ? 'scanned, not running' : 'not running', c.background ? 'every page' : 'Cube page only'].join(' · ');
-  };
   const cubeSet = (name, v) => {
     if (!Core.has(name)) { log('⚠️ ' + (Core.has('cube.status') ? 'Cube Suite is too old for ' + name + ' — reload so 3.5.6+ loads' : 'Cube Suite is not loaded on this page (Core ⚙️ → Cube Suite; no "match" in addons.json)'), 'warn'); return Promise.resolve(); }
     return Promise.resolve(Core.call(name, v)).then(() => draw()).catch((e) => log('⚠️ Cube Suite: ' + esc((e && e.message) || e), 'warn'));
@@ -5393,56 +5444,163 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     return !bits.length && !(on && action) ? null : h('div', { class: 'ma-trow' }, h('div', { class: 'ma-note' }, bits.join(' · ')), on && action ? action : null);
   };
 
+  /* =============================================== TASKS (1.15: grouped rows) ===============================================
+   * One row per task: icon · title with ONE live line · action icon · chevron (options) · switch. Same slots on every row, so the switches line up.
+   * The Cube is a task like the others: its card (PvP, Shadow army, schedule) sits under its chevron. */
+  const taskText = (id, on) => { const i = Tasks.info(id) || {}; return [i.line ? (SDOT[i.state] || '') + liveLine(id, i.line) + (i.at ? ' · ' + ago(i.at) : '') : '', on ? nextBit(id) : ''].filter(Boolean).join(' · '); };
+  function taskRow(o) {                                              // o: { key, icon, title, tip, line (string | nodes), on, setOn, action: { icon, tip, fn }, body (fn -> nodes), open }
+    const has = typeof o.body === 'function', k = 'task:' + o.key, op = has && isOpen(k, !!o.open);
+    return h('div', { class: 'ma-tw' + (o.on ? '' : ' off') },
+      h('div', { class: 'ma-tr' }, h('span', { class: 'ma-ico' }, o.icon),
+        h('div', { class: 'ma-tt', title: o.tip || null }, h('b', {}, o.title), h('small', {}, ...[].concat(o.line == null ? '' : o.line))),
+        o.action ? h('button', { type: 'button', class: 'ma-ib', title: o.action.tip, 'aria-label': o.action.tip, onclick: (e) => { stop(e); o.action.fn(); } }, o.action.icon) : h('span', { class: 'ma-tslot' }),
+        has ? h('button', { type: 'button', class: 'ma-cvb', title: op ? 'Hide options' : 'Options', 'aria-label': op ? 'Hide options' : 'Show options', onclick: (e) => { stop(e); ui.open[k] = !op; saveUi(); draw(); } }, op ? '▾' : '▸') : h('span', { class: 'ma-tslot' }),
+        o.setOn ? sw(() => o.on, o.setOn) : h('span')),
+      op ? h('div', { class: 'ma-tx' }, ...[].concat(o.body())) : null);
+  }
+  const tgroup = (...rows) => h('div', { class: 'ma-tg' }, ...rows.filter(Boolean));
+
+  /* ---- Cube: data from cube.status().view (Cube Suite 3.6.2+) ---- */
+  const CUBE_FFA_MIN = 960;                                          // 4:00 PM server: the PvP cap rises from 6 to 40 (Cube Suite PVP_SCHEDULE)
+  const cubeView = () => { const c = cubeSt(); return c && c.view ? c.view : null; };
+  const SA_CLS = { fought: 'f', missed: 'm', live: 'n', overdue: 'o', upcoming: '', unknown: '' };
+  const SA_WORD = { fought: 'fought', missed: 'ended without you', live: 'live now', overdue: 'past its slot, still open', upcoming: 'to come', unknown: 'not read' };
+  const saSlot = (m) => fmtClock(m.hour * 60 + m.minute);
+  const saTally = (v) => { let fought = 0, total = 0, missed = 0; v.sa.forEach((n) => n.matches.forEach((m) => { total++; if (m.state === 'fought') fought++; if (m.state === 'missed') missed++; })); return { fought, total, missed }; };
+  const saNext = (v) => { for (const n of v.sa) { const m = n.matches.find((x) => x.state === 'live' || x.state === 'overdue' || x.state === 'upcoming'); if (m) return { node: n.node, m }; } return null; };
+  const cubeStatusBits = (c, full) => {
+    if (!c) return ['Cube Suite is not loaded on this page'];
+    const v = c.view, bits = [c.instanceId ? '#' + c.instanceId : 'no active Cube', c.mode === 'fast' ? 'Fast Run' : 'Normal'];
+    if (full) { if (v) { const t = saTally(v); bits.push('PvP ' + v.pvp.joined + '/' + v.pvp.cap, 'SA ' + t.fought + '/' + t.total); } else if (c.instanceId) bits.push('PvP and SA not read'); }
+    if (cfg.cubeFast.enabled) bits.push(CubeFast.line().replace(/^Next/, 'next'));
+    return bits;
+  };
+  const cubeDot = (c) => h('span', { class: 'ma-cd ' + (c && c.running ? 'on' : '') }, '●');
+  const segBar = (cls, items) => h('div', { class: 'ma-sb ' + cls }, ...items);
+  const pvpStrip = (pv, big) => {
+    if (pv.cap <= 12) return segBar(big ? 'big' : '', Array.from({ length: pv.cap }, (_, i) => h('i', { class: i < pv.joined ? 'f' : '' })));
+    const j = Math.min(pv.joined, pv.cap);                           // 40 ticks are unreadable: one proportional bar
+    return segBar((big ? 'big ' : '') + 'mt', [h('i', { class: 'f', style: { flex: String(j) } }), h('i', { style: { flex: String(Math.max(0, pv.cap - j)) } })]);
+  };
+  /* The FFA schedule: Cube Suite's long timeline (rail, progress fill, marker), opened from the "FFA" link on hover or click. It floats, so it takes no room in the card. */
+  let ffaPop = null, ffaPin = false, ffaDog = 0;
+  function closeFfa() { if (ffaPop) { ffaPop.remove(); ffaPop = null; } ffaPin = false; clearInterval(ffaDog); document.removeEventListener('mousedown', ffaOut, true); document.removeEventListener('keydown', ffaKey, true); }
+  function ffaOut(e) { if (ffaPop && !ffaPop.contains(e.target) && !(e.target.closest && e.target.closest('[data-ffa]'))) closeFfa(); }
+  function ffaKey(e) { if (e.key === 'Escape') closeFfa(); }
+  function openFfa(anchor, pin) {
+    if (ffaPop) { if (pin) ffaPin = true; return; }
+    const v = cubeView(); if (!v) return;
+    const slots = v.sa.flatMap((n) => n.matches.map((m) => ({ n: n.node, m }))).sort((a, b) => (a.m.hour * 60 + a.m.minute) - (b.m.hour * 60 + b.m.minute)), RH = 26;
+    const word = { fought: 'done', missed: 'missed', live: 'live', overdue: 'late', upcoming: 'upcoming', unknown: 'not read' }, pcls = { fought: 'd', missed: 'm', live: 'n', overdue: 'o', upcoming: '', unknown: '' };
+    const prog = v.ffaProgress, rows = [h('div', { class: 'ma-ftr e' }, h('span', {}), h('span', {}, 'Before'), h('span', {}, 'start'))]
+      .concat(slots.map((s) => h('div', { class: 'ma-ftr ' + pcls[s.m.state] }, h('span', { class: 'tm' }, saSlot(s.m)), h('span', {}, 'Node ' + s.n + ' · ' + (s.n === 11 ? 'Final' : 'Match ' + s.m.no)), h('span', { class: 'sx' }, word[s.m.state]))))
+      .concat([h('div', { class: 'ma-ftr e' }, h('span', {}), h('span', {}, 'After'), h('span', {}, 'end'))]);
+    const el = h('div', { class: 'ma-ffa-pop', role: 'dialog', 'aria-label': 'FFA schedule' },
+      h('div', { class: 'ma-ffa-h' }, h('span', {}, 'FFA schedule - Server time'), h('button', { type: 'button', class: 'ma-ib sm', 'aria-label': 'Close', onclick: closeFfa }, '×')),
+      h('div', { class: 'ma-ffa-tl' }, h('div', { class: 'ma-ffa-rail' }), prog != null ? h('div', { class: 'ma-ffa-fill', style: { height: Math.round(prog * RH) + 'px' } }) : null, prog != null ? h('div', { class: 'ma-ffa-mk', style: { top: Math.round(13 + prog * RH - 6) + 'px' } }) : null, ...rows),
+      h('p', { class: 'ma-ffa-n' }, prog == null ? 'Server time not read yet.' : 'Also nukes any overdue fights still uncleared that are past FFA.'));
+    el.style.visibility = 'hidden'; document.body.append(el); ffaPop = el; ffaPin = !!pin;
+    const r = anchor.getBoundingClientRect(), w = el.offsetWidth, hh = el.offsetHeight;
+    el.style.left = Math.max(8, Math.min(r.right - w, innerWidth - w - 8)) + 'px';
+    el.style.top = Math.max(8, r.bottom + 6 + hh > innerHeight - 8 ? r.top - hh - 6 : r.bottom + 6) + 'px'; el.style.visibility = '';
+    el.addEventListener('mouseleave', () => { if (!ffaPin) closeFfa(); });
+    document.addEventListener('mousedown', ffaOut, true); document.addEventListener('keydown', ffaKey, true);
+    ffaDog = setInterval(() => { if (!ffaPop) return clearInterval(ffaDog); if (!ffaPin && !ffaPop.matches(':hover') && !document.querySelector('[data-ffa]:hover')) closeFfa(); }, 400);   // the tab redraws every few seconds: the link under the mouse is a new element, so mouseleave alone can miss
+  }
+  const ffaLink = () => h('button', { type: 'button', class: 'ma-ffa', 'data-ffa': '1', title: 'Show the FFA schedule', onmouseenter: (e) => openFfa(e.currentTarget, false), onmouseleave: () => { setTimeout(() => { if (!ffaPin && ffaPop && !ffaPop.matches(':hover')) closeFfa(); }, 180); },
+    onclick: (e) => { stop(e); if (ffaPop && ffaPin) closeFfa(); else { closeFfa(); openFfa(e.currentTarget, true); } } }, 'FFA');
+  const cpill = ([k, t]) => h('span', { class: 'ma-pill' + (CUBE_PILL[k] ? ' ' + CUBE_PILL[k] : ''), title: String(t) }, String(t).replace(' · ', ' '));
+  function cubePanels(c, v) {
+    const pv = v.pvp, nowM = serverMinutes(), pills = ((c.nodes || {}).pvp || []);
+    const ffaTxt = pv.ffa ? 'FFA open · cap ' + pv.cap : nowM != null && nowM < CUBE_FFA_MIN ? 'FFA 4:00 PM · in ' + fmtDur((CUBE_FFA_MIN - nowM) * 60000) : 'FFA 4:00 PM';
+    const pvp = h('div', { class: 'ma-cp' }, h('div', { class: 'ma-cph' }, h('b', {}, 'PvP'), h('span', {}, ffaTxt)), pvpStrip(pv, true),
+      h('p', { class: 'ma-cpl' }, pv.joined + ' of ' + pv.cap + ' joined'), h('div', { class: 'ma-cpills' }, pills.slice(0, 2).map(cpill), pills.length > 2 ? h('span', { class: 'ma-pill', title: pills.slice(2).map(([, t]) => t).join('\n') }, '+' + (pills.length - 2)) : null), h('p', { class: 'ma-cpl' }, pv.ffa ? 'Cap stays ' + pv.cap + ' until the next Cube.' : 'Next: FFA 4:00 PM, cap rises to 40.'));
+    const nx = saNext(v), t = saTally(v), unread = v.sa.every((n) => !n.read && !n.locked);
+    const rows = v.sa.map((n) => { const f = n.matches.filter((m) => m.state === 'fought').length, ms = n.matches.filter((m) => m.state === 'missed').length;
+      return h('div', { class: 'ma-cnr' }, h('b', {}, 'N' + n.node),
+        n.locked ? h('span', { class: 'lk' }, 'locked') : segBar('fx', n.matches.map((m) => h('i', { class: SA_CLS[m.state], title: 'Match ' + m.no + ' · ' + saSlot(m) + ' · ' + SA_WORD[m.state] }))),
+        h('em', { title: ms ? ms + ' missed' : '' }, ms ? String(ms) : ''), h('span', {}, n.locked ? '' : f + '/' + n.matches.length)); });
+    const sa = h('div', { class: 'ma-cp' }, h('div', { class: 'ma-cph' }, h('b', {}, 'Shadow army'), h('span', { title: v.schedClear ? 'Scheduled clear is on' : 'Scheduled clear is off (turn it on in Cube Suite)' }, v.schedClear ? h('i', { class: 'ma-cdot' }) : null, 'Clear at ', ffaLink())), ...rows,
+      h('p', { class: 'ma-cpl' }, unread ? 'Not read yet' : nx ? 'Next: N' + nx.node + (nx.node === 11 ? ' final' : ' match ' + nx.m.no) + ' · ' + saSlot(nx.m) : 'All slots done' + (t.missed ? ' · ' + t.missed + ' missed' : '')));
+    return [h('div', { class: 'ma-cv2' }, pvp, sa)];
+  }
+  function cubeBody(c) {
+    const out = [], v = c.view, cf = cfg.cubeFast, ft = c.fastTargets || {}, can = Core.has('cube.settings.set');
+    if (v) out.push(...cubePanels(c, v));
+    else out.push(note(c.instanceId ? 'PvP and Shadow army are not read yet: Cube Suite reports them on its next loop.' : 'No active Cube. PvP and Shadow army show here while a Cube is open and Cube Suite runs.'));
+    out.push(h('div', { class: 'ma-cf' },
+      opt('Day', dropdown([['sun', 'Sunday'], ['mon', 'Monday'], ['tue', 'Tuesday'], ['wed', 'Wednesday'], ['thu', 'Thursday'], ['fri', 'Friday'], ['sat', 'Saturday']], cf.day, (x) => { cf.day = x; })),
+      opt('Server time', num(() => toMin(cf.time), (n) => { cf.time = hhmm(n); }, { min: 0, fmt: fmtClock, parse: (x) => { const k = parseClock(x); return k == null ? null : toMin(k); } })),
+      opt('N7 match', can ? num(() => (cubeSt() || { fastTargets: {} }).fastTargets.node7MatchNo || 0, (n) => { cubeSet('cube.settings.set', { node7MatchNo: n }); }, { min: 0, max: 20, parse: parseFloat }) : h('span', { class: 'ma-note' }, '—')),
+      opt('N8 match', can ? num(() => (cubeSt() || { fastTargets: {} }).fastTargets.node8MatchNo || 0, (n) => { cubeSet('cube.settings.set', { node8MatchNo: n }); }, { min: 0, max: 20, parse: parseFloat }) : h('span', { class: 'ma-note' }, '—')),
+      opt('Leader', can ? sw(() => !!(cubeSt() || {}).leader, (x) => { cubeSet('cube.settings.set', { isLeader: x }); }, { sm: true, redraw: false }) : h('span', { class: 'ma-note' }, '—'))));
+    out.push(h('div', { class: 'ma-note' }, `Starts watching ${cf.leadMin} min before (server time). Everything else pauses until the Cube is cleared. N7 / N8: the match joined on Fast Run, 0 = none.`));
+    return out;
+  }
+  function cubeRow() {
+    const c = cubeSt(), cf = cfg.cubeFast;
+    return taskRow({ key: 'cube', icon: '🧊', title: 'Cube', tip: 'PvP, Shadow army and the scheduled fast run. The switch lets Cube Suite run on any page and turns the scheduled fast run on.',
+      line: [cubeDot(c), ' ', cubeStatusBits(c, true).join(' · ')], on: !!(cf.enabled || (c && c.background)),
+      setOn: (x) => { cf.enabled = !!x; if (Core.has('cube.background.set')) cubeSet('cube.background.set', !!x).then(() => x && cubeSet('cube.master.set', true)); },
+      body: c ? () => cubeBody(c) : null, open: true });
+  }
+  /* Overview: a read-only Cube strip (the controls stay in Tasks). Hidden while there is no Cube and nothing is scheduled. */
+  function cubeStrip() {
+    const c = cubeSt(); if (!c || (!c.instanceId && !cfg.cubeFast.enabled)) return null;
+    const v = c.view, items = [];
+    if (v) {
+      const pv = v.pvp, t = saTally(v), nx = saNext(v), nowM = serverMinutes();
+      items.push(h('div', { class: 'ma-ovi' }, h('span', {}, 'PvP'), pvpStrip(pv, false), h('small', {}, pv.joined + ' of ' + pv.cap + (pv.ffa ? ' · cap ' + pv.cap : nowM != null && nowM < CUBE_FFA_MIN ? ' · FFA in ' + fmtDur((CUBE_FFA_MIN - nowM) * 60000) : ''))));
+      items.push(h('div', { class: 'ma-ovi' }, h('span', {}, 'SA'), h('div', { class: 'ma-sb ga' }, ...v.sa.map((n) => h('div', { class: 'g', style: { flex: String(Math.max(1, n.matches.length)) } }, ...n.matches.map((m) => h('i', { class: SA_CLS[m.state], title: 'N' + n.node + ' match ' + m.no + ' · ' + saSlot(m) + ' · ' + SA_WORD[m.state] }))))),
+        h('small', {}, t.fought + ' of ' + t.total + (nx ? ' · next N' + nx.node + ' ' + saSlot(nx.m) : ' · done' + (t.missed ? ', ' + t.missed + ' missed' : '')))));
+    }
+    return h('div', { class: 'ma-ovc', title: 'Open the Cube in Tasks', onclick: () => go('tasks') },
+      h('div', { class: 'ma-ovc-h' }, h('span', { class: 'ma-ico' }, '🧊'), h('div', { class: 'ma-tt' }, h('b', {}, 'Cube'), h('small', {}, cubeDot(c), ' ', cubeStatusBits(c, false).join(' · '))), h('span', { class: 'ma-ovc-c' }, '›')),
+      items.length ? h('div', { class: 'ma-ovc-s' }, ...items) : null);
+  }
+
   function tTasks() {
     const out = [], T = cfg.tasks, cur = Engine.current();
     if (!Tab.isMain()) out.push(h('div', { class: 'ma-alert info' }, 'Another tab is the main one and runs the tasks. This tab only shows them.', h('div', {}, btn('Take over this tab', 'soft', () => { Tab.takeOver(); }))));
-    out.push(caption('Tasks'));
     if (!Run.tasksOn()) out.push(h('div', { class: 'ma-note' }, Run.wanted() ? '⏸ Halted (signed out): the tasks carry on when you are back.' : '⏹ Stopped: press ▶ Start and the tasks below run.'));
-    // Monsters
-    out.push(card('👹', 'Monsters', 'Wave and dungeon bosses', monstersOn(), (v) => { cfg.tasks.monsters = { enabled: !!v }; if (Run.wanted() && !Run.paused()) { if (v) Kernel.engineStart(true); else { Engine.halt(); Status.set('RUNNING'); } } },   // only the bosses: Start / Stop below is the master switch
-      [h('div', { class: 'ma-trow' }, h('div', { class: 'ma-note' }, !monstersOn() ? 'Off · the tasks below still run' : cur ? '🎯 ' + cur.name : (cfg.targets.length ? `${cfg.targets.length} ticked · ${STATE_TXT[Status.get()] || Status.get()}` : 'None ticked yet')), btn('Choose bosses ›', 'soft', () => go('bosses')))]));
-    // PvP (placeholders: your module registers itself with Automator.tasks.define)
-    out.push(h('div', { class: 'ma-card' },
-      h('div', { class: 'ma-card-h' }, h('span', { class: 'ma-ico' }, '⚔️'), h('div', { class: 'ma-card-t' }, h('b', {}, 'PvP'), h('small', {}, 'Solo and Team'))),
-      h('div', { class: 'ma-card-b' }, ['pvp.solo', 'pvp.team'].map((id) => { const d = Tasks.get(id), k = id.split('.')[1];
-        return h('div', {}, srow(d.icon, d.name.replace('PvP · ', ''), d.placeholder ? 'Not available yet' : d.desc, sw(() => T.pvp[k].enabled, (v) => { T.pvp[k].enabled = v; }), []), d.placeholder ? null : tStatus(id)); }))));
-    // Adventure Guild
-    out.push(card('📜', 'Adventure Guild', 'Quests: kills, collections and skills', T.guild.enabled, (v) => { T.guild.enabled = v; if (v) Tasks.poke('guild'); else Farm.drop('guild'); },
-      [taskLine('guild', T.guild.enabled, btn('Check now', 'soft', () => { Tasks.poke('guild'); draw(); }))]));
-    // Battle Pass
-    out.push(card('🎫', 'Battle Pass', 'The pass hunt, farmed for you', T.bp.enabled, (v) => { T.bp.enabled = v; if (v) Tasks.poke('bp'); else Farm.drop('bp'); },
-      [taskLine('bp', T.bp.enabled, btn('Check now', 'soft', () => { Tasks.poke('bp'); draw(); }))]));
-    // Merchant
-    const ms = Merchant.state();
-    out.push(card('🛒', 'Merchant', 'Weekly restock · resets Sunday 00:00 server', T.merchant.enabled, (v) => { T.merchant.enabled = v; if (v) Tasks.poke('merchant'); },
-      [taskLine('merchant', T.merchant.enabled, btn(ms.done ? 'Recheck' : 'Buy now', 'soft', () => { Merchant.reset(); Tasks.poke('merchant'); draw(); }))]));
-    // Graveyard: no bulk looting. Corpses worth more than the level limit make the NEXT potion a loot (see Loot.levelUpFirst); under the limit they are saved.
-    const gt = T.graveyard, gNext = gyText(Loot.nextPlan());
-    out.push(card('🪦', 'Graveyard', 'Over this many level-ups of corpses, the next potion is looted instead', gt.enabled, (v) => { gt.enabled = !!v; if (v) Tasks.poke('graveyard'); },
-      [taskLine('graveyard', gt.enabled, btn(Loot.state.looting ? 'Looting…' : 'Level up now', 'soft', () => { Loot.scanAndPass().then(() => draw()); draw(); })),
-        gNext ? note(gNext) : null],
-      num(() => gt.keepLevels, (n) => { gt.keepLevels = Math.round(n); }, { w: 44, min: 0, max: 50, unit: 'levels', parse: parseFloat })));
-    // Extraction
+    const check = (id, tip) => ({ icon: '↻', tip, fn: () => { Tasks.poke(id); draw(); } });
+    // Fighting
+    out.push(caption('Fighting'));
+    out.push(tgroup(
+      taskRow({ key: 'monsters', icon: '👹', title: 'Monsters', tip: 'Wave and dungeon bosses', on: monstersOn(),
+        line: !monstersOn() ? 'Off · the tasks below still run' : cur ? '🎯 ' + cur.name : (cfg.targets.length ? `${cfg.targets.length} ticked · ${STATE_TXT[Status.get()] || Status.get()}` : 'None ticked yet'),
+        setOn: (v) => { cfg.tasks.monsters = { enabled: !!v }; if (Run.wanted() && !Run.paused()) { if (v) Kernel.engineStart(true); else { Engine.halt(); Status.set('RUNNING'); } } },   // only the bosses: Start / Stop is the master switch
+        action: { icon: '☰', tip: 'Choose bosses', fn: () => go('bosses') } }),
+      cubeRow()));
+    // Chores
+    out.push(caption('Chores'));
+    const ms = Merchant.state(), gt = T.graveyard, gNext = gyText(Loot.nextPlan());
     Extract.learnSoon().catch(() => {});
     const xt = T.extract, xm = Extract.mobs(), xs = Extract.state(), xBad = xt.mob && (xs.never[xt.mob] || xs.weak[xt.mob]), xCur = xm.find((m) => m.low === xt.mob);
     const xShort = (n) => String(n).replace(/^(lizardman|general)\s+/i, '').replace(/\s+the\s+.*$/i, '') || n;                // "Lizardman Vanguard" -> "Vanguard", "General Skarn the Radiant Bastion" -> "Skarn"
     const xGroup = (m) => (m.label && !/^Gate /.test(m.label) ? m.label : `Wave ${m.wave}`);
-    const xPick = (low) => { xt.mob = xt.mob === low ? '' : low; ui.open['ex:pick'] = !xt.mob; saveUi(); saveCfg(); Tasks.poke('extract'); draw(); };
-    const xTile = (m) => h('button', { type: 'button', class: 'ma-mc' + (m.low === xt.mob ? ' on' : '') + (m.skip ? ' bad' : ''), title: `${m.name}${m.skip ? ' · refused by the game (' + m.skip + ')' : ''}${m.waiting ? ' · ' + m.waiting + ' corpse' + (m.waiting === 1 ? '' : 's') + ' waiting' : ''}`, onclick: (e) => { stop(e); xPick(m.low); } },
-      xShort(m.name), m.waiting ? h('em', {}, String(m.waiting)) : null);
-    const xSections = () => {
-      const g = [], by = new Map(); for (const m of xm) { const k = xGroup(m); if (!by.has(k)) { by.set(k, []); g.push(k); } by.get(k).push(m); }
-      return g.length ? g.flatMap((k) => [h('div', { class: 'ma-mp-h' }, k), h('div', { class: 'ma-mc-g' }, by.get(k).map(xTile))]) : [note('No mobs seen yet: the first look at the gate fills this.')];
+    const xSelect = () => {                                                                                                  // one dropdown, most corpses waiting first; the mobs the game refuses sit apart with the reason
+      const ok = xm.filter((m) => !m.skip).sort((a, b) => (b.waiting - a.waiting) || String(a.name).localeCompare(String(b.name))), bad = xm.filter((m) => m.skip);
+      const o = (m, dis) => h('option', Object.assign({ value: m.low }, m.low === xt.mob ? { selected: true } : {}, dis ? { disabled: true } : {}), dis ? `${xShort(m.name)} · ${m.skip}` : `${xShort(m.name)} · ${xGroup(m)} · ${m.waiting ? m.waiting + ' waiting' : 'none waiting'}`);
+      return h('select', { class: 'ma-in ma-xsel', onclick: stop, onchange: (e) => { xt.mob = e.target.value; saveCfg(); Tasks.poke('extract'); draw(); } },
+        h('option', Object.assign({ value: '' }, xt.mob ? {} : { selected: true }), xm.length ? 'Pick a mob…' : 'No mobs seen yet'), ...ok.map((m) => o(m, false)), bad.length ? h('optgroup', { label: 'Refused by the game' }, ...bad.map((m) => o(m, true))) : null);
     };
-    // Same shape as the other cards: header, ONE status line with its button, then the chosen mob (tap Change to pick another). The picker is only open while no mob is chosen or after Change.
-    const xOpen = isOpen('ex:pick', !xt.mob);
-    out.push(card('☠️', 'Extraction', 'Raises a shadow from a dead Grakthar mob', xt.enabled, (v) => { xt.enabled = !!v; if (v) Tasks.poke('extract'); },
-      [taskLine('extract', xt.enabled, btn('Look now', 'soft', () => { Tasks.poke('extract'); draw(); })),
-        xt.mob ? h('div', { class: 'ma-mp-sel' }, avatar(xCur ? xCur.name : xt.mob, xCur && xCur.img, { size: 'lg', boss: xCur && xCur.boss }),
-          h('div', { class: 't' }, h('b', {}, xCur ? xCur.name : xt.mob), h('small', {}, xCur ? `${xCur.waiting} waiting · ${xCur.alive} alive` : 'not seen yet')),
-          btn(xOpen ? 'Done' : 'Change', 'soft', () => { ui.open['ex:pick'] = !xOpen; saveUi(); draw(); })) : null,
-        xBad ? h('div', { class: 'ma-trow' }, h('div', { class: 'ma-note' }, `⚠️ Refused by the game: ${xs.never[xt.mob] ? 'no shadow form' : 'extraction skill too low'}. Pick another mob.`), btn('Retry', 'soft', () => { Extract.resetSkips(); draw(); })) : null,
-        xOpen ? h('div', {}, !xt.mob ? note('Pick the mob to raise a shadow from.') : null, ...xSections()) : null]));
+    out.push(tgroup(
+      taskRow({ key: 'guild', icon: '📜', title: 'Adventure Guild', tip: 'Quests: kills, collections and skills', on: T.guild.enabled, line: taskText('guild', T.guild.enabled) || 'Quests: kills, collections and skills',
+        setOn: (v) => { T.guild.enabled = v; if (v) Tasks.poke('guild'); else Farm.drop('guild'); }, action: check('guild', 'Check now') }),
+      taskRow({ key: 'bp', icon: '🎫', title: 'Battle Pass', tip: 'The pass hunt, farmed for you', on: T.bp.enabled, line: taskText('bp', T.bp.enabled) || 'The pass hunt, farmed for you',
+        setOn: (v) => { T.bp.enabled = v; if (v) Tasks.poke('bp'); else Farm.drop('bp'); }, action: check('bp', 'Check now') }),
+      taskRow({ key: 'merchant', icon: '🛒', title: 'Merchant', tip: 'Weekly restock · resets Sunday 00:00 server', on: T.merchant.enabled, line: taskText('merchant', T.merchant.enabled) || 'Weekly restock · resets Sunday 00:00 server',
+        setOn: (v) => { T.merchant.enabled = v; if (v) Tasks.poke('merchant'); }, action: { icon: '↻', tip: ms.done ? 'Recheck' : 'Buy now', fn: () => { Merchant.reset(); Tasks.poke('merchant'); draw(); } } }),
+      taskRow({ key: 'graveyard', icon: '🪦', title: 'Graveyard', tip: 'Over this many level-ups of corpses, the next potion is looted instead', on: gt.enabled,
+        line: (gt.enabled ? `keeping ${gt.keepLevels} level${gt.keepLevels === 1 ? '' : 's'}` : 'Over the limit, the next potion is looted instead') + (taskText('graveyard', gt.enabled) ? ' · ' + taskText('graveyard', gt.enabled) : ''),
+        setOn: (v) => { gt.enabled = !!v; if (v) Tasks.poke('graveyard'); }, action: { icon: '📈', tip: Loot.state.looting ? 'Looting…' : 'Level up now', fn: () => { Loot.scanAndPass().then(() => draw()); draw(); } },
+        body: () => [h('div', { class: 'ma-sr-o tm', style: { margin: 0 } }, opt('Keep a stash of', num(() => gt.keepLevels, (n) => { gt.keepLevels = Math.round(n); }, { min: 0, max: 50, unit: 'levels', parse: parseFloat }))), gNext ? note(gNext) : null] }),
+      taskRow({ key: 'extract', icon: '☠️', title: 'Extraction', tip: 'Raises a shadow from a dead Grakthar mob', on: xt.enabled,
+        line: [taskText('extract', xt.enabled) || (xt.mob ? '' : 'Pick the mob to raise a shadow from'), xCur ? h('span', { class: 'ma-mini' }, `${xShort(xCur.name)} · ${xCur.waiting} waiting`) : null],
+        setOn: (v) => { xt.enabled = !!v; if (v) Tasks.poke('extract'); }, action: check('extract', 'Look now'), open: !xt.mob,
+        body: () => [h('div', { class: 'ma-xf' }, h('span', { class: 'ma-opt-l' }, 'Raise a shadow from'), xSelect()),
+          xBad ? h('div', { class: 'ma-trow' }, h('div', { class: 'ma-note' }, `⚠️ Refused by the game: ${xs.never[xt.mob] ? 'no shadow form' : 'extraction skill too low'}. Pick another mob.`), btn('Retry', 'soft', () => { Extract.resetSkips(); draw(); })) : null] })));
     return out;
   }
 
@@ -5472,6 +5630,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
         wk && wk.total ? h('div', { class: 'ma-bar' }, h('i', { style: { width: pctOf({ done: wk.done + (wk.step ? 0.5 : 0), total: wk.total }).toFixed(1) + '%' } })) : null));
     }
 
+    const cubeS = cubeStrip(); if (cubeS) out.push(cubeS);                         // the Cube, read-only, under the hero (controls: Tasks)
     // vitals
     const xp = Me.expPct();
     out.push(h('div', { class: 'ma-vitals', style: { marginTop: '8px', marginBottom: 0 } },
@@ -5911,15 +6070,6 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
         : h('div', { class: 'ma-empty' }, 'No monsters known on this room yet: the Cube scan lists them as soon as it has seen it.'));
   }
   const CUBE_WORD = { cleared: 'cleared', joined: 'joined', avail: 'available', cd: 'cooldown', locked: 'locked', mon: 'waiting', idle: 'idle' };   // only used when a pill has no " · state" part
-  const cubeInfo = (c) => {                                          // the one info line: which Cube, how it runs, what Fast Run is aimed at
-    const ft = c.fastTargets || {}, bits = [c.instanceId ? 'Cube #' + c.instanceId : 'no active Cube', c.mode === 'fast' ? 'Fast Run' : 'Normal', c.master ? 'automation on' : 'automation paused', c.background ? 'every page' : 'Cube page only'];
-    if (c.mode === 'fast') bits.push(`N7 match ${ft.node7MatchNo || '–'} · N8 match ${ft.node8MatchNo || '–'}${c.leader ? ' · leader' : ''}`);
-    if (!c.running) bits.push('engine not running');
-    return bits.join(' · ');
-  };
-  // PvP and SA are automatic: one line of pills each, nothing to click
-  const cubeInfoRow = (label, pills) => (Array.isArray(pills) && pills.length ? h('div', { class: 'ma-cinfo' }, h('b', {}, label),
-    pills.map(([k, t]) => h('span', { class: 'ma-pill' + (CUBE_PILL[k] ? ' ' + CUBE_PILL[k] : ''), title: String(t) }, String(t)))) : null);
   const cubeLive = ([k]) => k === 'joined' || k === 'avail';
   /* a PvE room as a bubble, like a boss: avatar (dot = live state), name, "picked/total mobs · state", switch (the whole room on / off). Tap it for its mobs and caps. */
   function cubeRoom(c, d, nm) {
@@ -5940,13 +6090,10 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     if (f && !shown.length && !'cube crucible pvp sa shadow army'.includes(f)) return null;
     const all = [].concat(n.pvp || [], n.sa || [], n.pve || []).filter(([k]) => k !== 'locked'), done = all.filter(([k]) => k === 'cleared').length;   // locked / not-assigned nodes can never be cleared: leave them out of the goal
     const head = ['\u{1F9CA} Cube', h('small', {}, c.instanceId ? '#' + c.instanceId + ' · ' + (c.mode === 'fast' ? 'fast run' : 'normal') : 'no active Cube')];
-    const aside = [all.length ? h('span', { class: 'ma-pill' + (done === all.length ? ' ok' : done ? ' blue' : '') }, done + '/' + all.length) : null,
-      Core.has('cube.background.set') ? sw(() => !!c.background, (v) => { cubeSet('cube.background.set', v).then(() => v && cubeSet('cube.master.set', true)); }, { sm: true, redraw: false }) : null].filter(Boolean);
+    const aside = [all.length ? h('span', { class: 'ma-pill' + (done === all.length ? ' ok' : done ? ' blue' : '') }, done + '/' + all.length) : null].filter(Boolean);
     return fold('grp:cube', !!(c.running || c.background), head, () => {
-      const body = [note(cubeInfo(c))];
-      if (Core.has('cube.mode.set')) body.push(opt('Mode', seg([['normal', 'Normal'], ['fast', 'Fast Run']], c.mode || 'normal', (v) => { cubeSet('cube.mode.set', v); })));
-      body.push(cubeInfoRow('PvP', n.pvp), cubeInfoRow('SA', n.sa));
-      if (!c.nodes) body.push(note(c.instanceId ? 'Cube Suite has not reported node states yet (it does on its next loop).' : 'No live read: PvP, SA and PvE states show while Cube Suite runs. Open the Cube page, or switch on the every-page switch above.'));
+      const body = [];                                               // PvP, Shadow army and the schedule live in Tasks (the Cube row); here only the PvE rooms
+      if (!c.nodes) body.push(note(c.instanceId ? 'Cube Suite has not reported room states yet (it does on its next loop).' : 'No live read: room states show while Cube Suite runs. Open the Cube page, or switch the Cube on in Tasks.'));
       if (!d) { body.push(note('Needs Cube Suite 3.6.0+ for the PvE rooms (reload so the new version loads).')); return body; }
       body.push(cubePveSettings(d));
       body.push(h('div', { class: 'ma-wv' },
@@ -6054,24 +6201,10 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   }
 
   /* =============================== SETTINGS (potions, fighting, timing) =============================== */
-  /* Settings > Cube: each setting is a real card (icon, title, what it does, its control up in the header, its options in a well underneath), like the Loadout card */
-  const cubeCard = (...a) => { const el = card(...a); el.classList.add('cube'); return el; };
-  function pvpCard() {
-    const c = cubeSt() || {}, hasMode = Core.has('cube.mode.set'), fast = c.mode === 'fast';
-    const desc = !hasMode ? cubeLine() : fast ? 'Fast Run: the match you join on Node 7 and Node 8 (0 = none)' : 'Normal: joins PvP matches as they open';
-    const body = hasMode && fast ? (Core.has('cube.settings.set') ? h('div', { class: 'ma-sr-o tm' },
-      opt('Node 7 match', num(() => (cubeSt() || { fastTargets: {} }).fastTargets.node7MatchNo || 0, (n) => { cubeSet('cube.settings.set', { node7MatchNo: n }); }, { w: 56, min: 0, max: 20, parse: parseFloat })),
-      opt('Node 8 match', num(() => (cubeSt() || { fastTargets: {} }).fastTargets.node8MatchNo || 0, (n) => { cubeSet('cube.settings.set', { node8MatchNo: n }); }, { w: 56, min: 0, max: 20, parse: parseFloat })),
-      opt('Leader / Vice', sw(() => !!(cubeSt() || {}).leader, (v) => { cubeSet('cube.settings.set', { isLeader: v }); }, { sm: true, redraw: false }))) : note(cubeLine())) : null;   // the match numbers only mean something in Fast Run
-    return h('div', { class: 'ma-card cube' },
-      h('div', { class: 'ma-card-h' }, h('span', { class: 'ma-ico' }, '⚔️'), h('div', { class: 'ma-card-t' }, h('b', {}, 'PvP matches'), h('small', {}, desc)),
-        hasMode ? seg([['normal', 'Normal'], ['fast', 'Fast Run']], c.mode || 'normal', (v) => { cubeSet('cube.mode.set', v); }) : null),
-      body ? h('div', { class: 'ma-card-b' }, body) : null);
-  }
   const afDesc = () => { const md = Farm.mode(); return md.kind === 'auto' ? 'On: Auto-Farm whenever the game allows it (level 400+), the normal attack path below — picked for you' : md.why + ' — using the normal attack path'; };
   function tSettings() {
     const S = cfg.stam, SV = S.save, H = cfg.hp, M = cfg.mana, L = cfg.autoLoot;
-    const au = Guard.info(), cls = effectiveClass(), cs = cls ? CLASS_SKILLS[cls] : null;
+    const cls = effectiveClass(), cs = cls ? CLASS_SKILLS[cls] : null;
     const skillOn = cfg.useClassSkill;
     return [
       caption('Potions & loot'),
@@ -6097,23 +6230,14 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
         srow('📦', 'Collection quests', 'Adventure Guild: donates the quest item', sw(() => cfg.tasks.guild.collect !== false, (v) => { cfg.tasks.guild.collect = v; })),
         srow('🌾', 'Farm missing items', 'Short on a collection quest\'s item: find the mob that drops it and farm it (nothing is guessed)', sw(() => cfg.tasks.guild.collectFarm !== false, (v) => { cfg.tasks.guild.collectFarm = v; })),
         srow('✨', 'Skill quests', 'Adventure Guild: casts your class skill', sw(() => cfg.tasks.guild.skill !== false, (v) => { cfg.tasks.guild.skill = v; }))),
-      caption('Cube'),
-      cubeCard('⏰', 'Scheduled fast run', cfg.cubeFast.enabled ? CubeFast.line() : 'Pauses everything else, watches for the new Cube, jumps in on Fast Run', cfg.cubeFast.enabled, (v) => { cfg.cubeFast.enabled = v; }, cfg.cubeFast.enabled ? h('div', { class: 'ma-sr-o tm' },
-          opt('Day', dropdown([['sun', 'Sunday'], ['mon', 'Monday'], ['tue', 'Tuesday'], ['wed', 'Wednesday'], ['thu', 'Thursday'], ['fri', 'Friday'], ['sat', 'Saturday']], cfg.cubeFast.day, (v) => { cfg.cubeFast.day = v; })),
-          opt(['Server time', h('small', {}, 'UTC' + (() => { try { return Core.clock.parts().offset; } catch (_) { return '+05:30'; } })() + ' · e.g. 11:00 PM')], num(() => toMin(cfg.cubeFast.time), (n) => { cfg.cubeFast.time = hhmm(n); },
-            { w: 84, min: 0, fmt: fmtClock, parse: (t) => { const c = parseClock(t); return c == null ? null : toMin(c); } })),
-          opt('Start watching', num(() => cfg.cubeFast.leadMin, (n) => { cfg.cubeFast.leadMin = n; }, { unit: 'min before', min: 1, max: 60, parse: parseFloat })),
-          opt('Check every', num(() => cfg.cubeFast.pollSec, (n) => { cfg.cubeFast.pollSec = n; }, { unit: 's', min: 2, max: 60, parse: parseFloat }))) : null),
-      pvpCard(),
       caption('Advanced'),
-      fold('adv', false, ['⏱ Timing', h('small', {}, 'pauses between requests')], () => [h('div', { class: 'ma-sr-o tm' },
+      fold('adv', false, ['⏱ Timing', h('small', {}, `scan ${+(cfg.fightScanMs / 60000).toFixed(1)} min · waves ${cfg.attackDelayMs} ms · dungeons ${cfg.dungeonAttackDelayMs} ms`)], () => [h('div', { class: 'ma-sr-o tm' },
         opt(['Scan every', h('small', {}, 'Waves, dungeons, and loot')], num(() => cfg.fightScanMs / 60000, (n) => { cfg.fightScanMs = Math.round(n * 60000); }, { unit: 'min', min: 0.1, parse: parseFloat })),
         opt('Wave attack cooldown', num(() => cfg.attackDelayMs, (n) => { cfg.attackDelayMs = n; }, { unit: 'ms', min: 0 })),
         opt('Dungeon attack cooldown', num(() => cfg.dungeonAttackDelayMs, (n) => { cfg.dungeonAttackDelayMs = n; }, { unit: 'ms', min: 0 })),
         skillOn ? opt('Skill → attack gap', num(() => cfg.skillToAttackGapMs, (n) => { cfg.skillToAttackGapMs = n; }, { unit: 'ms', min: 0 })) : null,
         L.enabled ? opt('Gap between loot claims', num(() => L.claimGapMs, (n) => { L.claimGapMs = n; }, { unit: 'ms', min: 0 })) : null)]),
-      h('div', { class: 'ma-note ma-about' }, `v${VERSION} · re-login ${au.status ? (au.status.configured ? 'set up' : 'not set up') : 'unavailable'} · ${Presets.note()}`,
-        ' · ', h('button', { type: 'button', class: 'ma-link', onclick: () => { SideMob.forget(); draw(); } }, `forget ${SideMob.shielded()} shielded mob${SideMob.shielded() === 1 ? '' : 's'}`))];
+      h('div', { class: 'ma-note ma-about' }, 'v' + VERSION)];
   }
 
   const unesc = (t) => String(t).replace(/&quot;/g, '"').replace(/&#0?39;|&apos;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');   // log lines were escaped for html but are shown as text
