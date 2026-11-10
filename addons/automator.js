@@ -4886,16 +4886,17 @@ const CubeFast = (() => {
     try { const r = await Core.call(name, ...args); return r && typeof r === 'object' ? r : { ok: true, value: r }; }
     catch (e) { return { ok: false, missing: !!(e && e.code === 'NO_CAP'), message: (e && e.message) || String(e) }; }
   };
-  // Cube Suite's PvE potion flags are not settings here: they follow Settings → Potions (Stamina, Health), and the damage model follows the profile (Normal = eco, Fast Run = fast).
+  // Cube Suite's PvE potion flags are not settings here: the Automator already drinks the Stamina and HP potions itself (Settings → Potions), so Cube Suite's own are held OFF
+  // (both would drink for the same need). The damage model follows the profile (Normal = eco, Fast Run = fast). staminaPotionExpCap is left as it is: it only matters while the potion is on.
   // Checked every beat for BOTH profiles; only a difference is sent, and one that was refused is not retried until something changes.
   const pveLast = {};
   function syncPve() {
     try {
       if (!Core.has('cube.pve.get') || !Core.has('cube.pve.set')) return;
-      const get = Core.cap('cube.pve.get'), S = cfg.stam, cap = Math.min(100, Math.max(0, Number(S.save && S.save.thresholdPct) || 100));
+      const get = Core.cap('cube.pve.get');
       for (const profile of ['normal', 'fast']) {
         const d = get({ profile }); if (!d || d.profile !== profile) continue;           // an older Cube Suite answers only for the active profile
-        const want = { damageModel: profile === 'fast' ? 'fast' : 'eco', useStaminaPotion: !!S.enabled, staminaPotionExpCap: cap, useHpPotion: !!cfg.hp.enabled }, diff = {};
+        const want = { damageModel: profile === 'fast' ? 'fast' : 'eco', useStaminaPotion: false, useHpPotion: false }, diff = {};
         for (const k in want) if (d[k] !== want[k]) diff[k] = want[k];
         const sig = JSON.stringify(diff);
         if (sig === '{}') { pveLast[profile] = ''; continue; }
@@ -5663,6 +5664,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     const out = [], v = c.view;
     if (v) out.push(...cubePanels(c, v));
     else if (!c.running) out.push(note(c.background ? 'Cube Suite has not read the page yet. It reports once its engine has looped.' : 'Cube Suite is not running on this page. It runs on the Cube page, or on any page while Cube is on in Tasks and the Automator is started.'));
+    else if (c.instanceId && !('view' in c)) out.push(note('This Cube Suite is too old to report PvP and Shadow army (needs 3.6.5+). Reload so the new version loads.'));   // no `view` key at all = an older Cube Suite: it will never report them
     else out.push(note(c.instanceId ? 'PvP and Shadow army are not read yet: Cube Suite reports them on its next loop.' : 'No active Cube. PvP and Shadow army show here while a Cube is open and Cube Suite runs.'));
     return out;
   }
