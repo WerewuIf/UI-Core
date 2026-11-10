@@ -37,7 +37,10 @@
  * The panel is drawn on the Cube page only. Elsewhere the engine runs headless, and only when "background" is on (default OFF, so merely opening
  * any page never starts PvP / PvE by itself). One tab runs the engine (Core.tab 'cube-suite'); commands are shared state + a wake event, so
  * it does not matter which tab the command came from. */
-/* v3.6.3: the engine now clears its published status when it stops (background switched off on a page that is not the Cube page), so cube.status() no longer says
+/* v3.6.4: new capability cube.tyrant.auto(bool) for the Automator: while on, Tyrant Conclave (node 9) automation is switched on for the current Cube AND again for every new Cube
+ * (the new-Cube reset to OFF still happens, the Automator's request then switches it back on). Off = the Automator lets go: if IT switched Tyrant on, it is switched off again
+ * (a Tyrant you ticked yourself stays). status() also carries `tyrant` (the toggle) and `tyrantAuto` (the Automator's request).
+ * v3.6.3: the engine now clears its published status when it stops (background switched off on a page that is not the Cube page), so cube.status() no longer says
  * `running` for up to 5 minutes after it stopped; status() also carries `seenAt` (when the engine last reported).
  * v3.6.2: cube.pve.get / cube.pve.set take { profile: 'normal' | 'fast' }, so the Fast Run caps can be edited (and shown) while Normal is the active mode, and the other way round.
  * New cube.log.get({ since?, limit? }) -> { ok, lines: [{ time, at, source, level, msg }] }: the log of every tab (shared copy, appended by whichever tab logs), plus a shared 'cube:log' event
@@ -55,7 +58,7 @@
  * v3.5.4: new capability cube.master.set(bool) so the Automator can switch Cube Suite's automation on / off (status().master already reported it, nothing could set it).
  * NOTE: addons.json must NOT give cube-suite a "match": this is a service that runs on any page. With a match Core skips it everywhere else and no cube.* capability exists there. */
 Core.module({
-  id: 'cube-suite', name: 'Cube Suite', icon: '🧊', version: '3.6.3',
+  id: 'cube-suite', name: 'Cube Suite', icon: '🧊', version: '3.6.4',
   provides: (api) => api && api.status ? {
     'cube.status':         { fn: api.status,    doc: 'what Cube Suite is doing (shared across tabs)', returns: '{ ok, mode, master, background, follow, running, instanceId, cleared, fastTargets }' },
     'cube.mode.set':       { fn: api.setMode,   doc: "switch Fast Run / Normal", args: "'fast' | 'normal'" },
@@ -64,6 +67,7 @@ Core.module({
     'cube.background.set': { fn: api.setBackground, doc: 'run the engine on any page, not only the Cube page', args: 'boolean' },
     'cube.follow':         { fn: api.follow,    doc: 'pin the engine to one Cube instance (null = unpin)', args: 'instanceId | null' },
     'cube.fastrun.start':  { fn: api.startFastRun, doc: 'follow that Cube, Fast Run on, automation on, background on', args: '{ instanceId }' },
+    'cube.tyrant.auto':    { fn: api.setTyrantAuto, doc: 'on = Tyrant Conclave (node 9) automation is on for this Cube and for every new Cube; off = the Automator lets go (what it switched on goes off again)', args: 'boolean' },
     'cube.log.get':        { fn: api.logGet,    doc: 'the Cube Suite log of every tab, newest last; a shared "cube:log" event pings when it grew', args: '{ since?: ms timestamp, limit?: number }', returns: '{ ok, lines: [{ time, at, source: pvp|sa|pve|sys, level: info|warn|error, msg }] }' },
     'cube.pve.get':        { fn: api.pveGet,    doc: 'PvE damage settings of the active profile (or args.profile) + every node\'s mobs (selected, cap); works with no Cube open', args: '{ profile?: normal|fast }', returns: '{ ok, profile, active, damageMode, fixedDamageCap, damageModel, nodes: [{ id, label, mobs: [{ key, name, selected, cap }] }] }' },
     'cube.pve.set':        { fn: api.pveSet,    doc: 'change the PvE damage settings of the active profile (same as the Cube panel); works with no Cube open', args: '{ profile?: normal|fast (default: the active one), damageMode?: exp|fixed|monster|loot|scheduled, damageModel?: eco|fast, fixedDamageCap?: number, useStaminaPotion?: boolean, staminaPotionExpCap?: number, useHpPotion?: boolean, copyFromOther?: true, mob?: { nodeId, key, selected?: boolean, cap?: number }, node?: { nodeId, selected: boolean }, schedule?: { nodeId, add?: true, idx?: number, remove?: true, hour?, minute?, noTime?, mode?, fixedCap? } }' },
@@ -228,6 +232,8 @@ Core.module({
 
   const PVP_TYRANT_NODE_ID      = 9;
   const PVP_TYRANT_ENABLED_KEY  = 'autocube_pvp_tyrant_enabled_v1';
+  const PVP_TYRANT_AUTO_KEY     = 'ds_suite_tyrant_auto_v1';   // '1' = the Automator asked for Tyrant on for every Cube (cube.tyrant.auto)
+  const PVP_TYRANT_OWNED_KEY    = 'ds_suite_tyrant_owned_v1';  // '1' = the Automator's request is what switched Tyrant on (so letting go switches it off again)
 
   const SA_SOURCE         = 'game_dash';
   const SA_NODE_URL_BASE  = 'https://demonicscans.org/guild_dungeon_cube_army_enter.php';
@@ -598,6 +604,7 @@ Core.module({
 
   function pvpLoadTyrantEnabled()  { return localStorage.getItem(PVP_TYRANT_ENABLED_KEY) === '1'; }
   function pvpSaveTyrantEnabled(v) { dsSafeSetItem(PVP_TYRANT_ENABLED_KEY, v ? '1' : '0'); }
+  function pvpTyrantAuto()         { try { return localStorage.getItem(PVP_TYRANT_AUTO_KEY) === '1'; } catch { return false; } }
 
   function saLoadScheduledNukeEnabled() {
     const raw = localStorage.getItem(SA_SCHED_NUKE_KEY);
@@ -4170,6 +4177,7 @@ Core.module({
         saPruneOldParticipatedKeys(nextSeen);
         if (isNew) {
           if (pvpTyrantEnabled) { pvpTyrantEnabled = false; pvpSaveTyrantEnabled(false); }
+          if (pvpTyrantAuto()) { pvpTyrantEnabled = true; pvpSaveTyrantEnabled(true); dsSafeSetItem(PVP_TYRANT_OWNED_KEY, '1'); addLog('sys', 'info', 'Tyrant Conclave automation ENABLED for the new Cube (the Automator asked for it)'); }
           addLog('sys', 'info', `Instance changed to #${instanceId}`);
           pvpSaveFastRunState({ ...s, node7Results: {}, node8Results: {}, lastInstanceId: instanceId, seenInstanceIds: nextSeen });
         } else {
@@ -5585,7 +5593,8 @@ Core.module({
       let f = {}; try { f = pvpLoadFastRunState() || {}; } catch { /* none yet */ }
       return { ok: true, mode: dsLoadMode(), master: dsLoadMasterEnabled(), background: dsBackgroundOn(), follow: dsLoadFollow(),
         running: live, seenAt: live ? Number(st.at) || 0 : 0, instanceId: live ? String(st.instanceId || '') : '', cleared: live && !!st.cleared,
-        fastTargets: { node7MatchNo: Number(f.node7MatchNo) || 0, node8MatchNo: Number(f.node8MatchNo) || 0 }, leader: !!f.isLeader, nodes: live ? st.nodes || null : null };
+        fastTargets: { node7MatchNo: Number(f.node7MatchNo) || 0, node8MatchNo: Number(f.node8MatchNo) || 0 }, leader: !!f.isLeader, nodes: live ? st.nodes || null : null,
+        tyrant: pvpLoadTyrantEnabled(), tyrantAuto: pvpTyrantAuto() };
     },
     setMode(m) { dsSaveMode(m === 'fast' ? 'fast' : 'normal'); dsWake(); return api.status(); },
     setMaster(on) { dsSaveMasterEnabled(!!on); masterEnabled = !!on; dsWake(); try { refreshUI(); } catch (_) { /* panel not on this page */ } return api.status(); },
@@ -5598,6 +5607,17 @@ Core.module({
     },
     setBackground(on) { dsSafeSetItem(BACKGROUND_KEY, on ? '1' : '0'); dsSyncTabJoin(); dsWake(); return api.status(); },
     follow(id) { dsSaveFollow(id); dsWake(); return api.status(); },
+    setTyrantAuto(on) {                                                                 // the Automator's request: Tyrant on for this Cube and every new one, until it lets go
+      on = !!on; const was = pvpTyrantAuto();
+      dsSafeSetItem(PVP_TYRANT_AUTO_KEY, on ? '1' : '0');
+      if (on && !was) {                                                                 // switched on once, when the request starts: a Tyrant you untick later stays off until the next Cube
+        if (!pvpLoadTyrantEnabled()) { pvpSaveTyrantEnabled(true); dsSafeSetItem(PVP_TYRANT_OWNED_KEY, '1'); addLog('sys', 'info', 'Tyrant Conclave automation ENABLED (the Automator asked for it)'); }
+      } else if (!on && localStorage.getItem(PVP_TYRANT_OWNED_KEY) === '1') {           // letting go: what the Automator switched on goes off again; a Tyrant you ticked yourself stays
+        pvpSaveTyrantEnabled(false); dsSafeSetItem(PVP_TYRANT_OWNED_KEY, '0'); addLog('sys', 'info', 'Tyrant Conclave automation disabled (the Automator let go)');
+      }
+      pvpTyrantEnabled = pvpLoadTyrantEnabled();
+      try { refreshUI(); } catch (_) { /* panel not on this page */ } dsWake(); return api.status();
+    },
     logGet(o) {                                                                         // every tab's lines, newest last (this tab's not-yet-shared ones included)
       o = o || {}; let ring = []; try { ring = JSON.parse(localStorage.getItem(LOG_SHARED_KEY)) || []; } catch { /* none yet */ }
       let lines = (Array.isArray(ring) ? ring : []).concat(logPending);
@@ -5674,7 +5694,7 @@ Core.module({
     },
   };
   window.addEventListener('storage', (e) => { if (e.key === BACKGROUND_KEY) dsSyncTabJoin(); });   // another tab changed it
-  Core.on('cube:wake', () => { masterEnabled = dsLoadMasterEnabled(); if (dsTabIsMain) dsRestartLoop(); });   // masterEnabled is per tab: the command may have come from another one
+  Core.on('cube:wake', () => { masterEnabled = dsLoadMasterEnabled(); pvpTyrantEnabled = pvpLoadTyrantEnabled(); if (dsTabIsMain) dsRestartLoop(); });   // masterEnabled is per tab: the command may have come from another one
 
   if (document.body) init();
   else document.addEventListener('DOMContentLoaded', init);
