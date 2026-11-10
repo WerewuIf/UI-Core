@@ -28,7 +28,7 @@
  * default cap of a boss is its highest loot requirement, and bosses the roster did not know yet are added. Export .txt writes it all out.
  */
 Core.module({
-  id: 'automator', name: 'Automator', icon: '🤖', version: '1.15.0',
+  id: 'automator', name: 'Automator', icon: '🤖', version: '1.15.1',
   // Offered to other addons through Core capabilities (guides/CAPABILITIES.md):
   //   automator.status() -> the status string     automator.start() / automator.stop()     automator.scan() -> scan the bosses now
   provides: (api) => api && api.start ? {
@@ -39,7 +39,7 @@ Core.module({
   } : {},
   init(Core) {
 'use strict';
-const ID = 'automator', VERSION = '1.15.0';
+const ID = 'automator', VERSION = '1.15.1';
 const FARM_MARK = '\u2063farm\u2063';          // a task line is written when the task looks; this marks where the farm's state goes, filled in live when the line is drawn (a line saying "queued" while the farm is already checking the graveyard was stale)
 if (window.__automatorLoaded) { console.warn('[automator] already loaded', window.__automatorLoaded); return null; }
 window.__automatorLoaded = VERSION;
@@ -2528,7 +2528,7 @@ Object.assign(Dungeons, (() => {
     if (clears) clears.querySelectorAll('.card').forEach((card) => {
       const t = typeOfTitle((card.querySelector('.h') || {}).textContent), m = (card.textContent || '').match(/Instance #(\d+)/); if (t && m) ended[t].push(m[1]);
     });
-    inst = { at: Date.now(), v, ended };
+    inst = { at: Date.now(), v, ended, grid: !!r.doc.querySelector('.grid') };   // grid: the page really had its lists on it (an empty or error page that the guard did not flag is not a read)
     return inst;
   }
   async function pins(id) {                                              // the instance map: one pin per location
@@ -4820,12 +4820,14 @@ Object.assign(Tasks, (() => {
 /* CUBEFAST-BEGIN */
 const CubeFast = (() => {
   const GONE_EVERY = 60000;                                                             // run phase: how often the list is read to see that the Cube is still open
-  let goneAt = 0, goneN = 0, hopWarnAt = 0;                                             // (memory only) last still-open read, misses in a row, last "would not start" warning
+  const BLIND_MS = 15 * 60000;                                                          // run phase: the dungeon list unreadable (page down, stale, no lists on it) this long -> let go of the Automator, leave Cube Suite as it is
+  let goneAt = 0, goneN = 0, hopWarnAt = 0, badAt = 0, blindAt = 0;                                             // (memory only) last still-open read, misses in a row, last "would not start" warning
   const WATCH_MIN = 60;                                                                 // the watch ends this long after the slot if no new Cube ever shows up (not a setting: a Fast Run itself has no time limit)
   const st = Core.store(ID + '-cubefast', { def: { slot: 0, phase: 'idle', base: [], inst: '', bg: null, mst: null, at: 0, warned: false, known: 0 } });   // known: the highest Cube id seen or run so far (survives the weekly reset)
   const fresh = (slot, known) => ({ slot, phase: 'idle', base: [], inst: '', bg: null, mst: null, at: 0, warned: false, known: known || 0 });
   const top = (ids) => (ids || []).reduce((m, x) => Math.max(m, Number(x) || 0), 0);
   const live = (s) => !!s && (s.phase === 'watch' || s.phase === 'run');
+  const ownRun = (s) => !!s && s.phase === 'run' && Date.now() - (s.at || 0) < 4 * 86400000;   // a Fast Run that started less than 4 days ago keeps its slot, whatever the schedule says now
   const put = (n) => { if (JSON.stringify(n) !== JSON.stringify(st.get())) st.set(n); return n; };
   // The slot this week's run belongs to stays the same for 3 days after it starts, so a long Fast Run keeps its state. Then the next week's slot takes over.
   const slotNow = () => { const c = cfg.cubeFast; try { return Core.clock.next(c.day, c.time, Date.now() - 3 * 86400000); } catch (_) { return null; } };
@@ -4833,7 +4835,7 @@ const CubeFast = (() => {
   const hold = () => { if (!Run.pausedBy().includes('cubefast')) Run.pause('cubefast'); };
   const release = () => { if (Run.pausedBy().includes('cubefast')) Run.resume('cubefast'); };
   const cubeIds = (ins) => ((ins && ins.v && ins.v.crucible) || []).map(String);
-  const gotList = (ins) => !!ins && Date.now() - ins.at < 20000;           // Dungeons.instances() hands back its old list when a fetch fails: never act on that
+  const gotList = (ins) => !!ins && ins.grid !== false && Date.now() - ins.at < 20000;           // Dungeons.instances() hands back its old list when a fetch fails: never act on that
   // Every command goes to Cube Suite through its capabilities (Core.call). Nothing here touches its storage keys, its URL or its tab.
   const cube = async (name, ...args) => {
     try { const r = await Core.call(name, ...args); return r && typeof r === 'object' ? r : { ok: true, value: r }; }
@@ -4873,33 +4875,43 @@ const CubeFast = (() => {
   async function hop(s, id) {
     const r = await cube('cube.fastrun.start', { instanceId: id });
     if (!r.ok) { if (Date.now() - hopWarnAt >= 60000) { hopWarnAt = Date.now(); log(`⚠️ cube fast run: Cube Suite would not start on #${id} (${r.message || 'no answer'}) — still trying every beat`, 'warn'); } return; }
-    goneAt = Date.now(); goneN = 0;
+    goneAt = Date.now(); goneN = 0; blindAt = 0;
     put({ ...s, phase: 'run', inst: id, at: Date.now(), warned: false, known: Math.max(s.known || 0, Number(id) || 0) });
     log(`⏰ cube fast run: new Cube #${id} — Fast Run commanded`, 'ok');
   }
 
   async function tick() {
     syncPve();
+    if (!Run.wanted()) { release(); return; }                                          // Start is the master switch (for tasks too): while the Automator is stopped nothing is watched, held, swapped or commanded
     const c = cfg.cubeFast; let s = st.get() || fresh(0);
-    const slot = c.enabled ? slotNow() : null;
-    if (!slot) { if (live(s)) await finish(s, 'switched off — resuming'); else release(); return; }   // switched off (or no server clock yet): stand down
-    if (s.slot !== slot) {                                                              // a new week's slot: forget the last one (a run that never ended is wound up first: follow pin, background switch)
-      if (live(s)) await finish(s, `last week's run${s.inst ? ' (Cube #' + s.inst + ')' : ''} never ended — handing Cube Suite back`, 'warn');
-      s = fresh(slot, s.known);
+    let slot = c.enabled ? slotNow() : null;
+    if (c.enabled && !slot && ((s.phase === 'watch' && s.slot) || ownRun(s))) slot = s.slot;   // switched ON but no server clock yet (a reload, a hiccup): a watch or run that is already going carries on from its own stored slot. Its exits (the window is over, Cube Suite back on Normal, the Cube gone) never needed the clock, so it can neither be cut off nor stay held for ever
+    if (!slot) {
+      if (c.enabled) { release(); return; }                                              // switched ON, no clock, nothing live to carry on (an old state is wound up once the clock is back)
+      if (live(s)) await finish(s, 'switched off — resuming'); else release(); return;   // switched off: stand down
+    }
+    if (s.slot !== slot) {                                                              // a new week's slot, or you edited the day / time
+      if (ownRun(s)) slot = s.slot;                                                     // a Fast Run that is going belongs to its own slot until it ends: editing the schedule must not let the boss engine start under it
+      else {                                                                            // forget the last slot (a run that never ended is wound up first: follow pin, background switch)
+        if (live(s)) await finish(s, `last week's run${s.inst ? ' (Cube #' + s.inst + ')' : ''} never ended — handing Cube Suite back`, 'warn');
+        s = fresh(slot, s.known);
+      }
     }
     const now = Date.now(), end = slot + WATCH_MIN * 60000;
     if (s.phase === 'done' || (s.phase === 'idle' && now < slot - c.leadMin * 60000)) { put(s); release(); return; }
-    const look = s.phase === 'idle' && now > end;                                       // the watch window passed before we ever ran (browser closed, feature switched on mid-week): ONE look at the list, nothing is held unless a new Cube is there
-
-    if (!look) hold();                                                                  // watch / run: nothing else may spend stamina or swap the build
+    if (s.phase === 'idle' && now > end) { put({ ...s, phase: 'done' }); release(); return; }   // the watch window is over and nothing ran: done for this week. Never a late catch-up: a Fast Run on an ordinary day (Mon-Wed) was the bug
+    hold();                                                                             // watch / run: nothing else may spend stamina or swap the build
     if (s.phase === 'run') {
       const cs = await cube('cube.status');
-      if (!cs.ok) return finish(s, 'Cube Suite stopped answering — resuming', 'warn');
-      if (cs.mode !== 'fast') return finish(s, 'Cube Suite is back on Normal — resuming');
+      if (!cs.ok) { if (!badAt) badAt = now; if (now - badAt < 90000) return; badAt = 0; return finish(s, 'Cube Suite stopped answering for 90 s — resuming', 'warn'); }   // one failed read (the page navigating) is not the end of a Fast Run
+      badAt = 0;
+      if (cs.mode !== 'fast') { if (now - s.at < 45000) return; return finish(s, 'Cube Suite is back on Normal — resuming'); }   // right after the command Cube Suite may still be switching: give it 45 s
       if (!cs.running && !s.warned && now - s.at > 3 * 60000) { put({ ...s, warned: true }); log('⚠️ cube fast run: Cube Suite has not reported in for 3 min — is any tab open on this site?', 'warn'); }
       if (now - goneAt >= GONE_EVERY) {                                                 // a Cube can end without being cleared (it ran out of time): Cube Suite then never goes back to Normal. Two fresh reads in a row without it = over
         goneAt = now; const ins = await Dungeons.instances(true);
-        if (gotList(ins)) { goneN = cubeIds(ins).includes(String(s.inst)) ? 0 : goneN + 1; if (goneN >= 2) return finish(s, `Cube #${s.inst} is no longer open — resuming`, 'warn', { resetMode: true }); }
+        if (gotList(ins)) { blindAt = 0; goneN = cubeIds(ins).includes(String(s.inst)) ? 0 : goneN + 1; if (goneN >= 2) return finish(s, `Cube #${s.inst} is no longer open — resuming`, 'warn', { resetMode: true }); }
+        else if (!blindAt) blindAt = now;
+        else if (now - blindAt >= BLIND_MS) { blindAt = 0; return finish(s, 'the dungeon list has been unreadable for 15 min — resuming (Cube Suite is left as it is)', 'warn'); }
       }
       return;
     }
@@ -4911,9 +4923,7 @@ const CubeFast = (() => {
       // known = the highest id seen / run before (kept across weeks) or sitting in the Clears list. Nothing known yet: everything open is old (safe).
       const ids = cubeIds(ins), seen = Math.max(s.known || 0, top((ins.ended || {}).crucible)), after = now >= slot && seen > 0;
       const base = after ? ids.filter((x) => Number(x) <= seen) : ids, found = after && base.length < ids.length, known = Math.max(seen, top(base));
-      if (look && !found) { put({ ...s, phase: 'done', known }); return; }             // a late look that finds nothing new: done for this week, nothing was held
       if (!(await Core.when('cube.fastrun.start', { timeout: 3000 }))) { put({ ...s, phase: 'done', known }); release(); log('⚠️ cube fast run: Cube Suite is not loaded — nothing to drive, skipping this week', 'warn'); return; }
-      if (look) hold();
       const cs = await cube('cube.status'), ft = (cs && cs.fastTargets) || {};
       s = put({ ...s, phase: 'watch', base, known, bg: cs.ok ? !!cs.background : null, mst: cs.ok ? !!cs.master : null });
       log(`⏰ cube fast run: ${found ? `a new Cube is already open (newer than #${seen}) — taking it` : `watching for the new Cube (${s.base.length ? 'already open, ignored: #' + s.base.join(', #') : 'none open yet'})`} — everything else paused`, 'info');
@@ -4925,11 +4935,12 @@ const CubeFast = (() => {
     if (id) await hop(s, id);
   }
   function onMain() {                                                                    // a reload must not let the engine start before the first beat
-    const s = st.get(); if (live(s) && cfg.cubeFast.enabled && s.slot === slotNow()) { hold(); restoreBuild('cube fast run, after a reload'); }
+    const s = st.get(); if (Run.wanted() && live(s) && cfg.cubeFast.enabled && (s.slot === slotNow() || ownRun(s))) { hold(); restoreBuild('cube fast run, after a reload'); }
   }
   function line() {
     const s = st.get(), up = upcoming();
-    if (live(s) && s.slot === slotNow()) return s.phase === 'watch' ? 'Watching for the new Cube — everything else is paused' : `Fast Run on Cube #${s.inst} — everything else is paused`;
+    if (cfg.cubeFast.enabled && !Run.wanted()) return 'Automator is stopped: the scheduled fast run will not start';
+    if (live(s) && (s.slot === slotNow() || ownRun(s))) return s.phase === 'watch' ? 'Watching for the new Cube — everything else is paused' : `Fast Run on Cube #${s.inst} — everything else is paused`;
     return up ? `Next run in ${fmtDur(up - Date.now())}` : 'Waiting for the server clock';
   }
   return { tick, onMain, line, state: () => st.get() };
@@ -5566,12 +5577,13 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     else out.push(note(c.instanceId ? 'PvP and Shadow army are not read yet: Cube Suite reports them on its next loop.' : 'No active Cube. PvP and Shadow army show here while a Cube is open and Cube Suite runs.'));
     return out;
   }
-  const cubeSchedOn = (x) => { cfg.cubeFast.enabled = !!x; if (Core.has('cube.background.set')) cubeSet('cube.background.set', !!x).then(() => x && cubeSet('cube.master.set', true)); };
+  const cubeSchedOn = (x) => { cfg.cubeFast.enabled = !!x; };                         // the schedule only: no command goes to Cube Suite until the Fast Run itself starts
+  const cubeTaskOn = (x) => { if (Core.has('cube.background.set')) cubeSet('cube.background.set', !!x).then(() => x && cubeSet('cube.master.set', true)); };   // Cube Suite on any page; never touches the schedule
   function cubeRow() {
-    const c = cubeSt(), cf = cfg.cubeFast;
-    return taskRow({ key: 'cube', icon: '🧊', title: 'Cube', tip: 'The switch lets Cube Suite run on any page and turns the scheduled fast run on (Settings → Cube). PvP and Shadow army: Overview.',
-      line: [cubeDot(c), ' ', cubeStatusBits(c, true).join(' · ')], on: !!(cf.enabled || (c && c.background)),
-      setOn: cubeSchedOn,
+    const c = cubeSt();
+    return taskRow({ key: 'cube', icon: '🧊', title: 'Cube', tip: 'The switch lets Cube Suite run on any page. It does not touch the scheduled fast run (Settings → Cube). PvP and Shadow army: Overview.',
+      line: [cubeDot(c), ' ', cubeStatusBits(c, true).join(' · ')], on: !!(c && c.background),
+      setOn: cubeTaskOn,
       body: null });
   }
   function tTasks() {
@@ -6049,7 +6061,14 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
         h('button', { type: 'button', class: 'ma-add', style: { flex: '1 1 0' }, onclick: addTime }, '+ Add a time'),
         def < 0 ? h('button', { type: 'button', class: 'ma-add', style: { flex: '1 1 0' }, onclick: addDefault }, '+ Add a default') : null));
   }
-  const cubePveGet = () => { try { const f = Core.has('cube.pve.get') ? Core.cap('cube.pve.get') : null; return f ? f(ui.cubeProf ? { profile: ui.cubeProf } : undefined) : null; } catch (_) { return null; } };
+  const cubePveGet = () => {
+    try {
+      const f = Core.has('cube.pve.get') ? Core.cap('cube.pve.get') : null; if (!f) return null;
+      const d = f(ui.cubeProf ? { profile: ui.cubeProf } : undefined);
+      if (d && ui.cubeProf && d.profile !== ui.cubeProf) { ui.cubeProf = ''; saveUi(); return Object.assign({}, d, { noProfile: true }); }   // this Cube Suite ignores { profile }: edits would land on the ACTIVE mode, so stop sending it
+      return d;
+    } catch (_) { return null; }
+  };
   const pveFmt = (n) => (n > 0 ? short(n) : '0');
   const pveCapWord = (d) => ({ monster: 'damage cap', exp: 'EXP cap', loot: 'loot unlock', scheduled: 'timed caps', fixed: 'every mob: ' + (d.fixedDamageCap > 0 ? short(d.fixedDamageCap) : 'no limit') }[d.damageMode] || '');
   /* ONE fold for everything that is profile-wide (all rooms): stop condition, damage model, potions, copy from the other profile. Closed by default: its summary says what is set. */
@@ -6057,7 +6076,8 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     const fast = d.profile === 'fast', other = fast ? 'Normal' : 'Fast Run';
     const head = ['⚙ PvE settings', h('small', {}, (fast ? 'Fast Run' : 'Normal') + ' · ' + (pveCapWord(d) || d.damageMode) + ' · ' + (fast ? 'fewest hits' : 'eco'))];   // the damage model follows the mode: Normal = eco, Fast Run = fast (no setting of its own)
     return fold('cube:pvecfg', false, head, () => [
-      opt('Settings for', seg([['normal', 'Normal'], ['fast', 'Fast Run']], d.profile, (v) => { ui.cubeProf = v; saveUi(); }), 'Only picks which settings you edit here. It does not change the mode.', 'row'),
+      d.noProfile ? h('div', { class: 'ma-note' }, `Editing ${fast ? 'Fast Run' : 'Normal'} settings (the mode that is active now). Switching to the other one from here needs the updated Cube Suite (cube-suite-profile-patch.py).`)
+        : opt('Settings for', seg([['normal', 'Normal'], ['fast', 'Fast Run']], d.profile, (v) => { ui.cubeProf = v; saveUi(); }), 'Only picks which settings you edit here. It does not change the mode.', 'row'),
       h('div', { class: 'ma-ed-f' },
         opt('Stop condition', dropdown(PVE_MODES.concat(fast ? [] : [['scheduled', 'Scheduled (per-node, time-based)']]), d.damageMode, (v) => { cubePveSet({ damageMode: v }); }))),
       h('div', { class: 'ma-note ma-ed-n' }, PVE_MODE_HINT[d.damageMode] || ''),
@@ -6248,7 +6268,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
         srow('⏸️', 'Pause server auto-farm', 'So the two never fight over stamina', sw(() => cfg.autoFarmControl, (v) => { cfg.autoFarmControl = v; }, { redraw: false }))),
       caption('Cube'),
       group(
-        srow('🧊', 'Scheduled fast run', 'Switches the Cube to Fast Run at its time; everything else pauses until the Cube is cleared', sw(() => cfg.cubeFast.enabled, cubeSchedOn), cfg.cubeFast.enabled ? [
+        srow('🧊', 'Scheduled fast run', 'Switches the Cube to Fast Run at its time, only while the Automator is started; everything else pauses until the Cube is cleared', sw(() => cfg.cubeFast.enabled, cubeSchedOn), cfg.cubeFast.enabled ? [
           opt('Day', dropdown([['sun', 'Sunday'], ['mon', 'Monday'], ['tue', 'Tuesday'], ['wed', 'Wednesday'], ['thu', 'Thursday'], ['fri', 'Friday'], ['sat', 'Saturday']], cfg.cubeFast.day, (x) => { cfg.cubeFast.day = x; })),
           opt('Server time', num(() => toMin(cfg.cubeFast.time), (n) => { cfg.cubeFast.time = hhmm(n); }, { min: 0, fmt: fmtClock, parse: (x) => { const k = parseClock(x); return k == null ? null : toMin(k); } })),
           ...[['node7MatchNo', 'N7 match'], ['node8MatchNo', 'N8 match']].map(([k, label]) => opt(label, Core.has('cube.settings.set') ? num(() => (cubeSt() || { fastTargets: {} }).fastTargets[k] || 0, (n) => { cubeSet('cube.settings.set', { [k]: n }); }, { min: 0, max: 20, parse: parseFloat }) : h('span', { class: 'ma-note' }, '—'))),
