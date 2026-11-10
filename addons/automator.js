@@ -4555,7 +4555,7 @@ const Merchant = (() => {
 const Extract = (() => {
   const GATE = 3, WAVES = [3, 5, 8];                         // Grakthar gate; the waves known to hold mobs (the Roster's gate-3 waves are added)
   const LEARN_MS = 12 * 3600000;                             // a wave that does not hold the chosen mob is only re-read this often, and only its alive view: just to learn the mob names
-  const PROBE_MS = 10 * 60000;                               // out of attempts: one extraction try this often
+  const PROBE_MS = 60 * 60000;                               // out of attempts: one extraction try this often
   const SCAN_LIMITED_MS = 30 * 60000;                        // out of attempts: the wave pages are only re-read this often
   const MAX_VERIFY = 20, MAX_IDS = 600, KEEP_MS = 7 * 86400000, READY_TRUST_MS = 6 * 3600000;
   const EMPTY = { ids: {}, mobs: {}, never: {}, weak: {}, seen: {}, limitedAt: 0, scanAt: 0, got: 0, run: 0, last: [] };
@@ -4791,7 +4791,7 @@ Object.assign(Tasks, (() => {
   define({ id: 'guild', name: 'Adventure Guild', icon: '📜', desc: 'Kill quests: finish, accept, auto-farm the kills', every: () => mins(cfg.tasks.guild.everyMin, 5), enabled: () => !!cfg.tasks.guild.enabled, tick: Guild.tick });
   define({ id: 'bp', name: 'Battle Pass', icon: '🎫', desc: 'The hunt of the pass, auto-farmed', every: () => mins(cfg.tasks.bp.everyMin, 10), enabled: () => !!cfg.tasks.bp.enabled, tick: Battle.tick });
   define({ id: 'merchant', name: 'Merchant', icon: '🛒', desc: 'Buys the weekly restock once per server week', every: () => mins(cfg.tasks.merchant.everyMin, 30), enabled: () => !!cfg.tasks.merchant.enabled, tick: Merchant.tick });
-  define({ id: 'graveyard', name: 'Graveyard', icon: '🪦', desc: 'Over its level limit, the next potion is looted instead', every: () => 6 * 3600000, enabled: () => !!cfg.tasks.graveyard.enabled, tick: Graveyard.tick });
+  define({ id: 'graveyard', name: 'Graveyard cleaning', icon: '🪦', desc: 'Over its level limit, the next potion is looted instead', every: () => 6 * 3600000, enabled: () => !!cfg.tasks.graveyard.enabled, tick: Graveyard.tick });
   define({ id: 'extract', name: 'Extraction', icon: '☠️', desc: 'Raises shadows from dead Grakthar gate monsters: no join or kill needed', every: () => mins(cfg.tasks.extract.everyMin, 5), enabled: () => !!cfg.tasks.extract.enabled, tick: Extract.tick });
   define({ id: 'pvp.solo', name: 'PvP · Solo', icon: '⚔️', group: 'pvp', desc: 'placeholder — plug your PvP module in', placeholder: true, enabled: () => !!cfg.tasks.pvp.solo.enabled });
   define({ id: 'pvp.team', name: 'PvP · Team', icon: '🛡️', group: 'pvp', desc: 'placeholder — plug your PvP module in', placeholder: true, enabled: () => !!cfg.tasks.pvp.team.enabled });
@@ -5420,7 +5420,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   const STATE_TXT = { FIGHTING: 'Fighting', RUNNING: 'Running', SCANNING: '🔎 Scanning bosses', GRAVEYARD: '🪦 Scanning graveyard', WAITING: 'Waiting for a boss', 'NO STAMINA': 'Out of stamina', DUEL: 'Phase duel', SWITCHING: '🎒 Switching build', PLANNING: '🧭 Planning build order', PAUSED: 'Paused', FARMING: '🌾 Auto-farming', STOPPED: 'Stopped', FOLLOWER: 'Another tab is running it' };
   const dotOf = (st) => (!Tab.isMain() ? 'follower' : /FIGHT|RUN|DUEL|SCAN|GRAVE|SWITCH|PLAN|FARM/.test(st) ? 'running' : /WAIT|STAMINA/.test(st) ? 'waiting' : /PAUSE/.test(st) ? 'follower' : '');
   // what the automator is doing apart from the bosses: the farm (and who it farms for), a task mid-tick, or the tasks that are switched on
-  const SHORT = { guild: 'Quests', bp: 'BP', merchant: 'Merchant', extract: 'Extraction', graveyard: 'Graveyard' }, tShort = (d) => SHORT[d.id] || d.name, taskTag = (d) => `${d.icon} ${tShort(d)}`;
+  const SHORT = { guild: 'Quests', bp: 'BP', merchant: 'Merchant', extract: 'Extraction', graveyard: 'Graveyard cleaning' }, tShort = (d) => SHORT[d.id] || d.name, taskTag = (d) => `${d.icon} ${tShort(d)}`;
   const taskDone = (d) => { const i = Tasks.info(d.id) || {}; return i.at > 0 && (i.state === 'ok' || i.state === 'idle'); };            // this task has nothing to do for now
   const enabledTasks = () => Tasks.list().filter((d) => d.id !== 'monsters' && !d.placeholder && d.enabled && d.enabled());
   function otherWork() {
@@ -5545,12 +5545,14 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     const out = [], v = c.view, cf = cfg.cubeFast, ft = c.fastTargets || {}, can = Core.has('cube.settings.set');
     if (v) out.push(...cubePanels(c, v));
     else out.push(note(c.instanceId ? 'PvP and Shadow army are not read yet: Cube Suite reports them on its next loop.' : 'No active Cube. PvP and Shadow army show here while a Cube is open and Cube Suite runs.'));
+    const fastOn = c.mode === 'fast' || !!cf.enabled;                  // the scheduled run switches to Fast Run by itself, so its N7 / N8 must stay reachable
+    const nm = (k, label) => opt(label, can ? num(() => (cubeSt() || { fastTargets: {} }).fastTargets[k] || 0, (n) => { cubeSet('cube.settings.set', { [k]: n }); }, { min: 0, max: 20, parse: parseFloat }) : h('span', { class: 'ma-note' }, '—'));
+    out.push(opt('Fast Run', sw(() => c.mode === 'fast', (x) => { cubeSet('cube.mode.set', x ? 'fast' : 'normal'); }, { sm: true, redraw: false }), 'Switches Cube Suite to Fast Run now. N7 / N8 show while it is on.', 'row'));
+    if (fastOn) out.push(h('div', { class: 'ma-cf' }, nm('node7MatchNo', 'N7 match'), nm('node8MatchNo', 'N8 match'),
+      opt('Leader', can ? sw(() => !!(cubeSt() || {}).leader, (x) => { cubeSet('cube.settings.set', { isLeader: x }); }, { sm: true, redraw: false }) : h('span', { class: 'ma-note' }, '—'))));
     out.push(h('div', { class: 'ma-cf' },
       opt('Day', dropdown([['sun', 'Sunday'], ['mon', 'Monday'], ['tue', 'Tuesday'], ['wed', 'Wednesday'], ['thu', 'Thursday'], ['fri', 'Friday'], ['sat', 'Saturday']], cf.day, (x) => { cf.day = x; })),
-      opt('Server time', num(() => toMin(cf.time), (n) => { cf.time = hhmm(n); }, { min: 0, fmt: fmtClock, parse: (x) => { const k = parseClock(x); return k == null ? null : toMin(k); } })),
-      opt('N7 match', can ? num(() => (cubeSt() || { fastTargets: {} }).fastTargets.node7MatchNo || 0, (n) => { cubeSet('cube.settings.set', { node7MatchNo: n }); }, { min: 0, max: 20, parse: parseFloat }) : h('span', { class: 'ma-note' }, '—')),
-      opt('N8 match', can ? num(() => (cubeSt() || { fastTargets: {} }).fastTargets.node8MatchNo || 0, (n) => { cubeSet('cube.settings.set', { node8MatchNo: n }); }, { min: 0, max: 20, parse: parseFloat }) : h('span', { class: 'ma-note' }, '—')),
-      opt('Leader', can ? sw(() => !!(cubeSt() || {}).leader, (x) => { cubeSet('cube.settings.set', { isLeader: x }); }, { sm: true, redraw: false }) : h('span', { class: 'ma-note' }, '—'))));
+      opt('Server time', num(() => toMin(cf.time), (n) => { cf.time = hhmm(n); }, { min: 0, fmt: fmtClock, parse: (x) => { const k = parseClock(x); return k == null ? null : toMin(k); } }))));
     out.push(h('div', { class: 'ma-note' }, `Starts watching ${cf.leadMin} min before (server time). Everything else pauses until the Cube is cleared. N7 / N8: the match joined on Fast Run, 0 = none.`));
     return out;
   }
@@ -5609,7 +5611,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
         setOn: (v) => { T.bp.enabled = v; if (v) Tasks.poke('bp'); else Farm.drop('bp'); }, action: check('bp', 'Check now') }),
       taskRow({ key: 'merchant', icon: '🛒', title: 'Merchant', tip: 'Weekly restock · resets Sunday 00:00 server', on: T.merchant.enabled, line: taskText('merchant', T.merchant.enabled) || 'Weekly restock · resets Sunday 00:00 server',
         setOn: (v) => { T.merchant.enabled = v; if (v) Tasks.poke('merchant'); }, action: { icon: '↻', tip: ms.done ? 'Recheck' : 'Buy now', fn: () => { Merchant.reset(); Tasks.poke('merchant'); draw(); } } }),
-      taskRow({ key: 'graveyard', icon: '🪦', title: 'Graveyard', tip: 'Over this many level-ups of corpses, the next potion is looted instead', on: gt.enabled,
+      taskRow({ key: 'graveyard', icon: '🪦', title: 'Graveyard cleaning', tip: 'Over this many level-ups of corpses, the next potion is looted instead', on: gt.enabled,
         line: (gt.enabled ? `keeping ${gt.keepLevels} level${gt.keepLevels === 1 ? '' : 's'}` : 'Over the limit, the next potion is looted instead') + (taskText('graveyard', gt.enabled) ? ' · ' + taskText('graveyard', gt.enabled) : ''),
         setOn: (v) => { gt.enabled = !!v; if (v) Tasks.poke('graveyard'); }, action: { icon: '📈', tip: Loot.state.looting ? 'Looting…' : 'Level up now', fn: () => { Loot.scanAndPass().then(() => draw()); draw(); } },
         body: () => [h('div', { class: 'ma-sr-o tm', style: { margin: 0 } }, opt('Keep a stash of', num(() => gt.keepLevels, (n) => { gt.keepLevels = Math.round(n); }, { min: 0, max: 50, unit: 'levels', parse: parseFloat }))), gNext ? note(gNext) : null] }),
@@ -5709,7 +5711,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
     }
     if (tcfg.graveyard.enabled) {
       const gi = Tasks.info('graveyard'), left = Loot.state.rows.filter((r) => r.needsLoot !== false).length;
-      out.push(fold('ov:graveyard', true, ['🪦 Graveyard', h('small', {}, left ? `${left} corpse${left === 1 ? '' : 's'} waiting` : '')], () => [tStatus('graveyard'), nextNote('graveyard')], { aside: stPill(gi) }));
+      out.push(fold('ov:graveyard', true, ['🪦 Graveyard cleaning', h('small', {}, left ? `${left} corpse${left === 1 ? '' : 's'} waiting` : '')], () => [tStatus('graveyard'), nextNote('graveyard')], { aside: stPill(gi) }));
     }
     if (tcfg.extract.enabled) {
       const ei = Tasks.info('extract'), es = Extract.state();
@@ -6015,7 +6017,7 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
   const PVE_MODE_HINT = { exp: 'Stops at each mob\'s server EXP cap. No setup needed.', fixed: 'One damage cap for all mobs.', monster: 'Per-mob caps below. 0 = skip that mob.', loot: 'Stops once you\'ve hit the DMG req for the rarest drop on each mob.', scheduled: 'Different caps at different times of day. Tap a room below to set its times.' };
   const cubePveSet = (o) => {
     if (!Core.has('cube.pve.set')) { log('⚠️ Cube Suite is too old for PvE settings: reload so 3.6.1+ loads', 'warn'); return Promise.resolve(); }
-    return Promise.resolve(Core.call('cube.pve.set', o)).then((r) => { if (r && r.ok === false) log('⚠️ Cube Suite: ' + esc(r.message || 'refused'), 'warn'); draw(); }).catch((e) => log('⚠️ Cube Suite: ' + esc((e && e.message) || e), 'warn'));
+    return Promise.resolve(Core.call('cube.pve.set', ui.cubeProf ? Object.assign({ profile: ui.cubeProf }, o) : o)).then((r) => { if (r && r.ok === false) log('⚠️ Cube Suite: ' + esc(r.message || 'refused'), 'warn'); draw(); }).catch((e) => log('⚠️ Cube Suite: ' + esc((e && e.message) || e), 'warn'));
   };
   /* Scheduled stop condition, one room: the times are edited HERE through cube.pve.set (Cube Suite 3.6.1+), not on the Cube page. A row applies from its time until the next one;
      "Default" applies before the first. Rows keep Cube Suite's own order (idx), the list shows them sorted. */
@@ -6050,17 +6052,17 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
         h('button', { type: 'button', class: 'ma-add', style: { flex: '1 1 0' }, onclick: addTime }, '+ Add a time'),
         def < 0 ? h('button', { type: 'button', class: 'ma-add', style: { flex: '1 1 0' }, onclick: addDefault }, '+ Add a default') : null));
   }
-  const cubePveGet = () => { try { const f = Core.has('cube.pve.get') ? Core.cap('cube.pve.get') : null; return f ? f() : null; } catch (_) { return null; } };
+  const cubePveGet = () => { try { const f = Core.has('cube.pve.get') ? Core.cap('cube.pve.get') : null; return f ? f(ui.cubeProf ? { profile: ui.cubeProf } : undefined) : null; } catch (_) { return null; } };
   const pveFmt = (n) => (n > 0 ? short(n) : '0');
   const pveCapWord = (d) => ({ monster: 'damage cap', exp: 'EXP cap', loot: 'loot unlock', scheduled: 'timed caps', fixed: 'every mob: ' + (d.fixedDamageCap > 0 ? short(d.fixedDamageCap) : 'no limit') }[d.damageMode] || '');
   /* ONE fold for everything that is profile-wide (all rooms): stop condition, damage model, potions, copy from the other profile. Closed by default: its summary says what is set. */
   function cubePveSettings(d) {
     const fast = d.profile === 'fast', other = fast ? 'Normal' : 'Fast Run';
-    const head = ['⚙ PvE settings', h('small', {}, (fast ? 'Fast Run' : 'Normal') + ' · ' + (pveCapWord(d) || d.damageMode) + ' · ' + (d.damageModel === 'fast' ? 'fewest hits' : 'eco'))];
+    const head = ['⚙ PvE settings', h('small', {}, (fast ? 'Fast Run' : 'Normal') + ' · ' + (pveCapWord(d) || d.damageMode) + ' · ' + (fast ? 'fewest hits' : 'eco'))];   // the damage model follows the mode: Normal = eco, Fast Run = fast (no setting of its own)
     return fold('cube:pvecfg', false, head, () => [
+      opt('Settings for', seg([['normal', 'Normal'], ['fast', 'Fast Run']], d.profile, (v) => { ui.cubeProf = v; saveUi(); }), 'Only picks which settings you edit here. It does not change the mode.', 'row'),
       h('div', { class: 'ma-ed-f' },
-        opt('Stop condition', dropdown(PVE_MODES.concat(fast ? [] : [['scheduled', 'Scheduled (per-node, time-based)']]), d.damageMode, (v) => { cubePveSet({ damageMode: v }); })),
-        opt('Damage model', dropdown([['eco', 'Eco'], ['fast', 'Fast']], d.damageModel, (v) => { cubePveSet({ damageModel: v }); }))),
+        opt('Stop condition', dropdown(PVE_MODES.concat(fast ? [] : [['scheduled', 'Scheduled (per-node, time-based)']]), d.damageMode, (v) => { cubePveSet({ damageMode: v }); }))),
       h('div', { class: 'ma-note ma-ed-n' }, PVE_MODE_HINT[d.damageMode] || ''),
       d.damageMode === 'fixed' ? h('div', { class: 'ma-ed-f' }, opt('Fixed cap', num(() => d.fixedDamageCap, (n) => { cubePveSet({ fixedDamageCap: n }); }, { min: 0, fmt: pveFmt, parse: parseCap }), '0 = no limit')) : null,
       opt('Stamina potion', sw(() => !!d.useStaminaPotion, (v) => { cubePveSet({ useStaminaPotion: v }); }, { sm: true, redraw: false }), 'Large potion when stamina runs out', 'row'),
@@ -6112,6 +6114,8 @@ select.ma-in{width:auto;max-width:100%;cursor:pointer;padding-right:4px}
       const body = [];                                               // PvP, Shadow army and the schedule live in Tasks (the Cube row); here only the PvE rooms
       if (!c.nodes) body.push(note(c.instanceId ? 'Cube Suite has not reported room states yet (it does on its next loop).' : 'No live read: room states show while Cube Suite runs. Open the Cube page, or switch the Cube on in Tasks.'));
       if (!d) { body.push(note('Needs Cube Suite 3.6.0+ for the PvE rooms (reload so the new version loads).')); return body; }
+      const fast = d.profile === 'fast', want = fast ? 'fast' : 'eco';
+      if (d.damageModel !== want && cubeFold.fixed !== d.profile) { cubeFold.fixed = d.profile; cubePveSet({ damageModel: want }); } else if (d.damageModel === want) cubeFold.fixed = '';   // old profiles: bring the model in line with the mode once
       body.push(cubePveSettings(d));
       body.push(h('div', { class: 'ma-wv' },
         h('div', { class: 'ma-wv-l' + ((n.pve || []).some(cubeLive) ? ' on' : '') }, h('b', {}, 'PvE'), h('small', {}, 'rooms')),
