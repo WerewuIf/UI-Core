@@ -37,7 +37,9 @@
  * The panel is drawn on the Cube page only. Elsewhere the engine runs headless, and only when "background" is on (default OFF, so merely opening
  * any page never starts PvP / PvE by itself). One tab runs the engine (Core.tab 'cube-suite'); commands are shared state + a wake event, so
  * it does not matter which tab the command came from. */
-/* v3.6.5: status().view = PvP joins / cap / FFA and the Shadow army slots as data ({ pvp, schedClear, ffaProgress, sa }), published with the status. The Automator's Overview reads it; without it
+/* v3.6.6: a Cube that is no longer open is no longer "active": two readable dungeon lists in a row without it clear the engine's Cube (status() says instanceId '' and drops nodes / view, so the
+ * Automator stops showing "working"), and a follow pin / ?instance_id= is only believed while that Cube is on the open list (a stale pin is dropped). An unreadable page (login, error, network) changes nothing.
+ * v3.6.5: status().view = PvP joins / cap / FFA and the Shadow army slots as data ({ pvp, schedClear, ffaProgress, sa }), published with the status. The Automator's Overview reads it; without it
  * (the key was missing before) its Cube card said "PvP and Shadow army are not read yet" forever. null until PvP has been scanned once for the Cube.
  * v3.6.4: new capability cube.tyrant.auto(bool) for the Automator: while on, Tyrant Conclave (node 9) automation is switched on for the current Cube AND again for every new Cube
  * (the new-Cube reset to OFF still happens, the Automator's request then switches it back on). Off = the Automator lets go: if IT switched Tyrant on, it is switched off again
@@ -60,7 +62,7 @@
  * v3.5.4: new capability cube.master.set(bool) so the Automator can switch Cube Suite's automation on / off (status().master already reported it, nothing could set it).
  * NOTE: addons.json must NOT give cube-suite a "match": this is a service that runs on any page. With a match Core skips it everywhere else and no cube.* capability exists there. */
 Core.module({
-  id: 'cube-suite', name: 'Cube Suite', icon: '🧊', version: '3.6.5',
+  id: 'cube-suite', name: 'Cube Suite', icon: '🧊', version: '3.6.6',
   provides: (api) => api && api.status ? {
     'cube.status':         { fn: api.status,    doc: 'what Cube Suite is doing (shared across tabs)', returns: '{ ok, mode, master, background, follow, running, instanceId, cleared, fastTargets }' },
     'cube.mode.set':       { fn: api.setMode,   doc: "switch Fast Run / Normal", args: "'fast' | 'normal'" },
@@ -342,6 +344,7 @@ Core.module({
 
   let uiBox             = null;
   let currentInstanceId = null;
+  let dsNoCubeReads = 0;                       // readable dungeon lists in a row that showed no open Cube
   let pvpBusy           = false;
   let saBusy            = false;
   let saFirstTickDone   = false;
@@ -1037,37 +1040,58 @@ Core.module({
     return result;
   }
 
-  function extractCubeInstanceId(html) {
+  // Every open Cube id on the dungeon list. null = this was NOT a readable dungeon list (login / maintenance / error page): that says nothing about the Cube.
+  // [] = the list was read and no Cube is open.
+  function extractCubeInstanceIds(html) {
     const doc     = new DOMParser().parseFromString(html, 'text/html');
     const section = [...doc.querySelectorAll('.section-title')].find(el =>
                                                                      normText(el.textContent).includes('active dungeon templates'));
-    if (!section) return null;
+    if (!section) return doc.querySelector('.grid') ? [] : null;
     let grid = section.nextElementSibling;
     while (grid && !grid.classList.contains('grid')) grid = grid.nextElementSibling;
-    if (!grid) return null;
-    const cubeCard = [...grid.querySelectorAll('.card')].find(card => {
+    if (!grid) return [];
+    const ids = [];
+    [...grid.querySelectorAll('.card')].forEach(card => {
       const title  = normText(card.querySelector('.h')?.textContent);
       const banner = normText(card.querySelector('img.banner')?.getAttribute('src') || '');
       const body   = normText(card.textContent);
-      return title.includes('polyhedral crucible')
-      || banner.includes('the_cube.webp')
-      || body.includes('cube layout');
+      if (!(title.includes('polyhedral crucible') || banner.includes('the_cube.webp') || body.includes('cube layout'))) return;
+      const link = [...card.querySelectorAll('a[href]')].find(a => (a.getAttribute('href') || '').includes('guild_dungeon_enter.php?id='));
+      const id = link && new URL(link.getAttribute('href'), location.origin).searchParams.get('id');
+      if (id && !ids.includes(id)) ids.push(id);
     });
-    if (!cubeCard) return null;
-    const link = [...cubeCard.querySelectorAll('a[href]')].find(a =>
-                                                                (a.getAttribute('href') || '').includes('guild_dungeon_enter.php?id='));
-    if (!link) return null;
-    return new URL(link.getAttribute('href'), location.origin).searchParams.get('id');
+    return ids;
   }
 
+  let dsOpenCache = { at: 0, ids: null };      // the last GOOD read of the dungeon list
+  let dsPinMiss = 0;                           // fresh reads in a row where the pinned Cube was not open any more
+  async function dsOpenCubeIds(maxAgeMs) {     // ids of the open Cubes, or null when the list could not be read (never cached)
+    if (maxAgeMs > 0 && dsOpenCache.ids && Date.now() - dsOpenCache.at < maxAgeMs) return dsOpenCache.ids;
+    let ids = null;
+    try {
+      const res = await fetch(DUNGEONS_URL, { credentials: 'same-origin', cache: 'no-store' });
+      if (res.ok) ids = extractCubeInstanceIds(await res.text());
+    } catch { /* network hiccup: unknown, not "closed" */ }
+    if (ids) dsOpenCache = { at: Date.now(), ids };
+    return ids;
+  }
+
+  // -> '<id>'  the Cube that is open now
+  //    null    the dungeon list was read and NO Cube is open (the old one ended / was never there)
+  //    undefined  could not tell (fetch failed, login page): the caller must change nothing
+  // A follow pin (the Automator's Fast Run) or an ?instance_id= in the URL only counts while that Cube is still on the open list. Before, they were believed blindly, so a Cube that
+  // had closed kept being "active" for ever (status said working, nodes / PvP / SA stayed on screen).
   async function getActiveCubeInstanceId() {
-    const followed = dsLoadFollow();                                  // a command pinned it (the Automator's fast run): beats the URL, so a tab opened on the old Cube is not dragged back
-    if (followed) return followed;
-    const urlId = new URLSearchParams(location.search).get('instance_id');
-    if (urlId) return urlId;
-    const res = await fetch(DUNGEONS_URL, { credentials: 'same-origin', cache: 'no-store' });
-    if (!res.ok) return null;
-    return extractCubeInstanceId(await res.text());
+    const follow = dsLoadFollow(), urlId = new URLSearchParams(location.search).get('instance_id') || '', cand = follow || urlId;
+    let open = await dsOpenCubeIds(cand ? 20_000 : 0);
+    if (cand && open && !open.includes(String(cand))) open = await dsOpenCubeIds(0);   // a cached list may predate the Cube: look again before believing it is gone
+    if (!open) return cand ? String(cand) : undefined;                                  // unreadable: keep what we had
+    if (cand && open.includes(String(cand))) { dsPinMiss = 0; return String(cand); }
+    if (follow) {                                                                       // pinned to a Cube that is not open: dropped after two fresh reads in a row
+      if (++dsPinMiss < 2) return String(follow);
+      dsPinMiss = 0; dsSaveFollow(null); addLog('sys', 'info', `Cube #${follow} is no longer open — follow pin dropped`);
+    }
+    return open[0] || null;
   }
 
   function pvpDefaultFastRunState() {
@@ -4170,10 +4194,51 @@ Core.module({
     refreshUI();
   }
 
+  function dsResetInstanceState() {            // everything that belongs to one particular Cube (a new Cube started, or the old one is gone)
+    pvpLiveJoinCount     = 0;
+    pvpHasScanned        = false;
+    for (const k of Object.keys(pvpCooldownByNode)) delete pvpCooldownByNode[k];
+    if (pvpCountdownInterval) { clearInterval(pvpCountdownInterval); pvpCountdownInterval = 0; }
+    saAllClearedForNow = false;
+    saFirstTickDone = false;
+    dsAutoModeResetDone = false;
+    saLastServerTime = null;
+    for (const k of Object.keys(saNodeStats)) delete saNodeStats[k];
+    pvpLockedNodesLogged.clear();
+    saLockedNodesLogged.clear();
+    pvpActiveBattleLoops.clear();
+    saScheduledNukingMatch.clear();
+    pveLockedNodesLogged.clear();
+    pveSessionVerified.clear();
+    for (const nodeId of Object.keys(pveNodeVerifyTimers)) {
+      clearTimeout(pveNodeVerifyTimers[nodeId]);
+      delete pveNodeVerifyTimers[nodeId];
+    }
+    for (const k of Object.keys(pvpNodeStats))          delete pvpNodeStats[k];
+    for (const k of Object.keys(saNodeStats))           delete saNodeStats[k];
+    for (const k of Object.keys(pveNodeStats))          delete pveNodeStats[k];
+    for (const k of Object.keys(pveDiscoveredMobsByNode)) delete pveDiscoveredMobsByNode[k];
+    for (const k of Object.keys(pveDeadMobsByNode))    delete pveDeadMobsByNode[k];
+    for (const k of Object.keys(pveDeadNamesByNode))   delete pveDeadNamesByNode[k];
+    for (const k of Object.keys(saLastBattleState))  delete saLastBattleState[k];
+    for (const k of Object.keys(pvpLastNodeMatches))  delete pvpLastNodeMatches[k];
+    pveStaminaWaiting = false;
+    cubeStateCache = { data: null, forInstance: '', at: 0 };
+  }
+  function dsForgetCube() {                    // no Cube is open any more: the engine stops claiming the old one, so status() / the Automator panel stop saying "working" and drop its nodes / PvP / SA
+    const old = currentInstanceId; if (!old) return;
+    currentInstanceId = null;
+    dsResetInstanceState();
+    dsStatusSig = '';                          // the status must be rewritten now, not in 15 s
+    addLog('sys', 'info', `Cube #${old} is no longer open — waiting for the next one`);
+  }
+
   async function tick() {
     try {
       if (dsTabIsMain) dsArmScheduleWakeups();   // FIX (b): picks up edited PvE schedules / mode switches
       const instanceId = await getActiveCubeInstanceId();
+      if (instanceId) dsNoCubeReads = 0;
+      else if (instanceId === null && currentInstanceId && ++dsNoCubeReads >= 2) { dsNoCubeReads = 0; dsForgetCube(); }   // two reads in a row of a readable list without a Cube (one odd page is not the end of a Cube); undefined = unreadable: nothing changes
       if (instanceId && instanceId !== currentInstanceId) {
         const s = pvpLoadFastRunState();
         const seen = Array.isArray(s.seenInstanceIds) ? s.seenInstanceIds : [];
@@ -4181,35 +4246,7 @@ Core.module({
         const nextSeen = seen.includes(instanceId) ? seen : [...seen, instanceId].slice(-5);
 
         currentInstanceId = instanceId;
-        pvpLiveJoinCount     = 0;
-        pvpHasScanned        = false;
-        for (const k of Object.keys(pvpCooldownByNode)) delete pvpCooldownByNode[k];
-        if (pvpCountdownInterval) { clearInterval(pvpCountdownInterval); pvpCountdownInterval = 0; }
-        saAllClearedForNow = false;
-        saFirstTickDone = false;
-        dsAutoModeResetDone = false;
-        saLastServerTime = null;
-        for (const k of Object.keys(saNodeStats)) delete saNodeStats[k];
-        pvpLockedNodesLogged.clear();
-        saLockedNodesLogged.clear();
-        pvpActiveBattleLoops.clear();
-        saScheduledNukingMatch.clear();
-        pveLockedNodesLogged.clear();
-        pveSessionVerified.clear();
-        for (const nodeId of Object.keys(pveNodeVerifyTimers)) {
-          clearTimeout(pveNodeVerifyTimers[nodeId]);
-          delete pveNodeVerifyTimers[nodeId];
-        }
-        for (const k of Object.keys(pvpNodeStats))          delete pvpNodeStats[k];
-        for (const k of Object.keys(saNodeStats))           delete saNodeStats[k];
-        for (const k of Object.keys(pveNodeStats))          delete pveNodeStats[k];
-        for (const k of Object.keys(pveDiscoveredMobsByNode)) delete pveDiscoveredMobsByNode[k];
-        for (const k of Object.keys(pveDeadMobsByNode))    delete pveDeadMobsByNode[k];
-        for (const k of Object.keys(pveDeadNamesByNode))   delete pveDeadNamesByNode[k];
-        for (const k of Object.keys(saLastBattleState))  delete saLastBattleState[k];
-        for (const k of Object.keys(pvpLastNodeMatches))  delete pvpLastNodeMatches[k];
-        pveStaminaWaiting = false;
-        cubeStateCache = { data: null, forInstance: '', at: 0 };
+        dsResetInstanceState();
         pvePruneOldMobStateKeys(nextSeen);
         pvePruneOldAttackDmgKeys(nextSeen);
         saPruneOldParticipatedKeys(nextSeen);
