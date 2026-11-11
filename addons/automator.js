@@ -28,7 +28,7 @@
  * default cap of a boss is its highest loot requirement, and bosses the roster did not know yet are added. Export .txt writes it all out.
  */
 Core.module({
-  id: 'automator', name: 'Automator', icon: '🤖', version: '1.15.12',
+  id: 'automator', name: 'Automator', icon: '🤖', version: '1.15.13',
   // Offered to other addons through Core capabilities (guides/CAPABILITIES.md):
   //   automator.status() -> the status string     automator.start() / automator.stop()     automator.scan() -> scan the bosses now
   provides: (api) => api && api.start ? {
@@ -39,7 +39,7 @@ Core.module({
   } : {},
   init(Core) {
 'use strict';
-const ID = 'automator', VERSION = '1.15.12';
+const ID = 'automator', VERSION = '1.15.13';
 const FARM_MARK = '\u2063farm\u2063';          // a task line is written when the task looks; this marks where the farm's state goes, filled in live when the line is drawn (a line saying "queued" while the farm is already checking the graveyard was stale)
 if (window.__automatorLoaded) { console.warn('[automator] already loaded', window.__automatorLoaded); return null; }
 window.__automatorLoaded = VERSION;
@@ -4532,7 +4532,7 @@ const Graveyard = (() => {                                              // the t
 
 const Merchant = (() => {
   const ONE_TIME_GOLD = new Set(['26', '40', '41']);                      // limited gold items that never restock (same list as the UI Cleanup merchant)
-  const store = Core.store(ID + '-merchant', { def: { week: 0, done: false, at: 0, spent: 0, bought: 0 } });
+  const store = Core.store(ID + '-merchant', { def: { week: 0, done: false, verified: false, at: 0, spent: 0, bought: 0 } });
   const setInfo = (p) => Tasks.info('merchant', p);
   const weekStart = () => { try { const n = Core.clock.next('sun', '00:00'); if (n > 0) return n - 7 * 86400000; } catch (_) { /* no server clock yet */ } return 0; };
   const save = (o) => store.set(Object.assign({}, store.get(), o));       // merge: the shop list below survives every save
@@ -4546,29 +4546,50 @@ const Merchant = (() => {
   }
   const shopOf = (items) => items.filter(weekly).map((i) => ({ src: i.source, name: i.name, bought: i.bought, limit: i.limit, price: i.price }));   // what the Overview counts: per shop, items and units
   const goldOf = (doc) => { const el = doc.getElementById('goldBalance'), n = el ? parseNum(el.textContent, -1) : -1; if (n >= 0) return n; try { return Number(Core.me.get().gold) || 0; } catch (_) { return 0; } };
-  async function damon() {
+  async function damon() {      // -> { items, ok }. ok=false: the Damon shop could not be READ (network error, not JSON). A shop that answers "no offers" is a clean empty read (ok=true)
     try {
       const r = await fetch('/olympus_damon_buy.php?action=state', { headers: { Accept: 'application/json' }, credentials: 'include' }), j = await r.json();
-      if (!j || j.status !== 'success' || !Array.isArray(j.offers)) return [];
-      return j.offers.map((o) => { const limit = Number(o.weekly_limit) || 0; return { source: 'damon', id: String(o.key || ''), currency: 'gold', name: String(o.name || 'Item'), price: Number(o.price) || 0, limit, bought: limit > 0 && o.remaining !== undefined ? Math.max(0, limit - Number(o.remaining || 0)) : Number(o.bought) || 0 }; });
-    } catch (_) { return []; }
+      if (!j || j.status !== 'success' || !Array.isArray(j.offers)) return { items: [], ok: true };
+      return { ok: true, items: j.offers.map((o) => { const limit = Number(o.weekly_limit) || 0; return { source: 'damon', id: String(o.key || ''), currency: 'gold', name: String(o.name || 'Item'), price: Number(o.price) || 0, limit, bought: limit > 0 && o.remaining !== undefined ? Math.max(0, limit - Number(o.remaining || 0)) : Number(o.bought) || 0 }; }) };
+    } catch (_) { return { items: [], ok: false }; }
+  }
+  // One read of both shops. { err } when it cannot be trusted: signed out, fetch failed, or the page has no merchant cards at all (not loaded / layout changed / error page).
+  async function readShop() {
+    let doc;
+    try { doc = parseHtml(await netText('/merchant.php', { force: true, ttl: 0, key: 'ma:merchant' })); } catch (e) { return { err: 'fetch', msg: (e && e.message) || 'fetch failed' }; }
+    const st = Guard.pageState(doc); if (st !== 'ok') { Guard.fault(st, 'merchant'); return { err: 'signedout' }; }
+    const cards = scrape(doc); if (!cards.length) return { err: 'empty' };
+    const d = await damon();
+    return { doc, items: [...d.items, ...cards], damonOk: d.ok, gold: goldOf(doc) };
   }
   async function buy(it, qty) {
     const r = await Act.run(() => (it.source === 'damon' ? post('/olympus_damon_buy.php', { offer: it.id, qty: String(qty) }) : post('/merchant_buy.php', { merch_id: it.id, qty: String(qty) })), 150), j = r && r.json;
     return { ok: !!(j && String(j.status || '').trim() === 'success'), msg: String((j && j.message) || '').trim() };
   }
   const untilReset = () => { try { const n = Core.clock.next('sun', '00:00'); if (n > Date.now()) return n - Date.now() + 60000; } catch (_) { /* no server clock yet */ } return 6 * 3600000; };   // asleep until the weekly reset
+  const REVERIFY_MS = 6 * 3600000;                                           // a "done" is only trusted this long, then the shop is read again (a wrong server clock or a stale flag heals itself)
+  const RETRY_UNREADABLE_MS = 10 * 60000;
   async function tick() {
     const t = cfg.tasks.merchant; if (!t.enabled) return;
     setInfo({ state: 'run', line: 'reading the merchant…' });
     const wk = weekStart(), s = store.get() || {};
-    if (wk && s.week === wk && s.done && Array.isArray(s.shop)) { setInfo({ state: 'ok', line: `this week's restock is bought (${fmtNum(s.spent || 0)} gold) · next reset ${(() => { try { return new Date(Core.clock.next('sun', '00:00')).toLocaleString(); } catch (_) { return 'Sunday'; } })()} server time` }); return untilReset(); }
-    const doc = parseHtml(await netText('/merchant.php', { force: true, ttl: 0, key: 'ma:merchant' })), st = Guard.pageState(doc);
-    if (st !== 'ok') { Guard.fault(st, 'merchant'); setInfo({ state: 'err', line: 'not signed in' }); return 5 * 60000; }
-    let items = [...(await damon()), ...scrape(doc)];
-    let gold = goldOf(doc); const keep = 0; save({ shop: shopOf(items), gold });
-    const cands = items.filter((i) => weekly(i) && left(i) > 0 && i.price > 0).sort((a, b) => left(a) * a.price - left(b) * b.price);
-    if (!cands.length) { save({ week: wk, done: true, at: Date.now(), spent: s.week === wk ? s.spent || 0 : 0, bought: s.week === wk ? s.bought || 0 : 0 }); setInfo({ state: 'ok', line: 'nothing left to buy this week' }); return untilReset(); }
+    // "done" counts only when a real read of the shop proved it (verified) and it is not old. A done flag without `verified` (left by an older version, which marked a week done
+    // after an empty / failed read) is ignored: the shop is read again.
+    if (wk && s.week === wk && s.done && s.verified && Array.isArray(s.shop) && Date.now() - (s.at || 0) < REVERIFY_MS) {
+      setInfo({ state: 'ok', line: `this week's restock is bought (${fmtNum(s.spent || 0)} gold) · next reset ${(() => { try { return new Date(Core.clock.next('sun', '00:00')).toLocaleString(); } catch (_) { return 'Sunday'; } })()} server time` });
+      return Math.min(untilReset(), Math.max(60000, (s.at || 0) + REVERIFY_MS - Date.now()));
+    }
+    let sh = await readShop();
+    if (sh.err === 'signedout') { setInfo({ state: 'err', line: 'not signed in' }); return 5 * 60000; }
+    if (sh.err) {                                                            // an unreadable shop is NEVER "nothing to buy": nothing is marked done
+      const why = sh.err === 'empty' ? 'the merchant page showed no items (not loaded, or its layout changed)' : 'could not load the merchant (' + (sh.msg || 'error') + ')';
+      log(`⚠️ merchant: ${why} — will look again`, 'warn');
+      save({ week: wk, done: false, verified: false });
+      setInfo({ state: 'warn', line: why + ' — will look again' }); return RETRY_UNREADABLE_MS;
+    }
+    let gold = sh.gold; const keep = 0;
+    save({ shop: shopOf(sh.items), gold });
+    const cands = sh.items.filter((i) => weekly(i) && left(i) > 0 && i.price > 0).sort((a, b) => left(a) * a.price - left(b) * b.price);
     let spent = 0, n = 0, short = false, failed = 0;
     for (const it of cands) {
       const qty = Math.min(left(it), Math.floor(Math.max(0, gold - keep) / it.price), 99999);
@@ -4577,15 +4598,31 @@ const Merchant = (() => {
       setInfo({ state: 'run', line: `buying ${qty} × ${it.name}…` });
       const r = await buy(it, qty);
       if (r.ok) { gold -= qty * it.price; spent += qty * it.price; n++; it.bought += qty; if (qty < left(it)) short = true; log(`🛒 merchant: ${qty} × ${esc(it.name)} for ${fmtNum(qty * it.price)} gold`, 'ok'); }
-      else { log(`⚠️ merchant: ${esc(it.name)} — ${esc(r.msg || 'failed')}`, 'warn'); if (/not enough/i.test(r.msg)) short = true; else failed++; }
+      else { log(`⚠️ merchant: ${esc(it.name)} — ${esc(r.msg || 'no valid reply from the server')}`, 'warn'); if (/not enough/i.test(r.msg)) short = true; else failed++; }
       await sleep(150);
     }
-    const prev = s.week === wk ? s : {};
-    save({ week: wk, done: !short && !failed, at: Date.now(), spent: (prev.spent || 0) + spent, bought: (prev.bought || 0) + n, shop: shopOf(items), gold });
-    setInfo({ state: short || failed ? 'warn' : 'ok', line: failed && !short ? `bought ${n} item${n === 1 ? '' : 's'} (${fmtNum(spent)} gold) — ${failed} purchase${failed === 1 ? '' : 's'} failed, will look again` : short ? `bought ${n} item${n === 1 ? '' : 's'} (${fmtNum(spent)} gold) — not enough gold for the rest${keep ? ' (keeping ' + fmtNum(keep) + ')' : ''}, will look again` : `bought ${n} weekly item${n === 1 ? '' : 's'} for ${fmtNum(spent)} gold` });
-    return short || failed ? 30 * 60000 : untilReset();
+    // Do not trust our own bookkeeping or the buy replies: read the shop again and let IT say what is left (only when something was bought; otherwise the read above is fresh).
+    let final = sh;
+    if (n) { await sleep(400); final = await readShop(); if (final.err === 'signedout') { setInfo({ state: 'err', line: 'not signed in' }); return 5 * 60000; } }
+    const prev = s.week === wk ? s : {}, tot = { spent: (prev.spent || 0) + spent, bought: (prev.bought || 0) + n };
+    if (final.err) {
+      save({ week: wk, done: false, verified: false, at: Date.now(), spent: tot.spent, bought: tot.bought });
+      log('⚠️ merchant: could not re-read the shop to check the purchases — will look again', 'warn');
+      setInfo({ state: 'warn', line: `bought ${n} item${n === 1 ? '' : 's'} (${fmtNum(spent)} gold) — could not check the shop afterwards, will look again` }); return RETRY_UNREADABLE_MS;
+    }
+    const remaining = final.items.filter((i) => weekly(i) && left(i) > 0 && i.price > 0);
+    const gold2 = final.gold != null ? final.gold : gold;
+    const done = remaining.length === 0 && final.damonOk;
+    save({ week: wk, done, verified: done, at: Date.now(), spent: tot.spent, bought: tot.bought, shop: shopOf(final.items), gold: gold2 });
+    let line, state, wait;
+    if (done) { line = n ? `bought ${n} weekly item${n === 1 ? '' : 's'} for ${fmtNum(spent)} gold — shop checked, nothing left` : 'shop checked — every weekly item is already at its limit'; state = 'ok'; wait = Math.min(untilReset(), REVERIFY_MS); }
+    else if (!final.damonOk && !remaining.length) { line = `bought ${n} item${n === 1 ? '' : 's'} — the Damon shop could not be read, will look again`; state = 'warn'; wait = 30 * 60000; }
+    else if (failed && !short) { line = `bought ${n} item${n === 1 ? '' : 's'} (${fmtNum(spent)} gold) — ${failed} purchase${failed === 1 ? '' : 's'} failed, will look again`; state = 'warn'; wait = 30 * 60000; }
+    else if (short) { line = `bought ${n} item${n === 1 ? '' : 's'} (${fmtNum(spent)} gold) — not enough gold for the rest${keep ? ' (keeping ' + fmtNum(keep) + ')' : ''}, will look again`; state = 'warn'; wait = 30 * 60000; }
+    else { line = `${remaining.length} weekly item${remaining.length === 1 ? ' is' : 's are'} still available after buying — will look again`; state = 'warn'; wait = RETRY_UNREADABLE_MS; log('⚠️ merchant: the server said it sold the items, but the shop still shows some left (' + remaining.map((i) => esc(i.name)).join(', ') + ') — will try again', 'warn'); }
+    setInfo({ state, line }); return wait;
   }
-  return { tick, scrape, weekly, left, state: () => store.get() || {}, reset: () => store.set({ week: 0, done: false, at: 0, spent: 0, bought: 0 }) };
+  return { tick, scrape, weekly, left, state: () => store.get() || {}, reset: () => store.set({ week: 0, done: false, verified: false, at: 0, spent: 0, bought: 0 }) };
 })();
 
 /* ---- Extraction: raises a shadow from a dead Grakthar-gate monster. All it needs is the corpse: no join, no kill, no damage. ----
